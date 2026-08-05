@@ -1,0 +1,64 @@
+"""迁移 users 表结构至设计文档 v1.0 目标结构."""
+import asyncio
+import asyncpg
+
+
+async def main():
+    conn = await asyncpg.connect("postgresql://postgres:postgres@localhost:5432/lumi_db")
+
+    print("开始迁移 users 表结构...")
+
+    # 1. id 添加 DEFAULT gen_random_uuid()
+    print("  [1/5] 设置 id 默认值为 gen_random_uuid()...")
+    await conn.execute("ALTER TABLE users ALTER COLUMN id SET DEFAULT gen_random_uuid()")
+
+    # 2. role: 更新 CHECK 约束 + 添加 DEFAULT
+    print("  [2/5] 更新 role CHECK 约束 (superadmin -> super_admin) 并设置默认值...")
+    await conn.execute("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check")
+    await conn.execute("UPDATE users SET role = 'super_admin' WHERE role = 'superadmin'")
+    await conn.execute("ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('super_admin', 'admin', 'user'))")
+    await conn.execute("ALTER TABLE users ALTER COLUMN role SET DEFAULT 'user'")
+
+    # 3. avatar_url: VARCHAR(500) -> TEXT
+    print("  [3/5] 将 avatar_url 从 VARCHAR(500) 改为 TEXT...")
+    await conn.execute("ALTER TABLE users ALTER COLUMN avatar_url TYPE TEXT")
+
+    # 4. status: 添加 DEFAULT 'active'
+    print("  [4/5] 设置 status 默认值为 'active'...")
+    await conn.execute("ALTER TABLE users ALTER COLUMN status SET DEFAULT 'active'")
+
+    # 5. updated_at: 改为 NOT NULL + DEFAULT now()
+    print("  [5/5] 将 updated_at 改为 NOT NULL + DEFAULT now()...")
+    await conn.execute("UPDATE users SET updated_at = now() WHERE updated_at IS NULL")
+    await conn.execute("ALTER TABLE users ALTER COLUMN updated_at SET DEFAULT now()")
+    await conn.execute("ALTER TABLE users ALTER COLUMN updated_at SET NOT NULL")
+
+    print()
+    print("迁移完成! 验证新结构...")
+
+    # 验证新结构
+    rows = await conn.fetch(
+        "SELECT column_name, data_type, character_maximum_length, is_nullable, column_default "
+        "FROM information_schema.columns WHERE table_name = 'users' ORDER BY ordinal_position"
+    )
+    print()
+    print("=== 迁移后 users 表列结构 ===")
+    for r in rows:
+        print(f"  {r['column_name']:20s} | {r['data_type']:30s} | max_len={r['character_maximum_length']} | nullable={r['is_nullable']} | default={r['column_default']}")
+
+    # 验证约束
+    constraints = await conn.fetch(
+        "SELECT conname, contype, pg_get_constraintdef(oid) as def FROM pg_constraint WHERE conrelid = 'users'::regclass ORDER BY conname"
+    )
+    print()
+    print("=== 迁移后 users 表约束 ===")
+    for c in constraints:
+        print(f"  {c['conname']:30s} | type={c['contype']} | {c['def']}")
+
+    await conn.close()
+    print()
+    print("所有迁移已成功完成!")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

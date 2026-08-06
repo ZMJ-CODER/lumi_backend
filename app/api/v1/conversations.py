@@ -1,6 +1,7 @@
 """对话模块 API —— 增强场景模式联动."""
 
 from fastapi import APIRouter, Depends, Query
+from loguru import logger
 
 from app.core.deps import require_auth
 from app.models.conversation import (
@@ -53,6 +54,15 @@ async def send_message(
       6. 异步触发记忆提取
     """
     user_id = payload.get("sub", "")
+
+    # ── 联调日志：确认前端消息是否到达后端 ──
+    logger.info(
+        "📥 [收到前端消息] "
+        f"user_id={user_id} | conversation_id={conversation_id} | "
+        f"scene={req.scene} | local_mode={req.local_mode} | "
+        f"content={req.content!r} | content_len={len(req.content)}"
+    )
+
     result = await orchestrator.handle_message(
         user_id=user_id,
         conversation_id=conversation_id,
@@ -60,6 +70,14 @@ async def send_message(
         scene=req.scene,
         local_mode=req.local_mode,
     )
+
+    logger.info(
+        "📤 [返回AI回复给前端] "
+        f"user_id={user_id} | conversation_id={conversation_id} | "
+        f"message_id={result.get('message_id')} | "
+        f"content={result.get('content')!r} | citations_count={len(result.get('citations') or [])}"
+    )
+
     return {"code": 0, "data": result}
 
 

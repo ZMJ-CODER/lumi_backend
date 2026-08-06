@@ -16,6 +16,7 @@ from loguru import logger
 from app.agents.base import AgentContext
 from app.agents.registry import AgentRegistry
 from app.core.config import settings
+from app.core.llm import LLMClient
 from app.core.redis import get_redis
 from app.services.scene_manager import get_scene_config, get_scene_knowledge_tags
 
@@ -31,6 +32,17 @@ class Orchestrator:
       用户消息 → 加载场景配置 → 加载 Redis 上下文 + 长期记忆 →
       RAG 检索知识库 → 拼接 Prompt → 调用 LLM → 保存消息 → 异步提取记忆
     """
+
+    def __init__(self) -> None:
+        self._llm = LLMClient()
+        self._llm_started = False
+
+    async def _ensure_llm_started(self) -> None:
+        """懒启动 LLM 客户端（首次调用时初始化连接）."""
+        if not self._llm_started:
+            await self._llm.start()
+            self._llm_started = True
+            logger.info("🔌 LLMClient 已启动 (provider={})", self._llm.provider)
 
     # ── 上下文管理 ──────────────────────────────────────
 
@@ -102,6 +114,12 @@ class Orchestrator:
         """
         scene_config = get_scene_config(scene)
 
+        logger.info(
+            "⚙️ [Orchestrator 开始处理消息] "
+            f"user_id={user_id} | conversation_id={conversation_id} | "
+            f"scene={scene} | local_mode={local_mode} | content={content!r}"
+        )
+
         # 本地模式：仅记录，不生成回复（PC端已处理）
         if local_mode:
             return {
@@ -131,7 +149,9 @@ class Orchestrator:
             messages[-1]["content"] = f"参考以下知识库内容回答用户问题：\n\n{rag_context}\n\n用户问题：{content}"
 
         # 5. 调用 LLM 生成回复
+        logger.info("🤖 [调用 LLM] 待生成回复，messages_count={}", len(messages))
         reply = await self._call_llm(messages)
+        logger.info("✅ [LLM 回复完成] reply={!r}", reply)
 
         # 6. 保存助手回复到上下文
         assistant_msg = {"role": "assistant", "content": reply, "timestamp": datetime.now(timezone.utc).isoformat()}
@@ -185,10 +205,10 @@ class Orchestrator:
         return "", []
 
     async def _call_llm(self, messages: list[dict]) -> str:
-        """调用云端 LLM 生成回复."""
-        # TODO: 对接 LLMClient 或 LangChain ChatModel
-        logger.debug(f"LLM 调用: {len(messages)} 条消息")
-        return "（placeholder - LLM 回复）"
+        """调用云端 LLM 生成回复（真实接入 DeepSeek/Qwen）."""
+        await self._ensure_llm_started()
+        reply = await self._llm.chat(messages)
+        return reply
 
     # ── 智能体路由 ──────────────────────────────────────
 

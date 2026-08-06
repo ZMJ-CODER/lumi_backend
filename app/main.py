@@ -46,7 +46,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.PROJECT_NAME,
         version=settings.VERSION,
-        description="Lumi - 桌面AI陪伴助手后端服务 | 多场景陪伴 · 知识库RAG · 长期记忆 · 多用户体系 · PC本地加速协同",
+        description="Lumi",
         lifespan=lifespan,
     )
     app.include_router(api_router, prefix="/api/v1")

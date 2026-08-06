@@ -1,9 +1,9 @@
 """对话模块 API —— 增强场景模式联动."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger
 
-from app.core.deps import require_auth
+from app.core.deps import get_current_user, require_auth
 from app.models.conversation import (
     CreateConversationRequest,
     SendMessageRequest,
@@ -39,11 +39,12 @@ async def list_conversations(
 
 @router.post("/{conversation_id}/messages")
 async def send_message(
+    request: Request,
     conversation_id: str,
     req: SendMessageRequest,
-    payload: dict = Depends(require_auth),
+    payload: dict = Depends(get_current_user),
 ):
-    """发送消息（云端对话）.
+    """发送消息（云端对话；未登录时以游客身份 guest_id 兜底）.
 
     处理流程:
       1. 加载场景配置 (System Prompt + 知识库标签)
@@ -53,12 +54,18 @@ async def send_message(
       5. 保存消息到 Redis 上下文 + PostgreSQL
       6. 异步触发记忆提取
     """
-    user_id = payload.get("sub", "")
+    # 带了 token 但无效/过期 → 仍要求登录（让前端走刷新/重登流程，而不是静默变游客）
+    if request.headers.get("authorization") and not payload:
+        raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+
+    # 身份优先级: 登录用户 sub > 游客 guest_id > 兜底 "guest"
+    user_id = payload.get("sub") or req.guest_id or "guest"
+    is_guest = not payload
 
     # ── 联调日志：确认前端消息是否到达后端 ──
     logger.info(
         "📥 [收到前端消息] "
-        f"user_id={user_id} | conversation_id={conversation_id} | "
+        f"user_id={user_id} | is_guest={is_guest} | conversation_id={conversation_id} | "
         f"scene={req.scene} | local_mode={req.local_mode} | "
         f"content={req.content!r} | content_len={len(req.content)}"
     )

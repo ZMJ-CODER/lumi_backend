@@ -4,14 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="解决agengt不能传递用户消息给大模型的问题">
-      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="添加redis动态加载模型配置">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/admin.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/llm.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/llm.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/admin.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -90,7 +84,15 @@
       <option name="project" value="LOCAL" />
       <updated>1785992941923</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="添加redis动态加载模型配置">
+      <option name="closed" value="true" />
+      <created>1786002865006</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1786002865006</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -107,6 +109,7 @@
   <component name="VcsManagerConfiguration">
     <MESSAGE value="提交初始项目代码" />
     <MESSAGE value="解决agengt不能传递用户消息给大模型的问题" />
-    <option name="LAST_COMMIT_MESSAGE" value="解决agengt不能传递用户消息给大模型的问题" />
+    <MESSAGE value="添加redis动态加载模型配置" />
+    <option name="LAST_COMMIT_MESSAGE" value="添加redis动态加载模型配置" />
   </component>
 </project>

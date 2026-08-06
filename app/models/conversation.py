@@ -12,6 +12,7 @@ class SendMessageRequest(BaseModel):
     scene: str = Field(default="office")
     local_mode: bool = Field(default=False)
     attachments: list = Field(default_factory=list)
+    guest_id: str | None = Field(default=None, description="游客身份标识（未登录时由前端生成，登录后忽略）")
 
 
 class UpdateConversationRequest(BaseModel):

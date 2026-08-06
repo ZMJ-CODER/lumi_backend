@@ -148,9 +148,9 @@ class Orchestrator:
         if rag_context:
             messages[-1]["content"] = f"参考以下知识库内容回答用户问题：\n\n{rag_context}\n\n用户问题：{content}"
 
-        # 5. 调用 LLM 生成回复
+        # 5. 调用 LLM 生成回复（按场景动态取模型配置）
         logger.info("🤖 [调用 LLM] 待生成回复，messages_count={}", len(messages))
-        reply = await self._call_llm(messages)
+        reply = await self._call_llm(messages, scene=scene)
         logger.info("✅ [LLM 回复完成] reply={!r}", reply)
 
         # 6. 保存助手回复到上下文
@@ -204,10 +204,10 @@ class Orchestrator:
         # 4. 拼接上下文 + 生成 citations
         return "", []
 
-    async def _call_llm(self, messages: list[dict]) -> str:
-        """调用云端 LLM 生成回复（真实接入 DeepSeek/Qwen）."""
+    async def _call_llm(self, messages: list[dict], scene: str = "chat") -> str:
+        """调用云端 LLM 生成回复（配置动态读取: Redis → .env）."""
         await self._ensure_llm_started()
-        reply = await self._llm.chat(messages)
+        reply = await self._llm.chat(messages, scene=scene)
         return reply
 
     # ── 智能体路由 ──────────────────────────────────────

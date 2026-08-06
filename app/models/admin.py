@@ -22,3 +22,19 @@ class PublicKBSearchRequest(BaseModel):
 
 class SyncSummaryRequest(BaseModel):
     summaries: list[dict]
+
+
+class LLMConfigRequest(BaseModel):
+    """更新 LLM 动态配置（部分字段可缺省，缺省则沿用当前生效值）."""
+
+    scene: str | None = Field(default=None, description="场景标识；缺省表示全局默认")
+    base_url: str | None = Field(default=None, description="OpenAI 兼容接口地址")
+    api_key: str | None = Field(default=None, description="API 密钥")
+    model: str | None = Field(default=None, description="模型名")
+    timeout: int | None = Field(default=None, ge=5, le=600, description="请求超时秒数")
+
+
+class LLMResetRequest(BaseModel):
+    """重置 LLM 动态配置，回落 .env 默认值."""
+
+    scene: str | None = Field(default=None, description="场景标识；缺省表示全局默认")

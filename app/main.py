@@ -27,7 +27,7 @@ from app.core.redis import close_redis, init_redis
 async def lifespan(app: FastAPI):
     """应用生命周期管理."""
     setup_logging()
-    logger.info(f"🚀 {settings.PROJECT_NAME} v{settings.VERSION} 启动中...")
+    logger.info(f" {settings.PROJECT_NAME} v{settings.VERSION} 启动中...")
 
     # 初始化基础设施
     init_agents()

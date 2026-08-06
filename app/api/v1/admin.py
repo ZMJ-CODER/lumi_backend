@@ -1,12 +1,29 @@
 """管理员专有接口 —— 按设计文档 3.x 管理视图."""
 
-from fastapi import APIRouter, Depends
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.deps import get_admin_verified_token, require_admin, require_superadmin
-from app.models.admin import PublicKBSearchRequest, RAGConfigRequest, UpdateUserRequest
+from app.models.admin import (
+    LLMConfigRequest,
+    LLMResetRequest,
+    PublicKBSearchRequest,
+    RAGConfigRequest,
+    UpdateUserRequest,
+)
 from app.models.knowledge import AdminPasswordVerifyRequest
 
 router = APIRouter()
+
+
+def _mask_api_key(key: str) -> str:
+    """API 密钥脱敏，仅展示头尾."""
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "***"
+    return f"{key[:6]}***{key[-4:]}"
 
 
 # ── 用户管理（超管） ──────────────────────────────────
@@ -95,3 +112,56 @@ async def get_control_logs_summary(payload: dict = Depends(require_superadmin)):
     """查看所有用户的操控日志摘要（不记录对话内容，仅操作类型和时间戳）."""
     # TODO: SELECT action, success, created_at FROM control_logs 聚合统计
     return {"code": 0, "data": {"total_operations": 0, "by_action": {}}}
+
+
+@router.get("/llm-config")
+async def get_llm_config_view(
+    scene: str | None = Query(default=None, description="场景标识；缺省表示全局默认"),
+    payload: dict = Depends(require_superadmin),
+):
+    """查看当前生效的 LLM 配置（api_key 脱敏）."""
+    from app.core.llm_config import get_llm_config
+
+    cfg = await get_llm_config(scene)
+    return {"code": 0, "data": {**cfg, "api_key": _mask_api_key(cfg.get("api_key", ""))}}
+
+
+@router.put("/llm-config")
+async def update_llm_config(
+    req: LLMConfigRequest,
+    payload: dict = Depends(require_superadmin),
+):
+    """更新 LLM 动态配置：先验证连通性，通过后才写入 Redis，立即生效."""
+    from app.core.llm_config import get_llm_config, set_llm_config, validate_llm_config
+
+    current = await get_llm_config(req.scene)
+    candidate = {
+        "base_url": req.base_url or current.get("base_url", ""),
+        "api_key": req.api_key if req.api_key is not None else current.get("api_key", ""),
+        "model": req.model or current.get("model", ""),
+        "timeout": req.timeout if req.timeout is not None else current.get("timeout", 120),
+        "source": "redis",
+    }
+
+    ok, err = await validate_llm_config(candidate)
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"新配置验证失败，未写入: {err}")
+
+    candidate["updated_at"] = datetime.now(timezone.utc).isoformat()
+    candidate["updated_by"] = payload.get("username") or payload.get("sub") or "admin"
+    await set_llm_config(candidate, req.scene)
+
+    return {"code": 0, "data": {**candidate, "api_key": _mask_api_key(candidate["api_key"])}}
+
+
+@router.post("/llm-config/reset")
+async def reset_llm_config_view(
+    req: LLMResetRequest,
+    payload: dict = Depends(require_superadmin),
+):
+    """删除 Redis 中的 LLM 配置，回落 .env 默认值."""
+    from app.core.llm_config import reset_llm_config
+
+    await reset_llm_config(req.scene)
+    scope = f"场景 {req.scene}" if req.scene else "全局"
+    return {"code": 0, "message": f"已重置{scope} LLM 配置，回落 .env 默认值"}

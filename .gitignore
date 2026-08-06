@@ -12,6 +12,7 @@ venv/
 
 # Env
 .env
+app/.env
 
 # Logs
 logs/

@@ -62,16 +62,25 @@ class Settings(BaseSettings):
     # ── LLM 默认选用 ──
     LLM_PROVIDER: str = "deepseek"  # qwen / deepseek
 
-    # ── 嵌入模型 ──
-    EMBEDDING_MODEL: str = "text-embedding-3-small"
-    EMBEDDING_DIMENSION: int = 384
+    # ── 嵌入模型（本地推理，sentence-transformers）──
+    EMBEDDING_MODEL: str = "BAAI/bge-small-zh-v1.5"
+    EMBEDDING_DIMENSION: int = 512  # bge-small-zh-v1.5=512；切换 bge-m3 时改为 1024 并迁移数据库向量列
+    EMBEDDING_BATCH_SIZE: int = 16
+    EMBEDDING_DEVICE: str = "cpu"   # cpu / cuda
+    EMBEDDING_CACHE_DIR: str = ""   # 模型缓存目录；为空用 HuggingFace 默认缓存
+    # 检索指令前缀。bge 官方建议查询时附加，但本项目实测不加区分度更好，
+    # 默认关闭；切换 bge-m3 后可重新开启对比效果。
+    EMBEDDING_QUERY_INSTRUCTION: str = ""
+
+    # ── 文件上传 ──
+    UPLOAD_DIR: str = "data/uploads"
 
     # ── 搜索工具: Tavily ──
     TAVILY_API_KEY: str = ""
 
     # ── RAG 默认参数 ──
     RAG_TOP_K: int = 5
-    RAG_SIMILARITY_THRESHOLD: float = 0.7
+    RAG_SIMILARITY_THRESHOLD: float = 0.45  # 按 bge-small-zh 实测校准；切换模型后需重新校准
     RAG_CHUNK_SIZE: int = 500
     RAG_CHUNK_OVERLAP: int = 50
 

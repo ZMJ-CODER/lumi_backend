@@ -16,6 +16,7 @@ from captcha.image import ImageCaptcha
 from loguru import logger
 
 from app.core.config import settings
+from app.core.exceptions import RateLimitException
 from app.core.redis import get_redis
 
 # 验证码图片生成器
@@ -114,14 +115,20 @@ async def generate_captcha(ip: str | None = None) -> dict:
         }
 
     Raises:
-        ValueError: IP 被锁定或获取频率超限
+        RateLimitException: IP 被锁定或获取频率超限
     """
     # 安全策略：IP 锁定检查
     if ip:
         if await _check_ip_locked(ip):
-            raise ValueError(f"IP {ip} 因连续输错验证码已被锁定 {settings.CAPTCHA_LOCK_MINUTES} 分钟")
+            raise RateLimitException(
+                f"IP {ip} 因连续输错验证码已被锁定 {settings.CAPTCHA_LOCK_MINUTES} 分钟",
+                error_code="captcha_ip_locked",
+            )
         if not await _check_and_incr_rate(ip):
-            raise ValueError(f"IP {ip} 获取验证码过于频繁，每分钟限 {settings.CAPTCHA_RATE_LIMIT_PER_MINUTE} 次")
+            raise RateLimitException(
+                f"IP {ip} 获取验证码过于频繁，每分钟限 {settings.CAPTCHA_RATE_LIMIT_PER_MINUTE} 次",
+                error_code="captcha_rate_limited",
+            )
 
     captcha_id = str(uuid.uuid4())
     expr, answer = _generate_expression()

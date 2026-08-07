@@ -17,6 +17,9 @@ app/.env
 # Logs
 logs/
 
+# 运行时数据（嵌入模型缓存 / 用户上传文件），首次运行自动下载，不入库
+data/
+
 # Celery
 celerybeat-schedule
 celerybeat.pid

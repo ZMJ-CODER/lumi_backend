@@ -3,6 +3,7 @@
 from fastapi import Depends, Header
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.core.security import decode_token
 
 security_scheme = HTTPBearer(auto_error=False)
@@ -26,27 +27,21 @@ async def get_current_user(
 def require_auth(payload: dict = Depends(get_current_user)) -> dict:
     """强制要求登录，否则 401."""
     if not payload:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=401, detail="请先登录")
+        raise UnauthorizedException("请先登录")
     return payload
 
 
 def require_admin(payload: dict = Depends(require_auth)) -> dict:
     """要求管理员角色."""
     if payload.get("role") not in ("admin", "superadmin"):
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=403, detail="需要管理员权限")
+        raise ForbiddenException("需要管理员权限")
     return payload
 
 
 def require_superadmin(payload: dict = Depends(require_auth)) -> dict:
     """要求超级管理员角色."""
     if payload.get("role") != "superadmin":
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=403, detail="需要超级管理员权限")
+        raise ForbiddenException("需要超级管理员权限")
     return payload
 
 

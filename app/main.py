@@ -19,6 +19,7 @@ from loguru import logger
 from app.agents.registry import init_agents
 from app.api.router import api_router
 from app.core.config import settings
+from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import setup_logging
 from app.core.redis import close_redis, init_redis
 
@@ -49,6 +50,10 @@ def create_app() -> FastAPI:
         description="Lumi",
         lifespan=lifespan,
     )
+
+    # 注册全局统一异常处理器（所有未捕获/业务异常统一输出规范格式并完整记录日志）
+    register_exception_handlers(app)
+
     app.include_router(api_router, prefix="/api/v1")
 
     # CORS 跨域配置

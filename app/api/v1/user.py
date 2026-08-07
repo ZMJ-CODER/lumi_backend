@@ -2,12 +2,13 @@
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import require_auth
+from app.core.exceptions import ForbiddenException, NotFoundException, UnauthorizedException
 from app.models.db_models import User
 
 router = APIRouter()
@@ -21,19 +22,19 @@ async def get_current_user_info(
     """获取当前用户信息（从数据库查询完整信息）."""
     user_id = payload.get("sub", "")
     if not user_id:
-        raise HTTPException(status_code=401, detail="请先登录")
+        raise UnauthorizedException("请先登录")
 
     try:
         user_uuid = uuid.UUID(user_id)
     except (ValueError, AttributeError):
-        raise HTTPException(status_code=401, detail="令牌无效")
+        raise UnauthorizedException("令牌无效")
 
     result = await db.execute(select(User).where(User.id == user_uuid))
     user = result.scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise NotFoundException("用户不存在")
     if user.status == "disabled":
-        raise HTTPException(status_code=403, detail="账号已被禁用")
+        raise ForbiddenException("账号已被禁用")
 
     return {
         "code": 0,

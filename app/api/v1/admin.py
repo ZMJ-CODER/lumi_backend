@@ -2,9 +2,10 @@
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 
 from app.core.deps import get_admin_verified_token, require_admin, require_superadmin
+from app.core.exceptions import BadRequestException, ForbiddenException
 from app.models.admin import (
     LLMConfigRequest,
     LLMResetRequest,
@@ -61,9 +62,7 @@ async def update_rag_config(
 ):
     """全局检索参数配置：分块大小、Top-K、相似度阈值."""
     if not x_admin_token:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=403, detail="需要管理员二次验证")
+        raise ForbiddenException("需要管理员二次验证")
     # TODO: 校验 verified_token，更新全局 RAG 配置
     return {"code": 0, "data": {"top_k": req.top_k, "similarity_threshold": req.similarity_threshold}}
 
@@ -145,7 +144,7 @@ async def update_llm_config(
 
     ok, err = await validate_llm_config(candidate)
     if not ok:
-        raise HTTPException(status_code=400, detail=f"新配置验证失败，未写入: {err}")
+        raise BadRequestException(f"新配置验证失败，未写入: {err}")
 
     candidate["updated_at"] = datetime.now(timezone.utc).isoformat()
     candidate["updated_by"] = payload.get("username") or payload.get("sub") or "admin"

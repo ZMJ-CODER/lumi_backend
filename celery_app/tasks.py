@@ -8,19 +8,42 @@
   - delete_user_data:   物理清理用户数据
 """
 
+import asyncio
+
+from loguru import logger
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
 from celery_app import celery_app
+from app.core.config import settings
+from app.services.knowledge_service import process_document_pipeline
+
+
+def _new_async_session() -> tuple[object, async_sessionmaker]:
+    """为任务创建独立的异步引擎（NullPool），避免跨事件循环复用连接."""
+    engine = create_async_engine(settings.DATABASE_URL, poolclass=NullPool)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    return engine, factory
 
 
 @celery_app.task(bind=True, max_retries=3)
 def process_document(self, document_id: str, file_path: str, user_id: str, space_id: str):
     """处理上传的文档：分块 → 嵌入 → 存入 pgvector."""
-    # TODO:
-    # 1. 读取文件内容
-    # 2. LangChain TextSplitter 分块
-    # 3. 调用嵌入模型生成向量
-    # 4. 批量写入 document_chunks 表
-    # 5. 更新 documents.status = 'ready'
-    pass
+    async def _run() -> int:
+        engine, factory = _new_async_session()
+        try:
+            async with factory() as session:
+                return await process_document_pipeline(session, document_id, file_path)
+        finally:
+            await engine.dispose()
+
+    try:
+        chunk_count = asyncio.run(_run())
+        logger.info("[Task] process_document 完成: doc={} chunks={}", document_id, chunk_count)
+    except Exception as exc:
+        logger.error("[Task] process_document 失败: doc={} err={}", document_id, exc)
+        raise self.retry(exc=exc, countdown=5)
 
 
 @celery_app.task(bind=True, max_retries=3)
@@ -37,27 +60,82 @@ def extract_memories(self, user_id: str, conversation_id: str, user_msg: str, as
 @celery_app.task(bind=True)
 def rebuild_index(self, space_id: str | None = None):
     """重建向量索引."""
-    # TODO: DROP INDEX → CREATE INDEX ON document_chunks USING ivfflat
-    pass
+    async def _run() -> None:
+        engine, _ = _new_async_session()
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("DROP INDEX IF EXISTS idx_chunks_embedding"))
+                await conn.execute(
+                    text(
+                        "CREATE INDEX idx_chunks_embedding ON document_chunks "
+                        "USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)"
+                    )
+                )
+                await conn.commit()
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(_run())
+        logger.info("[Task] rebuild_index 完成: space={}", space_id)
+    except Exception as exc:
+        logger.error("[Task] rebuild_index 失败: {}", exc)
+        raise
 
 
 @celery_app.task(bind=True)
 def cleanup_vectors(self):
     """清理已删除文档的冗余向量."""
-    # TODO: DELETE FROM document_chunks WHERE document_id NOT IN (SELECT id FROM documents)
-    pass
+    async def _run() -> None:
+        engine, _ = _new_async_session()
+        try:
+            async with engine.connect() as conn:
+                result = await conn.execute(
+                    text(
+                        "DELETE FROM document_chunks "
+                        "WHERE document_id NOT IN (SELECT id FROM documents)"
+                    )
+                )
+                await conn.commit()
+                logger.info("[Task] cleanup_vectors 清理 {} 条冗余向量", result.rowcount)
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        logger.error("[Task] cleanup_vectors 失败: {}", exc)
+        raise
 
 
 @celery_app.task(bind=True)
 def delete_user_data(self, user_id: str):
     """物理清理用户所有数据（24h 延迟执行）."""
-    # TODO:
-    # 1. DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)
-    # 2. DELETE FROM conversations WHERE user_id = ?
-    # 3. DELETE FROM memories WHERE user_id = ?
-    # 4. DELETE FROM document_chunks WHERE user_id = ?
-    # 5. DELETE FROM documents WHERE user_id = ?
-    # 6. DELETE FROM knowledge_spaces WHERE user_id = ? AND is_public = false
-    # 7. DELETE FROM control_logs WHERE user_id = ?
-    # 8. DELETE FROM users WHERE id = ?
-    pass
+    async def _run() -> None:
+        engine, _ = _new_async_session()
+        try:
+            async with engine.connect() as conn:
+                statements = [
+                    "DELETE FROM messages WHERE conversation_id IN "
+                    "(SELECT id FROM conversations WHERE user_id = :uid)",
+                    "DELETE FROM conversations WHERE user_id = :uid",
+                    "DELETE FROM memories WHERE user_id = :uid",
+                    "DELETE FROM document_chunks WHERE user_id = :uid",
+                    "DELETE FROM documents WHERE user_id = :uid",
+                    "DELETE FROM knowledge_spaces WHERE user_id = :uid AND is_public = false",
+                    "DELETE FROM control_logs WHERE user_id = :uid",
+                    "DELETE FROM refresh_tokens WHERE user_id = :uid",
+                    "DELETE FROM users WHERE id = :uid",
+                ]
+                for sql in statements:
+                    await conn.execute(text(sql), {"uid": user_id})
+                await conn.commit()
+                logger.info("[Task] delete_user_data 完成: user={}", user_id)
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        logger.error("[Task] delete_user_data 失败: {}", exc)
+        raise

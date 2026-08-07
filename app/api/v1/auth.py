@@ -8,7 +8,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import require_auth
+from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException, UnauthorizedException
 from app.core.security import (
     create_access_token,
     decode_token,
@@ -55,16 +56,16 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     """
     # 1. 校验图形验证码
     if not await verify_captcha(req.captcha_id, req.captcha_result):
-        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+        raise BadRequestException("验证码错误或已过期")
 
     # 2. 检查账号唯一性
     result = await db.execute(select(User).where(User.account == req.account))
     if result.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="账号已存在")
+        raise ConflictException("账号已存在")
 
     # 3. 密码强度校验
     if not validate_password_strength(req.password):
-        raise HTTPException(status_code=400, detail="密码需至少 8 位，包含字母和数字")
+        raise BadRequestException("密码需至少 8 位，包含字母和数字")
 
     # 4. argon2id 哈希
     password_hash = hash_password(req.password)
@@ -118,20 +119,20 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     """
     # 1. 校验图形验证码
     if not await verify_captcha(req.captcha_id, req.captcha_result):
-        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+        raise BadRequestException("验证码错误或已过期")
 
     # 2. 查找用户
     result = await db.execute(select(User).where(User.account == req.account))
     user = result.scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=401, detail="账号或密码错误")
+        raise UnauthorizedException("账号或密码错误")
 
     if user.status == "disabled":
-        raise HTTPException(status_code=403, detail="账号已被禁用")
+        raise ForbiddenException("账号已被禁用")
 
     # 3. 校验密码
     if not verify_password(req.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="账号或密码错误")
+        raise UnauthorizedException("账号或密码错误")
 
     user_id_str = str(user.id)
 
@@ -172,11 +173,11 @@ async def refresh(req: TokenRefreshRequest, db: AsyncSession = Depends(get_db)):
     )
     token_record = result.scalar_one_or_none()
     if not token_record:
-        raise HTTPException(status_code=401, detail="刷新令牌无效")
+        raise UnauthorizedException("刷新令牌无效")
     if token_record.expires_at < datetime.now(timezone.utc):
         await db.delete(token_record)
         await db.commit()
-        raise HTTPException(status_code=401, detail="刷新令牌已过期")
+        raise UnauthorizedException("刷新令牌已过期")
 
     # 废弃旧 token
     await db.delete(token_record)
@@ -186,7 +187,7 @@ async def refresh(req: TokenRefreshRequest, db: AsyncSession = Depends(get_db)):
     user = user_result.scalar_one_or_none()
     if not user or user.status == "disabled":
         await db.commit()
-        raise HTTPException(status_code=403, detail="用户不可用")
+        raise ForbiddenException("用户不可用")
 
     # 签发新令牌对
     user_id_str = str(user.id)

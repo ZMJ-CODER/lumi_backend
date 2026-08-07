@@ -1,9 +1,10 @@
 """对话模块 API —— 增强场景模式联动."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from loguru import logger
 
 from app.core.deps import get_current_user, require_auth
+from app.core.exceptions import UnauthorizedException
 from app.models.conversation import (
     CreateConversationRequest,
     SendMessageRequest,
@@ -56,7 +57,7 @@ async def send_message(
     """
     # 带了 token 但无效/过期 → 仍要求登录（让前端走刷新/重登流程，而不是静默变游客）
     if request.headers.get("authorization") and not payload:
-        raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+        raise UnauthorizedException("登录已过期，请重新登录")
 
     # 身份优先级: 登录用户 sub > 游客 guest_id > 兜底 "guest"
     user_id = payload.get("sub") or req.guest_id or "guest"

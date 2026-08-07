@@ -16,8 +16,10 @@ from loguru import logger
 from app.agents.base import AgentContext
 from app.agents.registry import AgentRegistry
 from app.core.config import settings
+from app.core.database import async_session_factory
 from app.core.llm import LLMClient
 from app.core.redis import get_redis
+from app.services.knowledge_service import search_user_knowledge
 from app.services.scene_manager import get_scene_config, get_scene_knowledge_tags
 
 # Redis Key 模板
@@ -189,20 +191,25 @@ class Orchestrator:
         return messages
 
     async def _retrieve_knowledge(self, user_id: str, query: str, space_tags: list[str]) -> tuple[str, list[dict]]:
-        """RAG 检索 —— 从 pgvector 检索相关文档块.
+        """RAG 检索 —— pgvector 相似度检索（个人空间 + 公共空间）.
 
         Returns:
             (拼接后的上下文文本, 引用列表)
         """
-        # TODO: 实现真正的向量检索
-        # 1. 对 query 做 embedding
-        # 2. SELECT * FROM document_chunks
-        #    WHERE user_id = ? AND space_tags @> ?
-        #    ORDER BY embedding <=> query_embedding
-        #    LIMIT top_k
-        # 3. 过滤 similarity_threshold
-        # 4. 拼接上下文 + 生成 citations
-        return "", []
+        try:
+            async with async_session_factory() as session:
+                return await search_user_knowledge(
+                    session,
+                    user_id=user_id,
+                    query=query,
+                    space_tags=space_tags,
+                    top_k=settings.RAG_TOP_K,
+                    threshold=settings.RAG_SIMILARITY_THRESHOLD,
+                )
+        except Exception as e:
+            # 检索失败不阻塞对话主流程，仅记录并跳过知识库
+            logger.warning("RAG 检索失败，跳过知识库: {}", e)
+            return "", []
 
     async def _call_llm(self, messages: list[dict], scene: str = "chat") -> str:
         """调用云端 LLM 生成回复（配置动态读取: Redis → .env）."""

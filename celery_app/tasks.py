@@ -17,7 +17,8 @@ from sqlalchemy.pool import NullPool
 
 from celery_app import celery_app
 from app.core.config import settings
-from app.services.knowledge_service import process_document_pipeline
+from app.services.rag.cleaner import DocumentQualityError
+from app.services.rag.knowledge import process_document_pipeline
 
 
 def _new_async_session() -> tuple[object, async_sessionmaker]:
@@ -41,6 +42,9 @@ def process_document(self, document_id: str, file_path: str, user_id: str, space
     try:
         chunk_count = asyncio.run(_run())
         logger.info("[Task] process_document 完成: doc={} chunks={}", document_id, chunk_count)
+    except DocumentQualityError as exc:
+        # 质量不达标：状态已在管线中标记为 error，属最终结果，不重试
+        logger.warning("[Task] process_document 质量不达标，跳过重试: {}", exc)
     except Exception as exc:
         logger.error("[Task] process_document 失败: doc={} err={}", document_id, exc)
         raise self.retry(exc=exc, countdown=5)

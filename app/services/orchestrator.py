@@ -19,7 +19,7 @@ from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.llm import LLMClient
 from app.core.redis import get_redis
-from app.services.knowledge_service import search_user_knowledge
+from app.services.rag.knowledge import search_user_knowledge
 from app.services.scene_manager import get_scene_config, get_scene_knowledge_tags
 
 # Redis Key 模板
@@ -151,9 +151,9 @@ class Orchestrator:
             messages[-1]["content"] = f"参考以下知识库内容回答用户问题：\n\n{rag_context}\n\n用户问题：{content}"
 
         # 5. 调用 LLM 生成回复（按场景动态取模型配置）
-        logger.info("🤖 [调用 LLM] 待生成回复，messages_count={}", len(messages))
+        logger.info(" [调用 LLM] 待生成回复，messages_count={}", len(messages))
         reply = await self._call_llm(messages, scene=scene)
-        logger.info("✅ [LLM 回复完成] reply={!r}", reply)
+        logger.info("[LLM 回复完成] reply={!r}", reply)
 
         # 6. 保存助手回复到上下文
         assistant_msg = {"role": "assistant", "content": reply, "timestamp": datetime.now(timezone.utc).isoformat()}

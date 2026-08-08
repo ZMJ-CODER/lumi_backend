@@ -7,7 +7,7 @@ from app.core.database import get_db
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.models.knowledge import CreateSpaceRequest, UpdateSpaceRequest
-from app.services import knowledge_service as kb
+from app.services.rag import knowledge as kb
 
 router = APIRouter()
 
@@ -24,42 +24,44 @@ def _is_admin(payload: dict) -> bool:
 
 @router.post("/documents")
 async def upload_document(
-    file: UploadFile = File(...),
+    files: list[UploadFile] = File(default=[]),
+    file: UploadFile | None = File(default=None),
     space_id: str = Form(...),
     scene_tag: str = Form(default=""),
     db: AsyncSession = Depends(get_db),
     payload: dict = Depends(require_auth),
 ):
-    """上传文档到知识库，异步处理分块与向量化."""
+    """批量上传文档到知识库（支持多文件），异步处理分块与向量化."""
     user_id = payload["sub"]
-    content = await file.read()
-    try:
-        doc, file_path = await kb.upload_document_file(
-            db, user_id, space_id, file.filename or "unnamed.txt", content
-        )
-    except ValueError as e:
-        raise BadRequestException(str(e))
-    except LookupError as e:
-        raise NotFoundException(str(e))
-    except PermissionError as e:
-        raise ForbiddenException(str(e))
-
-    # 先提交，再入队，避免 Celery 任务读到未提交的文档记录
-    await db.commit()
-
     from celery_app.tasks import process_document
 
-    process_document.delay(str(doc.id), str(file_path), str(doc.user_id), str(doc.space_id))
-    return {
-        "code": 0,
-        "data": {
-            "document_id": str(doc.id),
-            "filename": doc.filename,
-            "status": doc.status,
-            "chunk_count": doc.chunk_count,
-            "space_id": str(doc.space_id),
-        },
-    }
+    all_files = list(files) + ([file] if file else [])
+    if not all_files:
+        raise BadRequestException("请选择要上传的文件")
+
+    results: list[dict] = []
+    for f in all_files:
+        filename = f.filename or "unnamed.txt"
+        content = await f.read()
+        try:
+            doc, file_path = await kb.upload_document_file(db, user_id, space_id, filename, content)
+            # 先提交，再入队，避免 Celery 任务读到未提交的文档记录
+            await db.commit()
+            process_document.delay(str(doc.id), str(file_path), str(doc.user_id), str(doc.space_id))
+            results.append(
+                {
+                    "filename": filename,
+                    "document_id": str(doc.id),
+                    "status": doc.status,
+                    "chunk_count": doc.chunk_count,
+                    "space_id": str(doc.space_id),
+                }
+            )
+        except (ValueError, LookupError, PermissionError) as e:
+            await db.rollback()
+            results.append({"filename": filename, "error": str(e)})
+
+    return {"code": 0, "data": {"items": results, "total": len(results)}}
 
 
 @router.get("/documents")

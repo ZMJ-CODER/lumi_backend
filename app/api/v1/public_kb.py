@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import require_auth
 from app.models.admin import PublicKBSearchRequest
-from app.services import knowledge_service as kb
+from app.services.rag import knowledge as kb
 
 router = APIRouter()
 

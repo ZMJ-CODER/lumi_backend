@@ -1,4 +1,4 @@
-"""知识库服务 —— 知识空间 / 文档 / 分块入库 / 向量检索（pgvector + bge-small-zh-v1.5嵌入）.
+"""RAG 知识库服务 —— 知识空间 / 文档 / 分块入库 / 向量检索（pgvector + bge-small-zh-v1.5嵌入）.
 
 数据流:
   上传文档 → 落盘 + documents 表(pending) → Celery 处理管线
@@ -15,9 +15,10 @@ from sqlalchemy import bindparam, delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.embeddings import embed_query, embed_texts
+from app.services.rag.embeddings import embed_query, embed_texts
 from app.models.db_models import Document, DocumentChunk, KnowledgeSpace
-from app.services.document_parser import parse_file, split_text
+from app.services.rag.cleaner import HARD_FAIL_CODES, DocumentQualityError, assess_document, clean_document
+from app.services.rag.document_parser import parse_document, split_text
 
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
 
@@ -258,8 +259,22 @@ async def process_document_pipeline(session: AsyncSession, document_id: str, fil
         raise LookupError(f"文档不存在: {document_id}")
 
     try:
-        raw_text = parse_file(file_path, doc.filename)
-        chunks = split_text(raw_text, settings.RAG_CHUNK_SIZE, settings.RAG_CHUNK_OVERLAP)
+        try:
+            raw_text = parse_document(file_path, doc.filename)
+        except Exception as e:
+            # 解析失败归类为"无法解析"（如严重损坏的 PDF），终止处理不重试
+            raise DocumentQualityError(
+                f"unparsable：无法解析文档（{type(e).__name__}: {str(e)[:120]}）"
+            ) from e
+        # 清洗 + 质量门：低质量文档不入库
+        cleaned_text = clean_document(raw_text, doc.filename)
+        score, issues = assess_document(cleaned_text, filename=doc.filename, file_size=doc.file_size)
+        if score < settings.RAG_MIN_QUALITY_SCORE or any(i["code"] in HARD_FAIL_CODES for i in issues):
+            messages = [i["message"] for i in issues] or ["无法识别有效内容"]
+            raise DocumentQualityError(
+                f"文档质量不达标（{score:.2f}）：{'；'.join(messages)}"
+            )
+        chunks = split_text(cleaned_text, settings.RAG_CHUNK_SIZE, settings.RAG_CHUNK_OVERLAP)
         logger.info("📄 文档 {} 分块 {} 个", doc.filename, len(chunks))
 
         # 重处理时清掉旧分块

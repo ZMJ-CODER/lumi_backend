@@ -1,4 +1,4 @@
-"""嵌入模块 —— 本地模型推理（sentence-transformers + bge）.
+"""RAG 嵌入模块 —— 本地模型推理（sentence-transformers + bge）.
 
 设计:
   - 默认模型 BAAI/bge-small-zh-v1.5（512 维），后期可直接切换 BAAI/bge-m3（1024 维）

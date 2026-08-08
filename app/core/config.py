@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # ── 文件上传 ──
     UPLOAD_DIR: str = "data/uploads"
 
+    # ── Docling 文档解析（PDF / Office / 图片等）──
+    DOCLING_ENABLE_OCR: bool = True      # 扫描件/图片 OCR（依赖 RapidOCR，首次使用自动下载模型）
+    DOCLING_OCR_ENGINE: str = "rapidocr" # rapidocr / easyocr / tesseract
+
     # ── 搜索工具: Tavily ──
     TAVILY_API_KEY: str = ""
 
@@ -83,6 +87,7 @@ class Settings(BaseSettings):
     RAG_SIMILARITY_THRESHOLD: float = 0.45  # 按 bge-small-zh 实测校准；切换模型后需重新校准
     RAG_CHUNK_SIZE: int = 500
     RAG_CHUNK_OVERLAP: int = 50
+    RAG_MIN_QUALITY_SCORE: float = 0.5  # 清洗后质量分低于该值不入库（status=error）
 
     # ── 会话 ──
     CONVERSATION_CONTEXT_ROUNDS: int = 10

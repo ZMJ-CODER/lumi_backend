@@ -1,4 +1,4 @@
-"""文档解析与分块 —— 纯文本 v1，解析器按扩展名注册."""
+"""RAG 文档解析与分块 —— 纯文本 v1，解析器按扩展名注册."""
 
 from pathlib import Path
 
@@ -39,6 +39,27 @@ def parse_file(file_path: str, filename: str | None = None) -> str:
             except UnicodeDecodeError:
                 continue
         raise ValueError("文件编码无法识别（支持 UTF-8 / GB18030）")
+
+
+def parse_document(file_path: str, filename: str | None = None) -> str:
+    """统一文档解析入口：纯文本格式走内置解析，其余格式（PDF/Office/图片等）走 Docling.
+
+    Args:
+        file_path: 磁盘上的文件路径
+        filename: 原始文件名（用于扩展名判断，缺省用 file_path）
+
+    Raises:
+        ValueError: 解析失败（Docling 不支持或模型不可用）
+    """
+    name = filename or file_path
+    ext = Path(name).suffix.lower()
+    if ext in _TEXT_EXTS:
+        return parse_file(file_path, filename)
+
+    # 延迟导入 Docling，避免纯文本流程加载重型依赖
+    from app.services.rag.docling_parser import parse_with_docling
+
+    return parse_with_docling(file_path, filename)
 
 
 # 分隔符优先级：先按大块切，再按句子、标点、空格兜底

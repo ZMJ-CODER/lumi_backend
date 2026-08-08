@@ -25,6 +25,7 @@ dependencies = [
     "alembic>=1.13.0",
     "content>=0.0.1",
     "sentence-transformers>=5.7.0",
+    "docling>=2.118.0",
 ]
 
 [project.optional-dependencies]

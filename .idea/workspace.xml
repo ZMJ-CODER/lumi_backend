@@ -4,30 +4,31 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="添加游客角色">
-      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="添加统一异常管理，添加rag基座">
+      <change afterPath="$PROJECT_DIR$/app/services/rag/__init__.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/admin.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/auth.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/auth.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/conversations.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/conversations.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/api/v1/knowledge.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/knowledge.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/api/v1/public_kb.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/public_kb.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/user.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/user.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/deps.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/deps.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/knowledge.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/knowledge.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/captcha_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/captcha_service.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/embeddings.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/document_parser.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/knowledge_service.py" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/celery_app/tasks.py" beforeDir="false" afterPath="$PROJECT_DIR$/celery_app/tasks.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/conftest.py" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
   </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
@@ -117,7 +118,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786015225732</updated>
     </task>
-    <option name="localTasksCounter" value="5" />
+    <task id="LOCAL-00005" summary="添加统一异常管理，添加rag基座">
+      <option name="closed" value="true" />
+      <created>1786088398899</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1786088398899</updated>
+    </task>
+    <option name="localTasksCounter" value="6" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -136,6 +145,7 @@
     <MESSAGE value="解决agengt不能传递用户消息给大模型的问题" />
     <MESSAGE value="添加redis动态加载模型配置" />
     <MESSAGE value="添加游客角色" />
-    <option name="LAST_COMMIT_MESSAGE" value="添加游客角色" />
+    <MESSAGE value="添加统一异常管理，添加rag基座" />
+    <option name="LAST_COMMIT_MESSAGE" value="添加统一异常管理，添加rag基座" />
   </component>
 </project>

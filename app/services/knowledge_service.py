@@ -1,4 +1,4 @@
-"""知识库服务 —— 知识空间 / 文档 / 分块入库 / 向量检索（pgvector + 千问嵌入）.
+"""知识库服务 —— 知识空间 / 文档 / 分块入库 / 向量检索（pgvector + bge-small-zh-v1.5嵌入）.
 
 数据流:
   上传文档 → 落盘 + documents 表(pending) → Celery 处理管线

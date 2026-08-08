@@ -7,6 +7,7 @@ class CreateSpaceRequest(BaseModel):
     name: str = Field(..., description="空间名称")
     description: str = ""
     scene_tag: str | None = Field(default=None, description="场景标签: chat / office / game")
+    is_public: bool = Field(default=False, description="是否公共空间（仅管理员可设 true）")
 
 
 class UpdateSpaceRequest(BaseModel):

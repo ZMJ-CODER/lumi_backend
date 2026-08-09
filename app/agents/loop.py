@@ -11,8 +11,6 @@
     保持原有"单轮直接回复"行为，不改变现有链路。
 """
 
-from loguru import logger
-
 from app.agents.skills.registry import SkillRegistry
 from app.core.config import settings
 
@@ -29,10 +27,6 @@ async def maybe_run_skills(
     skills = SkillRegistry.list()
     if not skills:
         return None
-    logger.info(
-        "⚙️ [技能调用] 技能已启用（{} 个），执行循环待二期实现: conv={} scene={}",
-        len(skills), conversation_id, scene,
-    )
     # TODO(二期): 让 LLM 在 function-calling 模式下决定调用哪些技能，
     # 经沙箱执行后返回 [{skill, params, result}]，由调用方回填给 LLM 继续对话。
     return []

@@ -44,8 +44,8 @@ def _get_converter():
 def parse_with_docling(file_path: str, filename: str | None = None) -> str:
     """使用 Docling 解析文档并导出为 Markdown 文本."""
     converter = _get_converter()
-    logger.info("Docling 解析文档: {}", filename or file_path)
+    logger.debug("Docling 解析文档: {}", filename or file_path)
     result = converter.convert(Path(file_path))
     markdown = result.document.export_to_markdown()
-    logger.info("Docling 解析完成: {} -> {} 字符", filename or file_path, len(markdown))
+    logger.debug("Docling 解析完成: {} -> {} 字符", filename or file_path, len(markdown))
     return markdown

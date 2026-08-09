@@ -70,4 +70,10 @@ def create_app() -> FastAPI:
 app = create_app()
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host="localhost", port=8000, reload=True)
+    uvicorn.run(
+        "app.main:app",
+        host="localhost",
+        port=8000,
+        reload=True,
+        access_log=False,  # 关闭 uvicorn 默认的每请求访问日志，减少刷屏
+    )

@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -73,12 +73,21 @@ class Message(Base, UUIDMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     citations: Mapped[str | None] = mapped_column(Text)  # JSON string
     metadata_: Mapped[str | None] = mapped_column("metadata", Text)  # JSON string
+    client_message_id: Mapped[str | None] = mapped_column(String(64))  # 客户端消息 ID（幂等去重）
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")
 
     __table_args__ = (
         Index("idx_messages_conv_created", "conversation_id", "created_at"),
+        # 幂等：同一会话内客户端消息 ID 唯一（部分索引，兼容历史数据）
+        Index(
+            "uq_messages_conv_client",
+            "conversation_id",
+            "client_message_id",
+            unique=True,
+            postgresql_where=text("client_message_id IS NOT NULL"),
+        ),
     )
 
 

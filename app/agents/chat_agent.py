@@ -83,10 +83,6 @@ class ChatAgent(AgentBase):
         if len(history) > max_len:
             self._history[session_key] = history[-max_len:]
 
-        logger.debug(
-            f"ChatAgent 回复完成 | session={session_key} | "
-            f"历史轮数={len(history) // 2}"
-        )
         return reply
 
     def clear_memory(self, session_id: str) -> None:

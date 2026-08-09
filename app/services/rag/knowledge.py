@@ -300,9 +300,7 @@ async def process_document_pipeline(
         category, tags = await classify_document(cleaned_text, user_category or doc.category)
         doc.category = category
         doc.tags = ", ".join(tags) if tags else None
-        logger.info("🏷️ 文档 {} 时效档次={} 标签={}", doc.filename, doc.category, doc.tags)
         chunks = chunk_document(cleaned_text, doc.filename, settings.RAG_CHUNK_SIZE, settings.RAG_CHUNK_OVERLAP)
-        logger.info("📄 文档 {} 分块 {} 个", doc.filename, len(chunks))
 
         # 重处理时清掉旧分块
         await session.execute(delete(DocumentChunk).where(DocumentChunk.document_id == doc.id))
@@ -593,7 +591,7 @@ async def search_user_knowledge(
         )
 
     if citations:
-        logger.info("🔍 RAG 命中 {} 条引用", len(citations))
+        logger.debug("🔍 RAG 命中 {} 条引用", len(citations))
     return "\n\n".join(context_parts), citations
 
 

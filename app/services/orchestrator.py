@@ -7,6 +7,7 @@
   4. 触发异步记忆提取
 """
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -27,6 +28,13 @@ from app.services.scene_manager import get_scene_config, get_scene_knowledge_tag
 # Redis Key 模板
 CONTEXT_KEY = "conv:ctx:{conversation_id}"  # 会话上下文 (list of json)
 MEMORY_CACHE_KEY = "mem:user:{user_id}"  # 用户长期记忆缓存
+TITLE_KEY = "conv:title:{conversation_id}"  # 会话标题
+
+# 标题生成提示词：一句话概括对话主题
+_TITLE_SYSTEM_PROMPT = (
+    "你是对话标题生成助手。用一句话概括这段对话的主题，10~20 个字，"
+    "不要引号、不要句号结尾、不要任何多余解释，只输出标题本身。"
+)
 
 
 class Orchestrator:
@@ -76,6 +84,32 @@ class Orchestrator:
         r = get_redis()
         await r.delete(CONTEXT_KEY.format(conversation_id=conversation_id))
 
+    async def get_conversation_title(self, conversation_id: str) -> str | None:
+        """获取会话标题（Redis，可能为空）."""
+        r = get_redis()
+        return await r.get(TITLE_KEY.format(conversation_id=conversation_id))
+
+    async def save_conversation_title(self, conversation_id: str, title: str) -> None:
+        """保存会话标题（7 天 TTL，与上下文一致）."""
+        r = get_redis()
+        await r.set(TITLE_KEY.format(conversation_id=conversation_id), title, ex=604800)
+
+    async def _generate_title(self, content: str) -> str:
+        """用大模型生成会话标题（轻量调用，首条消息时与回复并行）."""
+        try:
+            reply = await self._llm.chat(
+                [
+                    {"role": "system", "content": _TITLE_SYSTEM_PROMPT},
+                    {"role": "user", "content": content},
+                ],
+                max_tokens=32,
+            )
+            title = reply.strip().strip('"“”').strip()
+            return title[:30]
+        except Exception as e:
+            logger.warning("会话标题生成失败: {}", e)
+            return ""
+
     # ── 记忆注入 ────────────────────────────────────────
 
     async def get_memory_context(self, user_id: str, limit: int = 5) -> list[str]:
@@ -119,12 +153,6 @@ class Orchestrator:
         """
         scene_config = get_scene_config(scene)
 
-        logger.info(
-            "⚙️ [Orchestrator 开始处理消息] "
-            f"user_id={user_id} | conversation_id={conversation_id} | "
-            f"scene={scene} | local_mode={local_mode} | content={content!r}"
-        )
-
         # 本地模式：仅记录，不生成回复（PC端已处理）
         if local_mode:
             return {
@@ -133,9 +161,11 @@ class Orchestrator:
                 "citations": [],
                 "scene": scene,
                 "local_mode": True,
+                "title": "",
             }
 
         # 1. 保存用户消息到上下文
+        is_first = len(await self.get_context(conversation_id)) == 0  # 首条消息 → 生成会话标题
         user_msg = {"role": "user", "content": content, "timestamp": datetime.now(timezone.utc).isoformat()}
         await self.append_context(conversation_id, user_msg)
 
@@ -156,15 +186,21 @@ class Orchestrator:
             messages[-1]["content"] = f"参考以下知识库内容回答用户问题：\n\n{rag_context}\n\n用户问题：{content}"
 
         # 5. 调用 LLM 生成回复（按场景动态取模型配置）
-        logger.info(" [调用 LLM] 待生成回复，messages_count={}", len(messages))
-        reply = await self._call_llm(messages, scene=scene)
-        logger.info("[LLM 回复完成] reply={!r}", reply)
+        title = await self.get_conversation_title(conversation_id)
+        if is_first and not title:
+            # 首条消息：回复与标题生成并行（大模型"阅读的同时"总结）
+            reply_task = asyncio.create_task(self._call_llm(messages, scene=scene))
+            title_task = asyncio.create_task(self._generate_title(content))
+            reply, title = await asyncio.gather(reply_task, title_task)
+            if title:
+                await self.save_conversation_title(conversation_id, title)
+        else:
+            reply = await self._call_llm(messages, scene=scene)
 
         # 技能调用循环（预留沙箱槽位）：默认关闭，不影响现有流程；
         # 二期实现后，在此把技能结果回填 LLM 继续对话
         tool_results = await maybe_run_skills(conversation_id, scene, messages, user_id=user_id)
-        if tool_results:
-            logger.info("⚙️ [技能调用] 技能结果待回填（二期实现）: {}", len(tool_results))
+        _ = tool_results  # 预留：二期在此把技能结果回填 LLM 继续对话
 
         # 6. 保存助手回复到上下文
         assistant_msg = {"role": "assistant", "content": reply, "timestamp": datetime.now(timezone.utc).isoformat()}
@@ -179,6 +215,7 @@ class Orchestrator:
             "citations": citations,
             "scene": scene,
             "local_mode": False,
+            "title": title or "",
         }
 
     # ── 内部方法 ────────────────────────────────────────

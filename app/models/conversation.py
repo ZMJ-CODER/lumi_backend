@@ -5,6 +5,10 @@ from pydantic import BaseModel, Field
 
 class CreateConversationRequest(BaseModel):
     scene: str = Field(default="chat", description="场景标识")
+    title: str | None = Field(default=None, description="会话标题（缺省为 新会话）")
+    client_conversation_id: str | None = Field(
+        default=None, description="客户端生成的会话 ID（UUID，用于幂等创建）"
+    )
 
 
 class SendMessageRequest(BaseModel):
@@ -16,6 +20,9 @@ class SendMessageRequest(BaseModel):
     retrieval_query: str | None = Field(
         default=None,
         description="检索用查询（本地小模型精炼改写后的版本）；缺省时用 content 检索",
+    )
+    message_id: str | None = Field(
+        default=None, description="客户端消息 ID（UUID，用于幂等去重，防止重复提交）"
     )
 
 

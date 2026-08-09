@@ -101,6 +101,7 @@ class Orchestrator:
         content: str,
         scene: str = "chat",
         local_mode: bool = False,
+        retrieval_query: str | None = None,
     ) -> dict:
         """处理用户消息的核心流程.
 
@@ -145,7 +146,9 @@ class Orchestrator:
 
         # 4. 知识库检索（按场景过滤空间标签）
         knowledge_tags = get_scene_knowledge_tags(scene)
-        rag_context, citations = await self._retrieve_knowledge(user_id, content, knowledge_tags)
+        # 检索查询：优先用客户端本地模型精炼后的版本（可插拔槽位）
+        search_query = retrieval_query or content
+        rag_context, citations = await self._retrieve_knowledge(user_id, search_query, knowledge_tags)
 
         if rag_context:
             messages[-1]["content"] = f"参考以下知识库内容回答用户问题：\n\n{rag_context}\n\n用户问题：{content}"

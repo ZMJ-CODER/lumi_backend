@@ -4,15 +4,11 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="rag新增关键词检索">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="rag新增文档时效性混合检索，新增文档分块策略路由分发">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/knowledge.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/knowledge.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/db_models.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/db_models.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/cleaner.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/cleaner.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/knowledge.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/knowledge.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/celery_app/tasks.py" beforeDir="false" afterPath="$PROJECT_DIR$/celery_app/tasks.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/conversations.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/conversations.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/models/conversation.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/conversation.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -138,7 +134,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786249084699</updated>
     </task>
-    <option name="localTasksCounter" value="8" />
+    <task id="LOCAL-00008" summary="rag新增文档时效性混合检索，新增文档分块策略路由分发">
+      <option name="closed" value="true" />
+      <created>1786253975764</created>
+      <option name="number" value="00008" />
+      <option name="presentableId" value="LOCAL-00008" />
+      <option name="project" value="LOCAL" />
+      <updated>1786253975764</updated>
+    </task>
+    <option name="localTasksCounter" value="9" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -160,6 +164,7 @@
     <MESSAGE value="添加统一异常管理，添加rag基座" />
     <MESSAGE value="实现rag主要业务以及部分优化，优化内容主要是数据清洗" />
     <MESSAGE value="rag新增关键词检索" />
-    <option name="LAST_COMMIT_MESSAGE" value="rag新增关键词检索" />
+    <MESSAGE value="rag新增文档时效性混合检索，新增文档分块策略路由分发" />
+    <option name="LAST_COMMIT_MESSAGE" value="rag新增文档时效性混合检索，新增文档分块策略路由分发" />
   </component>
 </project>

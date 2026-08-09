@@ -77,6 +77,7 @@ async def send_message(
         content=req.content,
         scene=req.scene,
         local_mode=req.local_mode,
+        retrieval_query=req.retrieval_query,
     )
 
     logger.info(

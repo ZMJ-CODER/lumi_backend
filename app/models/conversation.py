@@ -13,6 +13,10 @@ class SendMessageRequest(BaseModel):
     local_mode: bool = Field(default=False)
     attachments: list = Field(default_factory=list)
     guest_id: str | None = Field(default=None, description="游客身份标识（未登录时由前端生成，登录后忽略）")
+    retrieval_query: str | None = Field(
+        default=None,
+        description="检索用查询（本地小模型精炼改写后的版本）；缺省时用 content 检索",
+    )
 
 
 class UpdateConversationRequest(BaseModel):

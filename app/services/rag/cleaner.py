@@ -258,7 +258,9 @@ def assess_document(
         return 0.0, [{"code": "unparsable", "message": QUALITY_ISSUES["unparsable"]}]
 
     total = len(text)
-    readable = _readable_ratio(text)
+    # 可读率：先剥掉 Markdown 表格/代码的纯语法字符（| - # ` * _ > ~），避免误判
+    content_text = re.sub(r"[|\-`#*_>~]", "", text)
+    readable = _readable_ratio(content_text)
     bad_chars = (
         len(_CONTROL_RE.findall(text))
         + len(_ZERO_WIDTH_RE.findall(text))

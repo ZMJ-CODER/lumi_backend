@@ -4,11 +4,12 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="rag新增文档时效性混合检索，新增文档分块策略路由分发">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="几乎优化rag检索">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/conversations.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/conversations.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/conversation.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/conversation.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/rag/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/rag/cleaner.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/cleaner.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -142,7 +143,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786253975764</updated>
     </task>
-    <option name="localTasksCounter" value="9" />
+    <task id="LOCAL-00009" summary="几乎优化rag检索">
+      <option name="closed" value="true" />
+      <created>1786263573933</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1786263573933</updated>
+    </task>
+    <option name="localTasksCounter" value="10" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -165,6 +174,7 @@
     <MESSAGE value="实现rag主要业务以及部分优化，优化内容主要是数据清洗" />
     <MESSAGE value="rag新增关键词检索" />
     <MESSAGE value="rag新增文档时效性混合检索，新增文档分块策略路由分发" />
-    <option name="LAST_COMMIT_MESSAGE" value="rag新增文档时效性混合检索，新增文档分块策略路由分发" />
+    <MESSAGE value="几乎优化rag检索" />
+    <option name="LAST_COMMIT_MESSAGE" value="几乎优化rag检索" />
   </component>
 </project>

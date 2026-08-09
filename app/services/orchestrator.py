@@ -14,11 +14,13 @@ from datetime import datetime, timezone
 from loguru import logger
 
 from app.agents.base import AgentContext
+from app.agents.loop import maybe_run_skills
 from app.agents.registry import AgentRegistry
 from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.llm import LLMClient
 from app.core.redis import get_redis
+from app.services.rag.query_rewriter import get_retrieval_query
 from app.services.rag.knowledge import search_user_knowledge
 from app.services.scene_manager import get_scene_config, get_scene_knowledge_tags
 
@@ -146,8 +148,8 @@ class Orchestrator:
 
         # 4. 知识库检索（按场景过滤空间标签）
         knowledge_tags = get_scene_knowledge_tags(scene)
-        # 检索查询：优先用客户端本地模型精炼后的版本（可插拔槽位）
-        search_query = retrieval_query or content
+        # 检索查询（可插拔槽位）：客户端精炼 > 服务端小模型重写 > 原文
+        search_query = await get_retrieval_query(content, retrieval_query)
         rag_context, citations = await self._retrieve_knowledge(user_id, search_query, knowledge_tags)
 
         if rag_context:
@@ -157,6 +159,12 @@ class Orchestrator:
         logger.info(" [调用 LLM] 待生成回复，messages_count={}", len(messages))
         reply = await self._call_llm(messages, scene=scene)
         logger.info("[LLM 回复完成] reply={!r}", reply)
+
+        # 技能调用循环（预留沙箱槽位）：默认关闭，不影响现有流程；
+        # 二期实现后，在此把技能结果回填 LLM 继续对话
+        tool_results = await maybe_run_skills(conversation_id, scene, messages, user_id=user_id)
+        if tool_results:
+            logger.info("⚙️ [技能调用] 技能结果待回填（二期实现）: {}", len(tool_results))
 
         # 6. 保存助手回复到上下文
         assistant_msg = {"role": "assistant", "content": reply, "timestamp": datetime.now(timezone.utc).isoformat()}

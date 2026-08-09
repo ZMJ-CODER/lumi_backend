@@ -96,6 +96,20 @@ class Settings(BaseSettings):
     RAG_RECENCY_HALF_LIFE_DAYS: int = 90    # 时效性半衰期（天）：越新权重越高
     RAG_TIME_FILTER_DAYS: int | None = None # 可选硬过滤：只检索最近 N 天的文档（None=不过滤）
 
+    # ── 服务端查询重写（可插拔，默认关闭）──
+    # 手机端等没有本地小模型的客户端，由服务端小模型完成提问精炼。
+    # 优先级：客户端 retrieval_query > 服务端重写 > 原始 content。
+    RAG_QUERY_REWRITE_ENABLED: bool = False
+    RAG_QUERY_REWRITE_BASE_URL: str = "http://localhost:11434/v1"
+    RAG_QUERY_REWRITE_MODEL: str = ""
+    RAG_QUERY_REWRITE_TIMEOUT_SECONDS: int = 15
+
+    # ── 智能体技能与沙箱（预留，默认关闭）──
+    AGENT_SKILLS_ENABLED: bool = False   # 技能调用开关（默认关闭，开启后 LLM 可请求调用技能）
+    AGENT_SANDBOX_TYPE: str = "local"    # 沙箱类型：local / docker / wasm（预留）
+    AGENT_SANDBOX_TIMEOUT_SECONDS: int = 30
+    AGENT_SANDBOX_MAX_OUTPUT_CHARS: int = 8000
+
     # ── 文档类别与按类别半衰期（不同知识时效性不同）──
     RAG_DEFAULT_CATEGORY: str = "general"   # 默认类别
     RAG_CATEGORY_HALF_LIFE_DAYS: dict[str, int] = {

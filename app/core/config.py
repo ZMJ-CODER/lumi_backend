@@ -88,6 +88,8 @@ class Settings(BaseSettings):
     RAG_CHUNK_SIZE: int = 500
     RAG_CHUNK_OVERLAP: int = 50
     RAG_MIN_QUALITY_SCORE: float = 0.5  # 清洗后质量分低于该值不入库（status=error）
+    RAG_HYBRID_VECTOR_TOP_K: int = 10   # 混合检索：向量相似度路召回数
+    RAG_HYBRID_KEYWORD_TOP_K: int = 10  # 混合检索：关键词路召回数
 
     # ── 会话 ──
     CONVERSATION_CONTEXT_ROUNDS: int = 10

@@ -28,6 +28,7 @@ async def search_public_kb(
         req.space_tags or None,
         req.top_k,
         settings.RAG_SIMILARITY_THRESHOLD,
+        req.query,
     )
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
     return {"code": 0, "data": {"results": results, "query_time_ms": elapsed_ms}}

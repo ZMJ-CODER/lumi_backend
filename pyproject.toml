@@ -26,6 +26,7 @@ dependencies = [
     "content>=0.0.1",
     "sentence-transformers>=5.7.0",
     "docling>=2.118.0",
+    "jieba>=0.42.1",
 ]
 
 [project.optional-dependencies]

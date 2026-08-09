@@ -2,11 +2,12 @@
 
 数据流:
   上传文档 → 落盘 + documents 表(pending) → Celery 处理管线
-           → 解析 → 分块 → 嵌入 → document_chunks 表 → documents.status=ready
+           → 数据清洗→ 解析 → 分块 → 嵌入 → document_chunks 表 → documents.status=ready
   对话检索 → 查询向量 → pgvector 余弦相似度 → 拼接上下文 + 引用列表
 """
 
 import hashlib
+import re
 import uuid
 from pathlib import Path
 
@@ -311,7 +312,101 @@ async def process_document_pipeline(session: AsyncSession, document_id: str, fil
         raise
 
 
-# ── 向量检索 ─────────────────────────────────────────
+# ── 混合检索 ─────────────────────────────────────────
+
+_STOPWORDS = {"什么", "怎么", "如何", "为什么", "一个", "这个", "那个", "一下", "the", "and", "for", "with"}
+
+
+def _extract_keywords(query: str, top: int = 5) -> list[str]:
+    """提取查询关键字：jieba 中文分词为主，拉丁词 / 中文二元组兜底."""
+    keywords: list[str] = []
+    try:
+        import jieba.analyse
+        tags = jieba.analyse.extract_tags(query, topK=top, withWeight=False)
+        keywords.extend(t.strip() for t in tags if t.strip() and len(t.strip()) > 1)
+    except Exception:
+        pass
+
+    seen = {k.lower() for k in keywords}
+    # 拉丁词兜底（代码/英文术语）
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{1,}", query):
+        tl = token.lower()
+        if tl not in seen and tl not in _STOPWORDS:
+            keywords.append(token)
+            seen.add(tl)
+    # 中文二元组兜底（jieba 不可用时）
+    if not keywords:
+        for seg in re.findall(r"[\u4e00-\u9fff]{2,}", query):
+            for i in range(len(seg) - 1):
+                bigram = seg[i : i + 2]
+                if bigram not in seen:
+                    keywords.append(bigram)
+                    seen.add(bigram)
+                if len(keywords) >= top:
+                    break
+            if len(keywords) >= top:
+                break
+    return keywords[:top]
+
+
+def _hybrid_fuse(vector_rows, keyword_rows, top_k: int) -> list[dict]:
+    """Reciprocal Rank Fusion：融合向量与关键词两路召回结果.
+
+    RRF 分数 = Σ 1/(k + rank)，对排序位置敏感、对相似度绝对值不敏感，
+    天然适合混合不同度量（余弦相似度 vs 关键词命中数）的两路结果。
+    """
+    rrf_k = 60
+    merged: dict[str, dict] = {}
+    for rank, row in enumerate(vector_rows, 1):
+        cid = str(row["chunk_id"])
+        entry = merged.setdefault(
+            cid,
+            {
+                "chunk_id": cid,
+                "chunk_text": row["chunk_text"],
+                "title": row["title"],
+                "document_id": str(row["document_id"]),
+                "is_public": bool(row["is_public"]),
+                "similarity": round(float(row["similarity"]), 4),
+                "score": 0.0,
+            },
+        )
+        entry["score"] += 1.0 / (rrf_k + rank)
+    for rank, row in enumerate(keyword_rows, 1):
+        cid = str(row["chunk_id"])
+        entry = merged.get(cid)
+        if entry:
+            entry["score"] += 1.0 / (rrf_k + rank)
+        else:
+            merged[cid] = {
+                "chunk_id": cid,
+                "chunk_text": row["chunk_text"],
+                "title": row["title"],
+                "document_id": str(row["document_id"]),
+                "is_public": bool(row["is_public"]),
+                "similarity": None,
+                "score": 1.0 / (rrf_k + rank),
+            }
+    return sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:top_k]
+
+
+def _scope_conditions(user_id: str, space_tags: list[str], need_embedding: bool) -> tuple[list[str], dict]:
+    """构造检索范围条件（个人空间 + 公共空间，按场景标签过滤）."""
+    conds: list[str] = []
+    params: dict = {}
+    if need_embedding:
+        conds.append("c.embedding IS NOT NULL")
+    uid = _uuid(user_id)
+    if uid:
+        conds.append("(c.user_id = :uid OR s.is_public = true)")
+        params["uid"] = uid
+    else:
+        conds.append("s.is_public = true")
+    if space_tags:
+        conds.append("s.scene_tag IN :tags")
+        params["tags"] = list(space_tags)
+    return conds, params
+
 
 async def search_user_knowledge(
     session: AsyncSession,
@@ -321,62 +416,76 @@ async def search_user_knowledge(
     top_k: int | None = None,
     threshold: float | None = None,
 ) -> tuple[str, list[dict]]:
-    """对话 RAG 检索：个人空间 + 公共空间，按场景标签过滤.
+    """对话 RAG 混合检索：向量相似度 top-N + 关键词检索，RRF 融合.
 
     Returns:
         (拼接后的上下文文本, 引用列表)
     """
     top_k = top_k or settings.RAG_TOP_K
-    threshold = settings.RAG_SIMILARITY_THRESHOLD if threshold is None else threshold
     if not query or not query.strip():
         return "", []
 
+    conds, params = _scope_conditions(user_id, space_tags, need_embedding=True)
+    fused: list[dict] = []
+
+    # ── 第一路：向量相似度 top-N ──
     vec = await embed_query(query)
-    if not vec:
-        return "", []
-    qvec = _vector_str(vec)
+    if vec:
+        vec_top = settings.RAG_HYBRID_VECTOR_TOP_K
+        sql = f"""
+            SELECT c.id AS chunk_id, c.chunk_text, d.filename AS title,
+                   d.id AS document_id, s.is_public,
+                   1 - (c.embedding <=> CAST(:qvec AS vector)) AS similarity
+            FROM document_chunks c
+            JOIN documents d ON d.id = c.document_id
+            JOIN knowledge_spaces s ON s.id = c.space_id
+            WHERE {' AND '.join(conds)}
+            ORDER BY c.embedding <=> CAST(:qvec AS vector)
+            LIMIT :top_k
+        """
+        stmt = text(sql).bindparams(
+            bindparam("qvec", _vector_str(vec)),
+            bindparam("top_k", vec_top),
+        )
+        if space_tags:
+            stmt = stmt.bindparams(bindparam("tags", expanding=True))
+        rows = (await session.execute(stmt, params)).mappings().all()
+        fused = [dict(r) for r in rows]
 
-    uid = _uuid(user_id)
-    conds: list[str] = ["c.embedding IS NOT NULL"]
-    params: dict = {}
-    if uid:
-        conds.append("(c.user_id = :uid OR s.is_public = true)")
-        params["uid"] = uid
-    else:
-        conds.append("s.is_public = true")
-    if space_tags:
-        conds.append("s.scene_tag IN :tags")
-        params["tags"] = list(space_tags)
-
-    sql = f"""
-        SELECT * FROM (
-          SELECT c.id AS chunk_id, c.chunk_text, d.filename AS title,
-                 d.id AS document_id, s.is_public,
-                 1 - (c.embedding <=> CAST(:qvec AS vector)) AS similarity
-          FROM document_chunks c
-          JOIN documents d ON d.id = c.document_id
-          JOIN knowledge_spaces s ON s.id = c.space_id
-          WHERE {' AND '.join(conds)}
-          ORDER BY c.embedding <=> CAST(:qvec AS vector)
-          LIMIT :top_k
-        ) t
-        WHERE t.similarity >= :threshold
-        ORDER BY t.similarity DESC
-    """
-    stmt = text(sql).bindparams(
-        bindparam("qvec", qvec),
-        bindparam("top_k", top_k),
-        bindparam("threshold", threshold),
-    )
-    if space_tags:
-        stmt = stmt.bindparams(bindparam("tags", expanding=True))
-
-    result = await session.execute(stmt, params)
-    rows = result.mappings().all()
+    # ── 第二路：关键词检索 top-N ──
+    keywords = _extract_keywords(query)
+    if keywords:
+        kw_top = settings.RAG_HYBRID_KEYWORD_TOP_K
+        kw_conds, kw_params = _scope_conditions(user_id, space_tags, need_embedding=False)
+        kw_conds.append(
+            "(" + " OR ".join(f"c.chunk_text ILIKE :kw{i}" for i in range(len(keywords))) + ")"
+        )
+        match_expr = " + ".join(
+            f"(CASE WHEN c.chunk_text ILIKE :kw{i} THEN 1 ELSE 0 END)" for i in range(len(keywords))
+        )
+        kw_params.update({f"kw{i}": f"%{kw}%" for i, kw in enumerate(keywords)})
+        sql = f"""
+            SELECT c.id AS chunk_id, c.chunk_text, d.filename AS title,
+                   d.id AS document_id, s.is_public,
+                   ({match_expr}) AS kw_score
+            FROM document_chunks c
+            JOIN documents d ON d.id = c.document_id
+            JOIN knowledge_spaces s ON s.id = c.space_id
+            WHERE {' AND '.join(kw_conds)}
+            ORDER BY kw_score DESC, c.created_at DESC
+            LIMIT :top_k
+        """
+        stmt = text(sql).bindparams(bindparam("top_k", kw_top))
+        if space_tags:
+            stmt = stmt.bindparams(bindparam("tags", expanding=True))
+        kw_rows = (await session.execute(stmt, kw_params)).mappings().all()
+        fused = _hybrid_fuse(fused, kw_rows, top_k)
+    elif fused:
+        fused = fused[:top_k]
 
     context_parts: list[str] = []
     citations: list[dict] = []
-    for i, row in enumerate(rows, 1):
+    for i, row in enumerate(fused, 1):
         context_parts.append(f"[{i}] {row['chunk_text']}")
         citations.append(
             {
@@ -384,8 +493,9 @@ async def search_user_knowledge(
                 "title": row["title"],
                 "content": row["chunk_text"],
                 "source": row["title"],
-                "document_id": str(row["document_id"]),
-                "similarity": round(float(row["similarity"]), 4),
+                "document_id": row["document_id"],
+                "similarity": row.get("similarity"),
+                "score": round(float(row.get("score") or 0.0), 4),
             }
         )
 
@@ -400,52 +510,91 @@ async def search_public_vectors(
     space_tags: list[str] | None = None,
     top_k: int | None = None,
     threshold: float | None = None,
+    query: str = "",
 ) -> list[dict]:
-    """公共知识库向量检索（供 /public-kb/search 使用）."""
+    """公共知识库混合检索（供 /public-kb/search 使用）.
+
+    传 query 文本时走"向量 + 关键词 + RRF 融合"；只传向量时退化为纯向量检索。
+    """
     top_k = top_k or settings.RAG_TOP_K
     threshold = settings.RAG_SIMILARITY_THRESHOLD if threshold is None else threshold
     if not query_vector:
         return []
-    qvec = _vector_str(query_vector)
 
-    conds = ["c.embedding IS NOT NULL", "s.is_public = true"]
-    params: dict = {}
-    if space_tags:
-        conds.append("s.scene_tag IN :tags")
-        params["tags"] = list(space_tags)
+    def _public_conds(with_embedding: bool) -> tuple[list[str], dict]:
+        conds = ["s.is_public = true"]
+        if with_embedding:
+            conds.append("c.embedding IS NOT NULL")
+        params: dict = {}
+        if space_tags:
+            conds.append("s.scene_tag IN :tags")
+            params["tags"] = list(space_tags)
+        return conds, params
 
+    fused: list[dict] = []
+
+    # ── 第一路：向量相似度 top-N ──
+    conds, params = _public_conds(with_embedding=True)
     sql = f"""
-        SELECT * FROM (
-          SELECT c.id AS chunk_id, c.chunk_text, d.filename AS title,
-                 d.id AS document_id, s.scene_tag,
-                 1 - (c.embedding <=> CAST(:qvec AS vector)) AS similarity
-          FROM document_chunks c
-          JOIN documents d ON d.id = c.document_id
-          JOIN knowledge_spaces s ON s.id = c.space_id
-          WHERE {' AND '.join(conds)}
-          ORDER BY c.embedding <=> CAST(:qvec AS vector)
-          LIMIT :top_k
-        ) t
-        WHERE t.similarity >= :threshold
-        ORDER BY t.similarity DESC
+        SELECT c.id AS chunk_id, c.chunk_text, d.filename AS title,
+               d.id AS document_id, s.scene_tag,
+               1 - (c.embedding <=> CAST(:qvec AS vector)) AS similarity
+        FROM document_chunks c
+        JOIN documents d ON d.id = c.document_id
+        JOIN knowledge_spaces s ON s.id = c.space_id
+        WHERE {' AND '.join(conds)}
+        ORDER BY c.embedding <=> CAST(:qvec AS vector)
+        LIMIT :top_k
     """
     stmt = text(sql).bindparams(
-        bindparam("qvec", qvec),
-        bindparam("top_k", top_k),
-        bindparam("threshold", threshold),
+        bindparam("qvec", _vector_str(query_vector)),
+        bindparam("top_k", settings.RAG_HYBRID_VECTOR_TOP_K),
     )
     if space_tags:
         stmt = stmt.bindparams(bindparam("tags", expanding=True))
+    rows = (await session.execute(stmt, params)).mappings().all()
+    fused = [dict(r) for r in rows]
 
-    result = await session.execute(stmt, params)
+    # ── 第二路：关键词检索 top-N（有 query 文本才走） ──
+    keywords = _extract_keywords(query) if query else []
+    if keywords:
+        kw_conds, kw_params = _public_conds(with_embedding=False)
+        kw_conds.append(
+            "(" + " OR ".join(f"c.chunk_text ILIKE :kw{i}" for i in range(len(keywords))) + ")"
+        )
+        match_expr = " + ".join(
+            f"(CASE WHEN c.chunk_text ILIKE :kw{i} THEN 1 ELSE 0 END)" for i in range(len(keywords))
+        )
+        kw_params.update({f"kw{i}": f"%{kw}%" for i, kw in enumerate(keywords)})
+        sql = f"""
+            SELECT c.id AS chunk_id, c.chunk_text, d.filename AS title,
+                   d.id AS document_id, s.scene_tag,
+                   ({match_expr}) AS kw_score
+            FROM document_chunks c
+            JOIN documents d ON d.id = c.document_id
+            JOIN knowledge_spaces s ON s.id = c.space_id
+            WHERE {' AND '.join(kw_conds)}
+            ORDER BY kw_score DESC, c.created_at DESC
+            LIMIT :top_k
+        """
+        stmt = text(sql).bindparams(bindparam("top_k", settings.RAG_HYBRID_KEYWORD_TOP_K))
+        if space_tags:
+            stmt = stmt.bindparams(bindparam("tags", expanding=True))
+        kw_rows = (await session.execute(stmt, kw_params)).mappings().all()
+        fused = _hybrid_fuse(fused, kw_rows, top_k)
+    else:
+        # 纯向量路径：保留相似度阈值过滤（兼容旧行为）
+        fused = [r for r in fused if r["similarity"] >= threshold][:top_k]
+
     return [
         {
-            "chunk_id": str(row["chunk_id"]),
+            "chunk_id": row["chunk_id"],
             "content": row["chunk_text"],
             "title": row["title"],
-            "document_id": str(row["document_id"]),
+            "document_id": row["document_id"],
             "scene_tag": row["scene_tag"],
-            "similarity": round(float(row["similarity"]), 4),
+            "similarity": row.get("similarity"),
+            "score": round(float(row.get("score") or 0.0), 4),
         }
-        for row in result.mappings().all()
+        for row in fused
     ]

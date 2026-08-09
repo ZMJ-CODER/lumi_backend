@@ -18,6 +18,7 @@ class PublicKBSearchRequest(BaseModel):
     query_vector: list[float]
     top_k: int = Field(default=5, ge=1, le=50)
     space_tags: list[str] = Field(default_factory=list)
+    query: str = Field(default="", description="查询文本（可选）；提供时启用混合检索（向量 + 关键词）")
 
 
 class SyncSummaryRequest(BaseModel):

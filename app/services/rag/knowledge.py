@@ -163,25 +163,31 @@ async def upload_document_file(
     filename: str,
     content: bytes,
     category: str | None = None,
-) -> tuple[Document, Path]:
-    """保存上传文件并创建文档记录（status=pending，等待 Celery 处理）."""
+) -> tuple[Document, Path, bool]:
+    """保存上传文件并创建文档记录（status=pending，等待 Celery 处理）.
+
+    Returns:
+        (doc, file_path, is_new)：is_new=False 表示命中去重，直接返回已有文档，
+        调用方不应重复入队。
+    """
     if len(content) > MAX_UPLOAD_SIZE:
         raise ValueError("文件超过 20MB 限制")
     space = await _ensure_space_owned(session, space_id, user_id)
 
     file_hash = hashlib.sha256(content).hexdigest()
-    # 同空间同内容已处理成功 → 直接返回，避免重复入库
+    # 同空间同内容已有文档（pending/processing/ready）→ 直接返回，
+    # 避免上传超时重试等场景产生重复文档占用队列资源
     existing = (
         await session.execute(
             select(Document).where(
                 Document.space_id == space.id,
                 Document.file_hash == file_hash,
-                Document.status == "ready",
+                Document.status.in_(("pending", "processing", "ready")),
             )
         )
     ).scalar_one_or_none()
     if existing:
-        return existing, _doc_file_path(user_id, existing.id, existing.filename)
+        return existing, _doc_file_path(user_id, existing.id, existing.filename), False
 
     doc_id = uuid.uuid4()
     path = _doc_file_path(user_id, doc_id, filename)
@@ -201,7 +207,7 @@ async def upload_document_file(
     )
     session.add(doc)
     await session.flush()
-    return doc, path
+    return doc, path, True
 
 
 async def list_documents(
@@ -231,6 +237,7 @@ async def list_documents(
             "chunk_count": d.chunk_count,
             "category": d.category,
             "tags": d.tags,
+            "error_message": d.error_message,
             "created_at": d.created_at.isoformat() if d.created_at else None,
             "updated_at": d.updated_at.isoformat() if d.updated_at else None,
         }
@@ -318,6 +325,7 @@ async def process_document_pipeline(
 
         doc.status = "ready"
         doc.chunk_count = len(chunks)
+        doc.error_message = None
         await session.commit()
         logger.info("✅ 文档 {} 处理完成，chunks={}", doc.filename, len(chunks))
         return len(chunks)
@@ -326,6 +334,7 @@ async def process_document_pipeline(
         failed = await session.get(Document, _uuid(document_id))
         if failed:
             failed.status = "error"
+            failed.error_message = str(e)[:500]
             await session.commit()
         logger.error("❌ 文档 {} 处理失败: {}", document_id, e)
         raise

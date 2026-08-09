@@ -45,15 +45,17 @@ async def upload_document(
         filename = f.filename or "unnamed.txt"
         content = await f.read()
         try:
-            doc, file_path = await kb.upload_document_file(
+            doc, file_path, is_new = await kb.upload_document_file(
                 db, user_id, space_id, filename, content, category=category or None
             )
             # 先提交，再入队，避免 Celery 任务读到未提交的文档记录
             await db.commit()
-            process_document.delay(
-                str(doc.id), str(file_path), str(doc.user_id), str(doc.space_id),
-                doc.category,
-            )
+            # 命中去重的已有文档不再重复入队（任务已在队列或已完成）
+            if is_new:
+                process_document.delay(
+                    str(doc.id), str(file_path), str(doc.user_id), str(doc.space_id),
+                    doc.category,
+                )
             results.append(
                 {
                     "filename": filename,

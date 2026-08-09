@@ -103,7 +103,7 @@ async def main() -> None:
             space_id = str(space.id)
             paths = {}
             for fname, content in DOCS:
-                doc, path = await upload_document_file(session, USER_ID, space_id, fname, content.encode("utf-8"))
+                doc, path, _ = await upload_document_file(session, USER_ID, space_id, fname, content.encode("utf-8"))
                 paths[str(doc.id)] = (fname, str(path))
             await session.commit()
 

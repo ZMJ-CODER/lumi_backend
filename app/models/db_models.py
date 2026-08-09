@@ -110,7 +110,10 @@ class Document(Base, UUIDMixin):
     file_size: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending / processing / ready / error
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    category: Mapped[str | None] = mapped_column(String(50), default="general")  # news / general / history / other（时效档次）
+    tags: Mapped[str | None] = mapped_column(Text)  # 开放主题标签（逗号分隔，如 "科技, 发布会"）
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
 
     space: Mapped["KnowledgeSpace"] = relationship(back_populates="documents")
 

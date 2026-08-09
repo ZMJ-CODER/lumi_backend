@@ -7,8 +7,10 @@
 """
 
 import hashlib
+import math
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from loguru import logger
@@ -16,10 +18,12 @@ from sqlalchemy import bindparam, delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.services.rag.chunker import chunk_document
+from app.services.rag.classifier import classify_document, normalize_category
 from app.services.rag.embeddings import embed_query, embed_texts
 from app.models.db_models import Document, DocumentChunk, KnowledgeSpace
 from app.services.rag.cleaner import HARD_FAIL_CODES, DocumentQualityError, assess_document, clean_document
-from app.services.rag.document_parser import parse_document, split_text
+from app.services.rag.document_parser import parse_document
 
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
 
@@ -158,6 +162,7 @@ async def upload_document_file(
     space_id: str,
     filename: str,
     content: bytes,
+    category: str | None = None,
 ) -> tuple[Document, Path]:
     """保存上传文件并创建文档记录（status=pending，等待 Celery 处理）."""
     if len(content) > MAX_UPLOAD_SIZE:
@@ -192,6 +197,7 @@ async def upload_document_file(
         file_size=len(content),
         status="pending",
         chunk_count=0,
+        category=normalize_category(category) or settings.RAG_DEFAULT_CATEGORY,
     )
     session.add(doc)
     await session.flush()
@@ -223,7 +229,10 @@ async def list_documents(
             "file_size": d.file_size,
             "status": d.status,
             "chunk_count": d.chunk_count,
+            "category": d.category,
+            "tags": d.tags,
             "created_at": d.created_at.isoformat() if d.created_at else None,
+            "updated_at": d.updated_at.isoformat() if d.updated_at else None,
         }
         for d in docs
     ]
@@ -249,8 +258,13 @@ async def delete_document(session: AsyncSession, document_id: str, user_id: str)
 
 # ── 文档处理管线（Celery 调用） ───────────────────────
 
-async def process_document_pipeline(session: AsyncSession, document_id: str, file_path: str) -> int:
-    """文档处理管线: 解析 → 分块 → 嵌入 → 入库.
+async def process_document_pipeline(
+    session: AsyncSession,
+    document_id: str,
+    file_path: str,
+    user_category: str | None = None,
+) -> int:
+    """文档处理管线: 解析 → 清洗 → 质量门 → 分类 → 分块 → 嵌入 → 入库.
 
     Returns:
         入库的分块数量
@@ -275,7 +289,12 @@ async def process_document_pipeline(session: AsyncSession, document_id: str, fil
             raise DocumentQualityError(
                 f"文档质量不达标（{score:.2f}）：{'；'.join(messages)}"
             )
-        chunks = split_text(cleaned_text, settings.RAG_CHUNK_SIZE, settings.RAG_CHUNK_OVERLAP)
+        # 文档分类：时效档次 + 开放标签（大模型抽样判断，用户选择的档次作为参考）
+        category, tags = await classify_document(cleaned_text, user_category or doc.category)
+        doc.category = category
+        doc.tags = ", ".join(tags) if tags else None
+        logger.info("🏷️ 文档 {} 时效档次={} 标签={}", doc.filename, doc.category, doc.tags)
+        chunks = chunk_document(cleaned_text, doc.filename, settings.RAG_CHUNK_SIZE, settings.RAG_CHUNK_OVERLAP)
         logger.info("📄 文档 {} 分块 {} 个", doc.filename, len(chunks))
 
         # 重处理时清掉旧分块
@@ -315,6 +334,58 @@ async def process_document_pipeline(session: AsyncSession, document_id: str, fil
 # ── 混合检索 ─────────────────────────────────────────
 
 _STOPWORDS = {"什么", "怎么", "如何", "为什么", "一个", "这个", "那个", "一下", "the", "and", "for", "with"}
+
+# 时间意图：查询里出现这些词时提高时效性权重
+_TIME_INTENT_RE = re.compile(
+    r"最新|最近|近期|近\s*\d+\s*(天|周|月|年)|今年|本月|上周|昨天|刚刚|最新的"
+)
+
+
+def _recency_score(created_at, half_life_days: int | None = None) -> float:
+    """文档时效性分数：按指数衰减，越新越接近 1.
+
+    recency = exp(-age_days / half_life_days)
+    """
+    if created_at is None:
+        return 0.0
+    half_life = half_life_days or settings.RAG_RECENCY_HALF_LIFE_DAYS
+    try:
+        age_days = (datetime.now(timezone.utc) - created_at).total_seconds() / 86400
+    except TypeError:
+        return 0.0
+    if age_days <= 0:
+        return 1.0
+    return math.exp(-age_days / half_life)
+
+
+def _category_half_life(category: str | None) -> int:
+    """按文档类别取半衰期，未知类别回落默认类别."""
+    mapping = settings.RAG_CATEGORY_HALF_LIFE_DAYS
+    if category and category in mapping:
+        return mapping[category]
+    return mapping.get(settings.RAG_DEFAULT_CATEGORY, 180)
+
+
+def _time_intent_weight(query: str) -> float:
+    """查询含时间意图时返回更高权重，否则默认权重."""
+    if _TIME_INTENT_RE.search(query or ""):
+        return settings.RAG_RECENCY_QUERY_WEIGHT
+    return settings.RAG_RECENCY_WEIGHT
+
+
+def _apply_recency(rows: list[dict], weight: float) -> list[dict]:
+    """把时效性融入最终排序：final = (1-w)*相关性归一 + w*时效性."""
+    if not rows:
+        return rows
+    max_score = max((r.get("score") or r.get("similarity") or 0.0) for r in rows)
+    if max_score <= 0:
+        return rows
+    for r in rows:
+        relevance = (r.get("score") or r.get("similarity") or 0.0) / max_score
+        recency = _recency_score(r.get("created_at"), _category_half_life(r.get("category")))
+        r["recency"] = round(recency, 4)
+        r["score"] = round((1 - weight) * relevance + weight * recency, 4)
+    return sorted(rows, key=lambda x: x["score"], reverse=True)
 
 
 def _extract_keywords(query: str, top: int = 5) -> list[str]:
@@ -367,6 +438,8 @@ def _hybrid_fuse(vector_rows, keyword_rows, top_k: int) -> list[dict]:
                 "title": row["title"],
                 "document_id": str(row["document_id"]),
                 "is_public": bool(row["is_public"]),
+                "created_at": row["created_at"],
+                "category": row["category"],
                 "similarity": round(float(row["similarity"]), 4),
                 "score": 0.0,
             },
@@ -384,6 +457,8 @@ def _hybrid_fuse(vector_rows, keyword_rows, top_k: int) -> list[dict]:
                 "title": row["title"],
                 "document_id": str(row["document_id"]),
                 "is_public": bool(row["is_public"]),
+                "created_at": row["created_at"],
+                "category": row["category"],
                 "similarity": None,
                 "score": 1.0 / (rrf_k + rank),
             }
@@ -405,6 +480,9 @@ def _scope_conditions(user_id: str, space_tags: list[str], need_embedding: bool)
     if space_tags:
         conds.append("s.scene_tag IN :tags")
         params["tags"] = list(space_tags)
+    if settings.RAG_TIME_FILTER_DAYS:
+        conds.append("d.created_at >= :min_time")
+        params["min_time"] = datetime.now(timezone.utc) - timedelta(days=settings.RAG_TIME_FILTER_DAYS)
     return conds, params
 
 
@@ -434,7 +512,7 @@ async def search_user_knowledge(
         vec_top = settings.RAG_HYBRID_VECTOR_TOP_K
         sql = f"""
             SELECT c.id AS chunk_id, c.chunk_text, d.filename AS title,
-                   d.id AS document_id, s.is_public,
+                   d.id AS document_id, s.is_public, d.created_at AS created_at, d.category AS category,
                    1 - (c.embedding <=> CAST(:qvec AS vector)) AS similarity
             FROM document_chunks c
             JOIN documents d ON d.id = c.document_id
@@ -466,7 +544,7 @@ async def search_user_knowledge(
         kw_params.update({f"kw{i}": f"%{kw}%" for i, kw in enumerate(keywords)})
         sql = f"""
             SELECT c.id AS chunk_id, c.chunk_text, d.filename AS title,
-                   d.id AS document_id, s.is_public,
+                   d.id AS document_id, s.is_public, d.created_at AS created_at, d.category AS category,
                    ({match_expr}) AS kw_score
             FROM document_chunks c
             JOIN documents d ON d.id = c.document_id
@@ -483,6 +561,9 @@ async def search_user_knowledge(
     elif fused:
         fused = fused[:top_k]
 
+    # 时效性加权：相关性为主，新文档占优（时间意图查询权重更高）
+    fused = _apply_recency(fused, _time_intent_weight(query))
+
     context_parts: list[str] = []
     citations: list[dict] = []
     for i, row in enumerate(fused, 1):
@@ -495,6 +576,9 @@ async def search_user_knowledge(
                 "source": row["title"],
                 "document_id": row["document_id"],
                 "similarity": row.get("similarity"),
+                "created_at": row.get("created_at"),
+                "category": row.get("category"),
+                "recency": row.get("recency"),
                 "score": round(float(row.get("score") or 0.0), 4),
             }
         )
@@ -529,6 +613,9 @@ async def search_public_vectors(
         if space_tags:
             conds.append("s.scene_tag IN :tags")
             params["tags"] = list(space_tags)
+        if settings.RAG_TIME_FILTER_DAYS:
+            conds.append("d.created_at >= :min_time")
+            params["min_time"] = datetime.now(timezone.utc) - timedelta(days=settings.RAG_TIME_FILTER_DAYS)
         return conds, params
 
     fused: list[dict] = []
@@ -537,7 +624,7 @@ async def search_public_vectors(
     conds, params = _public_conds(with_embedding=True)
     sql = f"""
         SELECT c.id AS chunk_id, c.chunk_text, d.filename AS title,
-               d.id AS document_id, s.scene_tag,
+               d.id AS document_id, s.scene_tag, d.created_at AS created_at, d.category AS category,
                1 - (c.embedding <=> CAST(:qvec AS vector)) AS similarity
         FROM document_chunks c
         JOIN documents d ON d.id = c.document_id
@@ -568,7 +655,7 @@ async def search_public_vectors(
         kw_params.update({f"kw{i}": f"%{kw}%" for i, kw in enumerate(keywords)})
         sql = f"""
             SELECT c.id AS chunk_id, c.chunk_text, d.filename AS title,
-                   d.id AS document_id, s.scene_tag,
+                   d.id AS document_id, s.scene_tag, d.created_at AS created_at, d.category AS category,
                    ({match_expr}) AS kw_score
             FROM document_chunks c
             JOIN documents d ON d.id = c.document_id
@@ -586,6 +673,9 @@ async def search_public_vectors(
         # 纯向量路径：保留相似度阈值过滤（兼容旧行为）
         fused = [r for r in fused if r["similarity"] >= threshold][:top_k]
 
+    # 时效性加权：相关性为主，新文档占优（时间意图查询权重更高）
+    fused = _apply_recency(fused, _time_intent_weight(query))
+
     return [
         {
             "chunk_id": row["chunk_id"],
@@ -594,6 +684,9 @@ async def search_public_vectors(
             "document_id": row["document_id"],
             "scene_tag": row["scene_tag"],
             "similarity": row.get("similarity"),
+            "created_at": row.get("created_at"),
+            "category": row.get("category"),
+            "recency": row.get("recency"),
             "score": round(float(row.get("score") or 0.0), 4),
         }
         for row in fused

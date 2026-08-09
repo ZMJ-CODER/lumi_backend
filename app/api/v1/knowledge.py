@@ -28,6 +28,7 @@ async def upload_document(
     file: UploadFile | None = File(default=None),
     space_id: str = Form(...),
     scene_tag: str = Form(default=""),
+    category: str = Form(default=""),
     db: AsyncSession = Depends(get_db),
     payload: dict = Depends(require_auth),
 ):
@@ -44,16 +45,22 @@ async def upload_document(
         filename = f.filename or "unnamed.txt"
         content = await f.read()
         try:
-            doc, file_path = await kb.upload_document_file(db, user_id, space_id, filename, content)
+            doc, file_path = await kb.upload_document_file(
+                db, user_id, space_id, filename, content, category=category or None
+            )
             # 先提交，再入队，避免 Celery 任务读到未提交的文档记录
             await db.commit()
-            process_document.delay(str(doc.id), str(file_path), str(doc.user_id), str(doc.space_id))
+            process_document.delay(
+                str(doc.id), str(file_path), str(doc.user_id), str(doc.space_id),
+                doc.category,
+            )
             results.append(
                 {
                     "filename": filename,
                     "document_id": str(doc.id),
                     "status": doc.status,
                     "chunk_count": doc.chunk_count,
+                    "category": doc.category,
                     "space_id": str(doc.space_id),
                 }
             )

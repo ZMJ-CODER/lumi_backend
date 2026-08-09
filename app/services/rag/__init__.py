@@ -15,6 +15,8 @@ from app.services.rag.cleaner import (
     clean_document,
     quality_score,
 )
+from app.services.rag.classifier import CATEGORY_LABELS, classify_document, normalize_category
+from app.services.rag.chunker import chunk_document
 from app.services.rag.embeddings import embed_query, embed_texts
 from app.services.rag.knowledge import (
     create_space,
@@ -38,6 +40,10 @@ __all__ = [
     "DocumentQualityError",
     "QUALITY_ISSUES",
     "HARD_FAIL_CODES",
+    "CATEGORY_LABELS",
+    "classify_document",
+    "normalize_category",
+    "chunk_document",
     "split_text",
     "embed_query",
     "embed_texts",

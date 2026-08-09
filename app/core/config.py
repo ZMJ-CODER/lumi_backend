@@ -90,6 +90,20 @@ class Settings(BaseSettings):
     RAG_MIN_QUALITY_SCORE: float = 0.5  # 清洗后质量分低于该值不入库（status=error）
     RAG_HYBRID_VECTOR_TOP_K: int = 10   # 混合检索：向量相似度路召回数
     RAG_HYBRID_KEYWORD_TOP_K: int = 10  # 混合检索：关键词路召回数
+    # ── 检索时效性（知识有生命周期，新文档应占一定优势）──
+    RAG_RECENCY_WEIGHT: float = 0.3         # 时效性权重（0~1），与相关性加权
+    RAG_RECENCY_QUERY_WEIGHT: float = 0.6   # 查询含时间意图（"最新/最近"等）时的时效性权重
+    RAG_RECENCY_HALF_LIFE_DAYS: int = 90    # 时效性半衰期（天）：越新权重越高
+    RAG_TIME_FILTER_DAYS: int | None = None # 可选硬过滤：只检索最近 N 天的文档（None=不过滤）
+
+    # ── 文档类别与按类别半衰期（不同知识时效性不同）──
+    RAG_DEFAULT_CATEGORY: str = "general"   # 默认类别
+    RAG_CATEGORY_HALF_LIFE_DAYS: dict[str, int] = {
+        "news": 14,      # 新闻：衰减快
+        "general": 180,  # 通用/技术文档
+        "history": 3650, # 历史：长期有效（10 年）
+        "other": 365,
+    }
 
     # ── 会话 ──
     CONVERSATION_CONTEXT_ROUNDS: int = 10

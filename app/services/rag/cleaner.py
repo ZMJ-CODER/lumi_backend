@@ -279,7 +279,9 @@ def assess_document(
         issues.append({"code": "incomplete_parsing", "message": QUALITY_ISSUES["incomplete_parsing"]})
 
     # 极端噪声：可读字符占比 < 50%
-    if readable < 0.5:
+    ext = Path(filename or "").suffix.lower()
+    noise_threshold = 0.2 if ext in CODE_EXTS else 0.5  # 代码文件本身含大量标点，放宽
+    if readable < noise_threshold:
         issues.append({"code": "extreme_noise", "message": QUALITY_ISSUES["extreme_noise"]})
 
     # 完全无法理解：单个字符重复占比过高
@@ -287,7 +289,6 @@ def assess_document(
         issues.append({"code": "unintelligible_text", "message": QUALITY_ISSUES["unintelligible_text"]})
 
     # 安全风险代码（仅代码文件）
-    ext = Path(filename or "").suffix.lower()
     if ext in CODE_EXTS and any(re.search(p, text, re.IGNORECASE) for p in _SECURITY_PATTERNS):
         issues.append({"code": "security_vulnerabilities", "message": QUALITY_ISSUES["security_vulnerabilities"]})
 

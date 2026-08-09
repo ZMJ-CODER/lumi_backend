@@ -29,13 +29,20 @@ def _new_async_session() -> tuple[object, async_sessionmaker]:
 
 
 @celery_app.task(bind=True, max_retries=3)
-def process_document(self, document_id: str, file_path: str, user_id: str, space_id: str):
-    """处理上传的文档：分块 → 嵌入 → 存入 pgvector."""
+def process_document(
+    self,
+    document_id: str,
+    file_path: str,
+    user_id: str,
+    space_id: str,
+    category: str | None = None,
+):
+    """处理上传的文档：解析 → 清洗 → 分类 → 分块 → 嵌入 → 存入 pgvector."""
     async def _run() -> int:
         engine, factory = _new_async_session()
         try:
             async with factory() as session:
-                return await process_document_pipeline(session, document_id, file_path)
+                return await process_document_pipeline(session, document_id, file_path, user_category=category)
         finally:
             await engine.dispose()
 

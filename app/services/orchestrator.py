@@ -12,6 +12,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+from httpx import AsyncClient
 from loguru import logger
 
 from app.agents.base import AgentContext
@@ -27,6 +28,7 @@ from app.services.scene_manager import get_scene_config, get_scene_knowledge_tag
 
 # Redis Key 模板
 CONTEXT_KEY = "conv:ctx:{conversation_id}"  # 会话上下文 (list of json)
+SUMMARY_KEY = "conv:summary:{conversation_id}"  # 对话摘要（旧消息压缩，节省 token）
 MEMORY_CACHE_KEY = "mem:user:{user_id}"  # 用户长期记忆缓存
 TITLE_KEY = "conv:title:{conversation_id}"  # 会话标题
 
@@ -83,6 +85,87 @@ class Orchestrator:
         """清除会话上下文."""
         r = get_redis()
         await r.delete(CONTEXT_KEY.format(conversation_id=conversation_id))
+        await r.delete(SUMMARY_KEY.format(conversation_id=conversation_id))
+
+    # ── 对话摘要（压缩短期记忆，节省 token） ────────────
+
+    async def get_conversation_summary(self, conversation_id: str) -> str | None:
+        """获取会话摘要（Redis，可能为空）."""
+        r = get_redis()
+        return await r.get(SUMMARY_KEY.format(conversation_id=conversation_id))
+
+    async def save_conversation_summary(self, conversation_id: str, summary: str) -> None:
+        """保存会话摘要（7 天 TTL，与上下文一致）."""
+        r = get_redis()
+        if summary:
+            await r.set(SUMMARY_KEY.format(conversation_id=conversation_id), summary, ex=604800)
+
+    async def _generate_summary(self, prev_summary: str | None, messages: list[dict]) -> str:
+        """用 qwen-turbo 生成/接力对话摘要（轻量低成本）. """
+        parts: list[str] = []
+        if prev_summary:
+            parts.append(f"[之前的对话摘要]\n{prev_summary}")
+        for m in messages:
+            speaker = "用户" if m.get("role") == "user" else "助手"
+            parts.append(f"{speaker}: {m.get('content', '')}")
+        dialog = "\n".join(parts)
+
+        system_prompt = (
+            "你是对话摘要助手。把对话浓缩成简洁的中文摘要，"
+            "保留关键信息：用户的偏好与重要事实、双方达成的结论/约定、未完成的任务。"
+            "若提供了之前的摘要，新摘要要继承其中仍然重要的信息。只输出摘要本身。"
+        )
+        try:
+            async with AsyncClient(
+                base_url=settings.QWEN_BASE_URL,
+                headers={"Authorization": f"Bearer {settings.QWEN_API_KEY}"},
+                timeout=120,
+            ) as client:
+                resp = await client.post(
+                    "/chat/completions",
+                    json={
+                        "model": settings.QWEN_TURBO_MODEL,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"对话内容：\n\n{dialog}"},
+                        ],
+                        "max_tokens": 512,
+                        "temperature": 0.3,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                summary = (data["choices"][0]["message"]["content"] or "").strip()
+                return summary[: settings.CONVERSATION_SUMMARY_MAX_CHARS]
+        except Exception as e:
+            # 摘要失败不阻塞对话：保留旧摘要，下次触发再试
+            logger.warning("对话摘要生成失败: {}", e)
+            return prev_summary or ""
+
+    async def _maybe_summarize_context(self, conversation_id: str) -> None:
+        """上下文接近 token 预算时：把旧消息压缩成摘要，保留最近 N 轮."""
+        history = await self.get_context(conversation_id)
+        total = sum(self._estimate_tokens(str(m.get("content") or "")) for m in history)
+        if total < settings.CONVERSATION_SUMMARY_TRIGGER_TOKENS:
+            return
+
+        keep = settings.CONVERSATION_SUMMARY_KEEP_ROUNDS * 2
+        if len(history) <= keep:
+            return
+        old_msgs = history[:-keep]
+
+        prev_summary = await self.get_conversation_summary(conversation_id)
+        summary = await self._generate_summary(prev_summary, old_msgs)
+        if not summary:
+            # 摘要生成失败（且无旧摘要可继承）：不裁剪上下文，下次触发再试
+            return
+        await self.save_conversation_summary(conversation_id, summary)
+
+        # 裁剪 Redis 上下文：只保留最近 keep 条消息
+        r = get_redis()
+        key = CONTEXT_KEY.format(conversation_id=conversation_id)
+        await r.ltrim(key, -keep, -1)
+        await r.expire(key, 604800)
 
     async def get_conversation_title(self, conversation_id: str) -> str | None:
         """获取会话标题（Redis，可能为空）."""
@@ -172,9 +255,10 @@ class Orchestrator:
         # 2. 获取上下文 + 长期记忆
         history = await self.get_context(conversation_id)
         memory_facts = await self.get_memory_context(user_id)
+        summary = await self.get_conversation_summary(conversation_id)
 
-        # 3. 构建消息列表（System Prompt + 记忆 + 历史 + 当前提问）
-        messages = self._build_messages(scene, memory_facts, history, content)
+        # 3. 构建消息列表（System Prompt + 摘要 + 记忆 + 历史 + 当前提问）
+        messages = self._build_messages(scene, memory_facts, history, content, summary)
 
         # 4. 知识库检索（按场景过滤空间标签）
         knowledge_tags = get_scene_knowledge_tags(scene)
@@ -205,6 +289,8 @@ class Orchestrator:
         # 6. 保存助手回复到上下文
         assistant_msg = {"role": "assistant", "content": reply, "timestamp": datetime.now(timezone.utc).isoformat()}
         await self.append_context(conversation_id, assistant_msg)
+        # 上下文接近 token 预算时触发摘要（压缩旧消息，保留最近 N 轮）
+        await self._maybe_summarize_context(conversation_id)
 
         # 7. 异步触发记忆提取（TODO: Celery 任务）
         # extract_memory.delay(user_id, conversation_id, content, reply)
@@ -220,9 +306,44 @@ class Orchestrator:
 
     # ── 内部方法 ────────────────────────────────────────
 
-    def _build_messages(self, scene: str, memory_facts: list[str], history: list[dict], current: str) -> list[dict]:
-        """构建 LLM 请求消息列表."""
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """粗略估算 token 数：中文按 1 字符 ≈ 1 token，其他按 3 字符 ≈ 1 token."""
+        if not text:
+            return 0
+        cjk = sum(
+            1 for ch in text
+            if "\u4e00" <= ch <= "\u9fff" or "\u3000" <= ch <= "\u303f" or "\uff00" <= ch <= "\uffef"
+        )
+        other = len(text) - cjk
+        return cjk + other // 3 + 2
+
+    def _trim_history(self, history: list[dict], budget: int) -> list[dict]:
+        """按 token 预算从旧到新裁剪历史，保留最近的消息（当前提问始终保留）."""
+        kept: list[dict] = []
+        used = 0
+        for msg in reversed(history[:-1]):  # 最新在前；最后一条是当前提问
+            cost = self._estimate_tokens(str(msg.get("content") or ""))
+            if used + cost > budget and kept:
+                break
+            kept.append(msg)
+            used += cost
+        return list(reversed(kept))
+
+    def _build_messages(
+        self,
+        scene: str,
+        memory_facts: list[str],
+        history: list[dict],
+        current: str,
+        summary: str | None = None,
+    ) -> list[dict]:
+        """构建 LLM 请求消息列表（摘要 + 历史按 token 预算裁剪）."""
         system_prompt = get_scene_config(scene)["system_prompt"]
+
+        # 注入对话摘要（旧消息的压缩记忆）
+        if summary:
+            system_prompt += f"\n\n[对话历史摘要]\n{summary}"
 
         # 注入长期记忆
         if memory_facts:
@@ -231,8 +352,8 @@ class Orchestrator:
 
         messages = [{"role": "system", "content": system_prompt}]
 
-        # 注入历史上下文（排除最后一条，因为当前消息已包含）
-        for msg in history[:-1]:
+        # 注入最近历史（token 预算内），排除最后一条（当前消息已包含）
+        for msg in self._trim_history(history, settings.LLM_HISTORY_MAX_TOKENS):
             messages.append({"role": msg["role"], "content": msg["content"]})
 
         messages.append({"role": "user", "content": current})

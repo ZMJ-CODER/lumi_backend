@@ -14,7 +14,9 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
+from pathlib import Path
 
 from app.agents.registry import init_agents
 from app.api.router import api_router
@@ -55,6 +57,12 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     app.include_router(api_router, prefix="/api/v1")
+
+    # 聊天附件静态服务：/uploads/{user_id}/{file} → data/uploads/chat/{user_id}/{file}
+    # 注意：文件名为随机 UUID，未做鉴权；生产环境建议换签名 URL 或接入鉴权中间件
+    chat_upload_dir = Path(settings.UPLOAD_DIR) / "chat"
+    chat_upload_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory=str(chat_upload_dir)), name="uploads")
 
     # CORS 跨域配置
     app.add_middleware(

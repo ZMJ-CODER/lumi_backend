@@ -62,6 +62,11 @@ class Conversation(Base, UUIDMixin):
     user: Mapped["User"] = relationship(back_populates="conversations")
     messages: Mapped[list["Message"]] = relationship(back_populates="conversation", lazy="selectin", order_by="Message.created_at")
 
+    __table_args__ = (
+        # 会话列表高频查询：WHERE user_id = ? AND is_deleted = false ORDER BY updated_at DESC
+        Index("idx_conversations_user_updated", "user_id", "is_deleted", text("updated_at DESC")),
+    )
+
 
 # ── 消息表 ────────────────────────────────────────────
 
@@ -77,6 +82,9 @@ class Message(Base, UUIDMixin):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")
+    attachments: Mapped[list["Attachment"]] = relationship(
+        back_populates="message", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         Index("idx_messages_conv_created", "conversation_id", "created_at"),
@@ -88,6 +96,34 @@ class Message(Base, UUIDMixin):
             unique=True,
             postgresql_where=text("client_message_id IS NOT NULL"),
         ),
+    )
+
+
+# ── 消息附件表 ───────────────────────────────────────
+
+class Attachment(Base, UUIDMixin):
+    """消息附件（图片/语音/视频等）.
+
+    文件本体存服务器 uploads/chat/{user_id}/，file_url 为可访问的相对 URL；
+    语音转文字等能力后续接入，type 字段预留 audio 类型。
+    """
+
+    __tablename__ = "attachments"
+
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    type: Mapped[str] = mapped_column(String(20), nullable=False, default="file")  # image / audio / video / file
+    file_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    file_name: Mapped[str | None] = mapped_column(String(255))
+    file_size: Mapped[int | None] = mapped_column(Integer)
+    mime_type: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    message: Mapped["Message"] = relationship(back_populates="attachments")
+
+    __table_args__ = (
+        Index("idx_attachments_message", "message_id"),
     )
 
 

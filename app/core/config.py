@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     QWEN_API_KEY: str = ""
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_MODEL: str = "qwen-plus"
+    QWEN_VL_MODEL: str = "qwen-vl-plus"  # 多模态模型（普通聊天场景默认）
+    QWEN_TURBO_MODEL: str = "qwen-turbo"  # 对话摘要等轻量任务
 
     # ── LLM: DeepSeek ──
     DEEPSEEK_API_KEY: str = ""
@@ -120,7 +122,15 @@ class Settings(BaseSettings):
     }
 
     # ── 会话 ──
-    CONVERSATION_CONTEXT_ROUNDS: int = 10
+    CONVERSATION_CONTEXT_ROUNDS: int = 200
+    # 发送给模型的最近历史 token 预算（Qwen-VL-Plus 上下文 131k，给历史留 32k，
+    # 其余留给 system prompt / RAG 上下文 / 输出；可按需调整）
+    LLM_HISTORY_MAX_TOKENS: int = 32768
+    # 对话摘要（qwen-turbo）：上下文接近发送预算时，把旧消息压缩成摘要，
+    # 既省 token 又保留整段对话的记忆；触发阈值、保留轮数、摘要长度上限
+    CONVERSATION_SUMMARY_TRIGGER_TOKENS: int = 24576
+    CONVERSATION_SUMMARY_KEEP_ROUNDS: int = 20
+    CONVERSATION_SUMMARY_MAX_CHARS: int = 2000
 
     model_config = {
         "env_file": ".env",

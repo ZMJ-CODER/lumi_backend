@@ -29,9 +29,18 @@ _cache: dict[str, tuple[float, dict | None]] = {}
 CACHE_TTL = 5.0
 
 
-def _env_fallback(provider: str | None = None) -> dict:
-    """.env 兜底配置（保留 LLM_PROVIDER 选择逻辑）."""
+def _env_fallback(scene: str | None = None, provider: str | None = None) -> dict:
+    """.env 兜底配置（保留 LLM_PROVIDER 选择逻辑；普通聊天场景默认多模态模型）."""
     provider = provider or settings.LLM_PROVIDER
+    # 普通模式（chat）：Qwen-VL-Plus 多模态，131k 上下文
+    if scene == "chat":
+        return {
+            "base_url": settings.QWEN_BASE_URL,
+            "api_key": settings.QWEN_API_KEY,
+            "model": settings.QWEN_VL_MODEL,
+            "timeout": 120,
+            "source": "env",
+        }
     if provider == "qwen":
         return {
             "base_url": settings.QWEN_BASE_URL,
@@ -80,7 +89,7 @@ async def get_llm_config(scene: str | None = None, provider: str | None = None) 
     cfg = await _read_from_redis(LLM_CONFIG_KEY)
     if cfg:
         return cfg
-    return _env_fallback(provider)
+    return _env_fallback(scene, provider)
 
 
 async def set_llm_config(cfg: dict[str, Any], scene: str | None = None) -> None:

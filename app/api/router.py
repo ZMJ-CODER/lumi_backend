@@ -13,6 +13,7 @@ from app.api.v1 import (
     local_corpus,
     memories,
     public_kb,
+    uploads,
     user,
 )
 
@@ -43,6 +44,9 @@ api_router.include_router(public_kb.router, prefix="/public-kb", tags=["public-k
 # 本地加速协同
 api_router.include_router(local_corpus.router, prefix="/local-corpus", tags=["local-corpus"])
 api_router.include_router(local.router, prefix="/local", tags=["local"])
+
+# 聊天附件上传
+api_router.include_router(uploads.router, prefix="/uploads", tags=["uploads"])
 
 # 数据导出 & 账号删除（隐私保护）
 api_router.include_router(data_export.router, prefix="/user", tags=["data-export"])

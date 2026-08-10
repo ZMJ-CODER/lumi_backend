@@ -28,7 +28,7 @@ from app.models.conversation import (
     SendMessageRequest,
     UpdateConversationRequest,
 )
-from app.models.db_models import Conversation, Message
+from app.models.db_models import Attachment, Conversation, Message
 from app.services.orchestrator import orchestrator
 
 router = APIRouter()
@@ -158,6 +158,21 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
         meta["guest_id"] = req.guest_id
     user_msg.metadata_ = json.dumps(meta, ensure_ascii=False)
 
+    # 用户消息附件（图片/语音/视频）：当前只持久化引用，语音转文字后续接入
+    for att in req.attachments or []:
+        if not isinstance(att, dict) or not att.get("url"):
+            continue
+        db.add(
+            Attachment(
+                message_id=user_msg.id,
+                type=att.get("type") or "file",
+                file_url=str(att["url"])[:500],
+                file_name=att.get("name"),
+                file_size=att.get("size"),
+                mime_type=att.get("mime_type"),
+            )
+        )
+
     # 首条消息返回的标题落库；同时刷新排序时间
     if result.get("title"):
         conv.title = result["title"]
@@ -170,6 +185,17 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
         return
 
     # 实时同步：向订阅端（桌面/网页/移动端）推送新消息事件
+    user_attachments = [
+        {
+            "type": att.get("type") or "file",
+            "url": str(att["url"]),
+            "name": att.get("name"),
+            "size": att.get("size"),
+            "mime_type": att.get("mime_type"),
+        }
+        for att in (req.attachments or [])
+        if isinstance(att, dict) and att.get("url")
+    ]
     await _publish_conv_event(
         str(conv.user_id),
         "message.new",
@@ -180,6 +206,7 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
             "role": "user",
             "content": req.content,
             "citations": [],
+            "attachments": user_attachments,
             "created_at": datetime.now(timezone.utc).isoformat(),
         },
     )
@@ -417,6 +444,27 @@ async def get_messages(
         except (ValueError, TypeError):
             pass
     rows = (await db.execute(stmt)).scalars().all()
+    # 批量加载消息附件
+    attachments_by_message: dict[str, list[dict]] = {}
+    if rows:
+        att_rows = (
+            await db.execute(
+                select(Attachment).where(
+                    Attachment.message_id.in_([m.id for m in rows])
+                )
+            )
+        ).scalars().all()
+        for a in att_rows:
+            attachments_by_message.setdefault(str(a.message_id), []).append(
+                {
+                    "id": str(a.id),
+                    "type": a.type,
+                    "url": a.file_url,
+                    "name": a.file_name,
+                    "size": a.file_size,
+                    "mime_type": a.mime_type,
+                }
+            )
     items = [
         {
             "message_id": str(m.id),
@@ -424,6 +472,7 @@ async def get_messages(
             "content": m.content,
             "client_message_id": m.client_message_id,
             "citations": json.loads(m.citations) if m.citations else [],
+            "attachments": attachments_by_message.get(str(m.id), []),
             "created_at": m.created_at.isoformat() if m.created_at else None,
         }
         for m in rows

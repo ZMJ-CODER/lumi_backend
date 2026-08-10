@@ -1,0 +1,110 @@
+services:
+  # ── PostgreSQL (含 pgvector 扩展) ──
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: lumi-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: lumi_db
+      TZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d lumi_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Redis (缓存 + Celery broker/backend) ──
+  redis:
+    image: redis:7-alpine
+    container_name: lumi-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ── FastAPI 后端服务 ──
+  api:
+    build: .
+    container_name: lumi-api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+    environment:
+      # 覆盖 .env 中的 localhost 主机为容器服务名
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/lumi_db
+      DATABASE_ADMIN_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      # 本地 TTS 走 compose 内的 tts 服务
+      TTS_LOCAL_URL: http://tts:8765/tts
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Celery Worker (异步任务：文档处理、记忆提取等) ──
+  worker:
+    build: .
+    container_name: lumi-worker
+    command: celery -A celery_app.celery_app worker --loglevel=info
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/lumi_db
+      DATABASE_ADMIN_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      # 本地推理依赖的模型缓存目录
+      EMBEDDING_CACHE_DIR: /app/data/models
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  # ── 本地 TTS 服务 (qwen3-tts，可选) ──
+  tts:
+    build:
+      context: .
+      dockerfile: Dockerfile.tts
+    container_name: lumi-tts
+    environment:
+      # qwen3-tts 首次合成需下载 MLX 模型，走国内镜像（直连 HuggingFace 被墙）
+      HF_ENDPOINT: https://hf-mirror.com
+    ports:
+      - "8765:8765"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

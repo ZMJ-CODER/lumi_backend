@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "lumi-backend"
 version = "0.1.0"
@@ -27,6 +31,11 @@ dependencies = [
     "sentence-transformers>=5.7.0",
     "docling>=2.118.0",
     "jieba>=0.42.1",
+    # ── 语音（ASR + TTS 兜底）──
+    "openai-whisper>=20250625",
+    "edge-tts>=7.0",
+    "dashscope>=1.20",
+    "imageio-ffmpeg>=0.5",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +44,10 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "ruff>=0.5.0",
 ]
+
+[tool.setuptools.packages.find]
+include = ["app*", "celery_app*"]
+exclude = ["tests*", "scripts*", "tools*"]
 
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"

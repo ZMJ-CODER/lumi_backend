@@ -1,0 +1,38 @@
+# ── 排除本地数据/日志/缓存 ──
+data
+logs
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+
+# ── 环境变量/密钥（绝不进镜像） ──
+.env
+.env.*
+!.env.example
+
+# ── IDE / 系统 ──
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# ── Git / CI ──
+.git/
+.gitignore
+
+# ── 测试与文档 ──
+tests/
+docs/
+*.md
+
+# ── Python 缓存 ──
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ── Docker 自身 ──
+Dockerfile
+.dockerignore
+docker-compose*.yml

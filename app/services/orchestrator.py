@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.llm import LLMClient
 from app.core.redis import get_redis
+from app.services.speech import speech_to_text
 from app.services.rag.query_rewriter import get_retrieval_query
 from app.services.rag.knowledge import search_user_knowledge
 from app.services.scene_manager import get_scene_config, get_scene_knowledge_tags
@@ -221,6 +222,7 @@ class Orchestrator:
         scene: str = "chat",
         local_mode: bool = False,
         retrieval_query: str | None = None,
+        attachments: list | None = None,
     ) -> dict:
         """处理用户消息的核心流程.
 
@@ -236,6 +238,15 @@ class Orchestrator:
         """
         scene_config = get_scene_config(scene)
 
+        # 语音消息：content 为空但有音频附件 → Whisper 转写 + 纠错
+        transcript = content or ""
+        if not transcript.strip():
+            for att in attachments or []:
+                if isinstance(att, dict) and att.get("type") == "audio" and att.get("url"):
+                    transcript = await speech_to_text(str(att["url"]))
+                    break
+            content = transcript
+
         # 本地模式：仅记录，不生成回复（PC端已处理）
         if local_mode:
             return {
@@ -245,6 +256,7 @@ class Orchestrator:
                 "scene": scene,
                 "local_mode": True,
                 "title": "",
+                "transcript": transcript,
             }
 
         # 1. 保存用户消息到上下文
@@ -302,6 +314,7 @@ class Orchestrator:
             "scene": scene,
             "local_mode": False,
             "title": title or "",
+            "transcript": transcript,
         }
 
     # ── 内部方法 ────────────────────────────────────────

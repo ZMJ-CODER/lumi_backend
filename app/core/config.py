@@ -132,6 +132,20 @@ class Settings(BaseSettings):
     CONVERSATION_SUMMARY_KEEP_ROUNDS: int = 20
     CONVERSATION_SUMMARY_MAX_CHARS: int = 2000
 
+    # ── 语音（ASR + TTS）──
+    WHISPER_MODEL: str = "base"        # openai-whisper：tiny/base/small/medium/large
+    WHISPER_LANGUAGE: str = "zh"       # 转写语言；留空自动检测
+    ASR_CORRECT_ENABLED: bool = True   # 转写后用 qwen-turbo 纠错（口音/同音字）
+    TTS_ENABLED: bool = True           # AI 回复自动转语音（异步，可中断）
+    TTS_PROVIDER: str = "dashscope"    # local_qwen3（本地/局域网 qwen3-tts）/ dashscope（千问 cosyvoice）/ edge
+    TTS_MODEL: str = "cosyvoice-v1"    # 千问 TTS 模型（Dashscope 实际可用名）
+    TTS_VOICE: str = "Cherry"          # 千问音色：Cherry / Serena / Ethan 等
+    TTS_EDGE_VOICE: str = "zh-CN-XiaoxiaoNeural"  # edge-tts 兜底音色
+    TTS_LOCAL_URL: str = "http://localhost:8765/tts"  # 本地 qwen3-tts 服务地址
+    TTS_LOCAL_TIMEOUT: int = 180
+    TTS_FORMAT: str = "mp3"
+    TTS_SAMPLE_RATE: int = 24000
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

@@ -8,6 +8,7 @@
   - 游客：不落库（无账号），仍走 Redis 上下文，逻辑不变
 """
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -19,7 +20,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
+from app.core.config import settings
+from app.core.database import async_session_factory, get_db
 from app.core.deps import get_current_user, require_auth
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException
 from app.core.redis import get_redis
@@ -30,11 +32,15 @@ from app.models.conversation import (
 )
 from app.models.db_models import Attachment, Conversation, Message
 from app.services.orchestrator import orchestrator
+from app.services.speech import detect_audio_meta, save_audio_file, synthesize_speech
 
 router = APIRouter()
 
 CONV_LOCK_TTL = 180  # 会话级并发锁超时（秒）
 CONV_EVENTS_CHANNEL = "conv:events"  # Redis 频道：会话实时事件（SSE 多端同步）
+
+# 活跃 TTS 任务（按 user_id 跟踪）：用户发送下一条消息时中断上一条语音合成
+_active_tts_tasks: dict[str, asyncio.Task] = {}
 
 
 # ── 工具 ─────────────────────────────────────────────
@@ -243,6 +249,61 @@ async def _publish_conv_event(user_id: str, event_type: str, data: dict) -> None
         logger.warning("发布会话事件失败: {}", e)
 
 
+# ── AI 回复异步 TTS（可中断） ─────────────────────────
+
+def _cancel_user_tts(user_id: str) -> None:
+    """中断该用户正在进行的语音合成任务."""
+    task = _active_tts_tasks.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def _run_tts_task(user_id: str, conversation_id: str, message_id: str, text: str) -> None:
+    """异步把 AI 回复转成语音：合成 → 存文件 → 挂附件落库 → 推送 audio_ready."""
+    try:
+        audio = await synthesize_speech(text)
+        ext, mime = detect_audio_meta(audio)
+        _, url = save_audio_file(user_id, audio, ext=ext)
+
+        # 给 AI 消息挂音频附件（消息此时已由 _persist_messages 落库）
+        async with async_session_factory() as db:
+            msg = await db.get(Message, uuid.UUID(message_id))
+            if msg is None:
+                logger.warning("TTS 完成但消息不存在，跳过附件: {}", message_id)
+                return
+            db.add(
+                Attachment(
+                    message_id=msg.id,
+                    type="audio",
+                    file_url=url,
+                    file_name=f"reply.{ext}",
+                    file_size=len(audio),
+                    mime_type=mime,
+                )
+            )
+            await db.commit()
+
+        # 推送语音就绪事件（前端据此显示听筒按钮）
+        await _publish_conv_event(
+            user_id,
+            "message.audio_ready",
+            {
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "url": url,
+                "type": "audio",
+            },
+        )
+        logger.info("TTS 完成: msg={} url={}", message_id, url)
+    except asyncio.CancelledError:
+        logger.info("TTS 任务被新消息中断: msg={}", message_id)
+        raise
+    except Exception as e:
+        logger.warning("TTS 任务失败: {}", e)
+    finally:
+        _active_tts_tasks.pop(user_id, None)
+
+
 # ── 会话 CRUD ────────────────────────────────────────
 
 @router.post("")
@@ -387,6 +448,10 @@ async def send_message(
     is_guest = not payload
     uid = _uid(payload)
 
+    # 用户发送新消息 → 中断上一条未完成的语音合成
+    if not is_guest:
+        _cancel_user_tts(user_id)
+
     lock = await _acquire_conv_lock(conversation_id)
     try:
         # 幂等：登录用户重复提交同一客户端消息 → 直接重放已存结果
@@ -402,6 +467,7 @@ async def send_message(
             scene=req.scene,
             local_mode=req.local_mode,
             retrieval_query=req.retrieval_query,
+            attachments=req.attachments,
         )
 
         # 服务端持久化（仅登录用户；游客保持 Redis-only）
@@ -409,6 +475,18 @@ async def send_message(
             conv = await _get_owned_conversation(db, conversation_id, uid)
             if conv is not None:
                 await _persist_messages(db, conv, req, result)
+                # 异步把 AI 回复转成语音（完成后推 audio_ready 事件；新消息到达会被中断）
+                reply_text = (result.get("content") or "").strip()
+                if settings.TTS_ENABLED and reply_text and result.get("message_id"):
+                    task = asyncio.create_task(
+                        _run_tts_task(
+                            user_id,
+                            conversation_id,
+                            str(result["message_id"]),
+                            reply_text,
+                        )
+                    )
+                    _active_tts_tasks[user_id] = task
 
         return {"code": 0, "data": result}
     finally:

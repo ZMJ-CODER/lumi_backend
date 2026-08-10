@@ -1,0 +1,12 @@
+# ── Lumi 本地 TTS 服务（qwen3-tts / MLX） ──
+# 基于主镜像（api 构建完成后）叠加 qwen3-tts，隔离安装风险：
+# 即使 qwen3-tts 装不上，也不影响 api / worker。
+FROM lumi_backend-api:latest
+
+USER root
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        qwen3-tts edge-tts "mlx[cpu]==0.32.0"
+USER appuser
+
+EXPOSE 8765
+CMD ["python", "tools/qwen3_tts_server.py"]

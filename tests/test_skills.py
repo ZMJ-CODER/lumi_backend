@@ -7,7 +7,7 @@ import pytest
 
 from app.agents.sandbox.local import LocalSandbox
 from app.agents.skills.base import Skill, SkillResult
-from app.agents.skills.executor import get_skills_for_scene, run_skill_loop, skills_to_tools
+from app.agents.skills.executor import execute_tool_call, get_skills_for_scene, run_skill_loop, skills_to_tools
 from app.agents.skills.registry import SkillRegistry, init_skills
 
 
@@ -93,6 +93,43 @@ def test_skill_loop_unknown_skill():
     )
     assert records[0]["success"] is False
     assert records[0]["error_code"] == "SKILL_NOT_FOUND"
+
+
+class _FakeClientSkill(Skill):
+    name = "fake_client"
+    description = "test client skill"
+    environment = "client"
+    requires_confirmation = True
+    scenes = ["office"]
+
+    async def execute(self, params, context=None):
+        return SkillResult(success=True, output="client-done")
+
+
+def test_client_skill_confirmation_not_blocked(monkeypatch):
+    """client 环境的高危技能不应被执行器拦截（确认由用户端弹窗负责）."""
+    SkillRegistry.register(_FakeClientSkill())
+    # 屏蔽 Redis 通道，直接验证执行器放行 + 调用技能
+    import app.agents.skills.tools.client_skills as cs
+    import app.agents.skills.executor as exec_mod
+
+    # 纯逻辑测试：不落审计日志、不连 Redis/DB，避免异步连接清理噪音
+    async def noop_log(*args, **kwargs):
+        pass
+
+    async def fake_create(user_id, skill_name, params, confirm):
+        return {"request_id": "r1"}
+
+    async def fake_await(user_id, request_id, timeout=None):
+        return {"success": True, "output": "client-done", "metadata": {}}
+
+    monkeypatch.setattr(cs.client_tools, "create_client_tool_request", fake_create)
+    monkeypatch.setattr(cs.client_tools, "await_result", fake_await)
+    monkeypatch.setattr(exec_mod, "_record_skill_log", noop_log)
+    tc = {"id": "c1", "type": "function", "function": {"name": "fake_client", "arguments": "{}"}}
+    result = asyncio.run(execute_tool_call(tc, str(uuid.uuid4()), scene="office"))
+    assert result.success is True
+    assert result.output == "client-done"
 
 
 def test_local_sandbox():

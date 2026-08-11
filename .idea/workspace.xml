@@ -4,25 +4,14 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="新增流式输出去下重新生成，优化多端同步逻辑">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="开始构建skills，先创建一部分skill">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/chat_agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/chat_agent.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/loop.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/sandbox/local.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/sandbox/local.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/skills/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/base.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/registry.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/registry.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/auth.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/auth.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/chat.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/chat.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/executor.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/tools/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/tools/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/router.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/router.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/prompts.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/prompts.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/knowledge.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/knowledge.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/usage.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/usage.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/migrate_token_stats.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/migrate_token_stats.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_skills.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_skills.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -239,7 +228,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786446913204</updated>
     </task>
-    <option name="localTasksCounter" value="18" />
+    <task id="LOCAL-00018" summary="开始构建skills，先创建一部分skill">
+      <option name="closed" value="true" />
+      <created>1786456232980</created>
+      <option name="number" value="00018" />
+      <option name="presentableId" value="LOCAL-00018" />
+      <option name="project" value="LOCAL" />
+      <updated>1786456232980</updated>
+    </task>
+    <option name="localTasksCounter" value="19" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -271,6 +268,7 @@
     <MESSAGE value="新增流式聊天，新增自动联网搜索工具，新增可插拔提示词模版" />
     <MESSAGE value="继续优化聊天模块，新增各种包括安全性，体验感，后台管理的优化" />
     <MESSAGE value="新增流式输出去下重新生成，优化多端同步逻辑" />
-    <option name="LAST_COMMIT_MESSAGE" value="新增流式输出去下重新生成，优化多端同步逻辑" />
+    <MESSAGE value="开始构建skills，先创建一部分skill" />
+    <option name="LAST_COMMIT_MESSAGE" value="开始构建skills，先创建一部分skill" />
   </component>
 </project>

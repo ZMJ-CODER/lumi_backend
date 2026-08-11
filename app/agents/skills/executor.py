@@ -49,6 +49,7 @@ async def execute_tool_call(
     user_id: str,
     scene: str = "chat",
     conversation_id: str = "",
+    on_notify=None,
 ) -> SkillResult:
     """执行一次技能调用：校验 → 高危拦截 → 执行 → 审计."""
     fn = tool_call.get("function") or {}
@@ -65,8 +66,9 @@ async def execute_tool_call(
             metadata={"skill": name},
         )
 
-    # 高危操作：执行前必须用户确认（client 通道二期实现；确认前一律拒绝执行）
-    if skill.requires_confirmation:
+    # 高危操作：server/sandbox 技能执行前必须确认（暂不支持，一律拒绝）；
+    # client 技能由用户端弹窗确认（执行体内部处理），不在此拦截
+    if skill.requires_confirmation and skill.environment != "client":
         result = SkillResult(
             success=False,
             error="该操作属于高危行为，需要用户确认后才能执行",
@@ -77,7 +79,12 @@ async def execute_tool_call(
         await _record_skill_log(user_id, skill, args, result)
         return result
 
-    context = SkillContext(user_id=user_id, scene=scene, conversation_id=conversation_id)
+    context = SkillContext(
+        user_id=user_id,
+        scene=scene,
+        conversation_id=conversation_id,
+        on_notify=on_notify,
+    )
     try:
         result = await skill.execute(args, context)
     except Exception as exc:  # noqa: BLE001
@@ -179,7 +186,7 @@ async def run_skill_loop(
             {"role": "assistant", "content": content or None, "tool_calls": tool_calls}
         )
         for tc in tool_calls:
-            result = await execute_tool_call(tc, user_id, scene, conversation_id)
+            result = await execute_tool_call(tc, user_id, scene, conversation_id, on_notify=on_text)
             records.append(
                 {
                     "skill": tc.get("function", {}).get("name"),

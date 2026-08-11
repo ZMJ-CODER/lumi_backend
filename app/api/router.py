@@ -17,6 +17,7 @@ from app.api.v1 import (
     prompts,
     public_kb,
     tts,
+    tools,
     uploads,
     user,
 )
@@ -38,6 +39,9 @@ api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 
 # 按需文字转语音
 api_router.include_router(tts.router, prefix="/tts", tags=["tts"])
+
+# 客户端工具（本地文件操作等：用户端轮询 + 结果回传）
+api_router.include_router(tools.router, prefix="/tools", tags=["tools"])
 
 # 知识库
 api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledge"])

@@ -16,6 +16,7 @@
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
@@ -42,6 +43,8 @@ class SkillContext:
     user_id: str = ""
     scene: str = "chat"
     conversation_id: str = ""
+    # 进度通知回调（如"正在请求访问本地文件…"），流式模式下展示给用户
+    on_notify: Callable[[str], None] | None = None
 
 
 class Skill(ABC):

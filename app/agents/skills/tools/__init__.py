@@ -1,6 +1,12 @@
 """内置技能包：导入即注册到 SkillRegistry."""
 
 from app.agents.skills.registry import SkillRegistry
+from app.agents.skills.tools.client_skills import (
+    ListDirectorySkill,
+    OpenFileSkill,
+    ReadFileSkill,
+    WriteFileSkill,
+)
 from app.agents.skills.tools.get_datetime_skill import GetDatetimeSkill
 from app.agents.skills.tools.python_exec_skill import PythonExecSkill
 from app.agents.skills.tools.query_knowledge_skill import QueryKnowledgeSkill
@@ -10,3 +16,7 @@ SkillRegistry.register(GetDatetimeSkill())
 SkillRegistry.register(PythonExecSkill())
 SkillRegistry.register(QueryKnowledgeSkill())
 SkillRegistry.register(WebSearchSkill())
+SkillRegistry.register(ListDirectorySkill())
+SkillRegistry.register(ReadFileSkill())
+SkillRegistry.register(WriteFileSkill())
+SkillRegistry.register(OpenFileSkill())

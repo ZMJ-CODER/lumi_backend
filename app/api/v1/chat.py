@@ -19,6 +19,7 @@ from app.api.v1.conversations import (
     _acquire_conv_lock,
     _active_tts_tasks,
     _cancel_user_tts,
+    _delete_replaced_pair,
     _find_duplicate,
     _get_owned_conversation,
     _persist_messages,
@@ -64,6 +65,15 @@ async def chat_stream(
         try:
             lock = await _acquire_conv_lock(conversation_id)
             started = True
+
+            # 重新生成：先删除旧消息对（assistant + user），服务端保持单份、多端同步不重复
+            if not is_guest and req.regenerate:
+                await _delete_replaced_pair(
+                    db,
+                    conversation_id,
+                    req.replace_message_id,
+                    req.replace_client_message_id,
+                )
 
             # 幂等：登录用户重复提交同一客户端消息 → 直接重放已存结果
             if not is_guest and req.message_id:

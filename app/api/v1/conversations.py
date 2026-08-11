@@ -129,15 +129,30 @@ async def _find_duplicate(db: AsyncSession, conversation_id: str, client_message
 
 async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessageRequest, result: dict) -> None:
     """保存用户消息 + AI 回复到 PostgreSQL（幂等由唯一索引兜底）."""
-    user_msg = Message(
-        id=uuid.uuid4(),
-        conversation_id=conv.id,
-        role="user",
-        content=req.content,
-        client_message_id=req.message_id,
-        metadata_=json.dumps({"guest_id": req.guest_id}, ensure_ascii=False) if req.guest_id else None,
-    )
-    db.add(user_msg)
+    # 重新生成/中断重试：同一 client_message_id 已存在 → 复用旧用户消息行，避免重复 & 保证双端 ID 一致
+    existing_user = None
+    if req.message_id:
+        existing_user = (
+            await db.execute(
+                select(Message).where(
+                    Message.conversation_id == conv.id,
+                    Message.client_message_id == req.message_id,
+                )
+            )
+        ).scalar_one_or_none()
+    if existing_user is not None:
+        user_msg = existing_user
+        user_msg.content = req.content
+    else:
+        user_msg = Message(
+            id=uuid.uuid4(),
+            conversation_id=conv.id,
+            role="user",
+            content=req.content,
+            client_message_id=req.message_id,
+            metadata_=json.dumps({"guest_id": req.guest_id}, ensure_ascii=False) if req.guest_id else None,
+        )
+        db.add(user_msg)
     try:
         assistant_msg = Message(
             id=uuid.UUID(result["message_id"]),
@@ -165,19 +180,21 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
     user_msg.metadata_ = json.dumps(meta, ensure_ascii=False)
 
     # 用户消息附件（图片/语音/视频）：当前只持久化引用，语音转文字后续接入
-    for att in req.attachments or []:
-        if not isinstance(att, dict) or not att.get("url"):
-            continue
-        db.add(
-            Attachment(
-                message_id=user_msg.id,
-                type=att.get("type") or "file",
-                file_url=str(att["url"])[:500],
-                file_name=att.get("name"),
-                file_size=att.get("size"),
-                mime_type=att.get("mime_type"),
+    # 复用旧用户消息时不重复写入附件（原附件仍挂在同一行上）
+    if existing_user is None:
+        for att in req.attachments or []:
+            if not isinstance(att, dict) or not att.get("url"):
+                continue
+            db.add(
+                Attachment(
+                    message_id=user_msg.id,
+                    type=att.get("type") or "file",
+                    file_url=str(att["url"])[:500],
+                    file_name=att.get("name"),
+                    file_size=att.get("size"),
+                    mime_type=att.get("mime_type"),
+                )
             )
-        )
 
     # 首条消息返回的标题落库；同时刷新排序时间
     if result.get("title"):
@@ -445,6 +462,53 @@ async def delete_conversation(
 
 # ── 消息 ─────────────────────────────────────────────
 
+async def _delete_replaced_pair(
+    db: AsyncSession,
+    conversation_id: str,
+    replace_message_id: str | None,
+    replace_client_message_id: str | None,
+) -> None:
+    """重新生成：删除被替换的旧 AI 回复，复用旧用户消息行（保证客户端/服务端 ID 一致）.
+
+    旧 assistant 优先用 replace_message_id；缺省时从旧用户消息 metadata.reply_message_id 解析
+    （覆盖"回复失败但部分内容已落库"的重试场景）。用户消息行不删除，由 _persist_messages 复用。
+    """
+    if not replace_message_id and not replace_client_message_id:
+        return
+    try:
+        conv_uuid = uuid.UUID(conversation_id)
+    except (ValueError, TypeError):
+        return
+
+    old_user = None
+    if replace_client_message_id:
+        old_user = (
+            await db.execute(
+                select(Message).where(
+                    Message.conversation_id == conv_uuid,
+                    Message.client_message_id == replace_client_message_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+    old_assistant_id = replace_message_id
+    if not old_assistant_id and old_user is not None and old_user.metadata_:
+        # 从旧用户消息的回复关联中解析旧 assistant（错误重试场景前端不知道服务端消息 ID）
+        try:
+            meta = json.loads(old_user.metadata_)
+            old_assistant_id = meta.get("reply_message_id")
+        except (ValueError, TypeError):
+            old_assistant_id = None
+    if old_assistant_id:
+        try:
+            old = await db.get(Message, uuid.UUID(str(old_assistant_id)))
+        except (ValueError, TypeError):
+            old = None
+        if old is not None and old.conversation_id == conv_uuid and old.role == "assistant":
+            await db.delete(old)
+    await db.commit()
+
+
 @router.post("/{conversation_id}/messages")
 async def send_message(
     request: Request,
@@ -468,6 +532,14 @@ async def send_message(
 
     lock = await _acquire_conv_lock(conversation_id)
     try:
+        # 重新生成：先删除旧消息对（assistant + user），服务端保持单份、多端同步不重复
+        if not is_guest and req.regenerate:
+            await _delete_replaced_pair(
+                db,
+                conversation_id,
+                req.replace_message_id,
+                req.replace_client_message_id,
+            )
         # 幂等：登录用户重复提交同一客户端消息 → 直接重放已存结果
         if not is_guest and req.message_id:
             replay = await _find_duplicate(db, conversation_id, req.message_id)

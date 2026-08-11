@@ -28,6 +28,16 @@ class SendMessageRequest(BaseModel):
     message_id: str | None = Field(
         default=None, description="客户端消息 ID（UUID，用于幂等去重，防止重复提交）"
     )
+    regenerate: bool = Field(
+        default=False,
+        description="重新生成：先删除 replace_message_id / replace_client_message_id 对应的旧消息对，再生成新回复",
+    )
+    replace_message_id: str | None = Field(
+        default=None, description="重新生成时被替换的旧 AI 回复消息 ID（服务端消息 ID）"
+    )
+    replace_client_message_id: str | None = Field(
+        default=None, description="重新生成时被替换的旧用户消息客户端 ID（对应本地消息 id）"
+    )
 
 
 class UpdateConversationRequest(BaseModel):

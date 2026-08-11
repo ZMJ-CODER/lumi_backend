@@ -33,6 +33,13 @@ from app.services.scene_manager import get_scene_config, get_scene_knowledge_tag
 from app.services.memory.retrieval import search_user_memories
 from app.services.memory.privacy import resolve_decrypt_candidates
 from app.services.prompts import get_prompt_content
+from app.services.usage import (
+    CATEGORY_CHAT,
+    CATEGORY_SUMMARY,
+    CATEGORY_TITLE,
+    CATEGORY_TOOL_DECISION,
+    record_usage,
+)
 from app.services.web_search import WEB_SEARCH_TOOL, web_search
 
 # Redis Key 模板
@@ -57,12 +64,11 @@ _MULTIMODAL_KEYWORDS = ("vl", "vision", "4o", "gemini", "llava")
 _MAX_IMAGE_BYTES = 15 * 1024 * 1024  # 单图 ≤ 15MB（base64 后约 20MB，贴近接口上限）
 _MAX_IMAGES_PER_MESSAGE = 10
 _WEB_DECISION_PROMPT = (
-    "你是联网搜索决策助手。判断用户问题是否需要搜索互联网获取最新/实时信息。\n"
-    "需要联网的情况：最新新闻、实时数据（股票/天气/汇率/比分等）、当前事件、"
-    "用户明确要求搜索、或仅凭模型自身知识无法准确回答的问题。\n"
-    "不需要联网的情况：闲聊、寒暄、情感倾诉、常识问答、创作类请求、"
-    "基于已有知识的回答。\n"
-    "如果判断需要，调用 web_search 工具；否则不调用任何工具直接回答。"
+    "你是联网搜索决策助手。判断用户问题是否需要调用 web_search 工具。\n"
+    "只要用户明确要求搜索（如搜一下/搜索/查一下/查查/帮我查）、询问最新新闻、实时数据、"
+    "当前事件，或问题可能需要模型知识之外的最新信息，就必须调用 web_search 工具。\n"
+    "只有纯闲聊、寒暄、情感倾诉这类不需要任何外部信息的请求才不调用。\n"
+    "不确定时倾向调用工具。"
 )
 
 # 角色提示词下的场景行为补充（角色负责性格，场景负责行为）
@@ -140,7 +146,9 @@ class Orchestrator:
         if summary:
             await r.set(SUMMARY_KEY.format(conversation_id=conversation_id), summary, ex=604800)
 
-    async def _generate_summary(self, prev_summary: str | None, messages: list[dict]) -> str:
+    async def _generate_summary(
+        self, prev_summary: str | None, messages: list[dict], user_id: str
+    ) -> str:
         """用 qwen-turbo 生成/接力对话摘要（轻量低成本）. """
         parts: list[str] = []
         if prev_summary:
@@ -175,6 +183,14 @@ class Orchestrator:
                 )
                 resp.raise_for_status()
                 data = resp.json()
+                usage = data.get("usage") or {}
+                await record_usage(
+                    user_id,
+                    CATEGORY_SUMMARY,
+                    settings.QWEN_TURBO_MODEL,
+                    usage.get("prompt_tokens"),
+                    usage.get("completion_tokens"),
+                )
                 summary = (data["choices"][0]["message"]["content"] or "").strip()
                 return summary[: settings.CONVERSATION_SUMMARY_MAX_CHARS]
         except Exception as e:
@@ -198,7 +214,7 @@ class Orchestrator:
         await self._submit_unextracted(conversation_id, user_id, history, stop=len(history) - keep)
 
         prev_summary = await self.get_conversation_summary(conversation_id)
-        summary = await self._generate_summary(prev_summary, old_msgs)
+        summary = await self._generate_summary(prev_summary, old_msgs, user_id)
         if not summary:
             # 摘要生成失败（且无旧摘要可继承）：不裁剪上下文，下次触发再试
             return
@@ -268,7 +284,7 @@ class Orchestrator:
         r = get_redis()
         await r.set(TITLE_KEY.format(conversation_id=conversation_id), title, ex=604800)
 
-    async def _generate_title(self, content: str) -> str:
+    async def _generate_title(self, content: str, user_id: str) -> str:
         """用大模型生成会话标题（轻量调用，首条消息时与回复并行）."""
         try:
             reply = await self._llm.chat(
@@ -277,6 +293,8 @@ class Orchestrator:
                     {"role": "user", "content": content},
                 ],
                 max_tokens=32,
+                usage_user_id=user_id,
+                usage_category=CATEGORY_TITLE,
             )
             title = reply.strip().strip('"“”').strip()
             return title[:30]
@@ -381,14 +399,14 @@ class Orchestrator:
         if prep["is_first"] and not title:
             # 首条消息：回复与标题生成并行（大模型"阅读的同时"总结）
             reply_task = asyncio.create_task(
-                self._call_llm_auto(prep["messages"], scene, image_uris, content, prep["citations"])
+                self._call_llm_auto(user_id, prep["messages"], scene, image_uris, content, prep["citations"])
             )
-            title_task = asyncio.create_task(self._generate_title(content))
+            title_task = asyncio.create_task(self._generate_title(content, user_id))
             reply, title = await asyncio.gather(reply_task, title_task)
             if title:
                 await self.save_conversation_title(conversation_id, title)
         else:
-            reply = await self._call_llm_auto(prep["messages"], scene, image_uris, content, prep["citations"])
+            reply = await self._call_llm_auto(user_id, prep["messages"], scene, image_uris, content, prep["citations"])
 
         # 技能调用循环（预留沙箱槽位）：默认关闭，不影响现有流程；
         # 二期实现后，在此把技能结果回填 LLM 继续对话
@@ -444,11 +462,11 @@ class Orchestrator:
         # 首条消息：标题生成与回复流并行
         title_task = None
         if prep["is_first"] and not title:
-            title_task = asyncio.create_task(self._generate_title(content))
+            title_task = asyncio.create_task(self._generate_title(content, user_id))
 
         full_text = ""
         async for evt in self._stream_llm_auto(
-            prep["messages"], scene, image_uris, content, prep["citations"]
+            user_id, prep["messages"], scene, image_uris, content, prep["citations"]
         ):
             if evt["type"] == "delta":
                 full_text += evt["content"]
@@ -497,6 +515,9 @@ class Orchestrator:
         is_first = len(await self.get_context(conversation_id)) == 0
         user_msg = {"role": "user", "content": content, "timestamp": datetime.now(timezone.utc).isoformat()}
         await self.append_context(conversation_id, user_msg)
+        # 新会话首条消息：立即异步抽取（身份类事实（如名字/职业）往往出现在开场白，不等攒批）
+        if is_first:
+            await self._submit_unextracted(conversation_id, user_id, [user_msg])
 
         # 2. 上下文 + 长期记忆（画像常驻 + 事实按需召回）
         history = await self.get_context(conversation_id)
@@ -513,7 +534,7 @@ class Orchestrator:
 
         # 4. RAG 知识库检索（按场景过滤空间标签）
         knowledge_tags = get_scene_knowledge_tags(scene)
-        search_query = await get_retrieval_query(content, retrieval_query, scene)
+        search_query = await get_retrieval_query(content, retrieval_query, scene, user_id)
         rag_context, citations = await self._retrieve_knowledge(user_id, search_query, knowledge_tags)
         if rag_context:
             messages[-1]["content"] = f"参考以下知识库内容回答用户问题：\n\n{rag_context}\n\n用户问题：{content}"
@@ -612,6 +633,7 @@ class Orchestrator:
 
     async def _call_llm_auto(
         self,
+        user_id: str,
         messages: list[dict],
         scene: str,
         image_uris: list[str],
@@ -619,15 +641,18 @@ class Orchestrator:
         citations: list[dict],
     ) -> str:
         """阻塞版：qwen-plus 自主决定是否联网，最终回复由场景模型生成."""
-        messages = await self._maybe_decide_web(messages, user_content, citations)
+        messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
         if image_uris:
             cfg = await get_llm_config(scene, self._llm.provider)
             if self._is_multimodal_model(str(cfg.get("model") or "")):
                 messages = self._attach_images(messages, image_uris)
-        return await self._llm.chat(messages, scene=scene)
+        return await self._llm.chat(
+            messages, scene=scene, usage_user_id=user_id, usage_category=CATEGORY_CHAT
+        )
 
     async def _stream_llm_auto(
         self,
+        user_id: str,
         messages: list[dict],
         scene: str,
         image_uris: list[str],
@@ -635,16 +660,18 @@ class Orchestrator:
         citations: list[dict],
     ):
         """流式版：qwen-plus 自主决定是否联网，最终回复由场景模型逐段流式产出."""
-        messages = await self._maybe_decide_web(messages, user_content, citations)
+        messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
         if image_uris:
             cfg = await get_llm_config(scene, self._llm.provider)
             if self._is_multimodal_model(str(cfg.get("model") or "")):
                 messages = self._attach_images(messages, image_uris)
-        async for delta in self._llm.chat_stream(messages, scene=scene):
+        async for delta in self._llm.chat_stream(
+            messages, scene=scene, usage_user_id=user_id, usage_category=CATEGORY_CHAT
+        ):
             yield {"type": "delta", "content": delta}
 
     async def _maybe_decide_web(
-        self, messages: list[dict], user_content: str, citations: list[dict]
+        self, user_id: str, messages: list[dict], user_content: str, citations: list[dict]
     ) -> list[dict]:
         """模型自主决策是否联网：qwen-plus 工具调用；未调用则原样返回."""
         if not settings.WEB_SEARCH_TOOL_ENABLED:
@@ -659,7 +686,11 @@ class Orchestrator:
         ]
         try:
             _, tool_calls = await self._llm.chat_with_tools_qwen(
-                decision_messages, [WEB_SEARCH_TOOL], max_tokens=64
+                decision_messages,
+                [WEB_SEARCH_TOOL],
+                max_tokens=64,
+                usage_user_id=user_id,
+                usage_category=CATEGORY_TOOL_DECISION,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("联网工具决策调用失败，跳过联网: {}", exc)
@@ -866,7 +897,13 @@ class Orchestrator:
                 break
         return uris
 
-    async def _call_llm(self, messages: list[dict], scene: str = "chat", images: list[str] | None = None) -> str:
+    async def _call_llm(
+        self,
+        user_id: str,
+        messages: list[dict],
+        scene: str = "chat",
+        images: list[str] | None = None,
+    ) -> str:
         """调用云端 LLM 生成回复（配置动态读取: Redis → .env）.
 
         当前模型支持多模态且存在图片时，把最后一条用户消息改写为
@@ -880,7 +917,9 @@ class Orchestrator:
                 messages = self._attach_images(messages, images)
             else:
                 logger.warning("当前模型不支持多模态（{}），本轮图片已忽略", model)
-        reply = await self._llm.chat(messages, scene=scene)
+        reply = await self._llm.chat(
+            messages, scene=scene, usage_user_id=user_id, usage_category=CATEGORY_CHAT
+        )
         return reply
 
     # ── 智能体路由 ──────────────────────────────────────

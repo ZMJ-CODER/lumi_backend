@@ -25,6 +25,7 @@ from app.services.rag.knowledge import process_document_pipeline
 from app.services import conversation_trim
 from app.services.memory.extraction import extract_memories_from_dialog
 from app.services.memory.profile import build_user_profile
+from app.services.usage import aggregate_daily_stats
 
 
 def _new_async_session() -> tuple[object, async_sessionmaker]:
@@ -196,6 +197,25 @@ def cleanup_memories(self):
         asyncio.run(_run())
     except Exception as exc:
         logger.error("[Task] cleanup_memories 失败: {}", exc)
+        raise
+
+
+@celery_app.task(bind=True)
+def aggregate_token_stats(self):
+    """每日聚合 LLM token 用量：llm_usage → daily_token_stats（用户×日期×用途×模型），并清理原始明细."""
+    async def _run() -> int:
+        engine, factory = _new_async_session()
+        try:
+            async with factory() as session:
+                return await aggregate_daily_stats(session)
+        finally:
+            await engine.dispose()
+
+    try:
+        groups = asyncio.run(_run())
+        logger.debug("[Task] aggregate_token_stats 完成: groups={}", groups)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[Task] aggregate_token_stats 失败: {}", exc)
         raise
 
 

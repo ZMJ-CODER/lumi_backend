@@ -8,6 +8,7 @@
 
 import asyncio
 import json
+import uuid
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -58,8 +59,11 @@ async def chat_stream(
     async def event_gen():
         result = None
         lock = None
+        started = False
+        full_text = ""
         try:
             lock = await _acquire_conv_lock(conversation_id)
+            started = True
 
             # 幂等：登录用户重复提交同一客户端消息 → 直接重放已存结果
             if not is_guest and req.message_id:
@@ -86,6 +90,8 @@ async def chat_stream(
                 retrieval_query=req.retrieval_query,
                 attachments=req.attachments,
             ):
+                if evt["type"] == "delta":
+                    full_text += evt["content"]
                 if evt["type"] == "done":
                     result = evt
                 yield _sse(evt)
@@ -116,6 +122,20 @@ async def chat_stream(
                         _active_tts_tasks[user_id] = task
         except Exception as exc:  # noqa: BLE001
             logger.warning("流式聊天失败: {}", exc)
+            # 流式中断：仍持久化用户消息 + 已生成的部分回复，避免多端同步丢失
+            if started and not is_guest:
+                try:
+                    conv = await _get_owned_conversation(db, conversation_id, uid)
+                    if conv is not None:
+                        partial = {
+                            "message_id": str(uuid.uuid4()),
+                            "content": full_text or "",
+                            "citations": [],
+                            "title": "",
+                        }
+                        await _persist_messages(db, conv, req, partial)
+                except Exception as persist_exc:  # noqa: BLE001
+                    logger.warning("流式中断持久化失败: {}", persist_exc)
             yield _sse({"type": "error", "message": "服务器内部错误", "status": 500})
         finally:
             if lock is not None:

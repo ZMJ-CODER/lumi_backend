@@ -40,4 +40,9 @@ celery_app.conf.beat_schedule = {
         "task": "celery_app.tasks.cleanup_conversations",
         "schedule": crontab(hour=3, minute=0),
     },
+    # 每日聚合 LLM token 用量（低频率，避免统计查询压力）
+    "aggregate-token-stats": {
+        "task": "celery_app.tasks.aggregate_token_stats",
+        "schedule": crontab(hour=2, minute=0),
+    },
 }

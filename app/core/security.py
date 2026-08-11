@@ -82,5 +82,31 @@ def create_access_token(user_id: str, username: str, role: str) -> str:
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
+def create_admin_verified_token(user_id: str, username: str = "") -> str:
+    """管理员二次验证令牌（5 分钟，仅用于敏感管理操作）."""
+    expire = datetime.now(timezone.utc) + timedelta(
+        seconds=settings.ADMIN_VERIFIED_TOKEN_EXPIRE_SECONDS
+    )
+    payload = {
+        "sub": user_id,
+        "username": username,
+        "type": "admin_verified",
+        "iat": datetime.now(timezone.utc),
+        "exp": expire,
+    }
+    return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+
+def verify_admin_verified_token(token: str) -> dict | None:
+    """校验管理员二次验证令牌，返回 payload；无效/过期/类型不符返回 None."""
+    try:
+        data = decode_token(token)
+        if data.get("type") != "admin_verified":
+            return None
+        return data
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def decode_token(token: str) -> dict:
     return jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])

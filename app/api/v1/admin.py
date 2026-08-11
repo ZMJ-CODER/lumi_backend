@@ -1,11 +1,18 @@
 """管理员专有接口 —— 按设计文档 3.x 管理视图."""
 
+import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
+from app.core.database import get_db
 from app.core.deps import get_admin_verified_token, require_admin, require_superadmin
-from app.core.exceptions import BadRequestException, ForbiddenException
+from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException
+from app.core.rag_config import set_rag_overrides
+from app.core.security import create_admin_verified_token, verify_admin_verified_token, verify_password
 from app.models.admin import (
     LLMConfigRequest,
     LLMResetRequest,
@@ -13,7 +20,9 @@ from app.models.admin import (
     RAGConfigRequest,
     UpdateUserRequest,
 )
-from app.models.knowledge import AdminPasswordVerifyRequest
+from app.models.db_models import ControlLog, Document, KnowledgeSpace, User
+from app.models.knowledge import AdminPasswordVerifyRequest, RebuildIndexRequest
+from app.services.rag import knowledge as kb
 
 router = APIRouter()
 
@@ -27,29 +36,114 @@ def _mask_api_key(key: str) -> str:
     return f"{key[:6]}***{key[-4:]}"
 
 
+def _to_uid(value) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
+async def _load_user(db: AsyncSession, payload: dict) -> User:
+    uid = _to_uid(payload.get("sub"))
+    if not uid:
+        raise UnauthorizedException("令牌无效")
+    user = await db.get(User, uid)
+    if not user:
+        raise NotFoundException("用户不存在")
+    return user
+
+
+def _require_admin_verified(x_admin_token: str | None, payload: dict) -> None:
+    """校验管理员二次验证令牌（必须属于当前登录用户）."""
+    if not x_admin_token:
+        raise ForbiddenException("需要管理员二次验证")
+    data = verify_admin_verified_token(x_admin_token)
+    if not data or str(data.get("sub")) != str(payload.get("sub")):
+        raise ForbiddenException("管理员二次验证无效或已过期，请重新验证")
+
+
 # ── 用户管理（超管） ──────────────────────────────────
 
 @router.get("/users")
-async def list_users(payload: dict = Depends(require_superadmin)):
+async def list_users(
+    keyword: str = Query(default="", description="按账号/昵称模糊搜索"),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    payload: dict = Depends(require_superadmin),
+):
     """用户列表（超管）—— 查看所有注册用户."""
-    # TODO: SELECT id, username, role, is_active, created_at FROM users
-    return {"code": 0, "data": {"items": [], "total": 0}}
+    stmt = select(User)
+    if keyword:
+        kw = f"%{keyword}%"
+        stmt = stmt.where(or_(User.account.ilike(kw), User.username.ilike(kw)))
+    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
+    rows = (
+        await db.execute(stmt.order_by(User.created_at.desc()).limit(limit).offset(offset))
+    ).scalars().all()
+    items = [
+        {
+            "user_id": str(u.id),
+            "username": u.username,
+            "account": u.account,
+            "role": u.role,
+            "status": u.status,
+            "prompt_id": u.prompt_id,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        }
+        for u in rows
+    ]
+    return {"code": 0, "data": {"items": items, "total": total}}
 
 
 @router.patch("/users/{user_id}")
-async def update_user(user_id: str, req: UpdateUserRequest, payload: dict = Depends(require_superadmin)):
+async def update_user(
+    user_id: str,
+    req: UpdateUserRequest,
+    db: AsyncSession = Depends(get_db),
+    payload: dict = Depends(require_superadmin),
+):
     """更新用户角色/状态（超管）."""
-    # TODO: UPDATE users SET role = ?, is_active = ? WHERE id = ?
+    uid = _to_uid(user_id)
+    if not uid:
+        raise BadRequestException("user_id 无效")
+    if str(uid) == str(payload.get("sub")):
+        raise BadRequestException("不能修改自己的角色/状态")
+    user = await db.get(User, uid)
+    if not user:
+        raise NotFoundException("用户不存在")
+    if req.role is not None:
+        if req.role not in ("superadmin", "admin", "user"):
+            raise BadRequestException("角色无效")
+        user.role = req.role
+    if req.status is not None:
+        if req.status not in ("active", "disabled"):
+            raise BadRequestException("状态无效")
+        user.status = req.status
+    await db.commit()
     return {"code": 0, "message": "已更新"}
 
 
 # ── 二次密码验证 ─────────────────────────────────────
 
 @router.post("/verify-password")
-async def verify_admin_password(req: AdminPasswordVerifyRequest, payload: dict = Depends(require_admin)):
+async def verify_admin_password(
+    req: AdminPasswordVerifyRequest,
+    db: AsyncSession = Depends(get_db),
+    payload: dict = Depends(require_admin),
+):
     """二次密码验证，返回临时 verified_token（有效期 5 分钟）."""
-    # TODO: 校验管理员密码 → create_admin_verified_token
-    return {"code": 0, "data": {"verified_token": "placeholder-verified-token", "expires_in": 300}}
+    user = await _load_user(db, payload)
+    if not verify_password(req.admin_password, user.password_hash):
+        raise BadRequestException("密码错误")
+    token = create_admin_verified_token(str(user.id), user.username)
+    return {
+        "code": 0,
+        "data": {
+            "verified_token": token,
+            "expires_in": settings.ADMIN_VERIFIED_TOKEN_EXPIRE_SECONDS,
+        },
+    }
 
 
 # ── 全局 RAG 配置（超管 + 二次验证） ─────────────────
@@ -61,56 +155,188 @@ async def update_rag_config(
     x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """全局检索参数配置：分块大小、Top-K、相似度阈值."""
-    if not x_admin_token:
-        raise ForbiddenException("需要管理员二次验证")
-    # TODO: 校验 verified_token，更新全局 RAG 配置
-    return {"code": 0, "data": {"top_k": req.top_k, "similarity_threshold": req.similarity_threshold}}
+    _require_admin_verified(x_admin_token, payload)
+    cfg = {
+        "top_k": req.top_k,
+        "similarity_threshold": req.similarity_threshold,
+        "space_tags": req.space_tags,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_by": payload.get("username") or payload.get("sub") or "admin",
+    }
+    await set_rag_overrides(cfg)
+    return {"code": 0, "data": cfg}
 
 
 # ── 公共知识库管理（超管） ────────────────────────────
 
 @router.post("/public-kb/documents")
-async def upload_public_kb_document(payload: dict = Depends(require_superadmin)):
+async def upload_public_kb_document(
+    file: UploadFile = File(...),
+    category: str = Form(default=""),
+    db: AsyncSession = Depends(get_db),
+    payload: dict = Depends(require_superadmin),
+):
     """上传公共知识库文档."""
-    # TODO: 接收文件 → Celery 异步处理 → 写入 knowledge_spaces (is_public=true)
-    return {"code": 0, "data": {"document_id": "placeholder-doc-id"}}
+    from celery_app.tasks import process_document
+
+    user_id = payload["sub"]
+    space = (
+        await db.execute(
+            select(KnowledgeSpace).where(KnowledgeSpace.is_public.is_(True)).limit(1)
+        )
+    ).scalar_one_or_none()
+    if not space:
+        space = await kb.create_space(
+            db, user_id, "公共知识库", "公共知识库（管理员维护）", is_public=True
+        )
+        await db.commit()
+    filename = file.filename or "unnamed.txt"
+    content = await file.read()
+    doc, file_path, is_new = await kb.upload_document_file(
+        db, user_id, str(space.id), filename, content, category=category or None
+    )
+    await db.commit()
+    if is_new:
+        process_document.delay(
+            str(doc.id), str(file_path), str(doc.user_id), str(doc.space_id), doc.category
+        )
+    return {
+        "code": 0,
+        "data": {
+            "document_id": str(doc.id),
+            "filename": filename,
+            "status": doc.status,
+            "space_id": str(space.id),
+        },
+    }
 
 
 @router.get("/public-kb/documents")
-async def list_public_kb_documents(payload: dict = Depends(require_superadmin)):
+async def list_public_kb_documents(
+    status: str = Query(default=""),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    payload: dict = Depends(require_superadmin),
+):
     """公共知识库文档列表."""
-    return {"code": 0, "data": {"items": []}}
+    stmt = (
+        select(Document)
+        .join(KnowledgeSpace, KnowledgeSpace.id == Document.space_id)
+        .where(KnowledgeSpace.is_public.is_(True))
+    )
+    if status:
+        stmt = stmt.where(Document.status == status)
+    rows = (
+        await db.execute(stmt.order_by(Document.created_at.desc()).limit(limit))
+    ).scalars().all()
+    items = [
+        {
+            "document_id": str(d.id),
+            "filename": d.filename,
+            "file_size": d.file_size,
+            "status": d.status,
+            "category": d.category,
+            "chunk_count": d.chunk_count,
+            "space_id": str(d.space_id),
+            "created_at": d.created_at.isoformat() if d.created_at else None,
+        }
+        for d in rows
+    ]
+    return {"code": 0, "data": {"items": items, "total": len(items)}}
 
 
 @router.delete("/public-kb/documents/{document_id}")
-async def delete_public_kb_document(document_id: str, payload: dict = Depends(require_superadmin)):
+async def delete_public_kb_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+    payload: dict = Depends(require_superadmin),
+):
     """删除公共知识库文档."""
+    doc = await db.get(Document, _to_uid(document_id))
+    if not doc:
+        raise NotFoundException("文档不存在")
+    space = await db.get(KnowledgeSpace, doc.space_id)
+    if not space or not space.is_public:
+        raise ForbiddenException("仅公共知识库文档可在此删除")
+    ok = await kb.delete_document(db, document_id, str(doc.user_id))
+    if not ok:
+        raise NotFoundException("文档不存在")
+    await db.commit()
     return {"code": 0, "message": "已删除"}
 
 
 # ── 向量库运维（管理员 + 密码验证） ──────────────────
 
 @router.post("/knowledge/index/rebuild")
-async def rebuild_index(payload: dict = Depends(require_admin)):
+async def rebuild_index(
+    req: RebuildIndexRequest,
+    x_admin_token: str | None = Depends(get_admin_verified_token),
+    payload: dict = Depends(require_admin),
+):
     """重建向量索引."""
-    # TODO: 需二次验证 → Celery 异步重建 ivfflat 索引
+    _require_admin_verified(x_admin_token, payload)
+    from celery_app.tasks import rebuild_index as rebuild_index_task
+
+    rebuild_index_task.delay(req.space_id)
     return {"code": 0, "message": "索引重建任务已提交"}
 
 
 @router.post("/knowledge/cleanup")
-async def cleanup_knowledge(payload: dict = Depends(require_admin)):
+async def cleanup_knowledge(
+    x_admin_token: str | None = Depends(get_admin_verified_token),
+    payload: dict = Depends(require_admin),
+):
     """清理冗余向量数据."""
-    # TODO: 需二次验证 → 清理已删除文档的 chunk、孤儿向量
+    _require_admin_verified(x_admin_token, payload)
+    from celery_app.tasks import cleanup_vectors
+
+    cleanup_vectors.delay()
     return {"code": 0, "message": "清理任务已提交"}
 
 
 # ── 操控日志摘要查看（超管） ──────────────────────────
 
 @router.get("/control-logs/summary")
-async def get_control_logs_summary(payload: dict = Depends(require_superadmin)):
+async def get_control_logs_summary(
+    db: AsyncSession = Depends(get_db),
+    payload: dict = Depends(require_superadmin),
+):
     """查看所有用户的操控日志摘要（不记录对话内容，仅操作类型和时间戳）."""
-    # TODO: SELECT action, success, created_at FROM control_logs 聚合统计
-    return {"code": 0, "data": {"total_operations": 0, "by_action": {}}}
+    total = (
+        await db.execute(select(func.count()).select_from(ControlLog))
+    ).scalar_one()
+    by_action_rows = (
+        await db.execute(
+            select(ControlLog.action, func.count().label("n"))
+            .group_by(ControlLog.action)
+            .order_by(func.count().desc())
+        )
+    ).all()
+    by_action = {a: n for a, n in by_action_rows}
+    recent = (
+        await db.execute(
+            select(ControlLog).order_by(ControlLog.created_at.desc()).limit(50)
+        )
+    ).scalars().all()
+    recent_items = [
+        {
+            "log_id": str(l.id),
+            "user_id": str(l.user_id),
+            "action": l.action,
+            "target": l.target,
+            "success": l.success,
+            "created_at": l.created_at.isoformat() if l.created_at else None,
+        }
+        for l in recent
+    ]
+    return {
+        "code": 0,
+        "data": {
+            "total_operations": total,
+            "by_action": by_action,
+            "recent": recent_items,
+        },
+    }
 
 
 @router.get("/llm-config")

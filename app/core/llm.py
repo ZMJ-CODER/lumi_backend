@@ -14,6 +14,7 @@ from httpx import AsyncClient
 
 from app.core.config import settings
 from app.core.llm_config import get_llm_config
+from app.services.usage import estimate_tokens, record_usage
 
 
 class LLMClient:
@@ -39,6 +40,8 @@ class LLMClient:
         *,
         scene: str | None = None,
         model: str | None = None,
+        usage_user_id: str | None = None,
+        usage_category: str | None = None,
         **kwargs,
     ) -> str:
         """发送对话请求，返回模型响应文本."""
@@ -57,7 +60,16 @@ class LLMClient:
             resp = await client.post("/chat/completions", json=payload)
             resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+        usage = data.get("usage") or {}
+        await record_usage(
+            usage_user_id,
+            usage_category or "chat",
+            model_name,
+            usage.get("prompt_tokens"),
+            usage.get("completion_tokens"),
+        )
+        return content
 
     async def chat_with_tools(
         self,
@@ -66,6 +78,8 @@ class LLMClient:
         *,
         scene: str | None = None,
         model: str | None = None,
+        usage_user_id: str | None = None,
+        usage_category: str | None = None,
         **kwargs,
     ) -> tuple[str, list[dict]]:
         """非流式调用并允许工具调用（tool_choice=auto）。返回 (content, tool_calls)."""
@@ -91,6 +105,14 @@ class LLMClient:
             resp.raise_for_status()
             data = resp.json()
         msg = data["choices"][0]["message"]
+        usage = data.get("usage") or {}
+        await record_usage(
+            usage_user_id,
+            usage_category or "chat",
+            model_name,
+            usage.get("prompt_tokens"),
+            usage.get("completion_tokens"),
+        )
         return (msg.get("content") or ""), (msg.get("tool_calls") or [])
 
     async def chat_with_tools_qwen(
@@ -99,6 +121,8 @@ class LLMClient:
         tools: list[dict],
         *,
         model: str | None = None,
+        usage_user_id: str | None = None,
+        usage_category: str | None = None,
         **kwargs,
     ) -> tuple[str, list[dict]]:
         """用千问（DashScope）配置调用带工具接口（工具决策专用）.
@@ -125,6 +149,14 @@ class LLMClient:
             resp.raise_for_status()
             data = resp.json()
         msg = data["choices"][0]["message"]
+        usage = data.get("usage") or {}
+        await record_usage(
+            usage_user_id,
+            usage_category or "chat",
+            model_name,
+            usage.get("prompt_tokens"),
+            usage.get("completion_tokens"),
+        )
         return (msg.get("content") or ""), (msg.get("tool_calls") or [])
 
     async def chat_stream(
@@ -133,6 +165,8 @@ class LLMClient:
         *,
         scene: str | None = None,
         model: str | None = None,
+        usage_user_id: str | None = None,
+        usage_category: str | None = None,
         **kwargs,
     ):
         """流式调用（SSE）。返回异步生成器，逐段产出文本增量."""
@@ -142,7 +176,15 @@ class LLMClient:
         model_name = model or cfg.get("model") or settings.DEEPSEEK_MODEL
         timeout = float(cfg.get("timeout") or 120.0)
 
-        payload = {"model": model_name, "messages": messages, "stream": True, **kwargs}
+        payload = {
+            "model": model_name,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            **kwargs,
+        }
+        streamed_text = ""
+        prompt_tokens = completion_tokens = None
         async with AsyncClient(
             base_url=base_url,
             headers={"Authorization": f"Bearer {api_key}"},
@@ -161,12 +203,28 @@ class LLMClient:
                     except json.JSONDecodeError:
                         continue
                     choices = data.get("choices") or []
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta") or {}
-                    text = delta.get("content")
-                    if text:
-                        yield text
+                    if choices:
+                        delta = choices[0].get("delta") or {}
+                        text = delta.get("content")
+                        if text:
+                            streamed_text += text
+                            yield text
+                    elif data.get("usage"):
+                        usage = data.get("usage") or {}
+                        prompt_tokens = usage.get("prompt_tokens")
+                        completion_tokens = usage.get("completion_tokens")
+        # 记录用量：优先取流式返回的 usage，缺失时按文本粗略估算
+        if prompt_tokens is None:
+            prompt_tokens = sum(estimate_tokens(str(m.get("content") or "")) for m in messages)
+        if completion_tokens is None:
+            completion_tokens = estimate_tokens(streamed_text)
+        await record_usage(
+            usage_user_id,
+            usage_category or "chat",
+            model_name,
+            prompt_tokens,
+            completion_tokens,
+        )
 
     async def embed(
         self,

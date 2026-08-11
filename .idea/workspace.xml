@@ -4,32 +4,31 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="新增语音合成和语音转文字，新增docker容器部署">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="新增流式聊天，新增自动联网搜索工具，新增可插拔提示词模版">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/Dockerfile.tts" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile.tts" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/registry.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/registry.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/sandbox/registry.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/sandbox/registry.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/registry.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/registry.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/api/router.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/router.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/conversations.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/conversations.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/memories.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/memories.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/user.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/user.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/admin.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/chat.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/chat.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/data_export.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/data_export.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/health.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/health.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/uploads.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/uploads.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/exception_handlers.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/exception_handlers.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/core/llm.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/llm.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/conversation.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/conversation.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/security.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/security.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/models/db_models.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/db_models.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/memory.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/memory.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/user.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/user.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/memory/extraction.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/memory/extraction.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/memory/privacy.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/memory/privacy.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/memory/profile.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/memory/profile.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/docling_parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/docling_parser.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/services/rag/knowledge.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/knowledge.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/services/rag/query_rewriter.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/query_rewriter.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/scene_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/scene_manager.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/celery_app/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/celery_app/__init__.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/celery_app/tasks.py" beforeDir="false" afterPath="$PROJECT_DIR$/celery_app/tasks.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/docker-compose.yml" beforeDir="false" afterPath="$PROJECT_DIR$/docker-compose.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -222,7 +221,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786361069196</updated>
     </task>
-    <option name="localTasksCounter" value="15" />
+    <task id="LOCAL-00015" summary="新增流式聊天，新增自动联网搜索工具，新增可插拔提示词模版">
+      <option name="closed" value="true" />
+      <created>1786417855389</created>
+      <option name="number" value="00015" />
+      <option name="presentableId" value="LOCAL-00015" />
+      <option name="project" value="LOCAL" />
+      <updated>1786417855389</updated>
+    </task>
+    <option name="localTasksCounter" value="16" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -251,6 +258,7 @@
     <MESSAGE value="重构优化会话管理" />
     <MESSAGE value="实现短期记忆" />
     <MESSAGE value="新增语音合成和语音转文字，新增docker容器部署" />
-    <option name="LAST_COMMIT_MESSAGE" value="新增语音合成和语音转文字，新增docker容器部署" />
+    <MESSAGE value="新增流式聊天，新增自动联网搜索工具，新增可插拔提示词模版" />
+    <option name="LAST_COMMIT_MESSAGE" value="新增流式聊天，新增自动联网搜索工具，新增可插拔提示词模版" />
   </component>
 </project>

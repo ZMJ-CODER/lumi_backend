@@ -18,6 +18,7 @@ from sqlalchemy import bindparam, delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.rag_config import effective_threshold, effective_top_k
 from app.services.rag.chunker import chunk_document
 from app.services.rag.classifier import classify_document, normalize_category
 from app.services.rag.embeddings import embed_query, embed_texts
@@ -506,7 +507,7 @@ async def search_user_knowledge(
     Returns:
         (拼接后的上下文文本, 引用列表)
     """
-    top_k = top_k or settings.RAG_TOP_K
+    top_k = await effective_top_k(top_k or settings.RAG_TOP_K)
     if not query or not query.strip():
         return "", []
 
@@ -607,8 +608,10 @@ async def search_public_vectors(
 
     传 query 文本时走"向量 + 关键词 + RRF 融合"；只传向量时退化为纯向量检索。
     """
-    top_k = top_k or settings.RAG_TOP_K
-    threshold = settings.RAG_SIMILARITY_THRESHOLD if threshold is None else threshold
+    top_k = await effective_top_k(top_k or settings.RAG_TOP_K)
+    threshold = await effective_threshold(
+        settings.RAG_SIMILARITY_THRESHOLD if threshold is None else threshold
+    )
     if not query_vector:
         return []
 

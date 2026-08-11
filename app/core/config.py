@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # ── CORS ──
-    CORS_ORIGINS: list[str] = ["*"]
+    CORS_ORIGINS: list[str] = ["*"]  # 生产环境收敛为具体域名（通配符时不允许带凭据）
 
     # ── JWT ──
     JWT_SECRET_KEY: str = "change-me-in-production"
@@ -76,6 +76,7 @@ class Settings(BaseSettings):
 
     # ── 文件上传 ──
     UPLOAD_DIR: str = "data/uploads"
+    UPLOAD_TOKEN_TTL_SECONDS: int = 3600  # 附件签名 URL 有效期（秒）
 
     # ── Docling 文档解析（PDF / Office / 图片等）──
     DOCLING_ENABLE_OCR: bool = True      # 扫描件/图片 OCR（依赖 RapidOCR，首次使用自动下载模型）
@@ -172,7 +173,7 @@ class Settings(BaseSettings):
     }
     MEMORY_PROFILE_BUILD_INTERVAL_HOURS: int = 24  # 画像重建间隔（小时）
     MEMORY_PROFILE_INJECT_ENABLED: bool = True     # 画像常驻注入开关
-    MEMORY_EXTRACTION_MIN_MESSAGES: int = 20       # 对话攒满 N 条消息触发一次抽取（摘要路径之外）
+    MEMORY_EXTRACTION_MIN_MESSAGES: int = 5        # 对话攒满 N 条消息触发一次抽取（摘要路径之外；首条消息立即抽取）
     MEMORY_EXTRACTION_MAX_DIALOG_CHARS: int = 20000  # 单次抽取的对话文本上限（字符）
     MEMORY_EXTRACTION_MAX_TOKENS: int = 2048       # 抽取 LLM 输出 token 上限
     MEMORY_DECRYPT_ENABLED: bool = True            # L1 解密门总开关

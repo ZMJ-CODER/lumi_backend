@@ -20,15 +20,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 先复制依赖文件与源码（Docker 会缓存已安装依赖层）
+# 先只复制依赖清单并安装项目（editable 模式），
+# 该层只要 pyproject.toml / uv.lock 不变就永远命中缓存
 COPY pyproject.toml uv.lock ./
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -e .
+
+# 源码最后复制 —— 源码改动只触发本层及以下层，依赖层不受影响
 COPY app ./app
 COPY celery_app ./celery_app
 COPY scripts ./scripts
 COPY tools ./tools
-
-# 安装 Python 依赖（含项目本身），使用清华镜像加速
-RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple .
 
 # 非 root 用户运行
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app

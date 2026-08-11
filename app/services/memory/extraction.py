@@ -23,6 +23,7 @@ from app.core.crypto import encrypt_memory_text
 from app.core.redis import get_redis
 from app.models.db_models import Memory
 from app.services.rag.embeddings import embed_texts
+from app.services.usage import CATEGORY_MEMORY_EXTRACT, CATEGORY_MEMORY_MERGE, record_usage
 
 # ── L2 PII 正则兜底（命中即不落库）──
 PII_PATTERNS: dict[str, re.Pattern] = {
@@ -92,7 +93,13 @@ def _strip_code_fence(text: str) -> str:
     return re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
 
 
-async def _chat_turbo(system_prompt: str, user_content: str, max_tokens: int = 2048) -> str:
+async def _chat_turbo(
+    system_prompt: str,
+    user_content: str,
+    max_tokens: int = 2048,
+    user_id: str | None = None,
+    category: str = CATEGORY_MEMORY_EXTRACT,
+) -> str:
     """调用轻量模型（默认 qwen-turbo，与编排器摘要同一模式）."""
     async with AsyncClient(
         base_url=settings.QWEN_BASE_URL,
@@ -113,7 +120,16 @@ async def _chat_turbo(system_prompt: str, user_content: str, max_tokens: int = 2
         )
         resp.raise_for_status()
         data = resp.json()
-        return (data["choices"][0]["message"]["content"] or "").strip()
+        content = (data["choices"][0]["message"]["content"] or "").strip()
+    usage = data.get("usage") or {}
+    await record_usage(
+        user_id,
+        category,
+        settings.MEMORY_EXTRACTION_MODEL,
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+    )
+    return content
 
 
 def _parse_facts(raw: str) -> list[ExtractedFact]:
@@ -197,7 +213,13 @@ async def _merge_with_existing(
     candidate_lines = "\n".join(f"- {m.fact}" for m in candidates[:3])
     user_content = f"新事实：{fact.fact}\n\n已有记忆：\n{candidate_lines}"
     try:
-        raw = await _chat_turbo(MERGE_SYSTEM_PROMPT, user_content, max_tokens=512)
+        raw = await _chat_turbo(
+            MERGE_SYSTEM_PROMPT,
+            user_content,
+            max_tokens=512,
+            user_id=str(uid),
+            category=CATEGORY_MEMORY_MERGE,
+        )
         result = MergeResult(**json.loads(_strip_code_fence(raw)))
     except Exception as exc:  # noqa: BLE001
         logger.warning("记忆合并判定失败，按 new 处理: {}", exc)
@@ -231,6 +253,8 @@ async def extract_memories_from_dialog(
             EXTRACT_SYSTEM_PROMPT,
             f"对话内容：\n\n{dialog}",
             max_tokens=settings.MEMORY_EXTRACTION_MAX_TOKENS,
+            user_id=user_id,
+            category=CATEGORY_MEMORY_EXTRACT,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("记忆抽取 LLM 调用失败: {}", exc)

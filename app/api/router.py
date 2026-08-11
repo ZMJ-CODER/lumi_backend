@@ -9,12 +9,14 @@ from app.api.v1 import (
     control_logs,
     conversations,
     data_export,
+    health,
     knowledge,
     local,
     local_corpus,
     memories,
     prompts,
     public_kb,
+    tts,
     uploads,
     user,
 )
@@ -25,11 +27,17 @@ api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(user.router, prefix="/user", tags=["user"])
 
+# 健康检查
+api_router.include_router(health.router, prefix="/health", tags=["health"])
+
 # 对话（含场景管理）
 api_router.include_router(conversations.router, prefix="/conversations", tags=["conversations"])
 
 # 聊天（流式 SSE）
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
+
+# 按需文字转语音
+api_router.include_router(tts.router, prefix="/tts", tags=["tts"])
 
 # 知识库
 api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledge"])

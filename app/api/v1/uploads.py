@@ -1,17 +1,23 @@
 """聊天附件上传接口.
 
 当前开放图片上传；语音/视频等后续扩展（type 字段已预留）。
-文件存到 uploads/chat/{user_id}/，通过 /uploads 静态路径访问。
+文件存到 uploads/chat/{user_id}/，通过签名 URL 访问（不再静态裸挂）：
+  1. 前端用 GET /uploads/sign?path=... 换取限时签名 URL
+  2. GET /uploads/{user_id}/{filename}?token=...&exp=... 校验签名后返回文件
 """
 
+import hashlib
+import hmac
+import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi.responses import FileResponse
 
 from app.core.config import settings
 from app.core.deps import require_auth
-from app.core.exceptions import BadRequestException
+from app.core.exceptions import BadRequestException, NotFoundException
 
 router = APIRouter()
 
@@ -23,6 +29,49 @@ ALLOWED_EXTS = {
     ".mp3", ".wav", ".ogg", ".m4a", ".aac",
     ".mp4", ".webm", ".mov",
 }
+
+
+def _sign_upload(data: str) -> str:
+    """HMAC-SHA256 签名（密钥用 JWT_SECRET_KEY）."""
+    return hmac.new(
+        settings.JWT_SECRET_KEY.encode("utf-8"), data.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+@router.get("/sign")
+async def sign_upload_url(
+    path: str = Query(..., description="附件路径，形如 /uploads/{user_id}/{filename}"),
+    payload: dict = Depends(require_auth),
+):
+    """为聊天附件生成限时签名 URL（防止 /uploads 裸奔，他人拿到 URL 也访问不了）."""
+    parts = [p for p in (path or "").split("/") if p]
+    if len(parts) < 3 or parts[0] != "uploads":
+        raise BadRequestException("路径无效")
+    if parts[1] != payload.get("sub"):
+        raise BadRequestException("无权签名该文件")
+    exp = int(time.time()) + settings.UPLOAD_TOKEN_TTL_SECONDS
+    token = _sign_upload(f"{path}:{exp}")
+    return {"code": 0, "data": {"url": f"{path}?token={token}&exp={exp}"}}
+
+
+@router.get("/{user_id}/{filename}")
+async def get_upload_file(
+    user_id: str,
+    filename: str,
+    token: str = Query(...),
+    exp: int = Query(...),
+):
+    """带签名校验的附件访问：签名有效期内返回文件，否则拒绝."""
+    if exp < time.time():
+        raise BadRequestException("链接已过期，请重新生成")
+    path = f"/uploads/{user_id}/{filename}"
+    if not hmac.compare_digest(_sign_upload(f"{path}:{exp}"), token):
+        raise BadRequestException("签名无效")
+    base = (Path(settings.UPLOAD_DIR) / "chat" / str(user_id)).resolve()
+    target = (base / filename).resolve()
+    if not target.is_relative_to(base) or not target.is_file():
+        raise NotFoundException("文件不存在")
+    return FileResponse(target)
 
 
 @router.post("")

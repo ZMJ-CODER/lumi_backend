@@ -12,10 +12,10 @@
 """
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, SmallInteger, String, Text, func, text
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Float, ForeignKey, Index, Integer, SmallInteger, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -263,6 +263,45 @@ class UserPrompt(Base, UUIDMixin):
 
     __table_args__ = (
         Index("idx_user_prompts_user", "user_id"),
+    )
+
+
+# ── LLM token 用量：原始记录 + 每日聚合 ───────────────
+
+class LLMUsage(Base, UUIDMixin):
+    """每次 LLM 调用的 token 用量原始记录（按用户 × 用途 × 模型）."""
+
+    __tablename__ = "llm_usage"
+
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    category: Mapped[str] = mapped_column(String(40), nullable=False, comment="用途：chat/memory_extract/summary 等")
+    model: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_llm_usage_user_cat_created", "user_id", "category", "created_at"),
+    )
+
+
+class DailyTokenStat(Base, UUIDMixin):
+    """每日聚合的 token 用量（用户 × 日期 × 用途 × 模型），供低成本查询."""
+
+    __tablename__ = "daily_token_stats"
+
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    stat_date: Mapped[date] = mapped_column(Date, nullable=False)
+    category: Mapped[str] = mapped_column(String(40), nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    call_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "stat_date", "category", "model", name="uq_daily_token_stats"
+        ),
     )
 
 

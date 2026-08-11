@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.redis import get_redis
 from app.models.db_models import Memory, MemoryProfile
+from app.services.usage import CATEGORY_MEMORY_PROFILE, record_usage
 
 PROFILE_SYSTEM_PROMPT = """你是用户画像聚合助手。根据用户的长期记忆事实，生成用户画像 JSON：
 {
@@ -36,7 +37,12 @@ def _strip_code_fence(text: str) -> str:
     return re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
 
 
-async def _chat_turbo(system_prompt: str, user_content: str, max_tokens: int = 1024) -> str:
+async def _chat_turbo(
+    system_prompt: str,
+    user_content: str,
+    max_tokens: int = 1024,
+    user_id: str | None = None,
+) -> str:
     async with AsyncClient(
         base_url=settings.QWEN_BASE_URL,
         headers={"Authorization": f"Bearer {settings.QWEN_API_KEY}"},
@@ -55,7 +61,17 @@ async def _chat_turbo(system_prompt: str, user_content: str, max_tokens: int = 1
             },
         )
         resp.raise_for_status()
-        return (resp.json()["choices"][0]["message"]["content"] or "").strip()
+        data = resp.json()
+        content = (data["choices"][0]["message"]["content"] or "").strip()
+    usage = data.get("usage") or {}
+    await record_usage(
+        user_id,
+        CATEGORY_MEMORY_PROFILE,
+        settings.MEMORY_EXTRACTION_MODEL,
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+    )
+    return content
 
 
 async def build_user_profile(session: AsyncSession, user_id: str) -> MemoryProfile | None:
@@ -79,7 +95,7 @@ async def build_user_profile(session: AsyncSession, user_id: str) -> MemoryProfi
 
     lines = "\n".join(f"- [{m.memory_type}] {m.fact}" for m in facts)
     try:
-        raw = await _chat_turbo(PROFILE_SYSTEM_PROMPT, f"用户记忆：\n{lines}")
+        raw = await _chat_turbo(PROFILE_SYSTEM_PROMPT, f"用户记忆：\n{lines}", user_id=str(uid))
         data = json.loads(_strip_code_fence(raw))
     except Exception as exc:  # noqa: BLE001
         logger.warning("画像生成 LLM 调用失败: {}", exc)

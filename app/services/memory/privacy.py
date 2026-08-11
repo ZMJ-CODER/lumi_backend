@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.crypto import decrypt_memory_text, hash_memory_text
 from app.models.db_models import ControlLog, Memory
+from app.services.usage import CATEGORY_PRIVACY_CONFIRM, record_usage
 
 # 可被用户显式请求解密的 L1 话题（健康类白名单外，永不自动解密）
 DECRYPT_WHITELIST_TOPICS = {"财务", "家庭", "社交", "出行", "习惯"}
@@ -48,7 +49,9 @@ def _keyword_hit(message: str, placeholder: str) -> bool:
     return bool(topic) and topic in (message or "")
 
 
-async def _llm_confirm(candidates: list[Memory], message: str) -> list[Memory]:
+async def _llm_confirm(
+    candidates: list[Memory], message: str, user_id: str | None = None
+) -> list[Memory]:
     """LLM 二次确认：避免把闲聊误判为隐私索取."""
     items = "\n".join(f"- {m.fact} (id={m.id})" for m in candidates)
     try:
@@ -70,7 +73,16 @@ async def _llm_confirm(candidates: list[Memory], message: str) -> list[Memory]:
                 },
             )
             resp.raise_for_status()
-            raw = (resp.json()["choices"][0]["message"]["content"] or "").strip()
+            data = resp.json()
+            raw = (data["choices"][0]["message"]["content"] or "").strip()
+            usage = data.get("usage") or {}
+            await record_usage(
+                user_id,
+                CATEGORY_PRIVACY_CONFIRM,
+                settings.MEMORY_EXTRACTION_MODEL,
+                usage.get("prompt_tokens"),
+                usage.get("completion_tokens"),
+            )
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
         data = json.loads(raw)
         if not data.get("allow"):
@@ -117,7 +129,7 @@ async def resolve_decrypt_candidates(
         return []
 
     if settings.MEMORY_DECRYPT_LLM_CONFIRM_ENABLED:
-        pre = await _llm_confirm(pre, message)
+        pre = await _llm_confirm(pre, message, str(uid))
 
     results: list[dict] = []
     for m in pre:

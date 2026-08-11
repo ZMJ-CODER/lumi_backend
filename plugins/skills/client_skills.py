@@ -1,4 +1,4 @@
-"""客户端本地文件技能 —— 由用户端（Electron）执行.
+"""技能插件：客户端本地文件技能 —— 由用户端（Electron）执行.
 
 执行通道：创建待执行请求（Redis）→ 用户端轮询 → 高危弹窗确认 → 执行 → 回传结果。
 所有技能 environment=client，scenes=office。

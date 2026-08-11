@@ -1,4 +1,4 @@
-"""技能：python_exec —— 在隔离沙箱中执行 Python 代码."""
+"""技能插件：python_exec —— 在隔离沙箱中执行 Python 代码."""
 
 from app.agents.sandbox.registry import get_sandbox
 from app.agents.skills.base import Skill, SkillContext, SkillResult

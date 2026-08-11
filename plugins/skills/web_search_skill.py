@@ -1,4 +1,4 @@
-"""技能：web_search —— 联网搜索（Tavily）."""
+"""技能插件：web_search —— 联网搜索（Tavily）."""
 
 from app.agents.skills.base import Skill, SkillContext, SkillResult
 from app.services.web_search import web_search

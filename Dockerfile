@@ -38,6 +38,7 @@ COPY app ./app
 COPY celery_app ./celery_app
 COPY scripts ./scripts
 COPY tools ./tools
+COPY plugins ./plugins
 
 # 非 root 用户运行
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app

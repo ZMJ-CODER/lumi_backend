@@ -1,4 +1,4 @@
-"""技能：query_knowledge —— 检索用户知识库（RAG）."""
+"""技能插件：query_knowledge —— 检索用户知识库（RAG）."""
 
 from app.agents.skills.base import Skill, SkillContext, SkillResult
 from app.core.database import async_session_factory

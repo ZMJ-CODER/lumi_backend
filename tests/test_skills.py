@@ -13,14 +13,14 @@ from app.agents.skills.registry import SkillRegistry, init_skills
 
 @pytest.fixture(autouse=True)
 def _skills():
+    """加载真实插件目录（plugins/skills），测试结束后清理."""
+    from app.agents.skills import loader
+
     SkillRegistry.clear()
-    # init_skills 导入的 tools 包会被模块缓存，重跑时需要 reload 才能重新注册
-    import importlib
-
-    from app.agents.skills import tools
-
-    importlib.reload(tools)
+    loader.unload_skill_plugins()
+    loader.load_skill_plugins()
     yield
+    loader.unload_skill_plugins()
     SkillRegistry.clear()
 
 
@@ -109,22 +109,12 @@ class _FakeClientSkill(Skill):
 def test_client_skill_confirmation_not_blocked(monkeypatch):
     """client 环境的高危技能不应被执行器拦截（确认由用户端弹窗负责）."""
     SkillRegistry.register(_FakeClientSkill())
-    # 屏蔽 Redis 通道，直接验证执行器放行 + 调用技能
-    import app.agents.skills.tools.client_skills as cs
     import app.agents.skills.executor as exec_mod
 
     # 纯逻辑测试：不落审计日志、不连 Redis/DB，避免异步连接清理噪音
     async def noop_log(*args, **kwargs):
         pass
 
-    async def fake_create(user_id, skill_name, params, confirm):
-        return {"request_id": "r1"}
-
-    async def fake_await(user_id, request_id, timeout=None):
-        return {"success": True, "output": "client-done", "metadata": {}}
-
-    monkeypatch.setattr(cs.client_tools, "create_client_tool_request", fake_create)
-    monkeypatch.setattr(cs.client_tools, "await_result", fake_await)
     monkeypatch.setattr(exec_mod, "_record_skill_log", noop_log)
     tc = {"id": "c1", "type": "function", "function": {"name": "fake_client", "arguments": "{}"}}
     result = asyncio.run(execute_tool_call(tc, str(uuid.uuid4()), scene="office"))

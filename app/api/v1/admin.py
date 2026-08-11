@@ -390,3 +390,41 @@ async def reset_llm_config_view(
     await reset_llm_config(req.scene)
     scope = f"场景 {req.scene}" if req.scene else "全局"
     return {"code": 0, "message": f"已重置{scope} LLM 配置，回落 .env 默认值"}
+
+
+# ── 技能插件管理（热更新） ─────────────────────────────
+
+@router.get("/skills")
+async def list_skills_view(payload: dict = Depends(require_admin)):
+    """列出当前已注册的全部技能（含来源：builtin / plugin）."""
+    from app.agents.skills.registry import SkillRegistry
+
+    items = [
+        {
+            "name": s.name,
+            "category": s.category,
+            "environment": s.environment,
+            "permission": s.permission,
+            "requires_confirmation": s.requires_confirmation,
+            "scenes": s.scenes,
+            "source": SkillRegistry.get_source(s.name),
+        }
+        for s in SkillRegistry.list()
+    ]
+    return {"code": 0, "data": {"items": items}}
+
+
+@router.post("/skills/reload")
+async def reload_skills_view(payload: dict = Depends(require_admin)):
+    """热更新技能插件：卸载已加载插件 → 重新扫描 plugins/skills 目录注册.
+
+    不重启进程即可生效；适合开发迭代与线上小步更新。
+    """
+    from app.agents.skills.loader import reload_skill_plugins
+
+    result = reload_skill_plugins()
+    return {
+        "code": 0,
+        "data": result,
+        "message": f"技能插件已热更新（卸载 {result['unloaded']} / 注册 {result['registered']}）",
+    }

@@ -4,13 +4,19 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="开始构建skills，先创建一部分skill">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="新增一部分本地化skills">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/base.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/executor.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/tools/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/tools/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/router.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/router.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/registry.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/registry.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/tools/__init__.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/tools/client_skills.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/tools/get_datetime_skill.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/tools/python_exec_skill.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/tools/query_knowledge_skill.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/tools/web_search_skill.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/admin.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docker-compose.yml" beforeDir="false" afterPath="$PROJECT_DIR$/docker-compose.yml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tests/test_skills.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_skills.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -236,7 +242,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786456232980</updated>
     </task>
-    <option name="localTasksCounter" value="19" />
+    <task id="LOCAL-00019" summary="新增一部分本地化skills">
+      <option name="closed" value="true" />
+      <created>1786457470517</created>
+      <option name="number" value="00019" />
+      <option name="presentableId" value="LOCAL-00019" />
+      <option name="project" value="LOCAL" />
+      <updated>1786457470517</updated>
+    </task>
+    <option name="localTasksCounter" value="20" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -269,6 +283,7 @@
     <MESSAGE value="继续优化聊天模块，新增各种包括安全性，体验感，后台管理的优化" />
     <MESSAGE value="新增流式输出去下重新生成，优化多端同步逻辑" />
     <MESSAGE value="开始构建skills，先创建一部分skill" />
-    <option name="LAST_COMMIT_MESSAGE" value="开始构建skills，先创建一部分skill" />
+    <MESSAGE value="新增一部分本地化skills" />
+    <option name="LAST_COMMIT_MESSAGE" value="新增一部分本地化skills" />
   </component>
 </project>

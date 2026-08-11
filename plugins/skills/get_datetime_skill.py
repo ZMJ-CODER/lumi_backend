@@ -1,4 +1,4 @@
-"""技能：get_datetime —— 获取当前日期时间（时间敏感问题用）."""
+"""技能插件：get_datetime —— 获取当前日期时间（时间敏感问题用）."""
 
 from datetime import datetime, timedelta, timezone
 

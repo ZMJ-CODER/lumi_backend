@@ -15,3 +15,9 @@ class ChangePasswordRequest(BaseModel):
 
     old_password: str = Field(..., description="原密码")
     new_password: str = Field(..., description="新密码")
+
+
+class SetPromptRequest(BaseModel):
+    """设置角色提示词."""
+
+    prompt_id: str = Field(default="", description="角色提示词 id；空串表示恢复场景默认")

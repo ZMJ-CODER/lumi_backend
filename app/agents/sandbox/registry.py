@@ -18,7 +18,7 @@ _instances: dict[str, Sandbox] = {}
 def register_sandbox(name: str, cls: type[Sandbox]) -> None:
     """注册一种沙箱实现."""
     SANDBOXES[name] = cls
-    logger.info(f"沙箱已注册: {name} ({cls.__name__})")
+    logger.debug(f"沙箱已注册: {name} ({cls.__name__})")
 
 
 def _ensure_builtins() -> None:

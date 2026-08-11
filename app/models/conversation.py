@@ -12,6 +12,9 @@ class CreateConversationRequest(BaseModel):
 
 
 class SendMessageRequest(BaseModel):
+    conversation_id: str | None = Field(
+        default=None, description="会话 ID（流式接口从请求体取；阻塞接口走路径参数）"
+    )
     content: str = Field(..., description="消息内容")
     scene: str = Field(default="office")
     local_mode: bool = Field(default=False)
@@ -21,6 +24,7 @@ class SendMessageRequest(BaseModel):
         default=None,
         description="检索用查询（本地小模型精炼改写后的版本）；缺省时用 content 检索",
     )
+    web_search: bool = Field(default=False, description="是否开启联网搜索（Tavily）")
     message_id: str | None = Field(
         default=None, description="客户端消息 ID（UUID，用于幂等去重，防止重复提交）"
     )

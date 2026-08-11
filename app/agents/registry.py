@@ -23,7 +23,7 @@ class AgentRegistry:
         if agent.name in cls._agents:
             logger.warning(f"智能体 '{agent.name}' 已存在，将被覆盖")
         cls._agents[agent.name] = agent
-        logger.info(f"智能体已注册: {agent.name} (场景: {agent.supported_scenes or '全部'})")
+        logger.debug(f"智能体已注册: {agent.name} (场景: {agent.supported_scenes or '全部'})")
 
     @classmethod
     def get(cls, name: str) -> AgentBase | None:

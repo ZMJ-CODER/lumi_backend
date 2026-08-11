@@ -325,7 +325,7 @@ async def process_document_pipeline(
         doc.chunk_count = len(chunks)
         doc.error_message = None
         await session.commit()
-        logger.info("✅ 文档 {} 处理完成，chunks={}", doc.filename, len(chunks))
+        logger.debug("✅ 文档 {} 处理完成，chunks={}", doc.filename, len(chunks))
         return len(chunks)
     except Exception as e:
         await session.rollback()

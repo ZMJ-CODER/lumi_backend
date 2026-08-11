@@ -1,11 +1,12 @@
-"""服务端查询重写（可插拔，默认关闭）.
+"""服务端查询重写（可插拔）.
 
-用途：
-  - 手机端等没有本地小模型的客户端，由服务端小模型完成提问精炼。
-  - 与客户端本地模型槽位互补：客户端能精炼就用客户端的，否则服务端兜底。
+设计：
+  - 改写发生在服务端，默认走云端 qwen-turbo；
+  - 仅办公模式（scene=office）启用，其他场景直接原文，保证回复速度；
+  - 服务端本地小模型为预留插槽：RAG_QUERY_REWRITE_PROVIDER=local
+    并配置 BASE_URL / MODEL 后生效（OpenAI 兼容端点，如 Ollama）。
 
 优先级：客户端提供的 retrieval_query > 服务端重写 > 原始 content。
-默认关闭（RAG_QUERY_REWRITE_ENABLED=false），启用后配置 OpenAI 兼容端点即可。
 """
 
 from loguru import logger
@@ -19,21 +20,16 @@ REWRITE_SYSTEM_PROMPT = (
 )
 
 
-async def rewrite_query(text: str) -> str | None:
-    """调用服务端配置的小模型改写查询；未启用/失败时返回 None."""
-    if not settings.RAG_QUERY_REWRITE_ENABLED:
-        return None
-    base_url = settings.RAG_QUERY_REWRITE_BASE_URL.rstrip("/")
-    model = settings.RAG_QUERY_REWRITE_MODEL.strip()
-    if not model:
-        return None
-
+async def _rewrite(base_url: str, api_key: str | None, model: str, text: str) -> str | None:
+    """调用 OpenAI 兼容端点改写查询；失败返回 None（由调用方回退原文）."""
     try:
         import httpx
 
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         async with httpx.AsyncClient(timeout=settings.RAG_QUERY_REWRITE_TIMEOUT_SECONDS) as client:
             resp = await client.post(
-                f"{base_url}/chat/completions",
+                f"{base_url.rstrip('/')}/chat/completions",
+                headers=headers,
                 json={
                     "model": model,
                     "messages": [
@@ -53,9 +49,33 @@ async def rewrite_query(text: str) -> str | None:
         return None
 
 
-async def get_retrieval_query(content: str, client_query: str | None = None) -> str:
-    """决定本次检索用的查询：客户端精炼 > 服务端重写 > 原文."""
+async def rewrite_query(text: str) -> str | None:
+    """服务端改写：默认云端 qwen-turbo；本地小模型插槽配置后走本地."""
+    if not settings.RAG_QUERY_REWRITE_ENABLED:
+        return None
+    if (
+        settings.RAG_QUERY_REWRITE_PROVIDER == "local"
+        and settings.RAG_QUERY_REWRITE_MODEL.strip()
+    ):
+        return await _rewrite(
+            settings.RAG_QUERY_REWRITE_BASE_URL,
+            None,
+            settings.RAG_QUERY_REWRITE_MODEL.strip(),
+            text,
+        )
+    return await _rewrite(
+        settings.QWEN_BASE_URL, settings.QWEN_API_KEY, settings.QWEN_TURBO_MODEL, text
+    )
+
+
+async def get_retrieval_query(
+    content: str, client_query: str | None = None, scene: str | None = None
+) -> str:
+    """决定本次检索查询：客户端精炼 > 服务端重写（仅办公模式）> 原文."""
     if client_query and client_query.strip():
         return client_query
+    # 仅办公模式启用改写，其他场景直接原文（保回复速度）
+    if scene != "office":
+        return content
     rewritten = await rewrite_query(content)
-    return rewritten or content
+    return (rewritten or content).strip()[:500]

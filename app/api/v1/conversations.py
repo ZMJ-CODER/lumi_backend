@@ -190,6 +190,20 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
         await db.rollback()
         return
 
+    # 聊天记录生命周期：超过硬上限 → 异步裁剪（物理删除最旧消息 + 附件文件）
+    over = (
+        await db.execute(
+            select(func.count()).select_from(Message).where(Message.conversation_id == conv.id)
+        )
+    ).scalar_one()
+    if over > settings.CONVERSATION_MESSAGE_HARD_CAP:
+        try:
+            from celery_app.tasks import trim_conversation_messages as trim_task
+
+            trim_task.delay(str(conv.id))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("消息裁剪入队失败: {}", exc)
+
     # 实时同步：向订阅端（桌面/网页/移动端）推送新消息事件
     user_attachments = [
         {
@@ -294,9 +308,9 @@ async def _run_tts_task(user_id: str, conversation_id: str, message_id: str, tex
                 "type": "audio",
             },
         )
-        logger.info("TTS 完成: msg={} url={}", message_id, url)
+        logger.debug("TTS 完成: msg={} url={}", message_id, url)
     except asyncio.CancelledError:
-        logger.info("TTS 任务被新消息中断: msg={}", message_id)
+        logger.debug("TTS 任务被新消息中断: msg={}", message_id)
         raise
     except Exception as e:
         logger.warning("TTS 任务失败: {}", e)
@@ -468,6 +482,7 @@ async def send_message(
             local_mode=req.local_mode,
             retrieval_query=req.retrieval_query,
             attachments=req.attachments,
+            web_search_enabled=req.web_search,
         )
 
         # 服务端持久化（仅登录用户；游客保持 Redis-only）

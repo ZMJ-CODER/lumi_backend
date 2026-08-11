@@ -8,6 +8,8 @@
 每次调用按当前配置创建短连接，避免配置更新后旧连接仍携带旧 base_url/api_key。
 """
 
+import json
+
 from httpx import AsyncClient
 
 from app.core.config import settings
@@ -56,6 +58,115 @@ class LLMClient:
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"]
+
+    async def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        scene: str | None = None,
+        model: str | None = None,
+        **kwargs,
+    ) -> tuple[str, list[dict]]:
+        """非流式调用并允许工具调用（tool_choice=auto）。返回 (content, tool_calls)."""
+        cfg = await get_llm_config(scene, self.provider)
+        base_url = (cfg.get("base_url") or "").rstrip("/")
+        api_key = cfg.get("api_key") or ""
+        model_name = model or cfg.get("model") or settings.DEEPSEEK_MODEL
+        timeout = float(cfg.get("timeout") or 120.0)
+
+        payload = {
+            "model": model_name,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            **kwargs,
+        }
+        async with AsyncClient(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=timeout,
+        ) as client:
+            resp = await client.post("/chat/completions", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        msg = data["choices"][0]["message"]
+        return (msg.get("content") or ""), (msg.get("tool_calls") or [])
+
+    async def chat_with_tools_qwen(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        model: str | None = None,
+        **kwargs,
+    ) -> tuple[str, list[dict]]:
+        """用千问（DashScope）配置调用带工具接口（工具决策专用）.
+
+        工具决策独立于场景配置：部分场景模型（如 qwen-vl-plus）不支持 tools，
+        统一用 qwen-plus 做工具决策，避免受场景 provider 影响。
+        """
+        base_url = settings.QWEN_BASE_URL.rstrip("/")
+        api_key = settings.QWEN_API_KEY
+        model_name = model or settings.QWEN_MODEL
+        payload = {
+            "model": model_name,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            **kwargs,
+        }
+        async with AsyncClient(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=30,
+        ) as client:
+            resp = await client.post("/chat/completions", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        msg = data["choices"][0]["message"]
+        return (msg.get("content") or ""), (msg.get("tool_calls") or [])
+
+    async def chat_stream(
+        self,
+        messages: list[dict],
+        *,
+        scene: str | None = None,
+        model: str | None = None,
+        **kwargs,
+    ):
+        """流式调用（SSE）。返回异步生成器，逐段产出文本增量."""
+        cfg = await get_llm_config(scene, self.provider)
+        base_url = (cfg.get("base_url") or "").rstrip("/")
+        api_key = cfg.get("api_key") or ""
+        model_name = model or cfg.get("model") or settings.DEEPSEEK_MODEL
+        timeout = float(cfg.get("timeout") or 120.0)
+
+        payload = {"model": model_name, "messages": messages, "stream": True, **kwargs}
+        async with AsyncClient(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=timeout,
+        ) as client:
+            async with client.stream("POST", "/chat/completions", json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    chunk = line[len("data:"):].strip()
+                    if not chunk or chunk == "[DONE]":
+                        continue
+                    try:
+                        data = json.loads(chunk)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = data.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    text = delta.get("content")
+                    if text:
+                        yield text
 
     async def embed(
         self,

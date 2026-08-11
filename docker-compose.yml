@@ -39,7 +39,7 @@ services:
   api:
     build: .
     container_name: lumi-api
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
     env_file:
       - .env
     environment:
@@ -90,7 +90,27 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # ── 本地 TTS 服务 (qwen3-tts，可选) ──
+  # ── Celery Beat (定时任务调度：画像重建 / 记忆清理) ──
+  beat:
+    build: .
+    container_name: lumi-beat
+    command: celery -A celery_app.celery_app beat --loglevel=info
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/lumi_db
+      DATABASE_ADMIN_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  # ── 本地 TTS 服务 (qwen3-tts / MLX CUDA，可选) ──
   tts:
     build:
       context: .
@@ -99,8 +119,26 @@ services:
     environment:
       # qwen3-tts 首次合成需下载 MLX 模型，走国内镜像（直连 HuggingFace 被墙）
       HF_ENDPOINT: https://hf-mirror.com
+      # hf-mirror 不支持 Xet 加速通道（会 401），禁用后走普通 HTTP 下载
+      HF_HUB_DISABLE_XET: "1"
+      # Docker Desktop (WSL2) 下 CUDA 驱动库所在路径，手动挂载并加入库搜索路径；
+      # 若迁移到真实 Linux 服务器，删掉下面这行和下方 /usr/lib/wsl/lib 挂载，
+      # nvidia-container-toolkit 会自动完成驱动库注入
+      LD_LIBRARY_PATH: /usr/lib/wsl/lib
     ports:
       - "8765:8765"
+    volumes:
+      # 模型缓存持久化：避免每次重建镜像都重新下载 2.4GB 模型
+      - tts_model_cache:/home/appuser/.cache/huggingface
+      # Docker Desktop (WSL2) 需手动挂载 NVIDIA 驱动库，容器内才有 libcuda
+      - /usr/lib/wsl/lib:/usr/lib/wsl/lib:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     depends_on:
       - api
     restart: unless-stopped
@@ -108,3 +146,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  tts_model_cache:

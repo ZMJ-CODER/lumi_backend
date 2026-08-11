@@ -31,7 +31,7 @@ def _get_converter():
 
                 pipeline_options = PdfPipelineOptions()
                 pipeline_options.do_ocr = settings.DOCLING_ENABLE_OCR
-                logger.info("Docling 初始化：OCR={}", pipeline_options.do_ocr)
+                logger.debug("Docling 初始化：OCR={}", pipeline_options.do_ocr)
 
                 _converter = DocumentConverter(
                     format_options={

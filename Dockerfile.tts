@@ -1,11 +1,23 @@
-# ── Lumi 本地 TTS 服务（qwen3-tts / MLX） ──
+# ── Lumi 本地 TTS 服务（qwen3-tts / MLX CUDA） ──
 # 基于主镜像（api 构建完成后）叠加 qwen3-tts，隔离安装风险：
 # 即使 qwen3-tts 装不上，也不影响 api / worker。
 FROM lumi_backend-api:latest
 
 USER root
 RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
-        qwen3-tts edge-tts "mlx[cpu]==0.32.0"
+        qwen3-tts edge-tts "mlx[cuda]==0.32.0"
+# MLX CUDA 运行时 JIT 编译内核需要 CUDA 12 工具链头文件（单独一层，避免大依赖层失效）
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple nvidia-cuda-runtime-cu12==12.9.*
+# MLX CUDA 后端运行时 JIT 编译内核需要 CUDA 工具链头文件（CUDA 12），
+# 指向 pip 安装的 nvidia-cuda-runtime-cu12 头文件/库目录
+RUN mkdir -p /opt/cuda \
+    && ln -sfn /usr/local/lib/python3.13/site-packages/nvidia/cuda_runtime/include /opt/cuda/include \
+    && ln -sfn /usr/local/lib/python3.13/site-packages/nvidia/cuda_runtime/lib /opt/cuda/lib64 \
+    && ln -sfn /usr/local/lib/python3.13/site-packages/nvidia/cuda_runtime/lib /opt/cuda/lib
+ENV CUDA_HOME=/opt/cuda \
+    CUDA_PATH=/opt/cuda
+# 预创建 HuggingFace 模型缓存目录并交给 appuser，保证挂载命名卷后可写
+RUN mkdir -p /home/appuser/.cache/huggingface && chown -R appuser:appuser /home/appuser/.cache
 USER appuser
 
 EXPOSE 8765

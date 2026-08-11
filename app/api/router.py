@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     admin,
     auth,
+    chat,
     control_logs,
     conversations,
     data_export,
@@ -12,6 +13,7 @@ from app.api.v1 import (
     local,
     local_corpus,
     memories,
+    prompts,
     public_kb,
     uploads,
     user,
@@ -26,11 +28,17 @@ api_router.include_router(user.router, prefix="/user", tags=["user"])
 # 对话（含场景管理）
 api_router.include_router(conversations.router, prefix="/conversations", tags=["conversations"])
 
+# 聊天（流式 SSE）
+api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
+
 # 知识库
 api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledge"])
 
-# 记忆
-api_router.include_router(memories.router, prefix="/memories", tags=["memories"])
+# 长期记忆调试（superadmin）
+api_router.include_router(memories.router, prefix="/admin/memories", tags=["admin"])
+
+# 角色提示词
+api_router.include_router(prompts.router, prefix="/prompts", tags=["prompts"])
 
 # 操控日志
 api_router.include_router(control_logs.router, prefix="/control-logs", tags=["control-logs"])

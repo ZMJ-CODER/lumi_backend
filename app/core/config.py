@@ -83,6 +83,13 @@ class Settings(BaseSettings):
 
     # ── 搜索工具: Tavily ──
     TAVILY_API_KEY: str = ""
+    TAVILY_MAX_RESULTS: int = 5
+    TAVILY_SEARCH_DEPTH: str = "basic"  # basic / advanced
+    TAVILY_TIMEOUT_SECONDS: int = 15
+    WEB_SEARCH_TOOL_ENABLED: bool = True  # 模型自主决策是否联网（总开关）
+
+    # ── 角色提示词（可插拔：app/prompts/*.md，frontmatter 定义元信息）──
+    PROMPTS_DIR: str = "app/prompts"
 
     # ── RAG 默认参数 ──
     RAG_TOP_K: int = 5
@@ -98,12 +105,13 @@ class Settings(BaseSettings):
     RAG_RECENCY_HALF_LIFE_DAYS: int = 90    # 时效性半衰期（天）：越新权重越高
     RAG_TIME_FILTER_DAYS: int | None = None # 可选硬过滤：只检索最近 N 天的文档（None=不过滤）
 
-    # ── 服务端查询重写（可插拔，默认关闭）──
-    # 手机端等没有本地小模型的客户端，由服务端小模型完成提问精炼。
+    # ── 服务端查询重写（仅办公模式启用；默认云端 qwen-turbo）──
     # 优先级：客户端 retrieval_query > 服务端重写 > 原始 content。
-    RAG_QUERY_REWRITE_ENABLED: bool = False
-    RAG_QUERY_REWRITE_BASE_URL: str = "http://localhost:11434/v1"
-    RAG_QUERY_REWRITE_MODEL: str = ""
+    # 其他场景不做改写，保证回复速度；本地小模型为预留插槽（见下）。
+    RAG_QUERY_REWRITE_ENABLED: bool = True
+    RAG_QUERY_REWRITE_PROVIDER: str = "cloud"  # cloud（默认，qwen-turbo）/ local（服务端本地小模型插槽）
+    RAG_QUERY_REWRITE_BASE_URL: str = "http://localhost:11434/v1"  # local 插槽：OpenAI 兼容端点（Ollama 等）
+    RAG_QUERY_REWRITE_MODEL: str = ""          # local 插槽：模型名；配置后自动走本地
     RAG_QUERY_REWRITE_TIMEOUT_SECONDS: int = 15
 
     # ── 智能体技能与沙箱（预留，默认关闭）──
@@ -145,6 +153,34 @@ class Settings(BaseSettings):
     TTS_LOCAL_TIMEOUT: int = 180
     TTS_FORMAT: str = "mp3"
     TTS_SAMPLE_RATE: int = 24000
+
+    # ── 长期记忆 ──
+    MEMORY_ENCRYPTION_KEY: str = ""          # base64 编码的 32 字节主密钥；缺失时记忆加密不可用
+    MEMORY_ENCRYPTION_KEY_VERSION: int = 1   # 密钥版本，轮换时 +1 并触发全量重加密
+    MEMORY_EXTRACTION_MODEL: str = "qwen-turbo"  # 记忆抽取/合并/画像聚合用轻量模型
+    MEMORY_EXTRACTION_MIN_CONFIDENCE: float = 0.6  # 低于该置信度的事实不落库
+    MEMORY_FACT_TOP_K: int = 5               # 每轮对话注入的记忆事实上限
+    MEMORY_HYBRID_VECTOR_TOP_K: int = 10     # 记忆混合检索：向量路召回数
+    MEMORY_HYBRID_KEYWORD_TOP_K: int = 10    # 记忆混合检索：关键词路召回数
+    MEMORY_SIMILARITY_THRESHOLD: float = 0.72  # 去重/矛盾判定阈值
+    MEMORY_CLEANUP_THRESHOLD: float = 0.3    # 过期且重要度低于该值 → 物理删除
+    MEMORY_HALF_LIFE_DAYS: dict[str, int | None] = {
+        "identity": None,     # 不过期，仅在被矛盾事实取代时失效
+        "preference": 90,
+        "experience": 45,
+        "goal": 180,
+    }
+    MEMORY_PROFILE_BUILD_INTERVAL_HOURS: int = 24  # 画像重建间隔（小时）
+    MEMORY_PROFILE_INJECT_ENABLED: bool = True     # 画像常驻注入开关
+    MEMORY_EXTRACTION_MIN_MESSAGES: int = 20       # 对话攒满 N 条消息触发一次抽取（摘要路径之外）
+    MEMORY_EXTRACTION_MAX_DIALOG_CHARS: int = 20000  # 单次抽取的对话文本上限（字符）
+    MEMORY_EXTRACTION_MAX_TOKENS: int = 2048       # 抽取 LLM 输出 token 上限
+    MEMORY_DECRYPT_ENABLED: bool = True            # L1 解密门总开关
+    MEMORY_DECRYPT_LLM_CONFIRM_ENABLED: bool = True  # 关键词预筛后 LLM 二次确认
+
+    # ── 聊天记录生命周期（消息上限裁剪，物理删除）──
+    CONVERSATION_MESSAGE_KEEP: int = 50      # 每会话保留最近 N 条
+    CONVERSATION_MESSAGE_HARD_CAP: int = 70  # 超过该条数触发异步裁剪（回到 KEEP）
 
     model_config = {
         "env_file": ".env",

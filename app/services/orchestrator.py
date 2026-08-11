@@ -8,9 +8,12 @@
 """
 
 import asyncio
+import base64
 import json
+import mimetypes
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from httpx import AsyncClient
 from loguru import logger
@@ -21,17 +24,53 @@ from app.agents.registry import AgentRegistry
 from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.llm import LLMClient
+from app.core.llm_config import get_llm_config
 from app.core.redis import get_redis
 from app.services.speech import speech_to_text
 from app.services.rag.query_rewriter import get_retrieval_query
 from app.services.rag.knowledge import search_user_knowledge
 from app.services.scene_manager import get_scene_config, get_scene_knowledge_tags
+from app.services.memory.retrieval import search_user_memories
+from app.services.memory.privacy import resolve_decrypt_candidates
+from app.services.prompts import get_prompt_content
+from app.services.web_search import WEB_SEARCH_TOOL, web_search
 
 # Redis Key 模板
 CONTEXT_KEY = "conv:ctx:{conversation_id}"  # 会话上下文 (list of json)
 SUMMARY_KEY = "conv:summary:{conversation_id}"  # 对话摘要（旧消息压缩，节省 token）
 MEMORY_CACHE_KEY = "mem:user:{user_id}"  # 用户长期记忆缓存
+EXTRACT_OFFSET_KEY = "mem:extract_offset:{conversation_id}"  # 记忆抽取进度（已抽取消息条数偏移）
 TITLE_KEY = "conv:title:{conversation_id}"  # 会话标题
+
+# 记忆注入常量
+_TYPE_CN = {"identity": "身份", "preference": "偏好", "experience": "经历", "goal": "目标"}
+_PRIVACY_RULES = (
+    "\n\n隐私规则：\n"
+    "1. [隐私] 标记的内容为脱敏描述，不得输出其背后的明文细节；\n"
+    "2. 不得主动询问或推断用户的证件号、手机号、邮箱等精确身份信息；\n"
+    "3. 仅当用户明确要求且后端已在本轮授权解密时，才可使用隐私明文；\n"
+    "4. 涉及隐私的回复应模糊化（如\"您常用的联系方式\"而非直接复述）。"
+)
+
+# 多模态模型关键字（图片注入判断；qwen-vl-* / gpt-4o / gemini / llava 等）
+_MULTIMODAL_KEYWORDS = ("vl", "vision", "4o", "gemini", "llava")
+_MAX_IMAGE_BYTES = 15 * 1024 * 1024  # 单图 ≤ 15MB（base64 后约 20MB，贴近接口上限）
+_MAX_IMAGES_PER_MESSAGE = 10
+_WEB_DECISION_PROMPT = (
+    "你是联网搜索决策助手。判断用户问题是否需要搜索互联网获取最新/实时信息。\n"
+    "需要联网的情况：最新新闻、实时数据（股票/天气/汇率/比分等）、当前事件、"
+    "用户明确要求搜索、或仅凭模型自身知识无法准确回答的问题。\n"
+    "不需要联网的情况：闲聊、寒暄、情感倾诉、常识问答、创作类请求、"
+    "基于已有知识的回答。\n"
+    "如果判断需要，调用 web_search 工具；否则不调用任何工具直接回答。"
+)
+
+# 角色提示词下的场景行为补充（角色负责性格，场景负责行为）
+_SCENE_BEHAVIOR = {
+    "chat": "",
+    "office": "当前为办公模式：优先从用户知识库检索相关信息，回答时引用文档来源（📁 个人资料 / 🌐 公共知识库）。",
+    "game": "当前为游戏模式：回复短小精悍，像队友一样；可结合攻略语料给出可执行建议。",
+}
 
 # 标题生成提示词：一句话概括对话主题
 _TITLE_SYSTEM_PROMPT = (
@@ -57,7 +96,7 @@ class Orchestrator:
         if not self._llm_started:
             await self._llm.start()
             self._llm_started = True
-            logger.info("🔌 LLMClient 已启动 (provider={})", self._llm.provider)
+            logger.debug("LLMClient 已启动 (provider={})", self._llm.provider)
 
     # ── 上下文管理 ──────────────────────────────────────
 
@@ -143,7 +182,7 @@ class Orchestrator:
             logger.warning("对话摘要生成失败: {}", e)
             return prev_summary or ""
 
-    async def _maybe_summarize_context(self, conversation_id: str) -> None:
+    async def _maybe_summarize_context(self, conversation_id: str, user_id: str) -> None:
         """上下文接近 token 预算时：把旧消息压缩成摘要，保留最近 N 轮."""
         history = await self.get_context(conversation_id)
         total = sum(self._estimate_tokens(str(m.get("content") or "")) for m in history)
@@ -154,6 +193,9 @@ class Orchestrator:
         if len(history) <= keep:
             return
         old_msgs = history[:-keep]
+
+        # 被压缩掉的旧消息若尚未做过记忆抽取 → 先异步抽取（批量）
+        await self._submit_unextracted(conversation_id, user_id, history, stop=len(history) - keep)
 
         prev_summary = await self.get_conversation_summary(conversation_id)
         summary = await self._generate_summary(prev_summary, old_msgs)
@@ -167,6 +209,54 @@ class Orchestrator:
         key = CONTEXT_KEY.format(conversation_id=conversation_id)
         await r.ltrim(key, -keep, -1)
         await r.expire(key, 604800)
+
+    # ── 记忆抽取触发（异步，Celery）──────────────────────
+
+    async def _submit_unextracted(
+        self, conversation_id: str, user_id: str, history: list[dict], stop: int | None = None
+    ) -> None:
+        """把尚未做过记忆抽取的消息批量入队（按偏移量幂等推进）."""
+        try:
+            uuid.UUID(str(user_id))
+        except (ValueError, TypeError):
+            return  # 游客/无效用户不抽取
+        r = get_redis()
+        key = EXTRACT_OFFSET_KEY.format(conversation_id=conversation_id)
+        try:
+            offset = int(await r.get(key) or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        end = len(history) if stop is None else min(stop, len(history))
+        if offset >= end:
+            return
+        batch = [m for m in history[offset:end] if m.get("content")]
+        if batch:
+            try:
+                from celery_app.tasks import extract_memories
+
+                extract_memories.delay(user_id, conversation_id, batch)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("记忆抽取入队失败: {}", exc)
+                return
+        await r.set(key, str(end))
+        await r.expire(key, 604800)
+
+    async def _maybe_extract_memories(self, conversation_id: str, user_id: str) -> None:
+        """对话消息攒满一批后异步抽取长期记忆（摘要路径之外的兜底）."""
+        try:
+            uuid.UUID(str(user_id))
+        except (ValueError, TypeError):
+            return  # 游客/无效用户不抽取
+        r = get_redis()
+        key = EXTRACT_OFFSET_KEY.format(conversation_id=conversation_id)
+        try:
+            offset = int(await r.get(key) or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        history = await self.get_context(conversation_id)
+        if len(history) - offset < settings.MEMORY_EXTRACTION_MIN_MESSAGES:
+            return
+        await self._submit_unextracted(conversation_id, user_id, history)
 
     async def get_conversation_title(self, conversation_id: str) -> str | None:
         """获取会话标题（Redis，可能为空）."""
@@ -194,23 +284,65 @@ class Orchestrator:
             logger.warning("会话标题生成失败: {}", e)
             return ""
 
-    # ── 记忆注入 ────────────────────────────────────────
+    # ── 记忆注入（画像常驻 + 事实按需召回）──────────────
 
-    async def get_memory_context(self, user_id: str, limit: int = 5) -> list[str]:
-        """获取用户长期记忆的关键事实列表（优先高重要度、最近访问）."""
+    async def get_user_profile(self, user_id: str) -> dict | None:
+        """获取用户画像（Redis 缓存 1 小时 → memory_profile 表）."""
+        if not settings.MEMORY_PROFILE_INJECT_ENABLED:
+            return None
         r = get_redis()
         key = MEMORY_CACHE_KEY.format(user_id=user_id)
         cached = await r.get(key)
         if cached:
-            return json.loads(cached)
-        # TODO: 缓存未命中时从 PostgreSQL 加载
-        return []
+            try:
+                return json.loads(cached)
+            except (ValueError, TypeError):
+                pass
+        try:
+            async with async_session_factory() as session:
+                from app.models.db_models import MemoryProfile
 
-    async def cache_memories(self, user_id: str, facts: list[str]) -> None:
-        """缓存用户长期记忆到 Redis（TTL 1 小时）."""
-        r = get_redis()
-        key = MEMORY_CACHE_KEY.format(user_id=user_id)
-        await r.set(key, json.dumps(facts, ensure_ascii=False), ex=3600)
+                profile = await session.get(MemoryProfile, uuid.UUID(str(user_id)))
+                if not profile:
+                    return None
+                data = dict(profile.profile or {})
+                data["version"] = profile.version
+                data["updated_at"] = profile.updated_at.isoformat() if profile.updated_at else None
+                await r.set(key, json.dumps(data, ensure_ascii=False), ex=3600)
+                return data
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("获取用户画像失败: {}", exc)
+            return None
+
+    async def retrieve_memory_facts(self, user_id: str, query: str) -> list[dict]:
+        """按当前问题混合检索用户记忆事实（L1 只含占位符）；命中后异步强化."""
+        if not query or not query.strip():
+            return []
+        try:
+            async with async_session_factory() as session:
+                facts = await search_user_memories(
+                    session, user_id, query, top_k=settings.MEMORY_FACT_TOP_K
+                )
+                ids = [str(f["memory_id"]) for f in facts]
+                if ids:
+                    try:
+                        from celery_app.tasks import touch_memories
+
+                        touch_memories.delay(ids)
+                    except Exception:  # noqa: BLE001
+                        pass
+                return facts
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("记忆检索失败: {}", exc)
+            return []
+
+    async def get_memory_context(
+        self, user_id: str, query: str = "", retrieval_query: str | None = None
+    ) -> tuple[dict | None, list[dict]]:
+        """注入内容 = 画像（常驻） + 与当前问题相关的事实（按需召回）."""
+        profile = await self.get_user_profile(user_id)
+        facts = await self.retrieve_memory_facts(user_id, retrieval_query or query)
+        return profile, facts
 
     # ── 消息处理主流程 ──────────────────────────────────
 
@@ -223,29 +355,11 @@ class Orchestrator:
         local_mode: bool = False,
         retrieval_query: str | None = None,
         attachments: list | None = None,
+        web_search_enabled: bool = False,
     ) -> dict:
-        """处理用户消息的核心流程.
-
-        Args:
-            user_id: 用户 UUID
-            conversation_id: 会话 UUID
-            content: 用户消息内容
-            scene: 场景模式 (chat/office/game)
-            local_mode: 是否为本地模式请求（PC端已本地处理，仅同步摘要）
-
-        Returns:
-            {message_id, content, citations, scene}
-        """
-        scene_config = get_scene_config(scene)
-
-        # 语音消息：content 为空但有音频附件 → Whisper 转写 + 纠错
-        transcript = content or ""
-        if not transcript.strip():
-            for att in attachments or []:
-                if isinstance(att, dict) and att.get("type") == "audio" and att.get("url"):
-                    transcript = await speech_to_text(str(att["url"]))
-                    break
-            content = transcript
+        """处理用户消息的核心流程（阻塞版，供旧接口/降级路径使用）."""
+        transcript = await self._resolve_transcript(content, attachments)
+        content = transcript or content
 
         # 本地模式：仅记录，不生成回复（PC端已处理）
         if local_mode:
@@ -259,63 +373,318 @@ class Orchestrator:
                 "transcript": transcript,
             }
 
-        # 1. 保存用户消息到上下文
-        is_first = len(await self.get_context(conversation_id)) == 0  # 首条消息 → 生成会话标题
-        user_msg = {"role": "user", "content": content, "timestamp": datetime.now(timezone.utc).isoformat()}
-        await self.append_context(conversation_id, user_msg)
+        prep = await self._prepare_chat(user_id, conversation_id, content, scene, retrieval_query, attachments)
+        image_uris = await self._load_image_data_uris(user_id, attachments)
 
-        # 2. 获取上下文 + 长期记忆
-        history = await self.get_context(conversation_id)
-        memory_facts = await self.get_memory_context(user_id)
-        summary = await self.get_conversation_summary(conversation_id)
-
-        # 3. 构建消息列表（System Prompt + 摘要 + 记忆 + 历史 + 当前提问）
-        messages = self._build_messages(scene, memory_facts, history, content, summary)
-
-        # 4. 知识库检索（按场景过滤空间标签）
-        knowledge_tags = get_scene_knowledge_tags(scene)
-        # 检索查询（可插拔槽位）：客户端精炼 > 服务端小模型重写 > 原文
-        search_query = await get_retrieval_query(content, retrieval_query)
-        rag_context, citations = await self._retrieve_knowledge(user_id, search_query, knowledge_tags)
-
-        if rag_context:
-            messages[-1]["content"] = f"参考以下知识库内容回答用户问题：\n\n{rag_context}\n\n用户问题：{content}"
-
-        # 5. 调用 LLM 生成回复（按场景动态取模型配置）
+        # 调用 LLM：工具调用（模型自主决定联网）+ 最终回复
         title = await self.get_conversation_title(conversation_id)
-        if is_first and not title:
+        if prep["is_first"] and not title:
             # 首条消息：回复与标题生成并行（大模型"阅读的同时"总结）
-            reply_task = asyncio.create_task(self._call_llm(messages, scene=scene))
+            reply_task = asyncio.create_task(
+                self._call_llm_auto(prep["messages"], scene, image_uris, content, prep["citations"])
+            )
             title_task = asyncio.create_task(self._generate_title(content))
             reply, title = await asyncio.gather(reply_task, title_task)
             if title:
                 await self.save_conversation_title(conversation_id, title)
         else:
-            reply = await self._call_llm(messages, scene=scene)
+            reply = await self._call_llm_auto(prep["messages"], scene, image_uris, content, prep["citations"])
 
         # 技能调用循环（预留沙箱槽位）：默认关闭，不影响现有流程；
         # 二期实现后，在此把技能结果回填 LLM 继续对话
-        tool_results = await maybe_run_skills(conversation_id, scene, messages, user_id=user_id)
+        tool_results = await maybe_run_skills(conversation_id, scene, prep["messages"], user_id=user_id)
         _ = tool_results  # 预留：二期在此把技能结果回填 LLM 继续对话
 
-        # 6. 保存助手回复到上下文
-        assistant_msg = {"role": "assistant", "content": reply, "timestamp": datetime.now(timezone.utc).isoformat()}
-        await self.append_context(conversation_id, assistant_msg)
-        # 上下文接近 token 预算时触发摘要（压缩旧消息，保留最近 N 轮）
-        await self._maybe_summarize_context(conversation_id)
-
-        # 7. 异步触发记忆提取（TODO: Celery 任务）
-        # extract_memory.delay(user_id, conversation_id, content, reply)
+        # 保存助手回复 + 摘要 + 记忆抽取
+        await self._finalize_reply(conversation_id, user_id, reply)
 
         return {
             "message_id": str(uuid.uuid4()),
             "content": reply,
-            "citations": citations,
+            "citations": prep["citations"],
             "scene": scene,
             "local_mode": False,
             "title": title or "",
             "transcript": transcript,
         }
+
+    async def handle_message_stream(
+        self,
+        user_id: str,
+        conversation_id: str,
+        content: str,
+        scene: str = "chat",
+        local_mode: bool = False,
+        retrieval_query: str | None = None,
+        attachments: list | None = None,
+    ):
+        """流式处理用户消息：准备流程同 handle_message，LLM 走工具调用 + SSE 流式.
+
+        Yields: {"type": "delta", "content": ...} / {"type": "done", ...}
+        """
+        transcript = await self._resolve_transcript(content, attachments)
+        content = transcript or content
+
+        if local_mode:
+            yield {
+                "type": "done",
+                "message_id": str(uuid.uuid4()),
+                "content": "",
+                "citations": [],
+                "scene": scene,
+                "title": "",
+            }
+            return
+
+        prep = await self._prepare_chat(user_id, conversation_id, content, scene, retrieval_query, attachments)
+        image_uris = await self._load_image_data_uris(user_id, attachments)
+        message_id = str(uuid.uuid4())
+        title = await self.get_conversation_title(conversation_id)
+
+        # 首条消息：标题生成与回复流并行
+        title_task = None
+        if prep["is_first"] and not title:
+            title_task = asyncio.create_task(self._generate_title(content))
+
+        full_text = ""
+        async for evt in self._stream_llm_auto(
+            prep["messages"], scene, image_uris, content, prep["citations"]
+        ):
+            if evt["type"] == "delta":
+                full_text += evt["content"]
+            yield evt
+
+        if title_task is not None:
+            title = await title_task
+            if title:
+                await self.save_conversation_title(conversation_id, title)
+
+        # 保存助手回复 + 摘要 + 记忆抽取
+        await self._finalize_reply(conversation_id, user_id, full_text)
+
+        yield {
+            "type": "done",
+            "message_id": message_id,
+            "content": full_text,
+            "citations": prep["citations"],
+            "scene": scene,
+            "title": title or "",
+        }
+
+    # ── 消息处理公共流程 ────────────────────────────────
+
+    async def _resolve_transcript(self, content: str, attachments: list | None) -> str:
+        """语音附件 → Whisper 转写 + 纠错；无音频返回原内容."""
+        transcript = content or ""
+        if not transcript.strip():
+            for att in attachments or []:
+                if isinstance(att, dict) and att.get("type") == "audio" and att.get("url"):
+                    transcript = await speech_to_text(str(att["url"]))
+                    break
+        return transcript
+
+    async def _prepare_chat(
+        self,
+        user_id: str,
+        conversation_id: str,
+        content: str,
+        scene: str,
+        retrieval_query: str | None,
+        attachments: list | None,
+    ) -> dict:
+        """LLM 调用前的公共准备：上下文、长期记忆、消息构建、RAG 检索、隐私解密门."""
+        # 1. 保存用户消息到上下文
+        is_first = len(await self.get_context(conversation_id)) == 0
+        user_msg = {"role": "user", "content": content, "timestamp": datetime.now(timezone.utc).isoformat()}
+        await self.append_context(conversation_id, user_msg)
+
+        # 2. 上下文 + 长期记忆（画像常驻 + 事实按需召回）
+        history = await self.get_context(conversation_id)
+        summary = await self.get_conversation_summary(conversation_id)
+        profile, memory_facts = await self.get_memory_context(
+            user_id, query=content, retrieval_query=retrieval_query
+        )
+
+        # 3. 消息列表（System Prompt + 画像 + 记忆 + 摘要 + 历史 + 当前提问）
+        system_prompt = await self._get_system_prompt(user_id, scene)
+        messages = self._build_messages(
+            scene, profile, memory_facts, history, content, summary, system_prompt=system_prompt
+        )
+
+        # 4. RAG 知识库检索（按场景过滤空间标签）
+        knowledge_tags = get_scene_knowledge_tags(scene)
+        search_query = await get_retrieval_query(content, retrieval_query, scene)
+        rag_context, citations = await self._retrieve_knowledge(user_id, search_query, knowledge_tags)
+        if rag_context:
+            messages[-1]["content"] = f"参考以下知识库内容回答用户问题：\n\n{rag_context}\n\n用户问题：{content}"
+
+        # L1 隐私解密门：用户明确要求时解密注入并审计（仅白名单话题）
+        if memory_facts and content.strip():
+            try:
+                async with async_session_factory() as session:
+                    decrypted = await resolve_decrypt_candidates(
+                        session, user_id, conversation_id, memory_facts, content
+                    )
+                if decrypted:
+                    plaintext_block = "\n".join(f"- {d['plaintext']}" for d in decrypted)
+                    messages[-1]["content"] += f"\n\n[已获用户授权使用的隐私信息]\n{plaintext_block}"
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("隐私解密门处理失败: {}", exc)
+
+        return {"is_first": is_first, "messages": messages, "citations": citations}
+
+    async def _get_system_prompt(self, user_id: str, scene: str) -> str:
+        """系统提示词：用户选定角色优先，否则场景默认（可插拔角色目录）."""
+        prompt_id = None
+        try:
+            async with async_session_factory() as session:
+                from app.models.db_models import User
+
+                user = await session.get(User, uuid.UUID(str(user_id)))
+                prompt_id = user.prompt_id if user else None
+        except Exception:  # noqa: BLE001
+            prompt_id = None
+        if prompt_id:
+            content = await get_prompt_content(prompt_id, str(user_id))
+            if content:
+                note = _SCENE_BEHAVIOR.get(scene, "")
+                return content + (f"\n\n{note}" if note else "")
+        return get_scene_config(scene)["system_prompt"]
+
+    async def _finalize_reply(self, conversation_id: str, user_id: str, reply: str) -> None:
+        """保存助手回复到上下文，触发摘要与长期记忆抽取."""
+        assistant_msg = {
+            "role": "assistant",
+            "content": reply,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        await self.append_context(conversation_id, assistant_msg)
+        await self._maybe_summarize_context(conversation_id, user_id)
+        await self._maybe_extract_memories(conversation_id, user_id)
+
+    # ── 工具调用与流式回复 ─────────────────────────────
+
+    async def _apply_tool_calls(
+        self,
+        messages: list[dict],
+        user_content: str,
+        citations: list[dict],
+        tool_calls: list[dict],
+    ) -> list[dict]:
+        """执行模型请求的工具（当前仅 web_search），把结果回填消息列表并追加引用."""
+        messages = list(messages) + [{"role": "assistant", "content": None, "tool_calls": tool_calls}]
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if name != "web_search":
+                continue
+            try:
+                args = (
+                    json.loads(fn.get("arguments") or "{}")
+                    if isinstance(fn.get("arguments"), str)
+                    else (fn.get("arguments") or {})
+                )
+            except (ValueError, TypeError):
+                args = {}
+            query = str(args.get("query") or user_content)
+            results = await self._retrieve_web(query)
+            block = "\n".join(
+                f"[{i + 1}] {r['title']}\n{r['url']}\n{r['content'][:800]}"
+                for i, r in enumerate(results)
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": block or "未检索到相关结果",
+                }
+            )
+            citations.extend(
+                {
+                    "type": "web",
+                    "title": r["title"] or r["url"],
+                    "content": r["content"][:500],
+                    "source": r["url"],
+                }
+                for r in results
+            )
+        return messages
+
+    async def _call_llm_auto(
+        self,
+        messages: list[dict],
+        scene: str,
+        image_uris: list[str],
+        user_content: str,
+        citations: list[dict],
+    ) -> str:
+        """阻塞版：qwen-plus 自主决定是否联网，最终回复由场景模型生成."""
+        messages = await self._maybe_decide_web(messages, user_content, citations)
+        if image_uris:
+            cfg = await get_llm_config(scene, self._llm.provider)
+            if self._is_multimodal_model(str(cfg.get("model") or "")):
+                messages = self._attach_images(messages, image_uris)
+        return await self._llm.chat(messages, scene=scene)
+
+    async def _stream_llm_auto(
+        self,
+        messages: list[dict],
+        scene: str,
+        image_uris: list[str],
+        user_content: str,
+        citations: list[dict],
+    ):
+        """流式版：qwen-plus 自主决定是否联网，最终回复由场景模型逐段流式产出."""
+        messages = await self._maybe_decide_web(messages, user_content, citations)
+        if image_uris:
+            cfg = await get_llm_config(scene, self._llm.provider)
+            if self._is_multimodal_model(str(cfg.get("model") or "")):
+                messages = self._attach_images(messages, image_uris)
+        async for delta in self._llm.chat_stream(messages, scene=scene):
+            yield {"type": "delta", "content": delta}
+
+    async def _maybe_decide_web(
+        self, messages: list[dict], user_content: str, citations: list[dict]
+    ) -> list[dict]:
+        """模型自主决策是否联网：qwen-plus 工具调用；未调用则原样返回."""
+        if not settings.WEB_SEARCH_TOOL_ENABLED:
+            return messages
+        question = self._extract_user_text(messages)
+        if not question:
+            return messages
+        # 决策用独立的轻量提示，避免被对话人格/上下文带偏（只判断是否需要联网）
+        decision_messages = [
+            {"role": "system", "content": _WEB_DECISION_PROMPT},
+            {"role": "user", "content": question},
+        ]
+        try:
+            _, tool_calls = await self._llm.chat_with_tools_qwen(
+                decision_messages, [WEB_SEARCH_TOOL], max_tokens=64
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("联网工具决策调用失败，跳过联网: {}", exc)
+            return messages
+        if tool_calls:
+            return await self._apply_tool_calls(messages, user_content, citations, tool_calls)
+        return messages
+
+    @staticmethod
+    def _extract_user_text(messages: list[dict]) -> str:
+        """取最后一条用户消息的纯文本（多模态 content 列表时取 text 分片）."""
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                texts = [
+                    p.get("text", "")
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                ]
+                return "\n".join(t for t in texts if t)
+        return ""
 
     # ── 内部方法 ────────────────────────────────────────
 
@@ -346,22 +715,30 @@ class Orchestrator:
     def _build_messages(
         self,
         scene: str,
-        memory_facts: list[str],
+        profile: dict | None,
+        facts: list[dict],
         history: list[dict],
         current: str,
         summary: str | None = None,
+        system_prompt: str | None = None,
     ) -> list[dict]:
-        """构建 LLM 请求消息列表（摘要 + 历史按 token 预算裁剪）."""
-        system_prompt = get_scene_config(scene)["system_prompt"]
+        """构建 LLM 请求消息列表（画像 + 记忆事实 + 摘要 + 历史按 token 预算裁剪）."""
+        system_prompt = system_prompt or get_scene_config(scene)["system_prompt"]
 
         # 注入对话摘要（旧消息的压缩记忆）
         if summary:
             system_prompt += f"\n\n[对话历史摘要]\n{summary}"
 
-        # 注入长期记忆
-        if memory_facts:
-            facts_text = "\n".join(f"- {f}" for f in memory_facts)
-            system_prompt += f"\n\n[关于用户的长期记忆]\n{facts_text}"
+        # 注入用户画像（常驻）
+        if profile:
+            system_prompt += f"\n\n[用户画像]\n{self._render_profile(profile)}"
+
+        # 注入按需召回的记忆事实
+        if facts:
+            system_prompt += f"\n\n[用户长期记忆]\n{self._render_facts(facts)}"
+
+        # 隐私规则（恒常附加）
+        system_prompt += _PRIVACY_RULES
 
         messages = [{"role": "system", "content": system_prompt}]
 
@@ -371,6 +748,38 @@ class Orchestrator:
 
         messages.append({"role": "user", "content": current})
         return messages
+
+    @staticmethod
+    def _render_profile(profile: dict) -> str:
+        """画像 → 注入文本."""
+        parts: list[str] = []
+        for k, v in (profile.get("identity") or {}).items():
+            parts.append(f"{k}：{v}")
+        prefs = profile.get("preferences") or []
+        if prefs:
+            parts.append("偏好：" + "、".join(str(p) for p in prefs))
+        for g in profile.get("goals") or []:
+            if isinstance(g, dict):
+                parts.append(f"目标：{g.get('目标', g.get('goal', ''))}（{g.get('状态', '进行中')}）")
+        for p in profile.get("privacy") or []:
+            if isinstance(p, dict):
+                parts.append(f"隐私项：{p.get('占位', '')}（未获授权不读取）")
+        return "\n".join(parts) or "（暂无画像信息）"
+
+    @staticmethod
+    def _render_facts(facts: list[dict]) -> str:
+        """记忆事实 → 注入文本（L1 只显示占位符）."""
+        lines: list[str] = []
+        for f in facts:
+            text = str(f.get("fact") or "")
+            if f.get("privacy_level") == 1:
+                lines.append(f"- [隐私] {text}（未获授权不读取具体内容）")
+                continue
+            t = _TYPE_CN.get(str(f.get("memory_type") or ""), str(f.get("memory_type") or "记忆"))
+            imp = f.get("importance")
+            suffix = f"（重要度 {round(float(imp), 1)}）" if imp is not None else ""
+            lines.append(f"- [{t}] {text}{suffix}")
+        return "\n".join(lines)
 
     async def _retrieve_knowledge(self, user_id: str, query: str, space_tags: list[str]) -> tuple[str, list[dict]]:
         """RAG 检索 —— pgvector 相似度检索（个人空间 + 公共空间）.
@@ -393,9 +802,84 @@ class Orchestrator:
             logger.warning("RAG 检索失败，跳过知识库: {}", e)
             return "", []
 
-    async def _call_llm(self, messages: list[dict], scene: str = "chat") -> str:
-        """调用云端 LLM 生成回复（配置动态读取: Redis → .env）."""
+    async def _retrieve_web(self, query: str) -> list[dict]:
+        """联网搜索（Tavily）；失败不阻塞对话."""
+        try:
+            return await web_search(query)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("联网搜索失败: {}", exc)
+            return []
+
+    @staticmethod
+    def _is_multimodal_model(model: str) -> bool:
+        """按模型名判断是否支持图片输入."""
+        name = (model or "").lower()
+        return any(k in name for k in _MULTIMODAL_KEYWORDS)
+
+    @staticmethod
+    def _attach_images(messages: list[dict], images: list[str]) -> list[dict]:
+        """把最后一条用户消息改写为 text + image_url 分片（OpenAI 兼容格式）."""
+        if not messages or messages[-1].get("role") != "user":
+            return messages
+        text = str(messages[-1].get("content") or "")
+        result = list(messages)
+        result[-1] = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                *[{"type": "image_url", "image_url": {"url": uri}} for uri in images],
+            ],
+        }
+        return result
+
+    @staticmethod
+    async def _load_image_data_uris(user_id: str, attachments: list | None) -> list[str]:
+        """把图片附件读为 base64 data URI（供多模态模型使用；路径校验防越权）."""
+        if not attachments:
+            return []
+        base = (Path(settings.UPLOAD_DIR) / "chat" / str(user_id)).resolve()
+        uris: list[str] = []
+        for att in attachments:
+            if not isinstance(att, dict) or att.get("type") != "image":
+                continue
+            url = str(att.get("url") or "")
+            parts = [p for p in url.split("/") if p]
+            # URL 形如 /uploads/{user_id}/{filename}（静态挂载目录即 UPLOAD_DIR/chat）
+            if len(parts) < 3 or parts[0] != "uploads" or parts[1] != str(user_id):
+                continue
+            target = (base / parts[-1]).resolve()
+            if not target.is_relative_to(base) or not target.is_file():
+                logger.warning("[Vision] 图片文件不存在或路径越界，跳过: {}", url)
+                continue
+            try:
+                data = target.read_bytes()
+            except OSError:
+                continue
+            if len(data) > _MAX_IMAGE_BYTES:
+                logger.warning(
+                    "[Vision] 图片过大（{}MB），跳过: {}", len(data) // 1024 // 1024, parts[-1]
+                )
+                continue
+            mime = att.get("mime_type") or mimetypes.guess_type(target.name)[0] or "image/png"
+            uris.append(f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}")
+            if len(uris) >= _MAX_IMAGES_PER_MESSAGE:
+                break
+        return uris
+
+    async def _call_llm(self, messages: list[dict], scene: str = "chat", images: list[str] | None = None) -> str:
+        """调用云端 LLM 生成回复（配置动态读取: Redis → .env）.
+
+        当前模型支持多模态且存在图片时，把最后一条用户消息改写为
+        OpenAI 兼容的 content 分片（text + image_url data URI）。
+        """
         await self._ensure_llm_started()
+        if images:
+            cfg = await get_llm_config(scene, self._llm.provider)
+            model = str(cfg.get("model") or "")
+            if self._is_multimodal_model(model) and messages and messages[-1].get("role") == "user":
+                messages = self._attach_images(messages, images)
+            else:
+                logger.warning("当前模型不支持多模态（{}），本轮图片已忽略", model)
         reply = await self._llm.chat(messages, scene=scene)
         return reply
 

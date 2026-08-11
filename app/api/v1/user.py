@@ -11,7 +11,8 @@ from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException
 from app.core.security import hash_password, validate_password_strength, verify_password
 from app.models.db_models import RefreshToken, User
-from app.models.user import ChangePasswordRequest, UserProfileUpdateRequest
+from app.models.user import ChangePasswordRequest, SetPromptRequest, UserProfileUpdateRequest
+from app.services.prompts import get_prompt
 
 router = APIRouter()
 
@@ -57,6 +58,36 @@ async def get_current_user_info(
     """获取当前用户信息（从数据库查询完整信息）."""
     user = await _load_user(db, payload)
     return {"code": 0, "data": _user_dict(user)}
+
+
+@router.get("/prompt")
+async def get_my_prompt(
+    payload: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取我当前选定的角色提示词 id（空 = 场景默认）."""
+    user = await _load_user(db, payload)
+    return {"code": 0, "data": {"prompt_id": user.prompt_id or ""}}
+
+
+@router.put("/prompt")
+async def set_my_prompt(
+    req: SetPromptRequest,
+    payload: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """设置我使用的角色提示词（空串恢复默认）；立即对下一条消息生效."""
+    user = await _load_user(db, payload)
+    prompt_id = req.prompt_id.strip()
+    if prompt_id and await get_prompt(prompt_id, str(user.id)) is None:
+        raise BadRequestException("角色不存在")
+    user.prompt_id = prompt_id or None
+    await db.commit()
+    return {
+        "code": 0,
+        "data": {"prompt_id": user.prompt_id or ""},
+        "message": "已更新",
+    }
 
 
 @router.put("/profile")

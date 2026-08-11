@@ -44,7 +44,8 @@ def _build_error_response(status_code: int, code: int, message: str, data: objec
 async def _app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
     """AppException 及其子类：业务错误，按自身状态码返回."""
     # 5xx 视为服务端错误，记录 error；4xx 仅记录 warning（避免刷屏）
-    log = logger.error if exc.status_code >= 500 else logger.warning
+    # 5xx 记录 error；4xx 仅 DEBUG（避免 401/403 等高频业务错误刷屏）
+    log = logger.error if exc.status_code >= 500 else logger.debug
     log(
         "[AppException] {} {} | code={} | message={} | error_code={}",
         request.method, request.url.path, exc.code, exc.message, exc.error_code,
@@ -67,7 +68,7 @@ async def _validation_exception_handler(request: Request, exc: RequestValidation
 async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """兼容 FastAPI/Starlette 原生 HTTPException（存量代码或第三方组件直接抛出）."""
     detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-    log = logger.error if exc.status_code >= 500 else logger.warning
+    log = logger.error if exc.status_code >= 500 else logger.debug
     log("[HTTPException] {} {} | status={} | detail={}", request.method, request.url.path, exc.status_code, detail)
     return _build_error_response(exc.status_code, exc.status_code, detail)
 

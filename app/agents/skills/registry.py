@@ -16,7 +16,7 @@ class SkillRegistry:
         if skill.name in cls._skills:
             logger.warning(f"技能 '{skill.name}' 已存在，将被覆盖")
         cls._skills[skill.name] = skill
-        logger.info(f"技能已注册: {skill.name} | 需要沙箱: {skill.requires_sandbox}")
+        logger.debug(f"技能已注册: {skill.name} | 需要沙箱: {skill.requires_sandbox}")
 
     @classmethod
     def get(cls, name: str) -> Skill | None:

@@ -8,7 +8,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,9 +38,10 @@ router = APIRouter()
 # ══════════════════════════════════════════════
 
 @router.get("/captcha")
-async def get_captcha():
-    """获取图形验证码."""
-    data = await generate_captcha()
+async def get_captcha(request: Request):
+    """获取图形验证码（携带客户端 IP：限流 + 连续输错锁定）."""
+    client_ip = request.client.host if request.client else None
+    data = await generate_captcha(client_ip)
     return {"code": 0, "data": data}
 
 
@@ -49,13 +50,18 @@ async def get_captcha():
 # ══════════════════════════════════════════════
 
 @router.post("/register")
-async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(
+    request: Request,
+    req: RegisterRequest,
+    db: AsyncSession = Depends(get_db),
+):
     """用户注册.
 
     流程: 校验验证码 → 检查账号唯一性 → 密码强度 → argon2id 哈希 → 写入 DB → 签发 JWT
     """
+    client_ip = request.client.host if request.client else None
     # 1. 校验图形验证码
-    if not await verify_captcha(req.captcha_id, req.captcha_result):
+    if not await verify_captcha(req.captcha_id, req.captcha_result, client_ip):
         raise BadRequestException("验证码错误或已过期")
 
     # 2. 检查账号唯一性
@@ -112,13 +118,18 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 # ══════════════════════════════════════════════
 
 @router.post("/login")
-async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(
+    request: Request,
+    req: LoginRequest,
+    db: AsyncSession = Depends(get_db),
+):
     """用户登录.
 
     流程: 校验验证码 → 查用户 → 比对密码哈希 → 签发 JWT
     """
+    client_ip = request.client.host if request.client else None
     # 1. 校验图形验证码
-    if not await verify_captcha(req.captcha_id, req.captcha_result):
+    if not await verify_captcha(req.captcha_id, req.captcha_result, client_ip):
         raise BadRequestException("验证码错误或已过期")
 
     # 2. 查找用户

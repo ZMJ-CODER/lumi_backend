@@ -120,6 +120,7 @@ class Settings(BaseSettings):
     AGENT_SANDBOX_TYPE: str = "local"    # 沙箱类型：local / docker / wasm（预留）
     AGENT_SANDBOX_TIMEOUT_SECONDS: int = 30
     AGENT_SANDBOX_MAX_OUTPUT_CHARS: int = 8000
+    AGENT_SKILLS_MAX_ROUNDS: int = 5     # 技能调用循环最大轮数（防死循环）
 
     # ── 文档类别与按类别半衰期（不同知识时效性不同）──
     RAG_DEFAULT_CATEGORY: str = "general"   # 默认类别

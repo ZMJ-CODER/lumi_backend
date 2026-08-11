@@ -1,9 +1,10 @@
+# syntax=docker/dockerfile:1
+
 # ── Lumi Backend ──
 FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TZ=Asia/Shanghai
 
@@ -23,7 +24,14 @@ WORKDIR /app
 # 先只复制依赖清单并安装项目（editable 模式），
 # 该层只要 pyproject.toml / uv.lock 不变就永远命中缓存
 COPY pyproject.toml uv.lock ./
-RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -e .
+# 镜像源用 ENV 声明而非写死在 RUN 里：
+# 以后换源只改 ENV 值，RUN 指令字符串不变 → 依赖层缓存永久命中
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+# BuildKit 缓存挂载：下载好的 wheel 跨构建持久化。
+# 即使依赖层因 pyproject/uv.lock 变化或缓存失效而重建，
+# 也直接复用本地缓存安装，不用重新下载（torch 等大包从"半天"降到秒级）。
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -e .
 
 # 源码最后复制 —— 源码改动只触发本层及以下层，依赖层不受影响
 COPY app ./app

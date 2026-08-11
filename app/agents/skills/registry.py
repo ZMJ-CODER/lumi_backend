@@ -32,3 +32,11 @@ class SkillRegistry:
     def clear(cls) -> None:
         """清空注册表（主要用于测试）."""
         cls._skills.clear()
+
+
+def init_skills() -> None:
+    """初始化：导入内置技能包，触发注册.
+
+    新增技能时在 app/agents/skills/tools/__init__.py 里注册即可。
+    """
+    from app.agents.skills import tools  # noqa: F401

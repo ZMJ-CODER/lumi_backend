@@ -35,6 +35,9 @@ async def lifespan(app: FastAPI):
 
     # 初始化基础设施
     init_agents()
+    from app.agents.skills.registry import init_skills
+
+    init_skills()
     await init_redis()
     logger.info("基础设施初始化完成")
 

@@ -9,6 +9,7 @@
 import uuid
 from datetime import datetime, timezone
 
+from loguru import logger
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +19,7 @@ from app.models.db_models import DailyTokenStat, LLMUsage
 # 用途分类（"每方面"）
 CATEGORY_CHAT = "chat"
 CATEGORY_TOOL_DECISION = "tool_decision"
+CATEGORY_SKILL = "skill"
 CATEGORY_MEMORY_EXTRACT = "memory_extract"
 CATEGORY_MEMORY_MERGE = "memory_merge"
 CATEGORY_MEMORY_PROFILE = "memory_profile"
@@ -45,17 +47,22 @@ async def record_usage(
             uid = uuid.UUID(str(user_id))
         except (ValueError, TypeError):
             uid = None
-    async with async_session_factory() as session:
-        session.add(
-            LLMUsage(
-                user_id=uid,
-                category=category or CATEGORY_CHAT,
-                model=(model or "")[:100],
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
+    try:
+        async with async_session_factory() as session:
+            session.add(
+                LLMUsage(
+                    user_id=uid,
+                    category=category or CATEGORY_CHAT,
+                    model=(model or "")[:100],
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
             )
-        )
-        await session.commit()
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        # 用量统计属于可观测性：写入失败绝不能影响聊天/检索等主流程
+        # （典型场景：llm_usage 表缺失时仅降级为不统计，而不是让整个请求失败）
+        logger.warning("LLM 用量记录失败（不影响主流程）: {}", exc)
 
 
 def estimate_tokens(text: str) -> int:

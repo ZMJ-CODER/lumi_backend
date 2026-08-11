@@ -5,6 +5,7 @@ from loguru import logger
 from app.agents.base import AgentBase, AgentContext
 from app.agents.registry import AgentRegistry
 from app.core.llm import LLMClient
+from app.services.prompts import get_base_system_prompt
 from app.services.scene_manager import get_scene_system_prompt
 
 
@@ -61,8 +62,10 @@ class ChatAgent(AgentBase):
         # 4. 追加当前用户消息到记忆
         history.append({"role": "user", "content": message})
 
-        # 5. 构建消息列表（System Prompt + 历史上下文）
-        system_prompt = get_scene_system_prompt(context.scene)
+        # 5. 构建消息列表（一级安全规范 + 二级场景角色 + 历史上下文）
+        system_prompt = (
+            f"{get_base_system_prompt()}\n\n[角色设定]\n{get_scene_system_prompt(context.scene)}"
+        )
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
 

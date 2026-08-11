@@ -576,6 +576,7 @@ async def search_user_knowledge(
     citations: list[dict] = []
     for i, row in enumerate(fused, 1):
         context_parts.append(f"[{i}] {row['chunk_text']}")
+        created_at = row.get("created_at")
         citations.append(
             {
                 "type": "public" if row["is_public"] else "personal",
@@ -584,7 +585,9 @@ async def search_user_knowledge(
                 "source": row["title"],
                 "document_id": row["document_id"],
                 "similarity": row.get("similarity"),
-                "created_at": row.get("created_at"),
+                # datetime 必须转字符串：SSE 事件 json.dumps 无法序列化 datetime，
+                # 否则整条流式响应在 done 事件处抛错（引用永远传不到前端）
+                "created_at": created_at.isoformat() if created_at else None,
                 "category": row.get("category"),
                 "recency": row.get("recency"),
                 "score": round(float(row.get("score") or 0.0), 4),
@@ -694,7 +697,7 @@ async def search_public_vectors(
             "document_id": row["document_id"],
             "scene_tag": row["scene_tag"],
             "similarity": row.get("similarity"),
-            "created_at": row.get("created_at"),
+            "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
             "category": row.get("category"),
             "recency": row.get("recency"),
             "score": round(float(row.get("score") or 0.0), 4),

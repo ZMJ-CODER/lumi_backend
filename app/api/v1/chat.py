@@ -38,7 +38,9 @@ router = APIRouter()
 
 def _sse(obj: dict) -> str:
     """构造 SSE 事件行."""
-    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+    # default=str 兜底：citations 等元数据里若混入 datetime 等类型，
+    # 序列化失败会让整条流式以 error 结束，绝不能发生
+    return f"data: {json.dumps(obj, ensure_ascii=False, default=str)}\n\n"
 
 
 @router.post("/stream")

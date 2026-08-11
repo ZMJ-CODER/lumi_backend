@@ -19,8 +19,8 @@ from httpx import AsyncClient
 from loguru import logger
 
 from app.agents.base import AgentContext
-from app.agents.loop import maybe_run_skills
 from app.agents.registry import AgentRegistry
+from app.agents.skills.executor import get_skills_for_scene, run_skill_loop
 from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.llm import LLMClient
@@ -32,7 +32,7 @@ from app.services.rag.knowledge import search_user_knowledge
 from app.services.scene_manager import get_scene_config, get_scene_knowledge_tags
 from app.services.memory.retrieval import search_user_memories
 from app.services.memory.privacy import resolve_decrypt_candidates
-from app.services.prompts import get_prompt_content
+from app.services.prompts import get_base_system_prompt, get_prompt_content
 from app.services.usage import (
     CATEGORY_CHAT,
     CATEGORY_SUMMARY,
@@ -399,19 +399,18 @@ class Orchestrator:
         if prep["is_first"] and not title:
             # 首条消息：回复与标题生成并行（大模型"阅读的同时"总结）
             reply_task = asyncio.create_task(
-                self._call_llm_auto(user_id, prep["messages"], scene, image_uris, content, prep["citations"])
+                self._call_llm_auto(
+                    user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id
+                )
             )
             title_task = asyncio.create_task(self._generate_title(content, user_id))
             reply, title = await asyncio.gather(reply_task, title_task)
             if title:
                 await self.save_conversation_title(conversation_id, title)
         else:
-            reply = await self._call_llm_auto(user_id, prep["messages"], scene, image_uris, content, prep["citations"])
-
-        # 技能调用循环（预留沙箱槽位）：默认关闭，不影响现有流程；
-        # 二期实现后，在此把技能结果回填 LLM 继续对话
-        tool_results = await maybe_run_skills(conversation_id, scene, prep["messages"], user_id=user_id)
-        _ = tool_results  # 预留：二期在此把技能结果回填 LLM 继续对话
+            reply = await self._call_llm_auto(
+                user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id
+            )
 
         # 保存助手回复 + 摘要 + 记忆抽取
         await self._finalize_reply(conversation_id, user_id, reply)
@@ -466,7 +465,7 @@ class Orchestrator:
 
         full_text = ""
         async for evt in self._stream_llm_auto(
-            user_id, prep["messages"], scene, image_uris, content, prep["citations"]
+            user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id
         ):
             if evt["type"] == "delta":
                 full_text += evt["content"]
@@ -555,7 +554,18 @@ class Orchestrator:
         return {"is_first": is_first, "messages": messages, "citations": citations}
 
     async def _get_system_prompt(self, user_id: str, scene: str) -> str:
-        """系统提示词：用户选定角色优先，否则场景默认（可插拔角色目录）."""
+        """系统提示词 = 一级（安全规范，最高优先级） + 二级（角色设定）.
+
+        一级提示词固定前置且不可被覆盖：负责安全红线、防提示注入与越权指令拦截；
+        二级提示词由用户选定的角色（内置/自定义）或场景默认充当，负责性格与说话方式。
+        所有对话路径（流式/阻塞）统一经过此方法，保证安全底线始终生效。
+        """
+        base = get_base_system_prompt()
+        role = await self._resolve_role_prompt(user_id, scene)
+        return f"{base}\n\n[角色设定]\n{role}"
+
+    async def _resolve_role_prompt(self, user_id: str, scene: str) -> str:
+        """二级提示词：用户选定角色优先，否则场景默认（可插拔角色目录）."""
         prompt_id = None
         try:
             async with async_session_factory() as session:
@@ -639,13 +649,23 @@ class Orchestrator:
         image_uris: list[str],
         user_content: str,
         citations: list[dict],
+        conversation_id: str = "",
     ) -> str:
-        """阻塞版：qwen-plus 自主决定是否联网，最终回复由场景模型生成."""
-        messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
+        """阻塞版：技能循环（开启时）或 模型自主联网 + 场景模型回复."""
         if image_uris:
             cfg = await get_llm_config(scene, self._llm.provider)
             if self._is_multimodal_model(str(cfg.get("model") or "")):
                 messages = self._attach_images(messages, image_uris)
+
+        # 技能模式：LLM function calling 决定调用技能，循环到最终回复
+        if settings.AGENT_SKILLS_ENABLED and get_skills_for_scene(scene):
+            final_text, records, skill_citations = await run_skill_loop(
+                self._llm, user_id, messages, scene, conversation_id=conversation_id
+            )
+            citations.extend(skill_citations)
+            return final_text or "（技能调用完成，未能生成回复，请稍后重试）"
+
+        messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
         return await self._llm.chat(
             messages, scene=scene, usage_user_id=user_id, usage_category=CATEGORY_CHAT
         )
@@ -658,13 +678,31 @@ class Orchestrator:
         image_uris: list[str],
         user_content: str,
         citations: list[dict],
+        conversation_id: str = "",
     ):
-        """流式版：qwen-plus 自主决定是否联网，最终回复由场景模型逐段流式产出."""
-        messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
+        """流式版：技能循环（开启时）或 模型自主联网，最终回复流式产出."""
         if image_uris:
             cfg = await get_llm_config(scene, self._llm.provider)
             if self._is_multimodal_model(str(cfg.get("model") or "")):
                 messages = self._attach_images(messages, image_uris)
+
+        # 技能模式：循环内逐轮文本产出（工具调用中的"我来搜索…" + 最终回复）
+        if settings.AGENT_SKILLS_ENABLED and get_skills_for_scene(scene):
+            deltas: list[str] = []
+            final_text, records, skill_citations = await run_skill_loop(
+                self._llm,
+                user_id,
+                messages,
+                scene,
+                conversation_id=conversation_id,
+                on_text=deltas.append,
+            )
+            citations.extend(skill_citations)
+            for piece in deltas:
+                yield {"type": "delta", "content": piece}
+            return
+
+        messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
         async for delta in self._llm.chat_stream(
             messages, scene=scene, usage_user_id=user_id, usage_category=CATEGORY_CHAT
         ):

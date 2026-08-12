@@ -68,16 +68,59 @@ async def rewrite_query(text: str, user_id: str | None = None) -> str | None:
         settings.RAG_QUERY_REWRITE_PROVIDER == "local"
         and settings.RAG_QUERY_REWRITE_MODEL.strip()
     ):
-        return await _rewrite(
-            settings.RAG_QUERY_REWRITE_BASE_URL,
-            None,
-            settings.RAG_QUERY_REWRITE_MODEL.strip(),
-            text,
-            user_id,
-        )
+        return await _rewrite_local(text, user_id)
     return await _rewrite(
         settings.QWEN_BASE_URL, settings.QWEN_API_KEY, settings.QWEN_TURBO_MODEL, text, user_id
     )
+
+
+async def _rewrite_local(text: str, user_id: str | None = None) -> str | None:
+    """本地小模型改写（Ollama 原生 /api/chat）.
+
+    qwen3 系列默认 thinking 模式：OpenAI 兼容端点会把 token 全耗在推理上、
+    content 返回空。这里走原生 API 并显式 think=False，直接输出改写结果。
+    """
+    try:
+        import httpx
+
+        base = settings.RAG_QUERY_REWRITE_BASE_URL.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[: -len("/v1")]  # 兼容遗留的 /v1 后缀 → 原生根路径
+        async with httpx.AsyncClient(timeout=settings.RAG_QUERY_REWRITE_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                f"{base}/api/chat",
+                json={
+                    "model": settings.RAG_QUERY_REWRITE_MODEL.strip(),
+                    "messages": [
+                        {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"用户提问：{text}"},
+                    ],
+                    "stream": False,
+                    "think": False,
+                    "options": {"temperature": 0.2, "num_predict": 512},
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            rewritten = ((data.get("message") or {}).get("content") or "").strip()
+            # 噪声守卫：qwen3 系可能输出推理过程而非改写结果，识别后回退原文
+            # （避免污染检索查询；换用 qwen2.5 等非 thinking 模型后自然通过）
+            noise_markers = ("首先", "我需要", "我的任务", "作为", "分析", "示例", "改写后", "用户提问是", "用户提问：")
+            head = rewritten[:80]
+            if len(rewritten) > max(200, len(text) * 3) or any(m in head for m in noise_markers):
+                logger.info("本地重写输出疑似推理噪声，回退原文: {}", head)
+                return None
+            await record_usage(
+                user_id,
+                CATEGORY_REWRITE,
+                settings.RAG_QUERY_REWRITE_MODEL.strip(),
+                data.get("prompt_eval_count"),
+                data.get("eval_count"),
+            )
+            return rewritten or None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("本地查询重写失败，使用原文: {}", e)
+        return None
 
 
 async def get_retrieval_query(

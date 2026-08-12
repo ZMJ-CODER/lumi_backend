@@ -327,3 +327,43 @@ class ControlLog(Base, UUIDMixin):
     success: Mapped[bool] = mapped_column(Boolean, default=True)
     detail: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Project(Base, UUIDMixin):
+    """本地项目（方案 A）：代码留在用户端，服务器只存结构索引."""
+
+    __tablename__ = "projects"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    root_label: Mapped[str | None] = mapped_column(String(500))
+    file_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="ready", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_projects_user", "user_id"),
+    )
+
+
+class ProjectIndex(Base, UUIDMixin):
+    """项目结构索引：文件路径 + 符号 + 摘要（不含代码正文）."""
+
+    __tablename__ = "project_index"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    symbols: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
+    file_size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_project_index_project", "project_id"),
+    )

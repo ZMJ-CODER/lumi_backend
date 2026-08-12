@@ -40,18 +40,23 @@ class LLMClient:
         *,
         scene: str | None = None,
         model: str | None = None,
+        api_key: str | None = None,
+        reasoning_effort: str | None = None,
         usage_user_id: str | None = None,
         usage_category: str | None = None,
         **kwargs,
     ) -> str:
         """发送对话请求，返回模型响应文本."""
-        cfg = await get_llm_config(scene, self.provider)
+        cfg = await get_llm_config(scene, self.provider, user_id=usage_user_id)
         base_url = (cfg.get("base_url") or "").rstrip("/")
-        api_key = cfg.get("api_key") or ""
+        api_key = api_key or cfg.get("api_key") or ""
         model_name = model or cfg.get("model") or settings.DEEPSEEK_MODEL
         timeout = float(cfg.get("timeout") or 120.0)
 
         payload = {"model": model_name, "messages": messages, **kwargs}
+        effort = reasoning_effort or cfg.get("reasoning_effort")
+        if effort:
+            payload["reasoning_effort"] = effort
         async with AsyncClient(
             base_url=base_url,
             headers={"Authorization": f"Bearer {api_key}"},
@@ -78,14 +83,16 @@ class LLMClient:
         *,
         scene: str | None = None,
         model: str | None = None,
+        api_key: str | None = None,
+        reasoning_effort: str | None = None,
         usage_user_id: str | None = None,
         usage_category: str | None = None,
         **kwargs,
     ) -> tuple[str, list[dict]]:
         """非流式调用并允许工具调用（tool_choice=auto）。返回 (content, tool_calls)."""
-        cfg = await get_llm_config(scene, self.provider)
+        cfg = await get_llm_config(scene, self.provider, user_id=usage_user_id)
         base_url = (cfg.get("base_url") or "").rstrip("/")
-        api_key = cfg.get("api_key") or ""
+        api_key = api_key or cfg.get("api_key") or ""
         model_name = model or cfg.get("model") or settings.DEEPSEEK_MODEL
         timeout = float(cfg.get("timeout") or 120.0)
 
@@ -96,6 +103,9 @@ class LLMClient:
             "tool_choice": "auto",
             **kwargs,
         }
+        effort = reasoning_effort or cfg.get("reasoning_effort")
+        if effort:
+            payload["reasoning_effort"] = effort
         async with AsyncClient(
             base_url=base_url,
             headers={"Authorization": f"Bearer {api_key}"},
@@ -165,14 +175,16 @@ class LLMClient:
         *,
         scene: str | None = None,
         model: str | None = None,
+        api_key: str | None = None,
+        reasoning_effort: str | None = None,
         usage_user_id: str | None = None,
         usage_category: str | None = None,
         **kwargs,
     ):
         """流式调用（SSE）。返回异步生成器，逐段产出文本增量."""
-        cfg = await get_llm_config(scene, self.provider)
+        cfg = await get_llm_config(scene, self.provider, user_id=usage_user_id)
         base_url = (cfg.get("base_url") or "").rstrip("/")
-        api_key = cfg.get("api_key") or ""
+        api_key = api_key or cfg.get("api_key") or ""
         model_name = model or cfg.get("model") or settings.DEEPSEEK_MODEL
         timeout = float(cfg.get("timeout") or 120.0)
 
@@ -183,6 +195,9 @@ class LLMClient:
             "stream_options": {"include_usage": True},
             **kwargs,
         }
+        effort = reasoning_effort or cfg.get("reasoning_effort")
+        if effort:
+            payload["reasoning_effort"] = effort
         streamed_text = ""
         prompt_tokens = completion_tokens = None
         async with AsyncClient(

@@ -3,7 +3,7 @@
 特性：
   - 拓扑排序执行：节点依赖全部完成后才就绪
   - 并发上限（资源协调）：同时最多执行 AGENT_NODE_CONCURRENCY 个节点
-  - React 重试：节点失败按 retryable 重试，最多 max_retries 次
+  - React 重试：节点失败按 retryable 重试，最多 max_retries  次
   - 质检钩子：节点产出结果后走 ReviewHook，不通过则重试/失败
   - 暂停/取消：执行循环感知任务状态，取消时立即中断运行中的节点
 """
@@ -58,6 +58,7 @@ async def execute_dag(
     store: StateStore,
     *,
     concurrency: int | None = None,
+    llm_api_key: str | None = None,
 ) -> Job:
     """执行整个 DAG；就地更新 job.nodes 状态并持久化."""
     validate_dag(job.nodes)
@@ -148,7 +149,12 @@ async def execute_dag(
     def _ctx():
         from app.agents.orchestration.workers import WorkerContext
 
-        return WorkerContext(user_id=job.user_id, job_id=job.job_id, scene=job.scene)
+        return WorkerContext(
+            user_id=job.user_id,
+            job_id=job.job_id,
+            scene=job.scene,
+            llm_api_key=llm_api_key,
+        )
 
     # ── 依赖驱动的调度循环 ──
     pending = {n.id for n in job.nodes}

@@ -80,8 +80,50 @@ def _invalidate_cache(key: str) -> None:
     _cache.pop(key, None)
 
 
-async def get_llm_config(scene: str | None = None, provider: str | None = None) -> dict:
-    """获取生效的 LLM 配置: 场景级 → 全局默认 → .env 兜底."""
+async def _resolve_user_cfg(user_cfg: dict, provider: str | None) -> dict | None:
+    """用户级配置 → 可执行的 {base_url, api_key, model, ...}.
+
+    非 BYOK：api_key 用服务端 .env 里对应 provider 的密钥；
+    BYOK：api_key 留空，由 LLMClient 用请求头临时携带的 key 覆盖（绝不落库）。
+    """
+    from app.core.model_catalog import PROVIDER_BASE_URLS
+
+    prov = user_cfg.get("provider") or provider
+    base_url = PROVIDER_BASE_URLS.get(prov or "") or ""
+    if not base_url:
+        return None
+    env_key = ""
+    if prov == "qwen":
+        env_key = settings.QWEN_API_KEY
+    elif prov == "deepseek":
+        env_key = settings.DEEPSEEK_API_KEY
+    cfg = {
+        "base_url": base_url,
+        "api_key": "" if user_cfg.get("byok") else env_key,
+        "model": user_cfg.get("model") or "",
+        "timeout": 120,
+        "source": "user",
+        "byok": bool(user_cfg.get("byok")),
+    }
+    if user_cfg.get("reasoning_effort"):
+        cfg["reasoning_effort"] = user_cfg["reasoning_effort"]
+    return cfg
+
+
+async def get_llm_config(
+    scene: str | None = None,
+    provider: str | None = None,
+    user_id: str | None = None,
+) -> dict:
+    """获取生效的 LLM 配置: 用户级 → 场景级 → 全局默认 → .env 兜底."""
+    if user_id:
+        from app.services.user_llm_config import get_user_llm_config
+
+        user_cfg = await get_user_llm_config(user_id)
+        if user_cfg:
+            resolved = await _resolve_user_cfg(user_cfg, provider)
+            if resolved:
+                return resolved
     if scene:
         cfg = await _read_from_redis(LLM_CONFIG_SCENE_KEY.format(scene=scene))
         if cfg:

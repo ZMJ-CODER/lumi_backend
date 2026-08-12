@@ -18,7 +18,7 @@ from loguru import logger
 
 from app.agents.orchestration.dag import DagValidationError, execute_dag
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus
-from app.agents.orchestration.planner import Planner, RulePlanner
+from app.agents.orchestration.planner import LlmPlanner, Planner
 from app.agents.orchestration.review import ReviewHook, get_reviewer
 from app.agents.orchestration.state import RedisStateStore, StateStore
 from app.agents.orchestration.workers import WORKERS
@@ -35,16 +35,28 @@ class AgentOrchestrator:
         review: ReviewHook | None = None,
     ):
         self._store = store or RedisStateStore()
-        self._planner = planner or RulePlanner()
+        self._planner = planner or LlmPlanner()
         self._workers = workers if workers is not None else WORKERS
         self._review = review or get_reviewer()
         self._tasks: dict[str, asyncio.Task] = {}  # job_id -> 后台执行任务
+        # BYOK：job 生命周期内的临时 API key（仅内存，任务结束即释放，绝不落库/写日志）
+        self._job_api_keys: dict[str, str] = {}
 
     # ── 提交与执行 ──────────────────────────────────
 
-    async def submit_job(self, user_id: str, request: str, scene: str = "office") -> Job:
+    async def submit_job(
+        self,
+        user_id: str,
+        request: str,
+        scene: str = "office",
+        project_id: str | None = None,
+        llm_api_key: str | None = None,
+        clarification_answer: str | None = None,
+    ) -> Job:
         """规划任务树并启动后台执行，立即返回 Job."""
-        tree = await self._planner.plan(user_id, request, scene)
+        tree = await self._planner.plan(
+            user_id, request, scene, project_id, llm_api_key, clarification_answer
+        )
         job = Job(
             job_id=str(uuid.uuid4()),
             user_id=user_id,
@@ -53,7 +65,13 @@ class AgentOrchestrator:
             status=JobStatus.RUNNING,
             nodes=tree.nodes,
         )
+        # 意图不明确：LLM 请求向用户澄清，任务以"待澄清"结果直接收敛
+        if tree.clarification and not tree.nodes:
+            job.status = JobStatus.COMPLETED
+            job.result = {"type": "clarification", "question": tree.clarification}
         await self._store.create_job(job)
+        if llm_api_key:
+            self._job_api_keys[job.job_id] = llm_api_key
         task = asyncio.create_task(self._run_job(job.job_id))
         self._tasks[job.job_id] = task
         logger.info("多智能体任务已提交: {} | agent={} request={}", job.job_id[:8], [n.agent for n in job.nodes], request[:40])
@@ -61,11 +79,19 @@ class AgentOrchestrator:
 
     async def _run_job(self, job_id: str) -> None:
         """后台执行：校验 DAG → 拓扑执行 → 汇总状态."""
+        # 取出本次任务的临时 key（pop：任务开始时即从内存释放持有，执行期间保留局部引用）
+        llm_api_key = self._job_api_keys.pop(job_id, None)
         try:
             job = await self._store.get_job(job_id)
             if job is None:
                 return
-            await execute_dag(job, self._workers, self._review, self._store)
+            await execute_dag(
+                job,
+                self._workers,
+                self._review,
+                self._store,
+                llm_api_key=llm_api_key,
+            )
         except DagValidationError as exc:
             logger.error("任务 DAG 非法 {}: {}", job_id, exc)
             job = await self._store.get_job(job_id)
@@ -91,6 +117,7 @@ class AgentOrchestrator:
                 await self._store.save_job(job)
         finally:
             self._tasks.pop(job_id, None)
+            self._job_api_keys.pop(job_id, None)
 
     # ── 查询 ────────────────────────────────────────
 

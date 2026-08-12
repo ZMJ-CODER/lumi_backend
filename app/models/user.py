@@ -21,3 +21,15 @@ class SetPromptRequest(BaseModel):
     """设置角色提示词."""
 
     prompt_id: str = Field(default="", description="角色提示词 id；空串表示恢复场景默认")
+
+
+class UserLlmConfigRequest(BaseModel):
+    """用户模型选择（办公模式）."""
+
+    provider: str = Field(..., description="API 提供商: deepseek / qwen / openai")
+    model: str = Field(..., description="模型名称（内置目录 id 或 BYOK 自填模型名）")
+    reasoning_effort: str | None = Field(
+        default=None,
+        description="推理强度: low / medium / high（模型支持时生效）",
+    )
+    byok: bool = Field(default=False, description="是否自备 API key（key 本地保存，不上传）")

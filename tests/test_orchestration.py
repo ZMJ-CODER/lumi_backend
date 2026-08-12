@@ -129,7 +129,7 @@ def test_execute_dag_cancel_stops_running_and_pending():
 
 def test_orchestrator_submit_and_cancel():
     class FakePlanner(Planner):
-        async def plan(self, user_id, request, scene="office"):
+        async def plan(self, user_id, request, scene="office", project_id=None, llm_api_key=None, clarification_answer=None):
             return TaskTree(nodes=[_node("t1", agent="w1")])
 
     worker = FakeWorker("w1", delay=10)  # 慢任务，便于测试取消
@@ -166,3 +166,40 @@ def test_retrieval_worker_registered():
     assert WORKERS["retrieval"].skills == ["query_knowledge"]
     names = {w.name for w in list_workers()}
     assert "retrieval" in names
+
+
+def test_orchestrator_threads_byok_key_to_worker():
+    """BYOK：提交任务携带的临时 key 应通过 WorkerContext 传给 worker，任务结束后释放."""
+    seen = {}
+
+    class KeyWorker:
+        name = "keyw"
+
+        async def execute(self, node, ctx):
+            seen["key"] = ctx.llm_api_key
+            return {"success": True, "content": "ok"}
+
+    class FakePlanner(Planner):
+        async def plan(self, user_id, request, scene="office", project_id=None, llm_api_key=None, clarification_answer=None):
+            return TaskTree(nodes=[_node("t1", agent="keyw")])
+
+    orch = AgentOrchestrator(
+        store=InMemoryStateStore(),
+        planner=FakePlanner(),
+        workers={"keyw": KeyWorker()},
+        review=NoopReviewer(),
+    )
+
+    async def scenario():
+        job = await orch.submit_job("u1", "测试", llm_api_key="sk-test")
+        for _ in range(30):
+            await asyncio.sleep(0.2)
+            cur = await orch.get_job(job.job_id)
+            if cur.status.value in ("completed", "failed", "cancelled", "interrupted"):
+                break
+        assert orch._job_api_keys == {}  # 任务结束，key 已释放
+        return cur
+
+    final = asyncio.run(scenario())
+    assert final.status == JobStatus.COMPLETED
+    assert seen.get("key") == "sk-test"

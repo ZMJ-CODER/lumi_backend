@@ -19,6 +19,7 @@ from app.agents.skills.registry import SkillRegistry
 from app.core.config import settings
 from app.core.database import async_session_factory
 from app.models.db_models import ControlLog
+from app.services import client_tools
 from app.services.usage import CATEGORY_CHAT, CATEGORY_SKILL
 
 
@@ -133,12 +134,63 @@ async def _record_skill_log(
         logger.warning("技能审计日志写入失败: {}", exc)
 
 
+async def run_client_skill_request(
+    user_id: str,
+    skill_name: str,
+    params: dict,
+    requires_confirmation: bool = False,
+) -> SkillResult:
+    """客户端技能通用执行：创建待执行请求 → 用户端轮询执行 → 等待结果（超时取消）.
+
+    供 client 环境技能（本地文件/项目操作）复用；key 不经过服务端。
+    """
+    if not user_id:
+        return SkillResult(
+            success=False,
+            error="该技能需要登录后使用",
+            error_code="INVALID_ARGS",
+            retryable=False,
+        )
+    req = await client_tools.create_client_tool_request(
+        user_id, skill_name, params, requires_confirmation
+    )
+    if not req:
+        return SkillResult(
+            success=False,
+            error="该技能需要登录后使用",
+            error_code="INVALID_ARGS",
+            retryable=False,
+        )
+    result = await client_tools.await_result(user_id, req["request_id"])
+    if result is None:
+        return SkillResult(
+            success=False,
+            error="等待用户响应超时，操作已取消",
+            error_code="TIMEOUT",
+            retryable=False,
+        )
+    if result.get("success"):
+        return SkillResult(
+            success=True,
+            output=str(result.get("output") or ""),
+            metadata=result.get("metadata") or {},
+        )
+    return SkillResult(
+        success=False,
+        error=str(result.get("error") or "客户端执行失败"),
+        error_code=str((result.get("metadata") or {}).get("error_code") or "EXEC_ERROR"),
+        retryable=False,
+        metadata=result.get("metadata") or {},
+    )
+
+
 async def run_skill_loop(
     llm,
     user_id: str,
     messages: list[dict],
     scene: str = "chat",
     conversation_id: str = "",
+    llm_api_key: str | None = None,
     on_text=None,
 ) -> tuple[str, list[dict], list[dict]]:
     """技能调用主循环.
@@ -149,6 +201,7 @@ async def run_skill_loop(
     Args:
         llm: LLMClient 实例
         messages: 当前对话消息列表（最后一个为用户消息）
+        llm_api_key: BYOK 用户本次请求临时携带的 API key（用完即弃，不落库）
         on_text: 可选回调，每轮 assistant 文本产出时调用（流式输出用）
 
     Returns:
@@ -174,6 +227,7 @@ async def run_skill_loop(
             scene=scene,
             usage_user_id=user_id,
             usage_category=CATEGORY_SKILL,
+            api_key=llm_api_key,
         )
         if content:
             final_text = content
@@ -214,6 +268,7 @@ async def run_skill_loop(
                 scene=scene,
                 usage_user_id=user_id,
                 usage_category=CATEGORY_CHAT,
+                api_key=llm_api_key,
             )
             if on_text:
                 on_text(final_text)

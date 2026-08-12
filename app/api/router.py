@@ -16,6 +16,7 @@ from app.api.v1 import (
     local_corpus,
     memories,
     prompts,
+    projects,
     public_kb,
     tts,
     tools,
@@ -55,6 +56,9 @@ api_router.include_router(memories.router, prefix="/admin/memories", tags=["admi
 
 # 角色提示词
 api_router.include_router(prompts.router, prefix="/prompts", tags=["prompts"])
+
+# 本地项目（方案 A：结构索引，代码留本地）
+api_router.include_router(projects.router, prefix="/projects", tags=["projects"])
 
 # 操控日志
 api_router.include_router(control_logs.router, prefix="/control-logs", tags=["control-logs"])

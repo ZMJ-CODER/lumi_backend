@@ -20,6 +20,8 @@ from app.models.db_models import DailyTokenStat, LLMUsage
 CATEGORY_CHAT = "chat"
 CATEGORY_TOOL_DECISION = "tool_decision"
 CATEGORY_SKILL = "skill"
+CATEGORY_CODE = "code"
+CATEGORY_PLAN = "plan"
 CATEGORY_MEMORY_EXTRACT = "memory_extract"
 CATEGORY_MEMORY_MERGE = "memory_merge"
 CATEGORY_MEMORY_PROFILE = "memory_profile"

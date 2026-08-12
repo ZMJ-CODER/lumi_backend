@@ -27,11 +27,26 @@ def _skills():
 def test_skills_registered_and_scene_filtered():
     names = {s.name for s in SkillRegistry.list()}
     assert {"web_search", "query_knowledge", "get_datetime", "python_exec"} <= names
+    assert {"list_project", "read_project_file", "write_project_file", "run_project_command"} <= names
     chat = {s.name for s in get_skills_for_scene("chat")}
     assert "python_exec" not in chat  # 危险技能不进 chat 场景
     assert "web_search" in chat
     office = {s.name for s in get_skills_for_scene("office")}
     assert "python_exec" in office
+    assert {"list_project", "write_project_file", "run_project_command"} <= office
+
+
+def test_project_skills_metadata():
+    ws = SkillRegistry.get("write_project_file")
+    assert ws.environment == "client"
+    assert ws.requires_confirmation is True
+    assert ws.scenes == ["office"]
+    rc = SkillRegistry.get("run_project_command")
+    assert rc.environment == "client"
+    assert rc.requires_confirmation is True
+    rp = SkillRegistry.get("read_project_file")
+    assert rp.environment == "client"
+    assert rp.requires_confirmation is False
 
 
 def test_tool_definition_shape():

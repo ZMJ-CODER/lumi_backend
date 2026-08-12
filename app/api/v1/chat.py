@@ -58,6 +58,8 @@ async def chat_stream(
     is_guest = not payload
     uid = _uid(payload)
     conversation_id = req.conversation_id or ""
+    # BYOK：用户自备 API key 每次请求临时携带，用完即弃（不落库、不打印日志）
+    llm_api_key = request.headers.get("x-llm-api-key") or None
 
     async def event_gen():
         result = None
@@ -101,6 +103,7 @@ async def chat_stream(
                 local_mode=req.local_mode,
                 retrieval_query=req.retrieval_query,
                 attachments=req.attachments,
+                llm_api_key=llm_api_key,
             ):
                 if evt["type"] == "delta":
                     full_text += evt["content"]

@@ -525,6 +525,8 @@ async def send_message(
     user_id = payload.get("sub") or req.guest_id or "guest"
     is_guest = not payload
     uid = _uid(payload)
+    # BYOK：用户自备 API key 每次请求临时携带，用完即弃（不落库、不打印日志）
+    llm_api_key = request.headers.get("x-llm-api-key") or None
 
     # 用户发送新消息 → 中断上一条未完成的语音合成
     if not is_guest:
@@ -555,6 +557,7 @@ async def send_message(
             retrieval_query=req.retrieval_query,
             attachments=req.attachments,
             web_search_enabled=req.web_search,
+            llm_api_key=llm_api_key,
         )
 
         # 服务端持久化（仅登录用户；游客保持 Redis-only）

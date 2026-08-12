@@ -49,6 +49,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      # 本地查询重写小模型（Ollama 在 Windows 宿主）：容器内 localhost 到不了宿主，用 host.docker.internal
+      RAG_QUERY_REWRITE_BASE_URL: http://host.docker.internal:11434/v1
       # 本地 TTS 走 compose 内的 tts 服务
       TTS_LOCAL_URL: http://tts:8765/tts
     ports:

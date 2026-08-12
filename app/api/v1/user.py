@@ -12,6 +12,9 @@ from app.core.exceptions import BadRequestException, ForbiddenException, NotFoun
 from app.core.security import hash_password, validate_password_strength, verify_password
 from app.models.db_models import RefreshToken, User
 from app.models.user import ChangePasswordRequest, SetPromptRequest, UserProfileUpdateRequest
+from app.core.model_catalog import PROVIDER_BASE_URLS, find_model, get_model_catalog
+from app.models.user import UserLlmConfigRequest
+from app.services import user_llm_config
 from app.services.prompts import get_prompt
 
 router = APIRouter()
@@ -137,3 +140,55 @@ async def change_password(
     await db.commit()
 
     return {"code": 0, "message": "密码已修改，其他设备已退出，请使用新密码重新登录"}
+
+
+# ── 模型选择（办公模式） ─────────────────────────────
+
+@router.get("/models")
+async def list_models(payload: dict = Depends(require_auth)):
+    """模型目录（含上下文/多模态/价格/推理强度等元数据）."""
+    return {"code": 0, "data": {"items": get_model_catalog()}}
+
+
+@router.get("/llm-config")
+async def get_llm_config_view(payload: dict = Depends(require_auth)):
+    """当前用户的模型选择（不含任何 API key）."""
+    cfg = await user_llm_config.get_user_llm_config(payload["sub"])
+    return {"code": 0, "data": cfg or {}}
+
+
+@router.put("/llm-config")
+async def set_llm_config_view(
+    req: UserLlmConfigRequest,
+    payload: dict = Depends(require_auth),
+):
+    """保存模型选择：内置模型 或 自备 API（byok）.
+
+    BYOK 只存 provider/model/reasoning_effort；API key 由前端本地加密保存，
+    每次请求临时携带 X-LLM-API-KEY 头，后端用完即弃、绝不落库。
+    """
+    if req.provider not in PROVIDER_BASE_URLS:
+        raise BadRequestException(f"不支持的 API 提供商: {req.provider}，可选: {list(PROVIDER_BASE_URLS)}")
+    model_id = (req.model or "").strip()
+    if not model_id:
+        raise BadRequestException("模型名称不能为空")
+    if not req.byok and find_model(model_id) is None:
+        raise BadRequestException(f"未知的内置模型: {model_id}")
+    if req.reasoning_effort and req.reasoning_effort not in ("low", "medium", "high"):
+        raise BadRequestException("推理强度仅支持 low / medium / high")
+
+    cfg = {
+        "provider": req.provider,
+        "model": model_id,
+        "reasoning_effort": req.reasoning_effort,
+        "byok": bool(req.byok),
+    }
+    await user_llm_config.set_user_llm_config(payload["sub"], cfg)
+    return {"code": 0, "data": cfg, "message": "模型选择已保存"}
+
+
+@router.delete("/llm-config")
+async def clear_llm_config_view(payload: dict = Depends(require_auth)):
+    """恢复默认模型（清除用户级选择）."""
+    await user_llm_config.clear_user_llm_config(payload["sub"])
+    return {"code": 0, "message": "已恢复默认模型"}

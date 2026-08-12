@@ -1,6 +1,6 @@
 """多智能体协作 API —— 提交任务 / 查询状态 / 终止 / 暂停 / 恢复."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
 from app.agents.orchestration import orchestrator
 from app.core.deps import require_auth
@@ -12,11 +12,24 @@ router = APIRouter()
 
 @router.post("/jobs")
 async def create_agent_job(
+    request: Request,
     req: CreateAgentJobRequest,
     payload: dict = Depends(require_auth),
 ):
-    """提交多智能体协作任务（规划 + 后台执行），立即返回任务及任务树."""
-    job = await orchestrator.submit_job(payload["sub"], req.request, req.scene)
+    """提交多智能体协作任务（规划 + 后台执行），立即返回任务及任务树.
+
+    BYOK：用户自备 API key 通过 X-LLM-API-KEY 头临时携带，
+    仅任务执行期间保存在内存，任务结束即释放，不落库不写日志。
+    """
+    llm_api_key = request.headers.get("x-llm-api-key") or None
+    job = await orchestrator.submit_job(
+        payload["sub"],
+        req.request,
+        req.scene,
+        req.project_id,
+        llm_api_key,
+        req.clarification_answer,
+    )
     return {"code": 0, "data": job.model_dump()}
 
 

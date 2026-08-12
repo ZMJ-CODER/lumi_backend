@@ -284,7 +284,12 @@ class Orchestrator:
         r = get_redis()
         await r.set(TITLE_KEY.format(conversation_id=conversation_id), title, ex=604800)
 
-    async def _generate_title(self, content: str, user_id: str) -> str:
+    async def _generate_title(
+        self,
+        content: str,
+        user_id: str,
+        llm_api_key: str | None = None,
+    ) -> str:
         """用大模型生成会话标题（轻量调用，首条消息时与回复并行）."""
         try:
             reply = await self._llm.chat(
@@ -295,6 +300,7 @@ class Orchestrator:
                 max_tokens=32,
                 usage_user_id=user_id,
                 usage_category=CATEGORY_TITLE,
+                api_key=llm_api_key,
             )
             title = reply.strip().strip('"“”').strip()
             return title[:30]
@@ -374,6 +380,7 @@ class Orchestrator:
         retrieval_query: str | None = None,
         attachments: list | None = None,
         web_search_enabled: bool = False,
+        llm_api_key: str | None = None,
     ) -> dict:
         """处理用户消息的核心流程（阻塞版，供旧接口/降级路径使用）."""
         transcript = await self._resolve_transcript(content, attachments)
@@ -400,16 +407,16 @@ class Orchestrator:
             # 首条消息：回复与标题生成并行（大模型"阅读的同时"总结）
             reply_task = asyncio.create_task(
                 self._call_llm_auto(
-                    user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id
+                    user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key
                 )
             )
-            title_task = asyncio.create_task(self._generate_title(content, user_id))
+            title_task = asyncio.create_task(self._generate_title(content, user_id, llm_api_key))
             reply, title = await asyncio.gather(reply_task, title_task)
             if title:
                 await self.save_conversation_title(conversation_id, title)
         else:
             reply = await self._call_llm_auto(
-                user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id
+                user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key
             )
 
         # 保存助手回复 + 摘要 + 记忆抽取
@@ -434,6 +441,7 @@ class Orchestrator:
         local_mode: bool = False,
         retrieval_query: str | None = None,
         attachments: list | None = None,
+        llm_api_key: str | None = None,
     ):
         """流式处理用户消息：准备流程同 handle_message，LLM 走工具调用 + SSE 流式.
 
@@ -461,11 +469,11 @@ class Orchestrator:
         # 首条消息：标题生成与回复流并行
         title_task = None
         if prep["is_first"] and not title:
-            title_task = asyncio.create_task(self._generate_title(content, user_id))
+            title_task = asyncio.create_task(self._generate_title(content, user_id, llm_api_key))
 
         full_text = ""
         async for evt in self._stream_llm_auto(
-            user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id
+            user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key
         ):
             if evt["type"] == "delta":
                 full_text += evt["content"]
@@ -650,6 +658,7 @@ class Orchestrator:
         user_content: str,
         citations: list[dict],
         conversation_id: str = "",
+        llm_api_key: str | None = None,
     ) -> str:
         """阻塞版：技能循环（开启时）或 模型自主联网 + 场景模型回复."""
         if image_uris:
@@ -660,14 +669,14 @@ class Orchestrator:
         # 技能模式：LLM function calling 决定调用技能，循环到最终回复
         if settings.AGENT_SKILLS_ENABLED and get_skills_for_scene(scene):
             final_text, records, skill_citations = await run_skill_loop(
-                self._llm, user_id, messages, scene, conversation_id=conversation_id
+                self._llm, user_id, messages, scene, conversation_id=conversation_id, llm_api_key=llm_api_key
             )
             citations.extend(skill_citations)
             return final_text or "（技能调用完成，未能生成回复，请稍后重试）"
 
         messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
         return await self._llm.chat(
-            messages, scene=scene, usage_user_id=user_id, usage_category=CATEGORY_CHAT
+            messages, scene=scene, usage_user_id=user_id, usage_category=CATEGORY_CHAT, api_key=llm_api_key
         )
 
     async def _stream_llm_auto(
@@ -679,6 +688,7 @@ class Orchestrator:
         user_content: str,
         citations: list[dict],
         conversation_id: str = "",
+        llm_api_key: str | None = None,
     ):
         """流式版：技能循环（开启时）或 模型自主联网，最终回复流式产出."""
         if image_uris:
@@ -695,6 +705,7 @@ class Orchestrator:
                 messages,
                 scene,
                 conversation_id=conversation_id,
+                llm_api_key=llm_api_key,
                 on_text=deltas.append,
             )
             citations.extend(skill_citations)
@@ -704,7 +715,7 @@ class Orchestrator:
 
         messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
         async for delta in self._llm.chat_stream(
-            messages, scene=scene, usage_user_id=user_id, usage_category=CATEGORY_CHAT
+            messages, scene=scene, usage_user_id=user_id, usage_category=CATEGORY_CHAT, api_key=llm_api_key
         ):
             yield {"type": "delta", "content": delta}
 

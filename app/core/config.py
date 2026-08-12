@@ -123,6 +123,11 @@ class Settings(BaseSettings):
     AGENT_SKILLS_MAX_ROUNDS: int = 5     # 技能调用循环最大轮数（防死循环）
     AGENT_CLIENT_TOOL_TIMEOUT_SECONDS: int = 120  # 客户端工具等待用户执行/确认的最长时间
     SKILL_PLUGINS_DIR: str = "plugins/skills"     # 技能插件目录（Docker 挂载为 volume 支持热更新）
+    # ── 多智能体协作编排 ──
+    AGENT_JOBS_TTL_SECONDS: int = 86400           # 任务状态保留时间（24h，Redis appendonly 持久化）
+    AGENT_NODE_CONCURRENCY: int = 2               # 同时执行的 DAG 节点数（资源协调上限）
+    AGENT_NODE_MAX_RETRIES: int = 2               # 单节点失败最大重试次数（React 重试）
+    AGENT_NODE_TIMEOUT_SECONDS: int = 300         # 单节点执行超时（5 分钟，对应断网策略）
 
     # ── 文档类别与按类别半衰期（不同知识时效性不同）──
     RAG_DEFAULT_CATEGORY: str = "general"   # 默认类别

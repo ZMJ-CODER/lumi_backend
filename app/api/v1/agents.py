@@ -1,0 +1,70 @@
+"""多智能体协作 API —— 提交任务 / 查询状态 / 终止 / 暂停 / 恢复."""
+
+from fastapi import APIRouter, Depends, Query
+
+from app.agents.orchestration import orchestrator
+from app.core.deps import require_auth
+from app.core.exceptions import NotFoundException
+from app.models.agent import CancelAgentJobRequest, CreateAgentJobRequest
+
+router = APIRouter()
+
+
+@router.post("/jobs")
+async def create_agent_job(
+    req: CreateAgentJobRequest,
+    payload: dict = Depends(require_auth),
+):
+    """提交多智能体协作任务（规划 + 后台执行），立即返回任务及任务树."""
+    job = await orchestrator.submit_job(payload["sub"], req.request, req.scene)
+    return {"code": 0, "data": job.model_dump()}
+
+
+@router.get("/jobs")
+async def list_agent_jobs(
+    limit: int = Query(default=20, ge=1, le=100),
+    payload: dict = Depends(require_auth),
+):
+    """列出我的多智能体任务（按提交时间倒序）."""
+    jobs = await orchestrator.list_jobs(payload["sub"], limit)
+    return {"code": 0, "data": {"items": [j.model_dump() for j in jobs]}}
+
+
+@router.get("/jobs/{job_id}")
+async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
+    """查询任务状态与任务树（前端任务面板数据源）."""
+    job = await orchestrator.get_job(job_id)
+    if not job or job.user_id != payload["sub"]:
+        raise NotFoundException("任务不存在")
+    return {"code": 0, "data": job.model_dump()}
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_agent_job(
+    job_id: str,
+    req: CancelAgentJobRequest,
+    payload: dict = Depends(require_auth),
+):
+    """终止任务：立即停止调度，可选择保留已完成节点."""
+    job = await orchestrator.cancel_job(job_id, req.keep_completed)
+    if not job or job.user_id != payload["sub"]:
+        raise NotFoundException("任务不存在")
+    return {"code": 0, "data": job.model_dump(), "message": "任务已终止"}
+
+
+@router.post("/jobs/{job_id}/pause")
+async def pause_agent_job(job_id: str, payload: dict = Depends(require_auth)):
+    """暂停任务（不调度新节点；运行中的节点会执行完）."""
+    job = await orchestrator.pause_job(job_id)
+    if not job or job.user_id != payload["sub"]:
+        raise NotFoundException("任务不存在")
+    return {"code": 0, "data": job.model_dump(), "message": "任务已暂停"}
+
+
+@router.post("/jobs/{job_id}/resume")
+async def resume_agent_job(job_id: str, payload: dict = Depends(require_auth)):
+    """恢复被暂停的任务."""
+    job = await orchestrator.resume_job(job_id)
+    if not job or job.user_id != payload["sub"]:
+        raise NotFoundException("任务不存在")
+    return {"code": 0, "data": job.model_dump(), "message": "任务已恢复"}

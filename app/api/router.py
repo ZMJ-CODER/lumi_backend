@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     admin,
+    agents,
     auth,
     chat,
     control_logs,
@@ -27,6 +28,9 @@ api_router = APIRouter()
 # 认证 & 用户
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(user.router, prefix="/user", tags=["user"])
+
+# 多智能体协作（办公模式：任务编排 / 状态管理）
+api_router.include_router(agents.router, prefix="/agents", tags=["agents"])
 
 # 健康检查
 api_router.include_router(health.router, prefix="/health", tags=["health"])

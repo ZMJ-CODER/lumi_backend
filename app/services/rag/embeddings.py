@@ -20,48 +20,88 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 _model = None
 _model_lock = threading.Lock()
+_model_failed = False  # 加载失败后缓存，避免每次请求都重新尝试下载
+
+
+def _resolve_device() -> str:
+    """解析嵌入设备：配置了 cuda 但 torch 无 CUDA 支持时自动回退 cpu，避免整条链路失败."""
+    device = settings.EMBEDDING_DEVICE or "cpu"
+    if device == "cuda":
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                logger.warning(
+                    "EMBEDDING_DEVICE=cuda 但 torch 未编译 CUDA 支持（{}），回退到 cpu",
+                    torch.__version__,
+                )
+                device = "cpu"
+        except Exception:  # noqa: BLE001
+            device = "cpu"
+    return device
 
 
 def _get_model():
     """懒加载模型单例，并校验输出维度与配置一致."""
-    global _model
+    global _model, _model_failed
+    if _model_failed:
+        return None
     if _model is None:
         with _model_lock:
             if _model is None:
                 from sentence_transformers import SentenceTransformer
 
-                logger.info("⏳ 加载嵌入模型 {} ...", settings.EMBEDDING_MODEL)
+                device = _resolve_device()
+                logger.info(
+                    "⏳ 加载嵌入模型 {} (device={}) ...",
+                    settings.EMBEDDING_MODEL,
+                    device,
+                )
                 # 优先本地缓存加载（离线可用）；缓存不存在时回退在线下载
                 try:
-                    _model = SentenceTransformer(
-                        settings.EMBEDDING_MODEL,
-                        device=settings.EMBEDDING_DEVICE,
-                        cache_folder=settings.EMBEDDING_CACHE_DIR or None,
-                        local_files_only=True,
-                    )
-                except Exception as e:
-                    logger.info("本地无模型缓存，尝试在线下载: {}", e)
-                    _model = SentenceTransformer(
-                        settings.EMBEDDING_MODEL,
-                        device=settings.EMBEDDING_DEVICE,
-                        cache_folder=settings.EMBEDDING_CACHE_DIR or None,
-                    )
-                if hasattr(_model, "get_embedding_dimension"):
-                    dim = _model.get_embedding_dimension()
-                else:
-                    dim = _model.get_sentence_embedding_dimension()
-                if dim != settings.EMBEDDING_DIMENSION:
-                    raise RuntimeError(
-                        f"嵌入模型维度 {dim} 与 EMBEDDING_DIMENSION={settings.EMBEDDING_DIMENSION} 不一致，"
-                        "请检查配置或数据库向量列维度"
-                    )
-                logger.info("✅ 嵌入模型加载完成，维度={}", dim)
+                    try:
+                        _model = SentenceTransformer(
+                            settings.EMBEDDING_MODEL,
+                            device=device,
+                            cache_folder=settings.EMBEDDING_CACHE_DIR or None,
+                            local_files_only=True,
+                        )
+                    except Exception as e:
+                        logger.info("本地无模型缓存，尝试在线下载: {}", e)
+                        _model = SentenceTransformer(
+                            settings.EMBEDDING_MODEL,
+                            device=device,
+                            cache_folder=settings.EMBEDDING_CACHE_DIR or None,
+                        )
+                    if hasattr(_model, "get_embedding_dimension"):
+                        dim = _model.get_embedding_dimension()
+                    else:
+                        dim = _model.get_sentence_embedding_dimension()
+                    if dim != settings.EMBEDDING_DIMENSION:
+                        raise RuntimeError(
+                            f"嵌入模型维度 {dim} 与 EMBEDDING_DIMENSION={settings.EMBEDDING_DIMENSION} 不一致，"
+                            "请检查配置或数据库向量列维度"
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.error("嵌入模型加载失败（后续请求将降级跳过语义检索）: {}", e)
+                    _model = None
+                    _model_failed = True
+                    return None
+                logger.info(
+                    "✅ 嵌入模型加载完成，维度={} device={}",
+                    dim,
+                    device,
+                )
+    if _model_failed:
+        return None
     return _model
 
 
 def _encode_sync(texts: list[str], is_query: bool = False) -> list[list[float]]:
     """同步编码（在子线程中执行）."""
     model = _get_model()
+    if model is None:
+        return []
     if is_query and settings.EMBEDDING_QUERY_INSTRUCTION:
         texts = [settings.EMBEDDING_QUERY_INSTRUCTION + t for t in texts]
     vectors = model.encode(
@@ -86,4 +126,4 @@ async def embed_query(text: str) -> list[float]:
     if not text:
         return []
     vectors = await asyncio.to_thread(_encode_sync, [text], True)
-    return vectors[0]
+    return vectors[0] if vectors else []

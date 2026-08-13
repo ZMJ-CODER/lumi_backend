@@ -340,6 +340,7 @@ class Project(Base, UUIDMixin):
     file_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="ready", nullable=False)
+    vector_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -366,4 +367,34 @@ class ProjectIndex(Base, UUIDMixin):
 
     __table_args__ = (
         Index("idx_project_index_project", "project_id"),
+    )
+
+
+class CodeEmbedding(Base, UUIDMixin):
+    """本地代码向量：file_key=路径哈希（服务器不知真实路径与代码），供 agent 语义定位."""
+
+    __tablename__ = "code_embeddings"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    file_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    function_name: Mapped[str | None] = mapped_column(String(200))
+    line_start: Mapped[int | None] = mapped_column(Integer)
+    line_end: Mapped[int | None] = mapped_column(Integer)
+    summary: Mapped[str | None] = mapped_column(String(1000))
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(settings.EMBEDDING_DIMENSION), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_code_emb_project", "project_id"),
+        Index(
+            "idx_code_emb_embedding",
+            "embedding",
+            postgresql_using="ivfflat",
+            postgresql_with={"lists": 100},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
     )

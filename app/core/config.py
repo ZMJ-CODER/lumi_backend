@@ -1,8 +1,13 @@
 """应用配置，基于 pydantic-settings 从环境变量 / .env 加载."""
 
 from functools import lru_cache
+from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
+
+# 项目根目录：app/core/config.py → 上溯三级
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class Settings(BaseSettings):
@@ -65,14 +70,14 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "deepseek"  # qwen / deepseek
 
     # ── 嵌入模型（本地推理，sentence-transformers）──
-    EMBEDDING_MODEL: str = "BAAI/bge-small-zh-v1.5"
-    EMBEDDING_DIMENSION: int = 512  # bge-small-zh-v1.5=512；切换 bge-m3 时改为 1024 并迁移数据库向量列
+    EMBEDDING_MODEL: str = "BAAI/bge-m3"
+    EMBEDDING_DIMENSION: int = 1024  # bge-m3=1024（已从 bge-small-zh 迁移）
     EMBEDDING_BATCH_SIZE: int = 16
     EMBEDDING_DEVICE: str = "cpu"   # cpu / cuda
     EMBEDDING_CACHE_DIR: str = ""   # 模型缓存目录；为空用 HuggingFace 默认缓存
     # 检索指令前缀。bge 官方建议查询时附加，但本项目实测不加区分度更好，
     # 默认关闭；切换 bge-m3 后可重新开启对比效果。
-    EMBEDDING_QUERY_INSTRUCTION: str = ""
+    EMBEDDING_QUERY_INSTRUCTION: str = "为这个句子生成表示以用于检索相关文章："
 
     # ── 文件上传 ──
     UPLOAD_DIR: str = "data/uploads"
@@ -122,6 +127,7 @@ class Settings(BaseSettings):
     AGENT_SANDBOX_MAX_OUTPUT_CHARS: int = 8000
     AGENT_SKILLS_MAX_ROUNDS: int = 5     # 技能调用循环最大轮数（防死循环）
     AGENT_CLIENT_TOOL_TIMEOUT_SECONDS: int = 120  # 客户端工具等待用户执行/确认的最长时间
+    AGENT_REVIEW_ENABLED: bool = True    # 质检层开关（code 任务 LLM 审查；失败自动放行）
     SKILL_PLUGINS_DIR: str = "plugins/skills"     # 技能插件目录（Docker 挂载为 volume 支持热更新）
     # ── 多智能体协作编排 ──
     AGENT_JOBS_TTL_SECONDS: int = 86400           # 任务状态保留时间（24h，Redis appendonly 持久化）
@@ -192,9 +198,28 @@ class Settings(BaseSettings):
     CONVERSATION_MESSAGE_HARD_CAP: int = 70  # 超过该条数触发异步裁剪（回到 KEEP）
 
     model_config = {
-        "env_file": ".env",
+        # 固定从项目根加载 .env，避免 API/worker 从不同目录启动时读不到配置
+        "env_file": str(PROJECT_ROOT / ".env"),
         "env_file_encoding": "utf-8",
     }
+
+    @field_validator(
+        "UPLOAD_DIR",
+        "EMBEDDING_CACHE_DIR",
+        "PROMPTS_DIR",
+        "SKILL_PLUGINS_DIR",
+        mode="after",
+    )
+    @classmethod
+    def _resolve_relative_paths(cls, value: str) -> str:
+        """相对路径统一基于项目根解析为绝对路径.
+
+        防止 API（uvicorn）与 Celery worker 工作目录不一致时，
+        上传文件/模型缓存/提示词等相对路径各自解析到不同位置。
+        """
+        if value and not Path(value).is_absolute():
+            return str(PROJECT_ROOT / value)
+        return value
 
 
 @lru_cache

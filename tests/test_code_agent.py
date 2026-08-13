@@ -5,6 +5,7 @@ import uuid
 
 from app.agents.orchestration.models import TaskNode
 from app.agents.orchestration.planner import LlmPlanner, RulePlanner
+from app.agents.orchestration.review import LlmReviewHook
 from app.agents.orchestration.workers import CodeAgent, WorkerContext
 
 
@@ -23,7 +24,7 @@ def test_code_agent_read_generate_write(monkeypatch):
     calls = []
 
     async def fake_locate(project_id, instruction, ctx):
-        return "src/main.py"
+        return {"path": "src/main.py"}
 
     async def fake_generate(ctx, instruction, path, original):
         assert original == "old code"
@@ -45,8 +46,12 @@ def test_code_agent_read_generate_write(monkeypatch):
     assert result["success"] is True
     assert calls[0][0] == "read_project_file"
     assert calls[1][0] == "write_project_file"
+    assert calls[0][1]["path"] == "src/main.py"
     assert calls[1][1]["path"] == "src/main.py"
     assert calls[1][1]["content"] == "new code"
+    # 质检层可审查内容
+    assert result["new_content"] == "new code"
+    assert result["path"] == "src/main.py"
 
 
 def test_code_agent_requires_params(monkeypatch):
@@ -60,7 +65,7 @@ def test_code_agent_locate_failure(monkeypatch):
     agent = CodeAgent()
 
     async def fake_locate(project_id, instruction, ctx):
-        return None
+        return {}
 
     monkeypatch.setattr(agent, "_locate", fake_locate)
     node = _node(params={"project_id": "p1", "instruction": "改某个文件"})
@@ -215,3 +220,55 @@ def test_rule_planner_uses_clarification_answer(monkeypatch):
     )
     assert tree.nodes[0].agent == "code"
     assert str(tree.nodes[0].params["project_id"]) == str(FakeProject().id)
+
+
+def test_review_approves_non_code_and_missing_content():
+    hook = LlmReviewHook()
+    node = TaskNode(id="t1", name="x", agent="retrieval", params={})
+    verdict = asyncio.run(hook.review(node, {"success": True}, _ctx()))
+    assert verdict.approved is True
+
+    code_node = TaskNode(id="t2", name="code", agent="code", params={})
+    verdict = asyncio.run(hook.review(code_node, {"success": True}, _ctx()))
+    assert verdict.approved is True  # 无 new_content → 放行
+
+
+def test_review_llm_rejects_bad_code(monkeypatch):
+    hook = LlmReviewHook()
+    code_node = TaskNode(
+        id="t2",
+        name="code",
+        agent="code",
+        params={"instruction": "加个函数"},
+    )
+    result = {
+        "success": True,
+        "new_content": "def broken(:\n",
+        "instruction": "加个函数",
+        "path": "a.py",
+    }
+
+    async def fake_chat(self, messages, **kwargs):
+        return '{"approved": false, "feedback": "语法错误"}'
+
+    import app.core.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod.LLMClient, "chat", fake_chat)
+    verdict = asyncio.run(hook.review(code_node, result, _ctx()))
+    assert verdict.approved is False
+    assert "语法错误" in verdict.feedback
+
+
+def test_review_llm_failure_approves(monkeypatch):
+    hook = LlmReviewHook()
+    code_node = TaskNode(id="t2", name="code", agent="code", params={})
+    result = {"success": True, "new_content": "def ok(): pass", "instruction": "x", "path": "a.py"}
+
+    async def fake_chat(self, messages, **kwargs):
+        raise RuntimeError("网络错误")
+
+    import app.core.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod.LLMClient, "chat", fake_chat)
+    verdict = asyncio.run(hook.review(code_node, result, _ctx()))
+    assert verdict.approved is True  # 质检失败不阻塞主流程

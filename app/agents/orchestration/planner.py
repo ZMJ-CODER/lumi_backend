@@ -11,7 +11,6 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 
-from app.core.config import settings
 from app.agents.orchestration.models import TaskNode
 
 
@@ -100,19 +99,32 @@ class RulePlanner(Planner):
 PLANNER_JSON_PROMPT = (
     "你是任务规划器。把用户请求拆解为任务计划。\n"
     "可用执行 agent：\n"
-    "- retrieval：检索知识库/项目索引定位信息，params 用 {\"query\": \"检索词\"}\n"
-    "- code：在本地代码项目里修改/生成代码，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"指令\"}\n"
+    "- retrieval：检索知识库/项目索引定位信息，params 用 {\"query\": \"检索词\", \"top_k\": 5}\n"
+    "- code_reader：在本地代码项目里定位并读取相关文件，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"定位/分析指令\", \"target_file\": \"可选文件路径\"}\n"
+    "- code_writer：生成或修改本地代码文件并写回，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"编码指令\", \"target_file\": \"可选文件路径\", \"original_content\": \"可选，来自 reader\"}\n"
+    "- code_tester：按项目类型自动选择并运行合适的验证命令（如 npm run build / pytest -q），params 用 {\"project_id\": \"项目ID\"}，不要预设 command，由 tester 根据项目文件自行决定\n"
+    "- code_reviewer：审查已有代码或改动，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"审查要求\", \"target_file\": \"可选文件路径\"}\n"
+    "- code：旧版单节点代码任务（定位→生成→写回），params 用 {\"project_id\": \"项目ID\", \"instruction\": \"指令\"}\n"
     "严格输出 JSON（不要代码块围栏、不要任何解释）：\n"
     "{\"tasks\":[{\"id\":\"t1\",\"name\":\"任务名\",\"agent\":\"retrieval\",\"params\":{},\"depends_on\":[]}],\"clarification\":\"\"}\n"
     "意图不明确或缺少关键信息（如未指定哪个项目）时，tasks 留空、clarification 填需要向用户确认的问题。"
+)
+
+# 执行层 agent 白名单（LlmPlanner 可调度的节点）
+KNOWN_AGENTS = (
+    "retrieval",
+    "code",
+    "code_reader",
+    "code_writer",
+    "code_tester",
+    "code_reviewer",
 )
 
 
 class LlmPlanner(Planner):
     """LLM 意图拆解：用户请求 → 任务树（DAG）.
 
-    模型：配置了本地小模型（RAG_QUERY_REWRITE_PROVIDER=local）时走 Ollama 原生 API
-    （think=False + function calling）；否则用用户当前选择的云端模型。
+    模型：与执行层同模型（用户当前选择的云端大模型，BYOK 透传临时 key）。
     任何失败（模型不支持工具 / 解析失败 / 未定位到项目）→ 回退 RulePlanner。
     """
 
@@ -158,9 +170,27 @@ class LlmPlanner(Planner):
         projects: list[dict],
         clarification_answer: str | None = None,
     ) -> TaskTree | None:
+        # 为代码任务提供项目文件清单（前 30 个路径），帮助模型指定 target_file
+        project_files: dict[str, list[str]] = {}
+        for p in projects:
+            try:
+                from app.core.database import async_session_factory
+                from app.services import project_index
+
+                async with async_session_factory() as session:
+                    project_files[p["id"]] = await project_index.list_project_files(
+                        session, user_id, p["id"], limit=30
+                    )
+            except Exception:  # noqa: BLE001
+                project_files[p["id"]] = []
+        files_ctx = "\n".join(
+            f"- {p['name']}({p['id']}): {project_files.get(p['id'], []) or '（文件索引为空）'}"
+            for p in projects
+        )
         context = (
             f"用户请求：{request}\n"
             f"可用本地项目：{projects if projects else '无（retrieval 任务不需要项目）'}"
+            + (f"\n项目文件清单：\n{files_ctx}" if projects else "")
             + (f"\n用户指定的项目 ID：{project_id}" if project_id else "")
             + (f"\n用户补充说明：{clarification_answer}" if clarification_answer else "")
         )
@@ -175,12 +205,12 @@ class LlmPlanner(Planner):
             if not isinstance(t, dict):
                 continue
             agent = t.get("agent")
-            if agent not in ("retrieval", "code"):
+            if agent not in KNOWN_AGENTS:
                 continue
             params = dict(t.get("params") or {})
             if agent == "retrieval":
                 params.setdefault("query", request)
-            elif agent == "code":
+            elif agent in KNOWN_AGENTS[1:]:
                 pid = params.get("project_id") or project_id
                 if not pid and len(projects) == 1:
                     pid = projects[0]["id"]
@@ -200,34 +230,8 @@ class LlmPlanner(Planner):
         return TaskTree(nodes=nodes, clarification=clarification)
 
     async def _call_planner(self, user_id: str, context: str, llm_api_key: str | None) -> str | None:
-        """调用规划模型（本地优先，其次云端用户模型），返回 JSON 计划文本（原样）."""
+        """调用规划模型（用户配置的大模型），返回 JSON 计划文本（原样）."""
         prompt = PLANNER_JSON_PROMPT + "\n" + context
-        if (
-            settings.RAG_QUERY_REWRITE_PROVIDER == "local"
-            and settings.RAG_QUERY_REWRITE_MODEL.strip()
-        ):
-            try:
-                import httpx
-
-                base = settings.RAG_QUERY_REWRITE_BASE_URL.rstrip("/")
-                if base.endswith("/v1"):
-                    base = base[: -len("/v1")]
-                async with httpx.AsyncClient(timeout=60) as client:
-                    resp = await client.post(
-                        f"{base}/api/chat",
-                        json={
-                            "model": settings.RAG_QUERY_REWRITE_MODEL.strip(),
-                            "messages": [{"role": "user", "content": prompt}],
-                            "stream": False,
-                            "options": {"temperature": 0.1, "num_predict": 1024},
-                        },
-                    )
-                    resp.raise_for_status()
-                    return ((resp.json().get("message") or {}).get("content") or "").strip() or None
-            except Exception:  # noqa: BLE001
-                return None
-            return None
-
         try:
             from app.core.llm import LLMClient
             from app.services.usage import CATEGORY_PLAN

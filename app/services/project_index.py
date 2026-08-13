@@ -7,7 +7,7 @@
 import uuid
 
 from loguru import logger
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.db_models import Project, ProjectIndex
@@ -120,3 +120,66 @@ async def search_project(
         }
         for r in rows
     ]
+
+
+async def list_project_files(
+    session: AsyncSession,
+    user_id: str,
+    project_id: str,
+    limit: int = 50,
+) -> list[str]:
+    """列出项目内文件路径（供规划器上下文，帮助 LLM 指定目标文件）."""
+    uid = _uid(user_id)
+    pid = _uid(project_id)
+    if uid is None or pid is None:
+        return []
+    project = await session.get(Project, pid)
+    if not project or project.user_id != uid:
+        return []
+    rows = (
+        await session.execute(
+            select(ProjectIndex.file_path)
+            .where(ProjectIndex.project_id == pid)
+            .order_by(ProjectIndex.file_path.asc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def find_file_by_path(
+    session: AsyncSession,
+    user_id: str,
+    project_id: str,
+    file_path: str,
+) -> dict | None:
+    """按相对路径精确查找项目索引中的文件（忽略大小写，兼容 / 与 \\）.
+
+    code agent 显式指定 target_file 时先经此校验，避免把目录/乱猜路径当文件读取。
+    """
+    uid = _uid(user_id)
+    pid = _uid(project_id)
+    if uid is None or pid is None or not str(file_path or "").strip():
+        return None
+    project = await session.get(Project, pid)
+    if not project or project.user_id != uid:
+        return None
+    norm = str(file_path).strip().replace("\\", "/").lstrip("./")
+    if not norm or norm in (".", "/"):
+        return None
+    row = (
+        await session.execute(
+            select(ProjectIndex).where(
+                ProjectIndex.project_id == pid,
+                func.lower(ProjectIndex.file_path) == norm.lower(),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    return {
+        "file_path": row.file_path,
+        "symbols": row.symbols or "",
+        "summary": row.summary or "",
+        "size": row.file_size,
+    }

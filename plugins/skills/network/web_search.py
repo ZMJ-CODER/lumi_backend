@@ -1,4 +1,4 @@
-"""技能插件：web_search —— 联网搜索（Tavily）."""
+"""技能插件（network/网络与web工具）：web_search —— 联网搜索（Tavily）."""
 
 from app.agents.skills.base import Skill, SkillContext, SkillResult
 from app.services.web_search import web_search
@@ -10,7 +10,7 @@ class WebSearchSkill(Skill):
         "搜索互联网获取实时信息。当用户问题涉及最新新闻、实时数据、当前事件、"
         "或本地知识库无法覆盖的信息时使用。返回带来源的搜索结果。"
     )
-    category = "web"
+    category = "network"
     environment = "server"
     scenes = ["chat", "office", "game"]
     parameters_schema = {

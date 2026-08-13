@@ -25,6 +25,9 @@ class StateStore(ABC):
     async def create_job(self, job: Job) -> None: ...
 
     @abstractmethod
+    async def list_job_ids(self, user_id: str, limit: int = 20) -> list[str]: ...
+
+    @abstractmethod
     async def get_job(self, job_id: str) -> Job | None: ...
 
     @abstractmethod
@@ -46,6 +49,12 @@ class RedisStateStore(StateStore):
     async def create_job(self, job: Job) -> None:
         r = get_redis()
         await r.set(_key(job.job_id), job.model_dump_json(), ex=self._ttl)
+        # 用户任务索引：幂等写入（同一 job 不重复），供 list_jobs 倒序分页
+        index_key = f"multiagent:user_jobs:{job.user_id}"
+        await r.lrem(index_key, 0, job.job_id)
+        await r.lpush(index_key, job.job_id)
+        await r.ltrim(index_key, 0, 999)
+        await r.expire(index_key, self._ttl)
 
     async def get_job(self, job_id: str) -> Job | None:
         r = get_redis()
@@ -62,16 +71,19 @@ class RedisStateStore(StateStore):
         await self.create_job(job)
 
     async def list_jobs(self, user_id: str, limit: int = 20) -> list[Job]:
-        r = get_redis()
-        # 简单方案：按用户维护一个 job_id 列表；数据量大后再分页
-        key = f"multiagent:user_jobs:{user_id}"
-        ids = await r.lrange(key, 0, limit - 1)
+        ids = await self.list_job_ids(user_id, limit)
         jobs: list[Job] = []
         for jid in ids:
             job = await self.get_job(jid)
             if job:
                 jobs.append(job)
         return jobs
+
+    async def list_job_ids(self, user_id: str, limit: int = 20) -> list[str]:
+        r = get_redis()
+        # 按用户维护的 job_id 列表（create_job 时写入）；数据量大后再分页
+        key = f"multiagent:user_jobs:{user_id}"
+        return [str(x) for x in await r.lrange(key, 0, limit - 1)]
 
     async def delete_job(self, job_id: str) -> None:
         r = get_redis()
@@ -89,6 +101,9 @@ class InMemoryStateStore(StateStore):
         self._jobs[job.job_id] = job.model_copy(deep=True)
         self._user_index.setdefault(job.user_id, []).insert(0, job.job_id)
 
+    async def list_job_ids(self, user_id: str, limit: int = 20) -> list[str]:
+        return list(self._user_index.get(user_id, [])[:limit])
+
     async def get_job(self, job_id: str) -> Job | None:
         job = self._jobs.get(job_id)
         return job.model_copy(deep=True) if job else None
@@ -97,7 +112,7 @@ class InMemoryStateStore(StateStore):
         self._jobs[job.job_id] = job.model_copy(deep=True)
 
     async def list_jobs(self, user_id: str, limit: int = 20) -> list[Job]:
-        ids = self._user_index.get(user_id, [])[:limit]
+        ids = await self.list_job_ids(user_id, limit)
         return [self._jobs[i] for i in ids if i in self._jobs]
 
     async def delete_job(self, job_id: str) -> None:

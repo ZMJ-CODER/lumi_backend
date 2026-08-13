@@ -134,6 +134,14 @@ class Settings(BaseSettings):
     AGENT_NODE_CONCURRENCY: int = 2               # 同时执行的 DAG 节点数（资源协调上限）
     AGENT_NODE_MAX_RETRIES: int = 2               # 单节点失败最大重试次数（React 重试）
     AGENT_NODE_TIMEOUT_SECONDS: int = 300         # 单节点执行超时（5 分钟，对应断网策略）
+    # ── Temporal 编排（多智能体任务执行引擎）──
+    AGENT_ORCHESTRATION: str = "temporal"         # temporal（默认）/ legacy（自建 DAG；Temporal 不可用时自动回退）
+    TEMPORAL_ADDRESS: str = "localhost:7233"      # Temporal 前端 gRPC 地址
+    TEMPORAL_NAMESPACE: str = "default"           # Temporal namespace
+    TEMPORAL_TASK_QUEUE: str = "lumi-agents"      # Temporal 任务队列（worker 与客户端必须一致）
+    TEMPORAL_BYOK_TTL_SECONDS: int = 43200        # BYOK key 临时存放 TTL（12h；任务正常结束即删除）
+    TEMPORAL_RUN_WORKER_INPROCESS: bool = True    # 后端进程内运行 Temporal Worker（IDE 一键运行后端即含 Worker）
+    TEMPORAL_AUTO_START_SERVER: bool = True       # Worker 启动前自动拉起 Temporal 开发服务器（找不到 exe 则跳过）
 
     # ── 文档类别与按类别半衰期（不同知识时效性不同）──
     RAG_DEFAULT_CATEGORY: str = "general"   # 默认类别

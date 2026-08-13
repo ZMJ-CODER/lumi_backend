@@ -11,6 +11,10 @@ class CreateAgentJobRequest(BaseModel):
     project_id: str | None = Field(
         default=None, description="本地项目 ID（代码任务；缺省时按请求中的项目名匹配）"
     )
+    project_ids: list[str] | None = Field(
+        default=None,
+        description="用户本机已注册的本地项目 ID 列表（代码任务自动定位用；规划器从中自动选择目标项目，支持跨项目顺序修改）",
+    )
     clarification_answer: str | None = Field(
         default=None,
         description="指挥层澄清问题的用户回答（重提任务时携带，作为规划上下文）",

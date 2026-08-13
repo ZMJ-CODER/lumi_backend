@@ -27,6 +27,7 @@ async def create_agent_job(
         req.request,
         req.scene,
         req.project_id,
+        req.project_ids,
         llm_api_key,
         req.clarification_answer,
     )

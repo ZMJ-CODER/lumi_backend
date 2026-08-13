@@ -1,4 +1,4 @@
-"""技能插件：python_exec —— 在隔离沙箱中执行 Python 代码."""
+"""技能插件（shell/终端执行）：python_exec —— 在隔离沙箱中执行 Python 代码."""
 
 from app.agents.sandbox.registry import get_sandbox
 from app.agents.skills.base import Skill, SkillContext, SkillResult
@@ -10,7 +10,7 @@ class PythonExecSkill(Skill):
         "在隔离沙箱中执行一段 Python 代码。用于数学计算、数据分析、格式转换等"
         "需要真实执行的场景。代码在受限环境运行（超时/输出截断），不能访问网络。"
     )
-    category = "computation"
+    category = "shell"
     environment = "sandbox"
     scenes = ["office"]
     parameters_schema = {

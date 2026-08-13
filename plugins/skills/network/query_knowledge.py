@@ -1,4 +1,8 @@
-"""技能插件：query_knowledge —— 检索用户知识库（RAG）."""
+"""技能插件（network/网络与web工具）：query_knowledge —— 检索用户知识库（RAG）.
+
+归类说明：属于"信息检索"类能力（从知识库而非互联网获取信息），
+与 web_search 同归 network 分类，便于 LLM 按"获取外部信息"意图检索。
+"""
 
 from app.agents.skills.base import Skill, SkillContext, SkillResult
 from app.core.database import async_session_factory
@@ -12,7 +16,7 @@ class QueryKnowledgeSkill(Skill):
         "检索用户的个人/公共知识库，获取文档中的具体事实。"
         "当用户问题涉及上传过的文档、资料、知识库内容时使用。"
     )
-    category = "knowledge"
+    category = "network"
     environment = "server"
     scenes = ["chat", "office", "game"]
     parameters_schema = {

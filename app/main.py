@@ -39,11 +39,20 @@ async def lifespan(app: FastAPI):
 
     init_skills()
     await init_redis()
+    # 多智能体编排：Temporal Worker 随后端进程启动（未开则需独立进程跑 worker）
+    if settings.AGENT_ORCHESTRATION == "temporal" and settings.TEMPORAL_RUN_WORKER_INPROCESS:
+        from app.agents.orchestration.temporal.runtime import start_inprocess_worker
+
+        await start_inprocess_worker()
     logger.info("基础设施初始化完成")
 
     yield
 
     # 清理
+    if settings.TEMPORAL_RUN_WORKER_INPROCESS:
+        from app.agents.orchestration.temporal.runtime import stop_inprocess_worker
+
+        await stop_inprocess_worker()
     await close_redis()
     logger.info("资源已清理")
 

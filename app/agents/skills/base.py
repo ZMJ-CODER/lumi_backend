@@ -8,7 +8,7 @@
   - 沙箱（Sandbox）提供隔离的执行环境
 
 技能元数据（供场景过滤 / 权限治理 / 管理分组）:
-  - category:      功能域（data_query / web / computation / knowledge / system_op / client_op）
+  - category:      功能域（filesystem / shell / process / system / network / devtools / desktop / mcp）
   - environment:   执行环境（server=后端直接执行 / sandbox=本地子进程隔离 / client=推送用户端执行）
   - permission:    权限级别（user / admin）
   - requires_confirmation: 高危操作，执行前需用户确认（client 通道二期实现）

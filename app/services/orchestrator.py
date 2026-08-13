@@ -662,7 +662,8 @@ class Orchestrator:
     ) -> str:
         """阻塞版：技能循环（开启时）或 模型自主联网 + 场景模型回复."""
         if image_uris:
-            cfg = await get_llm_config(scene, self._llm.provider)
+            # 用用户当前选择的模型判断多模态，避免切换模型后图片注入失效
+            cfg = await get_llm_config(scene, self._llm.provider, user_id=user_id)
             if self._is_multimodal_model(str(cfg.get("model") or "")):
                 messages = self._attach_images(messages, image_uris)
 
@@ -692,7 +693,7 @@ class Orchestrator:
     ):
         """流式版：技能循环（开启时）或 模型自主联网，最终回复流式产出."""
         if image_uris:
-            cfg = await get_llm_config(scene, self._llm.provider)
+            cfg = await get_llm_config(scene, self._llm.provider, user_id=user_id)
             if self._is_multimodal_model(str(cfg.get("model") or "")):
                 messages = self._attach_images(messages, image_uris)
 

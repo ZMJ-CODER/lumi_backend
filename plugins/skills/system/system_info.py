@@ -1,4 +1,4 @@
-"""技能插件：get_datetime —— 获取当前日期时间（时间敏感问题用）."""
+"""技能插件（system/系统信息与硬件）：get_datetime —— 获取当前日期时间."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -11,7 +11,7 @@ class GetDatetimeSkill(Skill):
         "获取当前日期和时间（东八区）。当用户询问今天是几号、现在几点、"
         "本周几等时间敏感问题时使用，避免依赖模型训练截止日期。"
     )
-    category = "computation"
+    category = "system"
     environment = "server"
     scenes = ["chat", "office", "game"]
     parameters_schema = {

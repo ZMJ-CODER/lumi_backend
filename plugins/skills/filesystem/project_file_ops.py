@@ -1,8 +1,8 @@
-"""技能插件：本地代码项目操作 —— 由用户端（Electron）在项目根内执行.
+"""技能插件（filesystem/文件系统操作）：本地代码项目文件操作 —— 由用户端（Electron）执行.
 
 方案 A 的核心：代码留在本地，服务器 agent 通过 client 通道下发指令，
 Electron 端按 project_id → 本地根路径映射 + 相对路径 jail 校验后执行。
-写文件/执行命令为高危操作，需用户确认弹窗。
+本模块：list_project / read_project_file / write_project_file（run_project_command 归入 shell 分类）。
 """
 
 from app.agents.skills.base import Skill, SkillContext, SkillResult
@@ -20,7 +20,7 @@ class ListProjectSkill(Skill):
         "列出本地代码项目中某个目录下的文件和子目录（相对项目根路径）。"
         "当需要了解项目结构、定位文件时使用。"
     )
-    category = "system_op"
+    category = "filesystem"
     environment = "client"
     scenes = ["office"]
     parameters_schema = {
@@ -57,7 +57,7 @@ class ReadProjectFileSkill(Skill):
         "读取本地代码项目中的某个文件（相对项目根路径，单次 ≤200KB）。"
         "当需要查看代码内容来理解或修改时使用。"
     )
-    category = "system_op"
+    category = "filesystem"
     environment = "client"
     scenes = ["office"]
     parameters_schema = {
@@ -101,7 +101,7 @@ class WriteProjectFileSkill(Skill):
         "把文本内容写入本地代码项目中的文件（相对项目根，覆盖已有内容，自动创建目录）。"
         "高危操作：执行前需要用户在客户端确认。"
     )
-    category = "system_op"
+    category = "filesystem"
     environment = "client"
     requires_confirmation = True
     scenes = ["office"]
@@ -140,35 +140,3 @@ class WriteProjectFileSkill(Skill):
             True,
         )
 
-
-class RunProjectCommandSkill(Skill):
-    name = "run_project_command"
-    description = (
-        "在本地代码项目根目录执行测试/构建命令（白名单：npm/pnpm/yarn/pytest/cargo/go/make 等）。"
-        "用于运行测试或构建验证。命令受白名单与项目根目录 jail 约束，无需逐次确认。"
-    )
-    category = "system_op"
-    environment = "client"
-    requires_confirmation = False
-    scenes = ["office"]
-    parameters_schema = {
-        "type": "object",
-        "properties": {
-            "project_id": {"type": "string", "description": "本地项目 ID"},
-            "command": {"type": "string", "description": "要执行的命令，如 npm test / pytest / cargo test"},
-        },
-        "required": ["project_id", "command"],
-    }
-
-    async def execute(self, params: dict, context: SkillContext | None = None) -> SkillResult:
-        if not context or not context.user_id:
-            return SkillResult(success=False, error="需要登录后使用", error_code="INVALID_ARGS", retryable=False)
-        project_id = str(params.get("project_id") or "")
-        command = str(params.get("command") or "").strip()
-        _notify(context, f"（正在请求在项目中执行：{command}，请在弹出的确认框中确认）")
-        return await run_client_skill_request(
-            context.user_id,
-            self.name,
-            {"project_id": project_id, "command": command},
-            True,
-        )

@@ -1,7 +1,7 @@
-"""技能插件：客户端本地文件技能 —— 由用户端（Electron）执行.
+"""技能插件（filesystem/文件系统操作）：客户端本地文件技能 —— 由用户端（Electron）执行.
 
 执行通道：创建待执行请求（Redis）→ 用户端轮询 → 高危弹窗确认 → 执行 → 回传结果。
-所有技能 environment=client，scenes=office。
+本模块：list_directory / read_file / write_file（open_file 归入 desktop 分类）。
 """
 
 from app.agents.skills.base import Skill, SkillContext, SkillResult
@@ -66,7 +66,7 @@ class ListDirectorySkill(Skill):
         "列出用户电脑上某个目录下的文件和子目录（含名称、类型、大小）。"
         "当用户询问本地文件夹/目录里有什么时使用。"
     )
-    category = "system_op"
+    category = "filesystem"
     environment = "client"
     scenes = ["office"]
     parameters_schema = {
@@ -97,7 +97,7 @@ class ReadFileSkill(Skill):
         "读取用户电脑上某个文本文件的完整内容（单次最大 200KB，超出截断）。"
         "当用户让你查看、总结或分析本地文件内容时使用。"
     )
-    category = "system_op"
+    category = "filesystem"
     environment = "client"
     scenes = ["office"]
     parameters_schema = {
@@ -128,7 +128,7 @@ class WriteFileSkill(Skill):
         "把文本内容写入用户电脑的指定文件（会覆盖已有内容，目录不存在时自动创建）。"
         "高危操作：执行前需要用户在客户端确认。"
     )
-    category = "system_op"
+    category = "filesystem"
     environment = "client"
     permission = "user"
     requires_confirmation = True
@@ -155,33 +155,3 @@ class WriteFileSkill(Skill):
             True,
         )
 
-
-class OpenFileSkill(Skill):
-    name = "open_file"
-    description = (
-        "用系统默认应用打开用户电脑上的文件（文档、图片、程序等）。"
-        "高危操作：执行前需要用户在客户端确认。"
-    )
-    category = "system_op"
-    environment = "client"
-    requires_confirmation = True
-    scenes = ["office"]
-    parameters_schema = {
-        "type": "object",
-        "properties": {
-            "path": {"type": "string", "description": "要打开的文件绝对路径"},
-        },
-        "required": ["path"],
-    }
-
-    async def execute(self, params: dict, context: SkillContext | None = None) -> SkillResult:
-        path = str(params.get("path") or "").strip()
-        if not path:
-            return SkillResult(success=False, error="缺少文件路径 path", error_code="INVALID_ARGS", retryable=False)
-        _notify(context, f"（正在请求打开本地文件：{path}，请在弹出的确认框中确认）")
-        return await _run_client_skill(
-            context.user_id if context else "",
-            self.name,
-            {"path": path},
-            True,
-        )

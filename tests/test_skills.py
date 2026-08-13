@@ -43,7 +43,7 @@ def test_project_skills_metadata():
     assert ws.scenes == ["office"]
     rc = SkillRegistry.get("run_project_command")
     assert rc.environment == "client"
-    assert rc.requires_confirmation is True
+    assert rc.requires_confirmation is False  # 白名单命令免确认（npm/pytest 等）
     rp = SkillRegistry.get("read_project_file")
     assert rp.environment == "client"
     assert rp.requires_confirmation is False

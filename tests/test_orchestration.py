@@ -129,7 +129,16 @@ def test_execute_dag_cancel_stops_running_and_pending():
 
 def test_orchestrator_submit_and_cancel():
     class FakePlanner(Planner):
-        async def plan(self, user_id, request, scene="office", project_id=None, llm_api_key=None, clarification_answer=None):
+        async def plan(
+            self,
+            user_id,
+            request,
+            scene="office",
+            project_id=None,
+            project_ids=None,
+            llm_api_key=None,
+            clarification_answer=None,
+        ):
             return TaskTree(nodes=[_node("t1", agent="w1")])
 
     worker = FakeWorker("w1", delay=10)  # 慢任务，便于测试取消
@@ -138,6 +147,7 @@ def test_orchestrator_submit_and_cancel():
         planner=FakePlanner(),
         workers={"w1": worker},
         review=NoopReviewer(),
+        temporal_enabled=False,
     )
 
     async def scenario():
@@ -180,7 +190,16 @@ def test_orchestrator_threads_byok_key_to_worker():
             return {"success": True, "content": "ok"}
 
     class FakePlanner(Planner):
-        async def plan(self, user_id, request, scene="office", project_id=None, llm_api_key=None, clarification_answer=None):
+        async def plan(
+            self,
+            user_id,
+            request,
+            scene="office",
+            project_id=None,
+            project_ids=None,
+            llm_api_key=None,
+            clarification_answer=None,
+        ):
             return TaskTree(nodes=[_node("t1", agent="keyw")])
 
     orch = AgentOrchestrator(
@@ -188,6 +207,7 @@ def test_orchestrator_threads_byok_key_to_worker():
         planner=FakePlanner(),
         workers={"keyw": KeyWorker()},
         review=NoopReviewer(),
+        temporal_enabled=False,
     )
 
     async def scenario():

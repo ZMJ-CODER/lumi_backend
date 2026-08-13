@@ -1,4 +1,4 @@
-"""技能插件示例 —— 复制本文件并修改即可新增一个技能.
+"""技能插件示例（devtools/开发工具链）—— 复制本文件并修改即可新增一个技能.
 
 要求：
   - 文件名 = 模块名（仅字母/数字/下划线），以下划线开头会被跳过
@@ -18,7 +18,7 @@ from app.agents.skills.base import Skill, SkillResult
 class AddNumbersSkill(Skill):
     name = "add_numbers"
     description = "计算两个数字的和。"
-    category = "computation"
+    category = "devtools"
     environment = "server"          # server / sandbox / client
     permission = "user"             # user / admin
     requires_confirmation = False   # 高危操作置 True（client 技能由用户端弹窗确认）

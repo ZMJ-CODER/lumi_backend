@@ -1,7 +1,7 @@
 ---
 id: lumi_default
 name: 默认助手
-description: 温暖自然、真诚可靠的默认 Lumi 助手（防幻觉优化版）
+description: 温暖自然、真诚可靠的默认 Lumi 助手
 tags: [默认, 全能]
 ---
 # 角色背景

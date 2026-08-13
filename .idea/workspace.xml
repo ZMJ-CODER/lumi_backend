@@ -4,21 +4,69 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="新增dag下多agent协作，添加一个L1agent和一个L2agent，新增本地模型qwen2.5:3b">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="更换编排引擎，优化新增skills">
+      <change afterPath="$PROJECT_DIR$/app/agents/orchestration/progress.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/activities.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/client.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/runtime.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/worker.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/app/agents/temporal_workflows.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/desktop/ask_user.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/desktop/open_file.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/devtools/example.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/devtools/git.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/filesystem/client_file_ops.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/filesystem/edit_file.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/filesystem/file_stat.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/filesystem/project_file_ops.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/filesystem/search_files.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/mcp/README.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/network/curl.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/network/query_knowledge.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/network/web_search.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/process/README.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/process/kill.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/process/ps.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/shell/bash.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/shell/project_command.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/shell/python_exec.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/system/env.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/plugins/skills/system/system_info.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/start_temporal.cmd" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/start_temporal.ps1" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tools/temporal/LICENSE" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tools/temporal/temporal-dev.err.log" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tools/temporal/temporal-dev.out.log" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tools/temporal/temporal-worker.err.log" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tools/temporal/temporal-worker.out.log" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tools/temporal/temporal.exe" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tools/temporal/temporal.tar.gz" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/orchestration/planner.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/planner.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/review.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/review.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/state.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/state.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/orchestration/workers.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/workers.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/projects.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/projects.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/base.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/loader.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/loader.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/agents.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/agents.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/db_models.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/db_models.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/project.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/project.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/project_index.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/project_index.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/embeddings.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/embeddings.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/usage.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/usage.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/plugins/skills/project_skills.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/project_skills.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/models/agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/agent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/prompts/lumi_default.md" beforeDir="false" afterPath="$PROJECT_DIR$/app/prompts/lumi_default.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/client_skills.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/example_skill.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/get_datetime_skill.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/project_skills.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/python_exec_skill.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/query_knowledge_skill.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/web_search_skill.py" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_code_agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_code_agent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_orchestration.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_orchestration.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_skills.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_skills.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -57,19 +105,19 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;Docker.lumi.executor&quot;: &quot;Run&quot;,
-    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
-    &quot;Python.main.executor&quot;: &quot;Run&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
-    &quot;last_opened_file_path&quot;: &quot;E:/pythonpycharm/lumi_backend/app&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;Docker&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "Docker.lumi.executor": "Run",
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "Python.main.executor": "Run",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "git-widget-placeholder": "master",
+    "last_opened_file_path": "E:/pythonpycharm/lumi_backend",
+    "settings.editor.selected.configurable": "Docker"
   }
-}</component>
+}]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="E:\pythonpycharm\lumi_backend\app" />
@@ -276,7 +324,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786522024843</updated>
     </task>
-    <option name="localTasksCounter" value="23" />
+    <task id="LOCAL-00023" summary="更换嵌入模型，添加代码相关agent和skills，优化前后端交互逻辑">
+      <option name="closed" value="true" />
+      <created>1786601424915</created>
+      <option name="number" value="00023" />
+      <option name="presentableId" value="LOCAL-00023" />
+      <option name="project" value="LOCAL" />
+      <updated>1786601424915</updated>
+    </task>
+    <option name="localTasksCounter" value="24" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -313,6 +369,8 @@
     <MESSAGE value="迁移工具，将工具设定为可拆卸插件" />
     <MESSAGE value="定义多agent协作模式，利用轻量dag调度算法实现协同" />
     <MESSAGE value="新增dag下多agent协作，添加一个L1agent和一个L2agent，新增本地模型qwen2.5:3b" />
-    <option name="LAST_COMMIT_MESSAGE" value="新增dag下多agent协作，添加一个L1agent和一个L2agent，新增本地模型qwen2.5:3b" />
+    <MESSAGE value="更换嵌入模型，添加代码相关agent和skills，优化前后端交互逻辑" />
+    <MESSAGE value="更换编排引擎，优化新增skills" />
+    <option name="LAST_COMMIT_MESSAGE" value="更换编排引擎，优化新增skills" />
   </component>
 </project>

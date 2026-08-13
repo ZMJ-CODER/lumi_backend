@@ -4,6 +4,7 @@
 新增执行 agent 时继承 WorkerAgent 并注册到 WORKERS。
 """
 
+import asyncio
 import hashlib
 import json
 import re
@@ -14,6 +15,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.agents.orchestration.models import TaskNode
+from app.agents.orchestration.progress import set_progress as _report_progress
 from app.agents.skills.base import SkillContext
 from app.agents.skills.registry import SkillRegistry
 
@@ -21,6 +23,45 @@ from app.agents.skills.registry import SkillRegistry
 def _file_key(rel_path: str) -> str:
     """与客户端 fileKey 相同的算法：sha256(相对路径) 前 32 位 hex."""
     return hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:32]
+
+
+_CONFIG_FILE_HINTS = (
+    "tsconfig",
+    "package.json",
+    "vite.config",
+    "webpack.config",
+    "eslint",
+    "prettier",
+    ".gitignore",
+    "readme",
+    "license",
+    "dockerfile",
+)
+_CONFIG_FILE_SUFFIXES = (".json", ".lock", ".md", ".yaml", ".yml", ".toml", ".ini", ".cfg")
+_CONFIG_INTENT_KEYWORDS = (
+    "配置",
+    "依赖",
+    "tsconfig",
+    "package",
+    "vite",
+    "构建",
+    "脚手架",
+    "依赖包",
+)
+
+
+def _is_config_file(rel_path: str) -> bool:
+    """判断是否为配置/元数据类文件（写 UI/功能代码时应避开这些目标）."""
+    base = str(rel_path or "").lower()
+    if any(h in base for h in _CONFIG_FILE_HINTS):
+        return True
+    return base.endswith(_CONFIG_FILE_SUFFIXES)
+
+
+def _is_config_intent(instruction: str) -> bool:
+    """指令是否明确针对配置/依赖（此时允许定位到配置文件）."""
+    text = str(instruction or "").lower()
+    return any(k in text for k in _CONFIG_INTENT_KEYWORDS)
 
 
 @dataclass
@@ -83,6 +124,74 @@ REVIEW_SYSTEM_PROMPT = (
     "只输出 JSON：{\"approved\": true 或 false, \"issues\": [\"问题1\", \"问题2\"], \"feedback\": \"一句话总结\"}"
 )
 
+_STEP_TITLE_PROMPT = (
+    "根据用户的编码指令和文件路径，用一句话概括这次代码改动做了什么（20 字以内）。"
+    "不要引号、不要 Markdown、不要多余解释，只输出标题本身。"
+)
+
+
+async def _llm_step_title(ctx: WorkerContext, instruction: str, path: str) -> str | None:
+    """为代码编写节点生成一句话标题（LLM 概括；失败返回 None 走兜底）."""
+    try:
+        from app.core.llm import LLMClient
+        from app.services.usage import CATEGORY_TITLE
+
+        llm = LLMClient()
+        reply = await asyncio.wait_for(
+            llm.chat(
+                [
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{_STEP_TITLE_PROMPT}\n用户指令：{(instruction or '')[:200]}\n文件：{path}"
+                        ),
+                    }
+                ],
+                temperature=0.2,
+                max_tokens=60,
+                usage_user_id=ctx.user_id,
+                usage_category=CATEGORY_TITLE,
+                api_key=ctx.llm_api_key,
+            ),
+            timeout=10,
+        )
+        title = (reply or "").strip().strip('"').strip("'")
+        return title[:50] or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _step_title(ctx: WorkerContext, node: TaskNode, result: dict) -> str | None:
+    """为已完成节点生成一句话标题（code 类用 LLM 概括，其余直接拼接）."""
+    try:
+        agent = node.agent
+        path = str(
+            result.get("path")
+            or node.params.get("target_file")
+            or node.params.get("file_key")
+            or ""
+        )
+        if agent in ("code_writer", "code"):
+            instruction = str(
+                result.get("instruction") or node.params.get("instruction") or ""
+            )
+            title = await _llm_step_title(ctx, instruction, path)
+            return title or (f"编写 {path}" if path else "编写代码")
+        if agent == "code_reader":
+            return f"阅读 {path}" if path else "阅读代码"
+        if agent == "code_tester":
+            cmd = str(result.get("command") or node.params.get("command") or "")
+            passed = result.get("tests_passed")
+            state = "通过" if passed is True else ("未通过" if passed is False else "")
+            return f"测试 {cmd}{'：' + state if state else ''}".strip()
+        if agent == "retrieval":
+            return "检索知识库"
+        if agent == "code_reviewer":
+            return "代码审查"
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
 
 async def locate_project_file(
     user_id: str,
@@ -115,18 +224,37 @@ async def locate_project_file(
                     session, user_id, project_id, instruction, top_k=3
                 )
                 if vec_hits and vec_hits[0]["similarity"] >= 0.35:
-                    h = vec_hits[0]
+                    # 写 UI/功能代码时优先避开配置文件（tsconfig.json/package.json 等），
+                    # 避免"改了个配置就完事"；指令明确涉及配置时仍允许命中配置文件
+                    all_files = await project_index.list_project_files(
+                        session, user_id, project_id, limit=500
+                    )
+                    config_intent = _is_config_intent(instruction)
+                    picked = None
+                    for h in vec_hits:
+                        if h["similarity"] < 0.35:
+                            continue
+                        resolved = None
+                        if h.get("file_key"):
+                            resolved = next(
+                                (fp for fp in all_files if _file_key(fp) == h["file_key"]),
+                                None,
+                            )
+                        check_path = resolved or h.get("file_path") or ""
+                        if config_intent or not _is_config_file(check_path):
+                            picked = h
+                            break
+                    if picked is None:
+                        picked = vec_hits[0]  # 全部命中都是配置文件时退回最相似
+                    h = picked
                     file_key = h["file_key"]
                     # 语义命中返回 file_key；同时反查真实相对路径并一起返回，
                     # 让客户端优先按 path 读取（不依赖本地 fileMap 是否完整）
                     resolved_path = None
                     if file_key:
-                        for fp in await project_index.list_project_files(
-                            session, user_id, project_id, limit=500
-                        ):
-                            if _file_key(fp) == file_key:
-                                resolved_path = fp
-                                break
+                        resolved_path = next(
+                            (fp for fp in all_files if _file_key(fp) == file_key), None
+                        )
                     if resolved_path:
                         return {
                             "path": resolved_path,
@@ -431,9 +559,13 @@ class RetrievalAgent(WorkerAgent):
             return {"success": False, "error": "检索任务缺少 query 参数", "error_code": "INVALID_ARGS"}
         top_k = int(node.params.get("top_k") or 5)
         logger.debug("[Agent:retrieval] 检索 query={} top_k={}", query[:60], top_k)
-        return await self.run_skill(
+        await _report_progress(ctx.job_id, node.id, "正在检索知识库…")
+        result = await self.run_skill(
             "query_knowledge", {"query": query, "top_k": top_k}, ctx
         )
+        if result.get("success"):
+            result["step_title"] = "检索知识库"
+        return result
 
 
 class CodeAgent(WorkerAgent):
@@ -468,6 +600,7 @@ class CodeAgent(WorkerAgent):
         target_key = node.params.get("file_key")
         located = None
         if not target_path and not target_key:
+            await _report_progress(ctx.job_id, node.id, "正在定位相关代码文件…")
             located = await self._locate(project_id, instruction, ctx)
             target_key = located.get("file_key")
             target_path = located.get("path")
@@ -479,6 +612,7 @@ class CodeAgent(WorkerAgent):
             }
 
         # 2. 读取（client 技能，本地执行；语义命中用 file_key，客户端映射真实路径）
+        await _report_progress(ctx.job_id, node.id, f"正在阅读 {target_path or target_key}…")
         read, located = await _read_with_retry(
             self, ctx, project_id, instruction, target_path, target_key
         )
@@ -491,6 +625,7 @@ class CodeAgent(WorkerAgent):
 
         # 3. LLM 生成修改后的完整内容（附带项目文件清单，避免乱猜路径）
         project_files = await list_project_files(ctx.user_id, project_id)
+        await _report_progress(ctx.job_id, node.id, f"正在生成 {target_path or target_key} 代码…")
         new_content = await self._generate(
             ctx, instruction, target_path or target_key or "", original, project_files
         )
@@ -507,6 +642,7 @@ class CodeAgent(WorkerAgent):
             write_params["path"] = str(target_path)
         else:
             write_params["file_key"] = target_key
+        await _report_progress(ctx.job_id, node.id, f"正在写入 {target_path or target_key}…")
         write_result = await self.run_skill(
             "write_project_file", {**write_params, "content": new_content}, ctx
         )
@@ -514,6 +650,7 @@ class CodeAgent(WorkerAgent):
             write_result["new_content"] = new_content
             write_result["instruction"] = instruction
             write_result["path"] = target_path or target_key
+            write_result["step_title"] = await _step_title(ctx, node, write_result)
         return write_result
 
     async def _locate(self, project_id: str, instruction: str, ctx: WorkerContext) -> dict:
@@ -554,6 +691,7 @@ class CodeReaderAgent(WorkerAgent):
                 "error": "缺少 project_id",
                 "error_code": "INVALID_ARGS",
             }
+        await _report_progress(ctx.job_id, node.id, "正在定位相关代码文件…")
         located = await locate_project_file(
             ctx.user_id,
             project_id,
@@ -567,6 +705,9 @@ class CodeReaderAgent(WorkerAgent):
                 "error": "未能在项目索引中定位相关文件",
                 "error_code": "EXEC_ERROR",
             }
+        await _report_progress(
+            ctx.job_id, node.id, f"正在阅读 {located.get('path') or located.get('file_key')}…"
+        )
         read, located = await _read_with_retry(
             self,
             ctx,
@@ -582,6 +723,11 @@ class CodeReaderAgent(WorkerAgent):
             "located": located,
             "path": located.get("path") or located.get("file_key"),
             "content": read.get("content") or "",
+            "step_title": (
+                f"阅读 {located.get('path') or located.get('file_key')}"
+                if located.get("path") or located.get("file_key")
+                else "阅读代码"
+            ),
         }
 
 
@@ -634,6 +780,7 @@ class CodeWriterAgent(WorkerAgent):
                 path_label = str(target_path or target_key)
             original = read.get("content") or ""
 
+        await _report_progress(ctx.job_id, node.id, f"正在生成 {path_label} 代码…")
         new_content = await generate_code_content(
             ctx,
             instruction,
@@ -654,6 +801,7 @@ class CodeWriterAgent(WorkerAgent):
             write_params["path"] = target_path
         else:
             write_params["file_key"] = target_key
+        await _report_progress(ctx.job_id, node.id, f"正在写入 {path_label}…")
         write_result = await self.run_skill(
             "write_project_file", {**write_params, "content": new_content}, ctx
         )
@@ -661,6 +809,7 @@ class CodeWriterAgent(WorkerAgent):
             write_result["new_content"] = new_content
             write_result["instruction"] = instruction
             write_result["path"] = path_label
+            write_result["step_title"] = await _step_title(ctx, node, write_result)
         return write_result
 
 
@@ -720,6 +869,7 @@ class CodeTesterAgent(WorkerAgent):
             }
 
         # 执行一次（信任项目免确认；未信任则由用户确认）
+        await _report_progress(ctx.job_id, node.id, f"正在执行 {command}…")
         run = await self.run_skill(
             "run_project_command", {"project_id": project_id, "command": command}, ctx
         )
@@ -735,6 +885,9 @@ class CodeTesterAgent(WorkerAgent):
             "output": (output or error or "（无输出）")[:4000],
             "error": None if ok else (error[:500] or "命令执行失败"),
             "error_code": None if ok else (run.get("error_code") or "EXEC_ERROR"),
+            "step_title": (
+                f"测试 {command}：{'通过' if ok else '未通过'}"
+            ),
         }
 
 

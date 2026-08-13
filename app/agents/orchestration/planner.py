@@ -32,6 +32,7 @@ class Planner(ABC):
         request: str,
         scene: str = "office",
         project_id: str | None = None,
+        project_ids: list[str] | None = None,
         llm_api_key: str | None = None,
         clarification_answer: str | None = None,
     ) -> TaskTree:
@@ -53,12 +54,17 @@ class RulePlanner(Planner):
         request: str,
         scene: str = "office",
         project_id: str | None = None,
+        project_ids: list[str] | None = None,
         llm_api_key: str | None = None,
         clarification_answer: str | None = None,
     ) -> TaskTree:
         # 代码任务：显式指定 project_id，或在请求+澄清回答中匹配到已注册项目名
         combined = request + (f" {clarification_answer}" if clarification_answer else "")
-        resolved_project = project_id or await self._match_project(user_id, combined)
+        resolved_project = (
+            project_id
+            or (project_ids[0] if project_ids else None)
+            or await self._match_project(user_id, combined)
+        )
         if resolved_project:
             node = TaskNode(
                 id=f"c{int(time.time())}-{uuid.uuid4().hex[:6]}",
@@ -105,6 +111,12 @@ PLANNER_JSON_PROMPT = (
     "- code_tester：按项目类型自动选择并运行合适的验证命令（如 npm run build / pytest -q），params 用 {\"project_id\": \"项目ID\"}，不要预设 command，由 tester 根据项目文件自行决定\n"
     "- code_reviewer：审查已有代码或改动，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"审查要求\", \"target_file\": \"可选文件路径\"}\n"
     "- code：旧版单节点代码任务（定位→生成→写回），params 用 {\"project_id\": \"项目ID\", \"instruction\": \"指令\"}\n"
+    "代码任务建议按文件拆分节点，便于前端逐步展示进度：\n"
+    "  - 每个需要阅读/定位的文件一个 code_reader 节点（按阅读顺序设置 depends_on）；\n"
+    "  - 每个需要修改的文件一个 code_writer 节点，depends_on 指向对应的 reader 节点；\n"
+    "  - 所有写入完成后一个 code_tester 节点；需要时最后加 code_reviewer。\n"
+    "项目定位：根据用户请求与项目文件清单自动判断涉及哪个/哪些项目，不要因为未指定项目就澄清。\n"
+    "涉及多个项目时按顺序生成任务：先完成一个项目再切换下一个（不同项目用各自的 project_id）。\n"
     "严格输出 JSON（不要代码块围栏、不要任何解释）：\n"
     "{\"tasks\":[{\"id\":\"t1\",\"name\":\"任务名\",\"agent\":\"retrieval\",\"params\":{},\"depends_on\":[]}],\"clarification\":\"\"}\n"
     "意图不明确或缺少关键信息（如未指定哪个项目）时，tasks 留空、clarification 填需要向用户确认的问题。"
@@ -137,17 +149,18 @@ class LlmPlanner(Planner):
         request: str,
         scene: str = "office",
         project_id: str | None = None,
+        project_ids: list[str] | None = None,
         llm_api_key: str | None = None,
         clarification_answer: str | None = None,
     ) -> TaskTree:
         projects = await self._list_projects(user_id)
         tree = await self._plan_with_llm(
-            user_id, request, project_id, llm_api_key, projects, clarification_answer
+            user_id, request, project_id, project_ids, llm_api_key, projects, clarification_answer
         )
         if tree is not None:
             return tree
         return await self._fallback.plan(
-            user_id, request, scene, project_id, llm_api_key, clarification_answer
+            user_id, request, scene, project_id, project_ids, llm_api_key, clarification_answer
         )
 
     async def _list_projects(self, user_id: str) -> list[dict]:
@@ -166,10 +179,17 @@ class LlmPlanner(Planner):
         user_id: str,
         request: str,
         project_id: str | None,
+        project_ids: list[str] | None,
         llm_api_key: str | None,
         projects: list[dict],
         clarification_answer: str | None = None,
     ) -> TaskTree | None:
+        # 只展示用户本机项目（自动定位时聚焦这些项目，避免无关项目干扰）
+        if project_ids:
+            pid_set = set(project_ids)
+            focused = [p for p in projects if p["id"] in pid_set]
+            if focused:
+                projects = focused
         # 为代码任务提供项目文件清单（前 30 个路径），帮助模型指定 target_file
         project_files: dict[str, list[str]] = {}
         for p in projects:

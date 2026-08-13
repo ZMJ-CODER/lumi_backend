@@ -1,7 +1,8 @@
-"""技能插件加载器 —— 扫描 plugins/skills 目录，自动发现并注册 Skill 子类.
+"""技能插件加载器 —— 递归扫描 plugins/skills 分类目录，自动发现并注册 Skill 子类.
 
 设计：
-  - 每个插件 = 目录下一个 Python 文件，定义一个（或多个）Skill 子类
+  - 每个插件 = 分类子目录下一个 Python 文件，定义一个（或多个）Skill 子类
+  - 八大分类：filesystem / shell / process / system / network / devtools / desktop / mcp
   - 启动时与 POST /admin/skills/reload 时扫描注册；同名插件覆盖内置技能
   - 热更新不重启进程：重新扫描 → 卸载旧插件技能（恢复被覆盖的内置技能）→ 重新注册
   - Docker 部署时将 ./plugins 挂载为 volume，改插件文件无需重建镜像
@@ -39,10 +40,17 @@ def load_skill_plugins() -> int:
         logger.warning("技能插件目录不存在，跳过: {}", directory)
         return 0
     count = 0
-    for path in sorted(directory.glob("*.py")):
-        if path.name.startswith("_"):
+    for path in sorted(directory.rglob("*.py")):
+        # 跳过隐藏/私有文件、__init__.py 与 __pycache__ 字节码缓存
+        if (
+            path.name.startswith("_")
+            or "__pycache__" in path.parts
+            or path.name == "__init__.py"
+        ):
             continue
-        module_name = _safe_module_name(path.stem)
+        # 模块名 = 分类_文件名（相对插件根），避免不同目录同名文件冲突
+        rel_parts = path.relative_to(directory).with_suffix("").parts
+        module_name = _safe_module_name("_".join(rel_parts))
         if not module_name:
             logger.warning("跳过非法插件文件名（需字母/数字/下划线）: {}", path.name)
             continue

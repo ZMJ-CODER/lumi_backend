@@ -9,7 +9,7 @@
 | `process/` | 进程管理 | ps / kill（高危确认） |
 | `system/` | 系统信息与硬件 | get_datetime / env |
 | `network/` | 网络与 web 工具 | web_search / query_knowledge（信息检索）/ curl |
-| `devtools/` | 开发工具链 | git（status/diff/commit，commit 确认）/ example（add_numbers） |
+| `devtools/` | 开发工具链 | git（status/diff/commit，commit 确认）/ explore_project（项目结构/技术栈）/ search_codebase（语义搜代码）/ create_task_plan（需求→Task DAG）/ review_code（代码审查）/ lint_code（自动识别 linter）/ run_tests（自动识别测试命令）/ generate_tests（生成测试用例）/ analyze_logs（日志根因分析）/ example（add_numbers） |
 | `desktop/` | GUI 与桌面控制 | open_file / ask_user（人工提问，最重要） |
 | `mcp/` | MCP 生态工具 | （待实现） |
 

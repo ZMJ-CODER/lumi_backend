@@ -102,28 +102,8 @@ class RulePlanner(Planner):
 
 # ── LLM 意图拆解规划器 ───────────────────────────────
 
-PLANNER_JSON_PROMPT = (
-    "你是任务规划器。把用户请求拆解为任务计划。\n"
-    "可用执行 agent：\n"
-    "- retrieval：检索知识库/项目索引定位信息，params 用 {\"query\": \"检索词\", \"top_k\": 5}\n"
-    "- code_reader：在本地代码项目里定位并读取相关文件，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"定位/分析指令\", \"target_file\": \"可选文件路径\"}\n"
-    "- code_writer：生成或修改本地代码文件并写回，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"编码指令\", \"target_file\": \"可选文件路径\", \"original_content\": \"可选，来自 reader\"}\n"
-    "- code_tester：按项目类型自动选择并运行合适的验证命令（如 npm run build / pytest -q），params 用 {\"project_id\": \"项目ID\"}，不要预设 command，由 tester 根据项目文件自行决定\n"
-    "- code_reviewer：审查已有代码或改动，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"审查要求\", \"target_file\": \"可选文件路径\"}\n"
-    "- code：旧版单节点代码任务（定位→生成→写回），params 用 {\"project_id\": \"项目ID\", \"instruction\": \"指令\"}\n"
-    "代码任务建议按文件拆分节点，便于前端逐步展示进度：\n"
-    "  - 每个需要阅读/定位的文件一个 code_reader 节点（按阅读顺序设置 depends_on）；\n"
-    "  - 每个需要修改的文件一个 code_writer 节点，depends_on 指向对应的 reader 节点；\n"
-    "  - 所有写入完成后一个 code_tester 节点；需要时最后加 code_reviewer。\n"
-    "项目定位：根据用户请求与项目文件清单自动判断涉及哪个/哪些项目，不要因为未指定项目就澄清。\n"
-    "涉及多个项目时按顺序生成任务：先完成一个项目再切换下一个（不同项目用各自的 project_id）。\n"
-    "严格输出 JSON（不要代码块围栏、不要任何解释）：\n"
-    "{\"tasks\":[{\"id\":\"t1\",\"name\":\"任务名\",\"agent\":\"retrieval\",\"params\":{},\"depends_on\":[]}],\"clarification\":\"\"}\n"
-    "意图不明确或缺少关键信息（如未指定哪个项目）时，tasks 留空、clarification 填需要向用户确认的问题。"
-)
-
-# 执行层 agent 白名单（LlmPlanner 可调度的节点）
-KNOWN_AGENTS = (
+# 注册表为空时的兜底 agent 清单（正常情况下由 AgentRegistry 动态生成）
+_FALLBACK_AGENTS = (
     "retrieval",
     "code",
     "code_reader",
@@ -131,6 +111,61 @@ KNOWN_AGENTS = (
     "code_tester",
     "code_reviewer",
 )
+
+_FALLBACK_AGENT_LINES = (
+    "- retrieval：检索知识库/项目索引定位信息，params 用 {\"query\": \"检索词\", \"top_k\": 5}\n"
+    "- code_reader：在本地代码项目里定位并读取相关文件，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"定位/分析指令\", \"target_file\": \"可选文件路径\"}\n"
+    "- code_writer：生成或修改本地代码文件并写回，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"编码指令\", \"target_file\": \"可选文件路径\", \"original_content\": \"可选，来自 reader\"}\n"
+    "- code_tester：按项目类型自动选择并运行合适的验证命令（如 npm run build / pytest -q），params 用 {\"project_id\": \"项目ID\"}，不要预设 command，由 tester 根据项目文件自行决定\n"
+    "- code_reviewer：审查已有代码或改动，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"审查要求\", \"target_file\": \"可选文件路径\"}\n"
+    "- code：旧版单节点代码任务（定位→生成→写回），params 用 {\"project_id\": \"项目ID\", \"instruction\": \"指令\"}\n"
+)
+
+
+def _agent_prompt_lines() -> str:
+    """从集中注册表动态生成"可用执行 agent"提示词段（新增 agent 自动出现在规划器）."""
+    try:
+        from app.agents.core.registry import AgentRegistry
+
+        agents = AgentRegistry.list()
+    except Exception:  # noqa: BLE001
+        agents = []
+    if not agents:
+        return _FALLBACK_AGENT_LINES
+    lines = []
+    for a in sorted(agents, key=lambda x: x.name):
+        extra = f"，{a.params_help}" if a.params_help else ""
+        lines.append(f"- {a.name}：{a.description}{extra}")
+    return "\n".join(lines)
+
+
+def _build_planner_prompt() -> str:
+    """构建规划器提示词（agent 清单由注册表动态生成）."""
+    return (
+        "你是任务规划器。把用户请求拆解为任务计划。\n"
+        "可用执行 agent：\n"
+        + _agent_prompt_lines()
+        + "\n代码任务建议按文件拆分节点，便于前端逐步展示进度：\n"
+        "  - 每个需要阅读/定位的文件一个 code_reader 节点（按阅读顺序设置 depends_on）；\n"
+        "  - 每个需要修改的文件一个 code_writer 节点，depends_on 指向对应的 reader 节点；\n"
+        "  - 所有写入完成后一个 code_tester 节点；需要时最后加 code_reviewer。\n"
+        "项目定位：根据用户请求与项目文件清单自动判断涉及哪个/哪些项目，不要因为未指定项目就澄清。\n"
+        "涉及多个项目时按顺序生成任务：先完成一个项目再切换下一个（不同项目用各自的 project_id）。\n"
+        "严格输出 JSON（不要代码块围栏、不要任何解释）：\n"
+        "{\"tasks\":[{\"id\":\"t1\",\"name\":\"任务名\",\"agent\":\"retrieval\",\"params\":{},\"depends_on\":[]}],\"clarification\":\"\"}\n"
+        "意图不明确或缺少关键信息（如未指定哪个项目）时，tasks 留空、clarification 填需要向用户确认的问题。"
+    )
+
+
+def _known_agents() -> tuple[str, ...]:
+    """执行层 agent 白名单（跟随集中注册表，注册表为空时回退内置清单）."""
+    try:
+        from app.agents.core.registry import AgentRegistry
+
+        names = tuple(AgentRegistry.names())
+    except Exception:  # noqa: BLE001
+        names = ()
+    return names or _FALLBACK_AGENTS
 
 
 class LlmPlanner(Planner):
@@ -225,12 +260,12 @@ class LlmPlanner(Planner):
             if not isinstance(t, dict):
                 continue
             agent = t.get("agent")
-            if agent not in KNOWN_AGENTS:
+            if agent not in _known_agents():
                 continue
             params = dict(t.get("params") or {})
             if agent == "retrieval":
                 params.setdefault("query", request)
-            elif agent in KNOWN_AGENTS[1:]:
+            elif agent in _known_agents()[1:]:
                 pid = params.get("project_id") or project_id
                 if not pid and len(projects) == 1:
                     pid = projects[0]["id"]
@@ -251,7 +286,7 @@ class LlmPlanner(Planner):
 
     async def _call_planner(self, user_id: str, context: str, llm_api_key: str | None) -> str | None:
         """调用规划模型（用户配置的大模型），返回 JSON 计划文本（原样）."""
-        prompt = PLANNER_JSON_PROMPT + "\n" + context
+        prompt = _build_planner_prompt() + "\n" + context
         try:
             from app.core.llm import LLMClient
             from app.services.usage import CATEGORY_PLAN

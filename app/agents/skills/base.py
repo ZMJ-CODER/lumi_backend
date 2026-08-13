@@ -43,6 +43,8 @@ class SkillContext:
     user_id: str = ""
     scene: str = "chat"
     conversation_id: str = ""
+    # BYOK：用户自备 API key（由执行器透传，仅本次调用临时使用，不落库）
+    llm_api_key: str | None = None
     # 进度通知回调（如"正在请求访问本地文件…"），流式模式下展示给用户
     on_notify: Callable[[str], None] | None = None
 

@@ -53,6 +53,13 @@ async def lifespan(app: FastAPI):
         from app.agents.orchestration.temporal.runtime import stop_inprocess_worker
 
         await stop_inprocess_worker()
+    # 关闭 MCP 客户端会话（客户端技能直连 Electron MCP server）
+    try:
+        from app.agents.mcp.manager import close_all
+
+        await close_all()
+    except Exception:  # noqa: BLE001
+        pass
     await close_redis()
     logger.info("资源已清理")
 

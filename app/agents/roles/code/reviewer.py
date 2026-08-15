@@ -1,8 +1,14 @@
 """代码审查 agent：审查已有代码或改动，输出结构化问题清单（供质检/人工参考）."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from app.agents.core.base import WorkerAgent, WorkerContext
 from app.agents.core.tools import locate_project_file, review_code_content
-from app.agents.orchestration.models import TaskNode
+
+if TYPE_CHECKING:
+    from app.agents.orchestration.models import TaskNode
 
 
 class CodeReviewerAgent(WorkerAgent):

@@ -19,9 +19,20 @@ class CreateAgentJobRequest(BaseModel):
         default=None,
         description="指挥层澄清问题的用户回答（重提任务时携带，作为规划上下文）",
     )
+    office_docs: list[dict] | None = Field(
+        default=None,
+        description="当前办公文档会话列表 [{doc_id, filename, kind}]；规划器按文件名匹配，给 office_doc 节点带正确 doc_id",
+    )
 
 
 class CancelAgentJobRequest(BaseModel):
     """终止任务：是否保留已完成节点."""
 
     keep_completed: bool = Field(default=True, description="保留已完成任务节点")
+
+
+class ApproveAgentJobRequest(BaseModel):
+    """人工审批：批准/拒绝某个高风险节点."""
+
+    node_id: str = Field(..., description="待审批的节点 id")
+    approved: bool = Field(default=True, description="true=批准执行，false=拒绝跳过")

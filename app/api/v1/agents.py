@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from app.agents.orchestration import orchestrator
 from app.core.deps import require_auth
 from app.core.exceptions import NotFoundException
-from app.models.agent import CancelAgentJobRequest, CreateAgentJobRequest
+from app.models.agent import ApproveAgentJobRequest, CancelAgentJobRequest, CreateAgentJobRequest
 
 router = APIRouter()
 
@@ -30,6 +30,7 @@ async def create_agent_job(
         req.project_ids,
         llm_api_key,
         req.clarification_answer,
+        req.office_docs,
     )
     return {"code": 0, "data": job.model_dump()}
 
@@ -53,6 +54,29 @@ async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     return {"code": 0, "data": job.model_dump()}
 
 
+@router.get("/jobs/{job_id}/stream")
+async def get_agent_job_stream(
+    job_id: str,
+    node_id: str = "",
+    cursor: int = 0,
+    payload: dict = Depends(require_auth),
+):
+    """代码生成流式增量（cursor 游标轮询）：前端拿到增量后直接写盘.
+
+    消息格式：{type: start|chunk|end, ...}；start 触发客户端截断重写该文件，
+    chunk 为文本增量，end 标记本次流结束（ok=false 时客户端回滚备份）。
+    """
+    from app.services import code_stream
+
+    if not node_id:
+        raise NotFoundException("缺少 node_id")
+    job = await orchestrator.get_job(job_id)
+    if not job or job.user_id != payload["sub"]:
+        raise NotFoundException("任务不存在")
+    chunks, new_cursor = await code_stream.read_stream(job_id, node_id, cursor)
+    return {"code": 0, "data": {"chunks": chunks, "cursor": new_cursor}}
+
+
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_agent_job(
     job_id: str,
@@ -64,6 +88,20 @@ async def cancel_agent_job(
     if not job or job.user_id != payload["sub"]:
         raise NotFoundException("任务不存在")
     return {"code": 0, "data": job.model_dump(), "message": "任务已终止"}
+
+
+@router.post("/jobs/{job_id}/approve")
+async def approve_agent_job(
+    job_id: str,
+    req: ApproveAgentJobRequest,
+    payload: dict = Depends(require_auth),
+):
+    """人工审批：批准/拒绝高风险节点（Human-in-the-Loop）."""
+    try:
+        await orchestrator.approve_job(job_id, req.node_id, req.approved)
+    except RuntimeError as exc:
+        raise BadRequestException(str(exc)) from exc
+    return {"code": 0, "message": "已提交审批"}
 
 
 @router.post("/jobs/{job_id}/pause")

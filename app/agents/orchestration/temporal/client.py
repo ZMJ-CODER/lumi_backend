@@ -68,6 +68,14 @@ async def signal_agent_workflow(job_id: str, signal: str, arg=None) -> None:
         await handle.signal(signal, arg)
 
 
+async def approve_agent_workflow(job_id: str, node_id: str, approved: bool = True) -> None:
+    """审批信号：approve_task(node_id, approved)."""
+    client = await get_temporal_client()
+    handle = client.get_workflow_handle(job_id)
+    # Temporal SDK 的 signal() 仅支持单个 arg，用 dict 包装多参数
+    await handle.signal("approve_task", {"node_id": str(node_id), "approved": bool(approved)})
+
+
 async def cancel_agent_workflow(job_id: str, keep_completed: bool = True) -> None:
     await signal_agent_workflow(job_id, "cancel_request", keep_completed)
 

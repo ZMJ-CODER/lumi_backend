@@ -1,11 +1,12 @@
 """技能插件（filesystem/文件系统操作）：客户端本地文件技能 —— 由用户端（Electron）执行.
 
-执行通道：创建待执行请求（Redis）→ 用户端轮询 → 高危弹窗确认 → 执行 → 回传结果。
+执行通道（混合架构）：配置 MCP 时由后端直连 Electron 端 MCP server 执行；
+未配置/连接失败时回退 Redis 轮询（创建待执行请求 → 用户端轮询 → 高危弹窗确认 → 执行 → 回传结果）。
 本模块：list_directory / read_file / write_file（open_file 归入 desktop 分类）。
 """
 
 from app.agents.skills.base import Skill, SkillContext, SkillResult
-from app.services import client_tools
+from app.agents.skills.executor import run_client_skill_request
 
 
 async def _run_client_skill(
@@ -14,44 +15,12 @@ async def _run_client_skill(
     params: dict,
     requires_confirmation: bool,
 ) -> SkillResult:
-    """创建客户端工具请求并等待结果."""
-    if not user_id:
-        return SkillResult(
-            success=False,
-            error="本地文件技能需要登录后使用",
-            error_code="INVALID_ARGS",
-            retryable=False,
-        )
-    req = await client_tools.create_client_tool_request(
-        user_id, skill_name, params, requires_confirmation
-    )
-    if not req:
-        return SkillResult(
-            success=False,
-            error="本地文件技能需要登录后使用",
-            error_code="INVALID_ARGS",
-            retryable=False,
-        )
-    result = await client_tools.await_result(user_id, req["request_id"])
-    if result is None:
-        return SkillResult(
-            success=False,
-            error="等待用户响应超时，操作已取消",
-            error_code="TIMEOUT",
-            retryable=False,
-        )
-    if result.get("success"):
-        return SkillResult(
-            success=True,
-            output=str(result.get("output") or ""),
-            metadata=result.get("metadata") or {},
-        )
-    return SkillResult(
-        success=False,
-        error=str(result.get("error") or "客户端执行失败"),
-        error_code=str((result.get("metadata") or {}).get("error_code") or "EXEC_ERROR"),
-        retryable=False,
-        metadata=result.get("metadata") or {},
+    """MCP 优先、Redis 轮询兜底的统一客户端技能执行."""
+    return await run_client_skill_request(
+        user_id,
+        skill_name,
+        params,
+        requires_confirmation=requires_confirmation,
     )
 
 
@@ -154,4 +123,3 @@ class WriteFileSkill(Skill):
             {"path": path, "content": content},
             True,
         )
-

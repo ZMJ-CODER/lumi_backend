@@ -104,6 +104,7 @@ async def chat_stream(
                 retrieval_query=req.retrieval_query,
                 attachments=req.attachments,
                 llm_api_key=llm_api_key,
+                thinking_mode=req.thinking_mode,
             ):
                 if evt["type"] == "delta":
                     full_text += evt["content"]

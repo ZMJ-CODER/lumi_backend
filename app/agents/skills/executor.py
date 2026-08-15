@@ -9,6 +9,7 @@
 """
 
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -24,8 +25,16 @@ from app.services.usage import CATEGORY_CHAT, CATEGORY_SKILL
 
 
 def get_skills_for_scene(scene: str) -> list[Skill]:
-    """按场景过滤技能（scenes 白名单；空 = 全场景）."""
-    return [s for s in SkillRegistry.list() if s.supports_scene(scene)]
+    """按场景过滤技能（scenes 白名单；空 = 全场景）.
+
+    渐进开放写工具：AGENT_TOOL_WRITE_ENABLED=False 时隐藏写操作技能（只读先行）。
+    """
+    allow_write = bool(settings.AGENT_TOOL_WRITE_ENABLED)
+    return [
+        s
+        for s in SkillRegistry.list()
+        if s.supports_scene(scene) and (allow_write or not s.write_op)
+    ]
 
 
 def skills_to_tools(scene: str) -> list[dict]:
@@ -139,10 +148,13 @@ async def run_client_skill_request(
     skill_name: str,
     params: dict,
     requires_confirmation: bool = False,
+    timeout: float | None = None,
+    ttl: int | None = None,
 ) -> SkillResult:
     """客户端技能通用执行：创建待执行请求 → 用户端轮询执行 → 等待结果（超时取消）.
 
     供 client 环境技能（本地文件/项目操作）复用；key 不经过服务端。
+    timeout：覆盖默认客户端工具等待超时（如依赖安装可能超过 120s）。
     """
     if not user_id:
         return SkillResult(
@@ -151,8 +163,13 @@ async def run_client_skill_request(
             error_code="INVALID_ARGS",
             retryable=False,
         )
+    # 混合架构：配置了 MCP 服务器时，客户端技能优先走 MCP（可插拔）；失败回退轮询
+    if settings.MCP_SERVERS:
+        mcp_result = await _try_mcp_tool(skill_name, params)
+        if mcp_result is not None:
+            return mcp_result
     req = await client_tools.create_client_tool_request(
-        user_id, skill_name, params, requires_confirmation
+        user_id, skill_name, params, requires_confirmation, ttl=ttl
     )
     if not req:
         return SkillResult(
@@ -161,7 +178,14 @@ async def run_client_skill_request(
             error_code="INVALID_ARGS",
             retryable=False,
         )
-    result = await client_tools.await_result(user_id, req["request_id"])
+    t0 = time.time()
+    result = await client_tools.await_result(user_id, req["request_id"], timeout=timeout)
+    logger.debug(
+        "[ClientSkill] {} 往返 {:.0f}ms | success={}",
+        skill_name,
+        (time.time() - t0) * 1000,
+        bool(result and result.get("success")),
+    )
     if result is None:
         return SkillResult(
             success=False,
@@ -182,6 +206,28 @@ async def run_client_skill_request(
         retryable=False,
         metadata=result.get("metadata") or {},
     )
+
+
+async def _try_mcp_tool(skill_name: str, params: dict) -> SkillResult | None:
+    """尝试通过 MCP 调用客户端技能；失败返回 None（走轮询兜底）."""
+    try:
+        from app.agents.mcp.manager import call_tool
+
+        servers = settings.MCP_SERVERS or []
+        if not servers:
+            return None
+        for server in servers:
+            res = await call_tool(server.get("name", ""), skill_name, params)
+            if res is None or not res.get("success"):
+                continue
+            return SkillResult(
+                success=not bool(res.get("is_error")),
+                output=str(res.get("content") or ""),
+                metadata=res.get("metadata") or {},
+            )
+        return None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def run_skill_loop(

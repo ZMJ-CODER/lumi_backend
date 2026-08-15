@@ -56,9 +56,10 @@ class GenerateTestsSkill(Skill):
                     },
                 ],
                 temperature=0.2,
-                max_tokens=8000,
+                max_tokens=16000,
                 usage_user_id=context.user_id,
                 usage_category=CATEGORY_CODE,
+                reasoning_effort="low",
                 api_key=context.llm_api_key,
             )
         except Exception as exc:  # noqa: BLE001

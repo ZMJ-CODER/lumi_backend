@@ -4,7 +4,7 @@
 
 | 目录 | 分类 | 现有工具 |
 | --- | --- | --- |
-| `filesystem/` | 文件系统操作 | list_directory / read_file / write_file / edit_file / search_files / file_stat / list_project / read_project_file / write_project_file |
+| `filesystem/` | 文件系统操作 | list_directory / read_file / write_file / edit_file / search_files / file_stat / rename_file / delete_file（回收站）/ list_project / read_project_file / write_project_file / rename_project_file / delete_project_file（回收站） |
 | `shell/` | 终端/shell 执行 | run_project_command / python_exec / bash（超时+输出限制，高危确认） |
 | `process/` | 进程管理 | ps / kill（高危确认） |
 | `system/` | 系统信息与硬件 | get_datetime / env |

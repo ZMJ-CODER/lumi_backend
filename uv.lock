@@ -1267,6 +1267,10 @@ dependencies = [
     { name = "temporalio" },
     { name = "torch" },
     { name = "torchvision" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-javascript" },
+    { name = "tree-sitter-python" },
+    { name = "tree-sitter-typescript" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1312,6 +1316,10 @@ requires-dist = [
     { name = "temporalio", specifier = ">=1.31.0" },
     { name = "torch", url = "https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.13.0%2Bcu126-cp313-cp313-win_amd64.whl" },
     { name = "torchvision", url = "https://mirrors.aliyun.com/pytorch-wheels/cu126/torchvision-0.28.0%2Bcu126-cp313-cp313-win_amd64.whl" },
+    { name = "tree-sitter", specifier = ">=0.26.0" },
+    { name = "tree-sitter-javascript", specifier = ">=0.25.0" },
+    { name = "tree-sitter-python", specifier = ">=0.25.0" },
+    { name = "tree-sitter-typescript", specifier = ">=0.23.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
 ]
 provides-extras = ["dev"]

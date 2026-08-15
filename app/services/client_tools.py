@@ -37,6 +37,7 @@ async def create_client_tool_request(
     skill_name: str,
     params: dict,
     requires_confirmation: bool = False,
+    ttl: int | None = None,
 ) -> dict | None:
     """创建待用户端执行的请求；返回请求数据（含 request_id）."""
     try:
@@ -54,10 +55,11 @@ async def create_client_tool_request(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     key = _key(user_id, request_id)
+    ttl = ttl or REQUEST_TTL_SECONDS
     await r.hset(key, mapping=payload)
-    await r.expire(key, REQUEST_TTL_SECONDS)
+    await r.expire(key, ttl)
     await r.rpush(_pending_key(user_id), request_id)
-    await r.expire(_pending_key(user_id), REQUEST_TTL_SECONDS)
+    await r.expire(_pending_key(user_id), ttl)
     return payload
 
 

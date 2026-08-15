@@ -1,10 +1,16 @@
 """检索 agent：复用现有 RAG，检索知识库返回文档片段与引用."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from loguru import logger
 
 from app.agents.core.base import WorkerAgent, WorkerContext
-from app.agents.orchestration.models import TaskNode
-from app.agents.orchestration.progress import set_progress as _report_progress
+from app.agents.core.progress import set_progress as _report_progress
+
+if TYPE_CHECKING:
+    from app.agents.orchestration.models import TaskNode
 
 
 class RetrievalAgent(WorkerAgent):

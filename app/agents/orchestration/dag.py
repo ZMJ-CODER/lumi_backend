@@ -51,6 +51,52 @@ def validate_dag(nodes: list[TaskNode]) -> None:
         raise DagValidationError("任务依赖存在环，无法执行")
 
 
+# 各 agent 的必选参数（校验规划结果用）
+_REQUIRED_PARAMS: dict[str, list[str]] = {
+    "office_doc": ["doc_id", "instruction", "mode"],
+    "office_text": ["instruction"],
+    "office_research": ["instruction", "mode"],
+    "office_todo": ["action"],
+    "retrieval": ["query"],
+    "web_research": ["instruction"],
+    "code": ["project_id", "instruction"],
+    "code_reader": ["project_id", "instruction"],
+    "code_writer": ["project_id", "instruction"],
+}
+
+
+def validate_planned_dag(
+    nodes: list[TaskNode],
+    workers: dict | None = None,
+) -> list[str]:
+    """规划结果静态校验：agent 已注册、必选参数、无环、id 唯一.
+
+    Returns 错误列表（空 = 通过）。
+    """
+    if workers is None:
+        from app.agents.orchestration.workers import WORKERS
+
+        workers = WORKERS
+
+    errors: list[str] = []
+    seen: set[str] = set()
+    for n in nodes:
+        if n.id in seen:
+            errors.append(f"节点 id 重复: {n.id}")
+        seen.add(n.id)
+        if n.agent not in workers:
+            errors.append(f"agent 未注册: {n.agent}")
+            continue
+        for p in _REQUIRED_PARAMS.get(n.agent, []):
+            if not n.params.get(p):
+                errors.append(f"{n.agent} 缺少必选参数 {p}")
+    try:
+        validate_dag(nodes)
+    except DagValidationError as exc:
+        errors.append(str(exc))
+    return errors
+
+
 async def execute_dag(
     job: Job,
     workers: dict,

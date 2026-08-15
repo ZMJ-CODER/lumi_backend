@@ -28,6 +28,19 @@ from app.services.rag.document_parser import parse_document
 
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
 
+# 编程语言扩展名：入库时直接归类为 code（聊天/办公 RAG 检索会排除，代码检索走 code 索引）
+CODE_FILE_EXTS = {
+    ".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".go", ".java", ".c", ".h",
+    ".cpp", ".hpp", ".cs", ".rs", ".php", ".rb", ".sh", ".bash", ".sql", ".kt", ".kts",
+    ".swift", ".dart", ".scala", ".lua", ".pl", ".r", ".vue", ".svelte", ".tsx",
+}
+
+
+def is_code_filename(filename: str | None) -> bool:
+    """按文件名判断是否为代码文件（用于归类 code，避免代码污染普通聊天检索）."""
+    name = (filename or "").lower()
+    return Path(name).suffix in CODE_FILE_EXTS
+
 
 # ── 工具 ─────────────────────────────────────────────
 
@@ -297,10 +310,15 @@ async def process_document_pipeline(
             raise DocumentQualityError(
                 f"文档质量不达标（{score:.2f}）：{'；'.join(messages)}"
             )
-        # 文档分类：时效档次 + 开放标签（大模型抽样判断，用户选择的档次作为参考）
-        category, tags = await classify_document(cleaned_text, user_category or doc.category)
-        doc.category = category
-        doc.tags = ", ".join(tags) if tags else None
+        # 代码文件直接归类 code（不进 LLM 分类；聊天/办公 RAG 检索会排除 code）
+        if is_code_filename(doc.filename):
+            doc.category = "code"
+            doc.tags = None
+        else:
+            # 文档分类：时效档次 + 开放标签（大模型抽样判断，用户选择的档次作为参考）
+            category, tags = await classify_document(cleaned_text, user_category or doc.category)
+            doc.category = category
+            doc.tags = ", ".join(tags) if tags else None
         chunks = chunk_document(cleaned_text, doc.filename, settings.RAG_CHUNK_SIZE, settings.RAG_CHUNK_OVERLAP)
 
         # 重处理时清掉旧分块
@@ -473,21 +491,33 @@ def _hybrid_fuse(vector_rows, keyword_rows, top_k: int) -> list[dict]:
     return sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:top_k]
 
 
-def _scope_conditions(user_id: str, space_tags: list[str], need_embedding: bool) -> tuple[list[str], dict]:
-    """构造检索范围条件（个人空间 + 公共空间，按场景标签过滤）."""
+def _scope_conditions(
+    user_id: str,
+    space_tags: list[str],
+    need_embedding: bool,
+    exclude_categories: list[str] | None = None,
+) -> tuple[list[str], dict]:
+    """构造检索范围条件（个人空间 + 公共空间，按场景标签过滤；可排除类别如 code）."""
     conds: list[str] = []
     params: dict = {}
     if need_embedding:
         conds.append("c.embedding IS NOT NULL")
     uid = _uuid(user_id)
     if uid:
-        conds.append("(c.user_id = :uid OR s.is_public = true)")
+        if settings.RAG_INCLUDE_PUBLIC_IN_PERSONAL:
+            # 个人检索包含公共空间（共享知识库场景；默认关闭，避免他人上传内容混入）
+            conds.append("(c.user_id = :uid OR s.is_public = true)")
+        else:
+            conds.append("c.user_id = :uid")
         params["uid"] = uid
     else:
         conds.append("s.is_public = true")
     if space_tags:
         conds.append("s.scene_tag IN :tags")
         params["tags"] = list(space_tags)
+    if exclude_categories:
+        conds.append("d.category NOT IN :excl_cats")
+        params["excl_cats"] = list(exclude_categories)
     if settings.RAG_TIME_FILTER_DAYS:
         conds.append("d.created_at >= :min_time")
         params["min_time"] = datetime.now(timezone.utc) - timedelta(days=settings.RAG_TIME_FILTER_DAYS)
@@ -501,6 +531,7 @@ async def search_user_knowledge(
     space_tags: list[str],
     top_k: int | None = None,
     threshold: float | None = None,
+    exclude_categories: list[str] | None = None,
 ) -> tuple[str, list[dict]]:
     """对话 RAG 混合检索：向量相似度 top-N + 关键词检索，RRF 融合.
 
@@ -508,10 +539,15 @@ async def search_user_knowledge(
         (拼接后的上下文文本, 引用列表)
     """
     top_k = await effective_top_k(top_k or settings.RAG_TOP_K)
+    threshold = await effective_threshold(
+        settings.RAG_SIMILARITY_THRESHOLD if threshold is None else threshold
+    )
     if not query or not query.strip():
         return "", []
 
-    conds, params = _scope_conditions(user_id, space_tags, need_embedding=True)
+    conds, params = _scope_conditions(
+        user_id, space_tags, need_embedding=True, exclude_categories=exclude_categories
+    )
     fused: list[dict] = []
 
     # ── 第一路：向量相似度 top-N ──
@@ -535,6 +571,8 @@ async def search_user_knowledge(
         )
         if space_tags:
             stmt = stmt.bindparams(bindparam("tags", expanding=True))
+        if exclude_categories:
+            stmt = stmt.bindparams(bindparam("excl_cats", expanding=True))
         rows = (await session.execute(stmt, params)).mappings().all()
         fused = [dict(r) for r in rows]
 
@@ -542,7 +580,9 @@ async def search_user_knowledge(
     keywords = _extract_keywords(query)
     if keywords:
         kw_top = settings.RAG_HYBRID_KEYWORD_TOP_K
-        kw_conds, kw_params = _scope_conditions(user_id, space_tags, need_embedding=False)
+        kw_conds, kw_params = _scope_conditions(
+            user_id, space_tags, need_embedding=False, exclude_categories=exclude_categories
+        )
         kw_conds.append(
             "(" + " OR ".join(f"c.chunk_text ILIKE :kw{i}" for i in range(len(keywords))) + ")"
         )
@@ -564,6 +604,8 @@ async def search_user_knowledge(
         stmt = text(sql).bindparams(bindparam("top_k", kw_top))
         if space_tags:
             stmt = stmt.bindparams(bindparam("tags", expanding=True))
+        if exclude_categories:
+            stmt = stmt.bindparams(bindparam("excl_cats", expanding=True))
         kw_rows = (await session.execute(stmt, kw_params)).mappings().all()
         fused = _hybrid_fuse(fused, kw_rows, top_k)
     elif fused:
@@ -571,6 +613,10 @@ async def search_user_knowledge(
 
     # 时效性加权：相关性为主，新文档占优（时间意图查询权重更高）
     fused = _apply_recency(fused, _time_intent_weight(query))
+
+    # 相关性硬门槛（宁缺毋滥）：相似度低于阈值的引用完全不可信，直接丢弃；
+    # 仅关键词命中、无向量相似度（similarity=None）的引用同样不可信。
+    fused = [r for r in fused if (r.get("similarity") or 0.0) >= threshold]
 
     context_parts: list[str] = []
     citations: list[dict] = []
@@ -688,6 +734,10 @@ async def search_public_vectors(
 
     # 时效性加权：相关性为主，新文档占优（时间意图查询权重更高）
     fused = _apply_recency(fused, _time_intent_weight(query))
+
+    # 相关性硬门槛（宁缺毋滥）：相似度低于阈值的引用完全不可信，直接丢弃；
+    # 仅关键词命中、无向量相似度（similarity=None）的引用同样不可信。
+    fused = [r for r in fused if (r.get("similarity") or 0.0) >= threshold]
 
     return [
         {

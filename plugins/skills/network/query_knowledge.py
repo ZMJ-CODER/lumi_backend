@@ -53,6 +53,8 @@ class QueryKnowledgeSkill(Skill):
                     query=query,
                     space_tags=tags,
                     top_k=int(params.get("top_k") or 5),
+                    # 代码文件走 code 类别，不混入知识检索（普通聊天/办公检索同样排除）
+                    exclude_categories=["code"],
                 )
         except Exception as exc:  # noqa: BLE001
             return SkillResult(

@@ -54,9 +54,10 @@ class AnalyzeLogsSkill(Skill):
                     },
                 ],
                 temperature=0.2,
-                max_tokens=2000,
+                max_tokens=4096,
                 usage_user_id=context.user_id,
                 usage_category=CATEGORY_CHAT,
+                reasoning_effort="low",
                 api_key=context.llm_api_key,
             )
         except Exception as exc:  # noqa: BLE001

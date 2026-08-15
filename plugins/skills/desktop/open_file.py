@@ -1,11 +1,12 @@
 """技能插件（desktop/GUI与桌面控制）：open_file —— 用系统默认应用打开文件.
 
 打开文件/目录属于"桌面控制"类操作（操作系统默认应用），
-执行通道：客户端（Electron）弹窗确认后调用系统默认应用打开。
+执行通道（混合架构）：配置 MCP 时由后端直连 Electron 端 MCP server 执行
+（高危弹窗确认在 Electron 主进程内完成）；未配置时回退 Redis 轮询弹窗确认。
 """
 
 from app.agents.skills.base import Skill, SkillContext, SkillResult
-from app.services import client_tools
+from app.agents.skills.executor import run_client_skill_request
 
 
 def _notify(context: SkillContext | None, text: str) -> None:
@@ -37,34 +38,9 @@ class OpenFileSkill(Skill):
             return SkillResult(success=False, error="缺少文件路径 path", error_code="INVALID_ARGS", retryable=False)
         _notify(context, f"（正在请求打开本地文件：{path}，请在弹出的确认框中确认）")
         user_id = context.user_id if context else ""
-        req = await client_tools.create_client_tool_request(
-            user_id, self.name, {"path": path}, True
-        )
-        if not req:
-            return SkillResult(
-                success=False,
-                error="本地文件技能需要登录后使用",
-                error_code="INVALID_ARGS",
-                retryable=False,
-            )
-        result = await client_tools.await_result(user_id, req["request_id"])
-        if result is None:
-            return SkillResult(
-                success=False,
-                error="等待用户响应超时，操作已取消",
-                error_code="TIMEOUT",
-                retryable=False,
-            )
-        if result.get("success"):
-            return SkillResult(
-                success=True,
-                output=str(result.get("output") or ""),
-                metadata=result.get("metadata") or {},
-            )
-        return SkillResult(
-            success=False,
-            error=str(result.get("error") or "客户端执行失败"),
-            error_code=str((result.get("metadata") or {}).get("error_code") or "EXEC_ERROR"),
-            retryable=False,
-            metadata=result.get("metadata") or {},
+        return await run_client_skill_request(
+            user_id,
+            self.name,
+            {"path": path},
+            requires_confirmation=True,
         )

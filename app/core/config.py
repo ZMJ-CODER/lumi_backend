@@ -99,7 +99,10 @@ class Settings(BaseSettings):
 
     # ── RAG 默认参数 ──
     RAG_TOP_K: int = 5
-    RAG_SIMILARITY_THRESHOLD: float = 0.45  # 按 bge-small-zh 实测校准；切换模型后需重新校准
+    RAG_SIMILARITY_THRESHOLD: float = 0.5  # 相关性硬门槛：低于此相似度的引用直接丢弃（宁缺毋滥）
+    # 个人 RAG 检索是否包含公共空间内容（False=只检索自己的文件；
+    # 公共空间仍可通过公共知识库接口显式检索，避免他人上传的内容混入个人检索）
+    RAG_INCLUDE_PUBLIC_IN_PERSONAL: bool = False
     RAG_CHUNK_SIZE: int = 500
     RAG_CHUNK_OVERLAP: int = 50
     RAG_MIN_QUALITY_SCORE: float = 0.5  # 清洗后质量分低于该值不入库（status=error）
@@ -127,7 +130,8 @@ class Settings(BaseSettings):
     AGENT_SANDBOX_MAX_OUTPUT_CHARS: int = 8000
     AGENT_SKILLS_MAX_ROUNDS: int = 5     # 技能调用循环最大轮数（防死循环）
     AGENT_CLIENT_TOOL_TIMEOUT_SECONDS: int = 120  # 客户端工具等待用户执行/确认的最长时间
-    AGENT_REVIEW_ENABLED: bool = True    # 质检层开关（code 任务 LLM 审查；失败自动放行）
+    AGENT_REVIEW_ENABLED: bool = False   # activity 级质检开关：与 writer 自检 + reviewer 节点重复，
+                                         # 默认关闭省一次 LLM 调用/节点；需要可改回 True
     SKILL_PLUGINS_DIR: str = "plugins/skills"     # 技能插件目录（Docker 挂载为 volume 支持热更新）
     # ── 多智能体协作编排 ──
     AGENT_JOBS_TTL_SECONDS: int = 86400           # 任务状态保留时间（24h，Redis appendonly 持久化）
@@ -142,6 +146,30 @@ class Settings(BaseSettings):
     TEMPORAL_BYOK_TTL_SECONDS: int = 43200        # BYOK key 临时存放 TTL（12h；任务正常结束即删除）
     TEMPORAL_RUN_WORKER_INPROCESS: bool = True    # 后端进程内运行 Temporal Worker（IDE 一键运行后端即含 Worker）
     TEMPORAL_AUTO_START_SERVER: bool = True       # Worker 启动前自动拉起 Temporal 开发服务器（找不到 exe 则跳过）
+    # 代码生成允许的最高推理档（渐进式：起始恒为 low，空内容/自检不过时自动升级到该档）。
+    # 想强制全部 low 可设为 low；想允许复杂任务用高推理则保持 high。
+    # 规划/审查/自检/标题等非产出型调用固定 low，不受此限制。
+    AGENT_LLM_REASONING_EFFORT: str = "high"
+    # 代码生成默认开启推理（先分析后写）：配合高输出上限避免"预算烧光返回空内容"
+    AGENT_CODE_NO_REASONING: bool = False
+    # 代码生成单次输出上限（取消小预算：推理强度高时几十万 token 属正常现象）
+    AGENT_CODE_MAX_TOKENS: int = 65536
+    # 限制用户指令/反馈输入长度（减少阅读与思考的 token 消耗）
+    AGENT_CODE_MAX_INSTRUCTION_CHARS: int = 4000
+    # 屏蔽的执行 agent（插件化注册时按 name 过滤）：写代码 agent 暂不使用，
+    # 保留代码便于日后恢复（清空列表即可）
+    AGENT_DISABLED: list[str] = [
+        "code",
+        "code_reader",
+        "code_writer",
+        "code_tester",
+        "code_reviewer",
+    ]
+    # 渐进开放写工具：False 时向 LLM 隐藏写操作技能（只读先行，发消息/改文件/装依赖等）
+    AGENT_TOOL_WRITE_ENABLED: bool = True
+    # 混合架构：客户端技能通过 MCP 调用（可插拔）。配置：
+    # [{"name": "lumi_client", "transport": "streamable-http", "url": "http://127.0.0.1:8765/mcp"}]
+    MCP_SERVERS: list[dict] = []
 
     # ── 文档类别与按类别半衰期（不同知识时效性不同）──
     RAG_DEFAULT_CATEGORY: str = "general"   # 默认类别

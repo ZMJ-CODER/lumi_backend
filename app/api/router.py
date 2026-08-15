@@ -15,12 +15,14 @@ from app.api.v1 import (
     local,
     local_corpus,
     memories,
+    office_docs,
     prompts,
     projects,
     public_kb,
     tts,
     tools,
     uploads,
+    usage,
     user,
 )
 
@@ -29,6 +31,7 @@ api_router = APIRouter()
 # 认证 & 用户
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(user.router, prefix="/user", tags=["user"])
+api_router.include_router(usage.router, prefix="/usage", tags=["usage"])
 
 # 多智能体协作（办公模式：任务编排 / 状态管理）
 api_router.include_router(agents.router, prefix="/agents", tags=["agents"])
@@ -53,6 +56,7 @@ api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledg
 
 # 长期记忆调试（superadmin）
 api_router.include_router(memories.router, prefix="/admin/memories", tags=["admin"])
+api_router.include_router(office_docs.router, prefix="/office/docs", tags=["office"])
 
 # 角色提示词
 api_router.include_router(prompts.router, prefix="/prompts", tags=["prompts"])

@@ -8,7 +8,9 @@ import hashlib
 import json
 import re
 
+import httpx
 from loguru import logger
+from pathlib import Path
 
 from app.core.config import settings
 
@@ -46,6 +48,8 @@ _CONFIG_INTENT_KEYWORDS = (
 def _is_config_file(rel_path: str) -> bool:
     """判断是否为配置/元数据类文件（写 UI/功能代码时应避开这些目标）."""
     base = str(rel_path or "").lower()
+    if base.endswith(".d.ts"):
+        return True  # 类型声明文件（env.d.ts 等）：写功能代码时不应作为目标
     if any(h in base for h in _CONFIG_FILE_HINTS):
         return True
     return base.endswith(_CONFIG_FILE_SUFFIXES)
@@ -57,12 +61,63 @@ def _is_config_intent(instruction: str) -> bool:
     return any(k in text for k in _CONFIG_INTENT_KEYWORDS)
 
 
+def _looks_like_new_file(rel_path: str) -> bool:
+    """判断显式目标路径是否像"要新建的文件"（不在索引中时允许创建）."""
+    p = str(rel_path or "").strip()
+    if not p or p.endswith("/") or ".." in p.split("/"):
+        return False
+    return bool(re.search(r"\.[A-Za-z0-9]+$", p))
+
+
 # ── 提示词模板 ───────────────────────────────────────────
+
+def _read_prompt_file(name: str) -> str:
+    """读取代码 agent 的上下文契约 / 自检清单（缺文件时静默降级）."""
+    try:
+        p = Path(__file__).resolve().parent.parent / "roles" / "code" / name
+        return p.read_text(encoding="utf-8").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+_AGENTS_MD = _read_prompt_file("AGENTS.md")
+_PITFALLS_MD = _read_prompt_file("COMMON_PITFALLS.md")
+
 
 CODE_SYSTEM_PROMPT = (
     "你是一名资深软件工程师，正在用户的本地代码项目里工作。"
+    "你需要根据用户的编码指令，生成完整的代码文件内容。"
+    "代码必须规范完整，且与用户指令保持一致。"
+    "动手前先在内部完成分析：理解用户意图、结合目录树定位改动点、评估对项目其他部分的影响，"
+    "分析完成后给出最合理的实现，然后输出代码。"
     "根据用户指令和提供的文件内容，生成修改后的完整文件内容。"
     "只输出文件内容本身，不要解释、不要 Markdown 代码块围栏。"
+    "如果项目架构需要，你可以新建或修改目录、文件（包括代码，文本等项目支持的格式）、依赖、配置文件等。"
+    + (("\n\n# 工作规范（最小上下文契约）\n" + _AGENTS_MD) if _AGENTS_MD else "")
+    + (("\n\n# 写码前自检清单\n" + _PITFALLS_MD) if _PITFALLS_MD else "")
+)
+
+CODE_SYSTEM_PROMPT_PATCH = (
+    "你是一名资深软件工程师，正在用户的本地代码项目里工作。文件较大，"
+    "动手前先在内部完成分析：理解用户意图、结合目录树定位改动点、评估影响，"
+    "分析完成后再输出补丁。"
+    "请用 SEARCH/REPLACE 块输出修改（不要输出整个文件）：\n"
+    "<<<<<<< SEARCH\n需要替换的原文（必须逐字符复制自上方提供的文件内容，"
+    "含首尾空格，并带足够上下文保证唯一匹配）\n=======\n新内容\n>>>>>>> REPLACE\n"
+    "可输出多个块（按从上到下顺序）；不要修改无关代码；除 SEARCH/REPLACE 块外不要输出任何解释。"
+    + (("\n\n# 工作规范（最小上下文契约）\n" + _AGENTS_MD) if _AGENTS_MD else "")
+    + (("\n\n# 写码前自检清单\n" + _PITFALLS_MD) if _PITFALLS_MD else "")
+)
+
+FIX_SYSTEM_PROMPT = (
+    "你是一名代码修复工程师。下面是静态类型检查/语法检查的报错输出，以及出错文件的代码。"
+    "请只修复报错相关的问题：\n"
+    "1. 逐条对照报错行号定位问题（导入缺失、类型不匹配、拼写不一致、模板与脚本不一致等）；\n"
+    "2. 输出 SEARCH/REPLACE 补丁修复这些错误（不要输出整个文件）；\n"
+    "3. SEARCH 必须逐字符复制文件原文（含首尾空格），并带足够上下文唯一匹配；\n"
+    "4. 不要修改与报错无关的代码。\n"
+    "格式：\n"
+    "<<<<<<< SEARCH\n需要替换的原文\n=======\n新内容\n>>>>>>> REPLACE\n"
 )
 
 TEST_SYSTEM_PROMPT = (
@@ -101,9 +156,11 @@ async def _llm_step_title(ctx, instruction: str, path: str) -> str | None:
                     }
                 ],
                 temperature=0.2,
-                max_tokens=60,
+                max_tokens=4096,
                 usage_user_id=ctx.user_id,
                 usage_category=CATEGORY_TITLE,
+                reasoning_effort="low",
+                disable_reasoning_effort=True,
                 api_key=ctx.llm_api_key,
             ),
             timeout=10,
@@ -173,6 +230,11 @@ async def locate_project_file(
                 )
                 if exact:
                     return {"path": exact["file_path"]}
+                # 显式指定的路径不在索引中：若是合理文件路径则标记为新文件（供 writer 创建），
+                # 否则视为无效路径直接返回空，不再落到语义检索（避免改到不相干的文件）
+                if _looks_like_new_file(str(target_file)):
+                    return {"path": str(target_file), "new_file": True}
+                return {}
             # 1) 语义检索：命中返回 file_key（客户端按本地映射读真实文件）
             try:
                 vec_hits = await code_embedding.search_code_vectors(
@@ -273,8 +335,27 @@ async def locate_project_file(
                 stem = base.rsplit(".", 1)[0] if "." in base else base
                 if stem and len(stem) >= 2 and stem in instruction:
                     return {"path": fp}
-            # 6) 找不到明确目标但项目有文件：优先主入口文件（"编写页面"类任务落到入口）
-            if all_files:
+            # 6) 找不到明确目标但项目有文件：仅当指令明确是 UI/页面类时才落到入口文件，
+            #    避免"模糊指令永远默认改 app.vue/main.js"（写半天写不对入口文件）
+            _UI_INTENT_KEYWORDS = (
+                "页面",
+                "首页",
+                "界面",
+                "样式",
+                "布局",
+                "外观",
+                "美化",
+                "按钮",
+                "导航",
+                "组件",
+                "视图",
+                "渲染",
+                "ui",
+                "page",
+            )
+            if all_files and any(
+                kw in instruction.lower() for kw in _UI_INTENT_KEYWORDS
+            ):
                 entry_hits = [
                     fp
                     for fp in all_files
@@ -314,6 +395,48 @@ async def list_project_files(user_id: str, project_id: str, limit: int = 500) ->
         return []
 
 
+async def locate_from_memory(worker, ctx, project_id: str, instruction: str) -> dict | None:
+    """快路径：热缓存命中 → 本地正则搜索命中，避免重新向量检索."""
+    try:
+        res = await worker.run_skill("get_project_context", {"project_id": project_id}, ctx)
+        if not res.get("success"):
+            return None
+        text = str(res.get("content") or "")
+        for line in text.splitlines():
+            m = re.match(r"\s*[-*]\s*([\w./\-\\]+\.\w+)", line)
+            if not m:
+                continue
+            fp = m.group(1).replace("\\", "/")
+            name = fp.rsplit("/", 1)[-1]
+            stem = name.rsplit(".", 1)[0] if "." in name else name
+            if stem and len(stem) >= 2 and (stem in instruction or name in instruction):
+                return {"path": fp, "from_memory": True}
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 本地正则搜索（用户提议的简化方案）：提取指令里的代码标识符，直接 grep 本地文件
+    tokens = re.findall(r"[A-Za-z_]\w{2,}", instruction)[:3]
+    if tokens:
+        try:
+            pattern = "|".join(re.escape(t) for t in tokens)
+            res = await worker.run_skill(
+                "grep_code",
+                {"project_id": project_id, "pattern": pattern, "max_results": 8},
+                ctx,
+            )
+            if res.get("success"):
+                items = res.get("results") or []
+                if items:
+                    from collections import Counter
+
+                    counts = Counter(str(x.get("path")) for x in items if x.get("path"))
+                    for p, _ in counts.most_common(3):
+                        return {"path": p, "from_memory": True, "from_grep": True}
+        except Exception:  # noqa: BLE001
+            pass
+    return None
+
+
 async def _read_with_retry(
     worker,
     ctx,
@@ -350,6 +473,60 @@ async def _read_with_retry(
     return read, {"path": target_path, "file_key": target_key}
 
 
+# ── 推理强度：渐进式（Progressive Reasoning） ─────────────
+
+_EFFORT_LEVELS = ("low", "medium", "high")
+
+
+def _effort_cap() -> str:
+    """代码生成允许的最高推理档（AGENT_LLM_REASONING_EFFORT）."""
+    cap = (settings.AGENT_LLM_REASONING_EFFORT or "high").strip().lower()
+    return cap if cap in _EFFORT_LEVELS else "high"
+
+
+def effort_start_for_task(instruction: str, original_len: int, is_new: bool) -> str:
+    """代码生成起始推理档：简单改动 low（快）；明显复杂的新文件/大改动 medium 起步."""
+    if _effort_cap() == "low":
+        return "low"
+    inst_len = len(instruction or "")
+    if inst_len > 600 or original_len > 8000 or (is_new and inst_len > 300):
+        return "medium"
+    return "low"
+
+
+def effort_escalate(current: str) -> str:
+    """升级一档（不超过用户允许的最高档）；到顶后返回当前档."""
+    cap = _effort_cap()
+    idx = _EFFORT_LEVELS.index(current)
+    cap_idx = _EFFORT_LEVELS.index(cap)
+    if idx >= cap_idx:
+        return current
+    return _EFFORT_LEVELS[idx + 1]
+
+
+def _format_project_tree(project_files: list[str], max_entries: int = 120) -> str:
+    """把项目文件清单渲染成缩进目录树（第一层上下文：目录结构）.
+
+    按路径深度缩进，最多展示 max_entries 条；目录节点自动生成。
+    """
+    files = sorted(f for f in project_files if f)[:max_entries]
+    if not files:
+        return "（项目文件索引为空）"
+    lines: list[str] = []
+    seen_dirs: set[str] = set()
+    for fp in files:
+        parts = fp.replace("\\", "/").strip("/").split("/")
+        # 目录节点
+        for i in range(1, len(parts)):
+            d = "/".join(parts[:i])
+            if d in seen_dirs:
+                continue
+            seen_dirs.add(d)
+            lines.append("  " * i + "📁 " + parts[i - 1] + "/")
+        lines.append("  " * len(parts) + "📄 " + parts[-1])
+    return "\n".join(lines)
+
+
 # ── LLM 生成 / 审查 ─────────────────────────────────────
 
 async def generate_code_content(
@@ -359,37 +536,179 @@ async def generate_code_content(
     original: str,
     system_prompt: str = CODE_SYSTEM_PROMPT,
     project_files: list[str] | None = None,
+    reasoning_effort: str | None = None,
+    patch_mode: bool = False,
+    context_override: str | None = None,
+    force_full: bool = False,
+    stream_begin_cb=None,
+    stream_cb=None,
+    no_reasoning_override: bool | None = None,
 ) -> str:
-    """LLM 生成完整文件内容（云端优先，本地小模型兜底）；自动去掉代码块围栏."""
+    """LLM 生成文件内容（渐进推理）。
+
+    patch_mode=True：大文件本地补丁模式——只返回 SEARCH/REPLACE 原始文本，
+    由调用方通过客户端 apply_patch 技能应用；context_override 传已提取的代码块上下文。
+    否则：小文件全文重写；大文件走服务端提取+应用兜底。
+    force_full=True：强制按"小文件"语义全文重写（发送全文、输出整文件），
+    用于补丁重试耗尽后的兜底，避免反复升档硬磕补丁。
+    stream_cb：可选异步回调，收到生成文本增量时调用（流式写盘用）；
+    传入后改用 chat_stream 增量产出，同时仍返回完整文本。
+    stream_begin_cb：可选异步回调，每次 LLM 尝试开始前调用（流式写盘时用于
+    通知客户端截断重写，避免上次失败尝试的残留内容污染文件）。
+    """
     try:
         from app.core.llm import LLMClient
         from app.services.usage import CATEGORY_CODE
+        from app.agents.core.patch import (
+            apply_search_replace,
+            build_edit_context,
+            parse_search_replace,
+        )
 
         llm = LLMClient()
-        content = original[-60000:] if len(original) > 60000 else original
+        lines = (original or "").splitlines()
+        is_large = (not force_full) and (patch_mode or (bool(original) and len(lines) > 150))
+        # 大文件：只发相关代码块 + 引用导入；小文件/强制全文：全文
+        if context_override:
+            shown_content = context_override
+        elif is_large:
+            shown_content = build_edit_context(original, path, instruction)
+        else:
+            shown_content = (original or "")[-60000:]
+        gen_prompt = CODE_SYSTEM_PROMPT_PATCH if is_large else system_prompt
         files_hint = ""
         if project_files:
             files_hint = (
-                "\n\n项目文件清单（供参考，写入路径必须是清单里的文件，避免目录/乱猜路径）：\n"
-                + "\n".join(f"- {p}" for p in project_files[:100])
+                "\n\n项目目录树（第一层上下文，供定位改动点；写入路径必须是清单里的文件）：\n"
+                + _format_project_tree(project_files)
             )
-        reply = await llm.chat(
-            [
-                {"role": "system", "content": system_prompt},
+        retry_hint = ""
+        instruction_short = (instruction or "")[: settings.AGENT_CODE_MAX_INSTRUCTION_CHARS]
+
+        async def _chat_once(
+            effort: str,
+            extra: str = "",
+            no_reasoning: bool = False,
+            show: str | None = None,
+            prompt: str | None = None,
+        ) -> str:
+            messages = [
+                {"role": "system", "content": prompt or gen_prompt},
                 {
                     "role": "user",
                     "content": (
-                        f"用户指令：{instruction}\n\n"
-                        f"文件路径：{path}\n\n当前文件内容：\n{content}"
+                        f"用户指令：{instruction_short}{extra}\n\n"
+                        f"文件路径：{path}\n\n当前文件内容：\n{show or shown_content}"
                         f"{files_hint}"
                     ),
                 },
-            ],
-            max_tokens=8000,
-            usage_user_id=ctx.user_id,
-            usage_category=CATEGORY_CODE,
-            api_key=ctx.llm_api_key,
+            ]
+
+            async def _invoke(max_tokens: int | None) -> str:
+                kwargs = {
+                    "usage_user_id": ctx.user_id,
+                    "usage_category": CATEGORY_CODE,
+                    "reasoning_effort": effort,
+                    "disable_reasoning_effort": no_reasoning,
+                    "api_key": ctx.llm_api_key,
+                }
+                if max_tokens is not None:
+                    kwargs["max_tokens"] = max_tokens
+                if stream_cb is None:
+                    return await llm.chat(messages, **kwargs)
+                # 流式：逐段回调（写盘由客户端完成），同时累积完整文本返回
+                if stream_begin_cb is not None:
+                    try:
+                        await stream_begin_cb()
+                    except Exception:  # noqa: BLE001
+                        pass  # 流式开始回调失败不影响生成
+                parts: list[str] = []
+
+                # 硬超时：单次流式生成最多 180s，防止网关只推 keep-alive 导致节点卡死
+                async def _consume() -> None:
+                    async for delta in llm.chat_stream(messages, **kwargs):
+                        parts.append(delta)
+                        try:
+                            if stream_cb is not None:
+                                await stream_cb(delta)
+                        except Exception:  # noqa: BLE001
+                            pass  # 流式回调失败不影响生成
+
+                await asyncio.wait_for(_consume(), timeout=180)
+                return "".join(parts)
+
+            try:
+                return await _invoke(settings.AGENT_CODE_MAX_TOKENS)
+            except httpx.HTTPStatusError as exc:
+                # 部分网关不接受过大的 max_tokens（400）：去掉该参数重试一次
+                if exc.response is not None and exc.response.status_code == 400:
+                    logger.warning(
+                        "[Agent] 网关拒绝 max_tokens={}，去掉后重试: {}",
+                        settings.AGENT_CODE_MAX_TOKENS,
+                        exc,
+                    )
+                    return await _invoke(None)
+                raise
+
+        effort = reasoning_effort or effort_start_for_task(
+            instruction, len(original), not bool((original or "").strip())
         )
+        reply = ""
+        # 代码生成默认关闭推理（配置可关）：thinking 慢且常把输出预算烧光导致空内容
+        no_reasoning = (
+            no_reasoning_override
+            if no_reasoning_override is not None
+            else bool(settings.AGENT_CODE_NO_REASONING)
+        )
+        for _attempt in range(2):
+            try:
+                reply = await _chat_once(effort, retry_hint, no_reasoning=no_reasoning)
+                if not (reply or "").strip():
+                    raise RuntimeError("模型返回空内容")
+            except Exception as exc:  # noqa: BLE001
+                if not no_reasoning:
+                    # 兜底：若开启推理，空内容多为推理把输出预算烧光 → 关推理重试
+                    logger.warning("[Agent] LLM 生成失败（effort={}）: {}，关闭推理重试", effort, exc)
+                    no_reasoning = True
+                    continue
+                nxt = effort_escalate(effort)
+                if nxt != effort:
+                    effort = nxt
+                    continue
+                logger.warning("[Agent] 推理档到顶，回退本地模型")
+                reply = await _generate_local(instruction, path, original)
+                break
+            if not is_large:
+                break  # 小文件：全文即结果
+            if patch_mode:
+                break  # 客户端应用：直接返回原始补丁文本
+            blocks = parse_search_replace(reply)
+            if not blocks:
+                break  # 模型未按补丁格式输出：当作整文件内容兜底
+            new_content, failures = apply_search_replace(original, blocks)
+            if not failures:
+                reply = new_content
+                break
+            # 补丁应用失败：把具体原因带回给模型，同档重试一次（不升档，避免越试越慢）
+            retry_hint = (
+                "\n\n【上次 SEARCH/REPLACE 应用失败】\n"
+                + "\n".join(failures)
+                + "\n请重新输出补丁：SEARCH 必须逐字符复制文件原文（含首尾空格），"
+                "并带足够上下文唯一匹配；不要修改无关代码。"
+            )
+        else:
+            # 服务端补丁重试耗尽：回退全文重写（不升档硬磕补丁）
+            logger.warning("[Agent] 服务端补丁重试耗尽，回退全文重写")
+            try:
+                reply = await _chat_once(
+                    effort,
+                    no_reasoning=no_reasoning,
+                    show=(original or "")[-60000:],
+                    prompt=system_prompt,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Agent] 全文重写失败: {}", exc)
+                reply = await _generate_local(instruction, path, original)
         reply = (reply or "").strip()
         if reply.startswith("```"):
             reply = re.sub(r"^```\w*\n?", "", reply)
@@ -462,9 +781,11 @@ async def review_code_content(ctx, instruction: str, path: str, content: str) ->
                 },
             ],
             temperature=0.1,
-            max_tokens=1024,
+            max_tokens=4096,
             usage_user_id=ctx.user_id,
             usage_category=CATEGORY_REVIEW,
+            reasoning_effort="low",
+            disable_reasoning_effort=True,
             api_key=ctx.llm_api_key,
         )
         data = _extract_json(reply)

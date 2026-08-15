@@ -57,9 +57,10 @@ class CreateTaskPlanSkill(Skill):
                     }
                 ],
                 temperature=0.1,
-                max_tokens=1024,
+                max_tokens=16000,
                 usage_user_id=context.user_id,
                 usage_category=CATEGORY_PLAN,
+                reasoning_effort="low",
                 api_key=context.llm_api_key,
             )
             data = _extract_json(reply) if reply else None

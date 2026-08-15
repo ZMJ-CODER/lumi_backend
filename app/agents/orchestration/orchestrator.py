@@ -88,8 +88,24 @@ class AgentOrchestrator:
         project_ids: list[str] | None = None,
         llm_api_key: str | None = None,
         clarification_answer: str | None = None,
+        office_docs: list[dict] | None = None,
     ) -> Job:
         """规划任务树并启动执行（Temporal 优先），立即返回 Job."""
+        # 幂等：30 秒内相同请求且任务未结束 → 直接返回（防双击/重复提交）
+        try:
+            for jid in await self._store.list_job_ids(user_id, 5):
+                j = await self._store.get_job(jid)
+                if (
+                    j
+                    and j.request == request
+                    and time.time() - (j.created_at or 0) < 30
+                    and j.status
+                    in (JobStatus.RUNNING, JobStatus.PENDING, JobStatus.WAITING_APPROVAL)
+                ):
+                    logger.info("幂等命中：返回已提交的相同任务 {}", jid[:8])
+                    return j
+        except Exception:  # noqa: BLE001
+            pass
         tree = await self._planner.plan(
             user_id,
             request,
@@ -98,6 +114,7 @@ class AgentOrchestrator:
             project_ids,
             llm_api_key,
             clarification_answer,
+            office_docs,
         )
         job = Job(
             job_id=str(uuid.uuid4()),
@@ -106,7 +123,27 @@ class AgentOrchestrator:
             scene=scene,
             status=JobStatus.RUNNING,
             nodes=tree.nodes,
+            plan_text=tree.plan_text,
         )
+        # DAG 静态校验：agent 已注册 / 必选参数 / 无环 / id 唯一；
+        # 校验失败 → 降级为知识库检索（简化流程），避免"LLM 瞎指挥"产生必失败的 DAG
+        from app.agents.orchestration.dag import validate_planned_dag
+        from app.agents.orchestration.models import TaskNode
+
+        dag_errors = validate_planned_dag(job.nodes, self._workers)
+        if dag_errors:
+            logger.warning(
+                "任务 DAG 校验失败，降级为检索流程: {} | {}", job.job_id[:8], "；".join(dag_errors)[:300]
+            )
+            job.nodes = [
+                TaskNode(
+                    id=f"r{int(time.time())}-{uuid.uuid4().hex[:6]}",
+                    name="知识库检索（规划降级）",
+                    agent="retrieval",
+                    params={"query": request, "top_k": 5},
+                    depends_on=[],
+                )
+            ]
         # 意图不明确：LLM 请求向用户澄清，任务以"待澄清"结果直接收敛
         if tree.clarification and not tree.nodes:
             job.status = JobStatus.COMPLETED
@@ -220,7 +257,7 @@ class AgentOrchestrator:
     async def _attach_progress(self, job: Job) -> Job:
         """把 Redis 中的节点实时进度合并进 node.metadata["progress"]（仅展示用）."""
         try:
-            from app.agents.orchestration.progress import get_job_progress
+            from app.agents.core.progress import get_job_progress
 
             progress = await get_job_progress(job.job_id)
             if progress:
@@ -287,6 +324,14 @@ class AgentOrchestrator:
                     n.error = "任务被用户终止"
         await self._store.save_job(job)
         return job
+
+    async def approve_job(self, job_id: str, node_id: str, approved: bool = True) -> None:
+        """人工审批：向工作流发送 approve_task 信号（高风险节点门控）."""
+        if not await self._probe_temporal():
+            raise RuntimeError("Temporal 不可用，无法审批")
+        from app.agents.orchestration.temporal.client import approve_agent_workflow
+
+        await approve_agent_workflow(job_id, node_id, approved)
 
     async def pause_job(self, job_id: str) -> Job | None:
         """暂停任务（不调度新节点；运行中的节点会执行完）."""

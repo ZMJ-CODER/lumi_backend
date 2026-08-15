@@ -11,15 +11,24 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 
+from loguru import logger
+
 from app.agents.orchestration.models import TaskNode
+from app.agents.orchestration.intent import classify
 
 
 class TaskTree:
     """规划结果：一组带依赖的任务节点."""
 
-    def __init__(self, nodes: list[TaskNode], clarification: str | None = None):
+    def __init__(
+        self,
+        nodes: list[TaskNode],
+        clarification: str | None = None,
+        plan_text: str | None = None,
+    ):
         self.nodes = nodes
         self.clarification = clarification
+        self.plan_text = plan_text
 
 
 class Planner(ABC):
@@ -35,6 +44,7 @@ class Planner(ABC):
         project_ids: list[str] | None = None,
         llm_api_key: str | None = None,
         clarification_answer: str | None = None,
+        office_docs: list[dict] | None = None,
     ) -> TaskTree:
         ...
 
@@ -57,15 +67,50 @@ class RulePlanner(Planner):
         project_ids: list[str] | None = None,
         llm_api_key: str | None = None,
         clarification_answer: str | None = None,
+        office_docs: list[dict] | None = None,
     ) -> TaskTree:
         # 代码任务：显式指定 project_id，或在请求+澄清回答中匹配到已注册项目名
         combined = request + (f" {clarification_answer}" if clarification_answer else "")
+        # 办公文档任务（规则回退）：带文档 → 直接建 office_doc 分析节点
+        if office_docs:
+            from app.agents.core.registry import AgentRegistry
+
+            if AgentRegistry.get("office_doc") is not None:
+                nodes = []
+                for d in office_docs or []:
+                    doc_id = str(d.get("doc_id") or "")
+                    if not doc_id:
+                        continue
+                    nodes.append(
+                        TaskNode(
+                            id=f"od{int(time.time())}-{uuid.uuid4().hex[:6]}-{len(nodes)}",
+                            name=f"分析文档 {d.get('filename') or doc_id[:8]}",
+                            agent="office_doc",
+                            params={
+                                "doc_id": doc_id,
+                                "instruction": request,
+                                "mode": "analyze",
+                                "analyze_mode": "qa",
+                            },
+                            depends_on=[],
+                        )
+                    )
+                if nodes:
+                    return TaskTree(nodes=nodes)
         resolved_project = (
             project_id
             or (project_ids[0] if project_ids else None)
             or await self._match_project(user_id, combined)
         )
         if resolved_project:
+            # 代码 agent 被屏蔽（AGENT_DISABLED）时，不创建必失败的 code 节点
+            from app.agents.core.registry import AgentRegistry
+
+            if AgentRegistry.get("code") is None:
+                return TaskTree(
+                    nodes=[],
+                    clarification="代码编写功能已停用，请改用普通对话，或试试知识库检索 / 联网搜索",
+                )
             node = TaskNode(
                 id=f"c{int(time.time())}-{uuid.uuid4().hex[:6]}",
                 name="代码任务",
@@ -105,11 +150,7 @@ class RulePlanner(Planner):
 # 注册表为空时的兜底 agent 清单（正常情况下由 AgentRegistry 动态生成）
 _FALLBACK_AGENTS = (
     "retrieval",
-    "code",
-    "code_reader",
-    "code_writer",
-    "code_tester",
-    "code_reviewer",
+    "web_research",
 )
 
 _FALLBACK_AGENT_LINES = (
@@ -148,11 +189,21 @@ def _build_planner_prompt() -> str:
         + "\n代码任务建议按文件拆分节点，便于前端逐步展示进度：\n"
         "  - 每个需要阅读/定位的文件一个 code_reader 节点（按阅读顺序设置 depends_on）；\n"
         "  - 每个需要修改的文件一个 code_writer 节点，depends_on 指向对应的 reader 节点；\n"
+        "  - 需要新建文件时，code_writer 的 target_file 用新文件路径（如 src/NewPage.vue），会自动创建；\n"
+        "  - 需要删除文件/临时脚本/缓存时，生成 code_writer 节点，params 加 \"action\": \"delete\"，instruction 写清要删除的文件路径；\n"
+        "  - 修改已有文件时必须明确 target_file（从项目文件清单里选具体文件）；指令没指明文件时先安排 code_reader/grep 定位，禁止因为指令模糊就默认改入口文件（app.vue / main.js / index.js 等）；\n"
         "  - 所有写入完成后一个 code_tester 节点；需要时最后加 code_reviewer。\n"
+        "办公任务（涉及文档/检索/文本产出时，例如上传文档后总结/改写/生成邮件/竞品分析/整理待办）：\n"
+        "  - 先分析/读取相关文档：office_doc 节点，mode=analyze 或 read，params 必须带正确的 doc_id；\n"
+        "  - 再按用户要求产出：邮件/公文/改写/摘要/纪要/抽取/合规用 office_text（task=email/doc/rewrite/summary/minutes/extract/compliance，instruction 写清要求）；\n"
+        "  - 竞品分析/文档问答/客服回复/早晚报用 office_research（mode=competitor/document_qa/customer_service/daily_report）；待办用 office_todo；\n"
+        "  - 修改文档用 office_doc（mode=edit，带 doc_id）；\n"
+        "  - 产出节点 depends_on 对应的分析/读取节点，确保先读到文档再产出。\n"
+        "项目很小或任务简单（如只改/建一两个小文件）时，用最少的节点：单个 code_writer 直接完成，不要过度拆分 reader/writer。\n"
         "项目定位：根据用户请求与项目文件清单自动判断涉及哪个/哪些项目，不要因为未指定项目就澄清。\n"
         "涉及多个项目时按顺序生成任务：先完成一个项目再切换下一个（不同项目用各自的 project_id）。\n"
         "严格输出 JSON（不要代码块围栏、不要任何解释）：\n"
-        "{\"tasks\":[{\"id\":\"t1\",\"name\":\"任务名\",\"agent\":\"retrieval\",\"params\":{},\"depends_on\":[]}],\"clarification\":\"\"}\n"
+        "{\"plan\":\"一句话/一段执行计划（给用户看）\",\"tasks\":[{\"id\":\"t1\",\"name\":\"任务名\",\"agent\":\"retrieval\",\"params\":{},\"depends_on\":[]}],\"clarification\":\"\"}\n"
         "意图不明确或缺少关键信息（如未指定哪个项目）时，tasks 留空、clarification 填需要向用户确认的问题。"
     )
 
@@ -187,15 +238,16 @@ class LlmPlanner(Planner):
         project_ids: list[str] | None = None,
         llm_api_key: str | None = None,
         clarification_answer: str | None = None,
+        office_docs: list[dict] | None = None,
     ) -> TaskTree:
         projects = await self._list_projects(user_id)
         tree = await self._plan_with_llm(
-            user_id, request, project_id, project_ids, llm_api_key, projects, clarification_answer
+            user_id, request, project_id, project_ids, llm_api_key, projects, clarification_answer, office_docs
         )
         if tree is not None:
             return tree
         return await self._fallback.plan(
-            user_id, request, scene, project_id, project_ids, llm_api_key, clarification_answer
+            user_id, request, scene, project_id, project_ids, llm_api_key, clarification_answer, office_docs
         )
 
     async def _list_projects(self, user_id: str) -> list[dict]:
@@ -218,6 +270,7 @@ class LlmPlanner(Planner):
         llm_api_key: str | None,
         projects: list[dict],
         clarification_answer: str | None = None,
+        office_docs: list[dict] | None = None,
     ) -> TaskTree | None:
         # 只展示用户本机项目（自动定位时聚焦这些项目，避免无关项目干扰）
         if project_ids:
@@ -248,8 +301,32 @@ class LlmPlanner(Planner):
             + (f"\n项目文件清单：\n{files_ctx}" if projects else "")
             + (f"\n用户指定的项目 ID：{project_id}" if project_id else "")
             + (f"\n用户补充说明：{clarification_answer}" if clarification_answer else "")
+            + (
+                "\n当前办公文档："
+                + "、".join(
+                    f"{d.get('filename')}(doc_id={d.get('doc_id')})"
+                    for d in office_docs or []
+                    if d.get("doc_id")
+                )
+                + "（涉及分析/修改对应文档时，office_doc 节点必须带上正确的 doc_id）"
+                if office_docs
+                else ""
+            )
         )
-        raw = await self._call_planner(user_id, context, llm_api_key)
+        # 意图分类（规则粗分类）：模板 / 半结构 / 自由
+        intent = classify(request, office_docs)
+        if intent["task_type"] == "template":
+            templated = await self._plan_with_template(
+                user_id, request, office_docs, llm_api_key, force_template=intent["template"]
+            )
+            if templated is not None:
+                return templated
+        elif intent["task_type"] == "semi_structured":
+            patterned = await self._plan_with_pattern(user_id, request, office_docs, llm_api_key)
+            if patterned is not None:
+                return patterned
+        # free / 兜底：Plan-then-Execute（LLM 自由规划，含 office_doc 兜底注入）
+        raw = await self._call_planner(user_id, request, context, llm_api_key)
         data = _extract_json(raw) if raw else None
         if not data:
             return None
@@ -282,24 +359,187 @@ class LlmPlanner(Planner):
                     depends_on=[str(d) for d in (t.get("depends_on") or [])],
                 )
             )
-        return TaskTree(nodes=nodes, clarification=clarification)
+        # 确定性兜底：带了办公文档但规划结果没覆盖到 → 强制补 office_doc 分析节点，
+        # 保证智能体一定能读到文档（不依赖 LLM 规划的自觉）
+        if office_docs and "office_doc" in _known_agents():
+            covered = {
+                str(n.params.get("doc_id"))
+                for n in nodes
+                if n.agent == "office_doc" and n.params.get("doc_id")
+            }
+            for d in office_docs or []:
+                doc_id = str(d.get("doc_id") or "")
+                if not doc_id or doc_id in covered:
+                    continue
+                fname = str(d.get("filename") or doc_id[:8])
+                nodes.append(
+                    TaskNode(
+                        id=f"od{int(time.time())}-{uuid.uuid4().hex[:6]}-{len(nodes)}",
+                        name=f"分析文档 {fname}",
+                        agent="office_doc",
+                        params={
+                            "doc_id": doc_id,
+                            "instruction": request,
+                            "mode": "analyze",
+                            "analyze_mode": "qa",
+                        },
+                        depends_on=[],
+                    )
+                )
+        return TaskTree(
+            nodes=nodes,
+            clarification=clarification,
+            plan_text=str(data.get("plan") or "").strip() or None,
+        )
 
-    async def _call_planner(self, user_id: str, context: str, llm_api_key: str | None) -> str | None:
+    async def _plan_with_template(
+        self,
+        user_id: str,
+        request: str,
+        office_docs: list[dict] | None,
+        llm_api_key: str | None,
+        force_template: str | None = None,
+    ) -> TaskTree | None:
+        """模板优先：规则分类命中 → 规则抽参（免 LLM）→ 模板构造器生成确定性 DAG."""
+        from app.core.llm import LLMClient
+        from app.services.usage import CATEGORY_PLAN
+        from app.agents.orchestration.templates import get_template, template_catalog_text
+
+        # 模板任务：规则抽参（不调 LLM，可靠性最高）
+        if force_template:
+            tmpl = get_template(force_template)
+            if tmpl:
+                params = _template_default_params(force_template, request)
+                nodes = tmpl.build(request, params, office_docs)
+                if nodes:
+                    logger.info("[Planner] 模板 {} 构建 DAG（规则抽参，{} 节点）", force_template, len(nodes))
+                    return TaskTree(
+                        nodes=[TaskNode(**n) for n in nodes],
+                        plan_text=f"按模板 {force_template} 执行：{request}",
+                    )
+        # 未指定模板：LLM 分类 + 抽参
+        doc_desc = "、".join(
+            f"{d.get('filename')}(doc_id={d.get('doc_id')})"
+            for d in office_docs or []
+            if d.get("doc_id")
+        )
+        prompt = (
+            "你是办公流程规划器。根据用户请求，从模板库选择最匹配的模板并抽取参数。\n"
+            "可用模板：\n"
+            + template_catalog_text()
+            + f"\n当前上传的文档：{doc_desc or '（无）'}\n"
+            + "只输出 JSON（不要 Markdown 围栏、不要解释）："
+            '{"template": "模板名或null", "params": {"参数名": 值}}\n'
+            "没有合适模板时 template 为 null。"
+        )
+        try:
+            llm = LLMClient()
+            reply = await llm.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=2000,
+                usage_user_id=user_id,
+                usage_category=CATEGORY_PLAN,
+                disable_reasoning_effort=True,
+                api_key=llm_api_key,
+            )
+            data = _extract_json(reply)
+            if not data:
+                return None
+            tname = str(data.get("template") or "")
+            tmpl = get_template(tname) if tname else None
+            if not tmpl:
+                return None
+            nodes = tmpl.build(request, dict(data.get("params") or {}), office_docs)
+            if not nodes:
+                return None
+            logger.info(
+                "[Planner] 模板 {} 构建 DAG（{} 节点）", tname, len(nodes)
+            )
+            return TaskTree(nodes=[TaskNode(**n) for n in nodes])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Planner] 模板规划失败，回退自由规划: {}", exc)
+            return None
+
+    async def _plan_with_pattern(
+        self,
+        user_id: str,
+        request: str,
+        office_docs: list[dict] | None,
+        llm_api_key: str | None,
+    ) -> TaskTree | None:
+        """半结构任务：LLM 选模式 + 填参数 → 模式构造器生成 DAG."""
+        from app.core.llm import LLMClient
+        from app.services.usage import CATEGORY_PLAN
+        from app.agents.orchestration.patterns import build_pattern, pattern_catalog_text
+
+        prompt = (
+            "你是办公流程规划器。用户请求是带条件的半结构任务，请选择一个模式并抽取参数。\n"
+            + pattern_catalog_text()
+            + "\n只输出 JSON（不要 Markdown 围栏）：{\"pattern\": \"模式名\", \"params\": {\"参数名\": 值}}\n"
+        )
+        try:
+            llm = LLMClient()
+            reply = await llm.chat(
+                [{"role": "user", "content": prompt + f"\n用户请求：{request}"}],
+                temperature=0.1,
+                max_tokens=2000,
+                usage_user_id=user_id,
+                usage_category=CATEGORY_PLAN,
+                disable_reasoning_effort=True,
+                api_key=llm_api_key,
+            )
+            data = _extract_json(reply)
+            if not data:
+                return None
+            nodes = build_pattern(
+                str(data.get("pattern") or ""),
+                request,
+                dict(data.get("params") or {}),
+                office_docs,
+            )
+            if not nodes:
+                return None
+            logger.info("[Planner] 模式 {} 构建 DAG（{} 节点）", data.get("pattern"), len(nodes))
+            return TaskTree(
+                nodes=[TaskNode(**n) for n in nodes],
+                plan_text=f"按模式 {data.get('pattern')} 执行：{request}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Planner] 模式规划失败，回退自由规划: {}", exc)
+            return None
+
+    async def _call_planner(
+        self,
+        user_id: str,
+        request: str,
+        context: str,
+        llm_api_key: str | None,
+    ) -> str | None:
         """调用规划模型（用户配置的大模型），返回 JSON 计划文本（原样）."""
         prompt = _build_planner_prompt() + "\n" + context
         try:
             from app.core.llm import LLMClient
             from app.services.usage import CATEGORY_PLAN
+            from app.agents.orchestration.cases import format_cases, get_similar_cases
 
             llm = LLMClient()
+            # Few-Shot：相似历史成功任务作为规划参考
+            similar = await get_similar_cases(request, 3)
+            if similar:
+                prompt += "\n\n" + format_cases(similar)
             reply = await llm.chat(
                 [
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,
-                max_tokens=1024,
+                # deepseek-v4-flash 等推理模型会先消耗大量 token 做 reasoning；
+                # 预算太小会导致 content 为空、规划器回退规则版（单节点、不拆分文件）。
+                # 给足 16000，保证规划 JSON 一定能产出。
+                max_tokens=16000,
                 usage_user_id=user_id,
                 usage_category=CATEGORY_PLAN,
+                reasoning_effort="low",
                 api_key=llm_api_key,
             )
             return (reply or "").strip() or None
@@ -324,3 +564,25 @@ def _extract_json(text: str) -> dict | None:
         return data if isinstance(data, dict) else None
     except (ValueError, TypeError):
         return None
+
+
+def _template_default_params(template: str, request: str) -> dict:
+    """模板任务的规则抽参（免 LLM）：按请求关键词推断参数."""
+    if template == "document_analysis_flow":
+        task = "summary" if any(k in request for k in ("总结", "摘要")) else "qa"
+        return {"task": task, "mode": "summary" if task == "summary" else "qa"}
+    if template == "daily_brief_flow":
+        period = "evening" if any(k in request for k in ("晚报", "晚间")) else "morning"
+        return {"period": period, "focus": ""}
+    if template == "invoice_filter_flow":
+        return {"threshold": 10000, "alert_threshold": 50000, "notify": "财务"}
+    if template == "document_compare_flow":
+        return {"dimensions": ""}
+    if template == "document_combine_flow":
+        return {"output": "summary"}
+    if template == "document_translate_flow":
+        for lang in ("英文", "日文", "韩文", "法文", "德文"):
+            if lang in request:
+                return {"target_lang": lang}
+        return {"target_lang": "中文"}
+    return {}

@@ -25,6 +25,10 @@ class SendMessageRequest(BaseModel):
         description="检索用查询（本地小模型精炼改写后的版本）；缺省时用 content 检索",
     )
     web_search: bool = Field(default=False, description="是否开启联网搜索（Tavily）")
+    thinking_mode: str = Field(
+        default="fast",
+        description="推理模式：fast=低推理（快速回复）/ think=高推理（深度思考）；仅影响普通聊天主回复",
+    )
     message_id: str | None = Field(
         default=None, description="客户端消息 ID（UUID，用于幂等去重，防止重复提交）"
     )

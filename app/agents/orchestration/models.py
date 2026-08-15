@@ -31,6 +31,7 @@ class JobStatus(str, Enum):
     FAILED = "failed"
     INTERRUPTED = "interrupted"  # 用户终止 / 断网超时
     CANCELLED = "cancelled"
+    WAITING_APPROVAL = "waiting_approval"  # 等待人工审批
 
 
 class TaskNode(BaseModel):
@@ -51,6 +52,9 @@ class TaskNode(BaseModel):
     started_at: float | None = None
     completed_at: float | None = None
     metadata: dict = Field(default_factory=dict)
+    # 审批门控：高风险写操作（发邮件/改系统/付款等）需人工确认后才执行
+    approval: bool = False
+    approval_note: str = ""
 
 
 class Job(BaseModel):
@@ -63,6 +67,7 @@ class Job(BaseModel):
     status: JobStatus = JobStatus.PENDING
     nodes: list[TaskNode] = Field(default_factory=list)
     result: dict | None = None    # 汇总结果（如最终回复）
+    plan_text: str | None = None  # 规划器产出的执行计划文本（供展示/审计）
     error: str | None = None
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)

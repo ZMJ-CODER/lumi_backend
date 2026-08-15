@@ -10,8 +10,17 @@
 
 from app.agents.core.base import WorkerAgent
 from app.agents.core.registry import AgentRegistry
+from app.core.config import settings
+from loguru import logger
 
 from app.agents.roles.knowledge.retrieval import RetrievalAgent
+from app.agents.roles.knowledge.web_research import WebResearchAgent
+from app.agents.roles.office.agents import (
+    OfficeDocAgent,
+    OfficeResearchAgent,
+    OfficeTextAgent,
+    OfficeTodoAgent,
+)
 from app.agents.roles.code.agent import CodeAgent
 from app.agents.roles.code.reader import CodeReaderAgent
 from app.agents.roles.code.writer import CodeWriterAgent
@@ -20,23 +29,39 @@ from app.agents.roles.code.reviewer import CodeReviewerAgent
 
 
 def register_all_agents() -> list[WorkerAgent]:
-    """注册全部内置执行 agent（幂等：同名覆盖）."""
+    """注册内置执行 agent（按 AGENT_DISABLED 过滤；幂等：同名覆盖）."""
     instances = [
         RetrievalAgent(),
+        WebResearchAgent(),
+        OfficeTextAgent(),
+        OfficeResearchAgent(),
+        OfficeTodoAgent(),
+        OfficeDocAgent(),
         CodeAgent(),
         CodeReaderAgent(),
         CodeWriterAgent(),
         CodeTesterAgent(),
         CodeReviewerAgent(),
     ]
+    disabled = set(settings.AGENT_DISABLED or [])
+    registered: list[WorkerAgent] = []
     for agent in instances:
+        if agent.name in disabled:
+            logger.info("Agent '{}' 已在 AGENT_DISABLED 中，跳过注册", agent.name)
+            continue
         AgentRegistry.register(agent)
-    return instances
+        registered.append(agent)
+    return registered
 
 
 __all__ = [
     "register_all_agents",
     "RetrievalAgent",
+    "WebResearchAgent",
+    "OfficeTextAgent",
+    "OfficeResearchAgent",
+    "OfficeTodoAgent",
+    "OfficeDocAgent",
     "CodeAgent",
     "CodeReaderAgent",
     "CodeWriterAgent",

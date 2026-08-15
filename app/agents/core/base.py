@@ -4,12 +4,17 @@
 新增执行 agent 时继承 WorkerAgent，在 roles/<领域>/ 下实现并注册。
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from app.agents.orchestration.models import TaskNode
 from app.agents.skills.base import SkillContext
 from app.agents.skills.registry import SkillRegistry
+
+if TYPE_CHECKING:
+    from app.agents.orchestration.models import TaskNode
 
 
 @dataclass
@@ -33,7 +38,7 @@ class WorkerAgent(ABC):
     skills: list[str] = []  # 该 agent 可调用的技能名（白名单）
 
     @abstractmethod
-    async def execute(self, node: TaskNode, ctx: WorkerContext) -> dict:
+    async def execute(self, node: "TaskNode", ctx: WorkerContext) -> dict:
         """执行一个任务节点，返回结构化结果."""
         ...
 
@@ -44,6 +49,16 @@ class WorkerAgent(ABC):
             return {"success": False, "error": f"技能不存在: {skill_name}", "error_code": "SKILL_NOT_FOUND"}
         if self.skills and skill_name not in self.skills:
             return {"success": False, "error": f"agent '{self.name}' 无权调用技能 {skill_name}", "error_code": "FORBIDDEN"}
+        # 规则引擎：硬逻辑动态校验（必填字段/阈值/权限），不交给 LLM
+        from app.agents.rules import check_rules
+
+        violations = check_rules(self.name, skill_name, params, ctx.user_id, ctx)
+        if violations:
+            return {
+                "success": False,
+                "error": "规则校验未通过：" + "；".join(violations[:3]),
+                "error_code": "RULE_VIOLATION",
+            }
         result = await skill.execute(
             params,
             SkillContext(

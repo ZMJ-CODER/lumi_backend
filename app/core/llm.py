@@ -42,6 +42,7 @@ class LLMClient:
         model: str | None = None,
         api_key: str | None = None,
         reasoning_effort: str | None = None,
+        disable_reasoning_effort: bool = False,
         usage_user_id: str | None = None,
         usage_category: str | None = None,
         **kwargs,
@@ -55,7 +56,7 @@ class LLMClient:
 
         payload = {"model": model_name, "messages": messages, **kwargs}
         effort = reasoning_effort or cfg.get("reasoning_effort")
-        if effort:
+        if effort and not disable_reasoning_effort:
             payload["reasoning_effort"] = effort
         async with AsyncClient(
             base_url=base_url,
@@ -66,6 +67,10 @@ class LLMClient:
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
+        if content is None or not str(content or "").strip():
+            # 推理强度过高时模型可能把输出预算全花在 reasoning 上，content 为空；
+            # 抛异常让调用方重试（禁用推理强度）或回退，避免静默"生成失败"
+            raise RuntimeError("模型返回空内容（可能推理强度过高耗尽输出预算）")
         usage = data.get("usage") or {}
         await record_usage(
             usage_user_id,
@@ -177,6 +182,7 @@ class LLMClient:
         model: str | None = None,
         api_key: str | None = None,
         reasoning_effort: str | None = None,
+        disable_reasoning_effort: bool = False,
         usage_user_id: str | None = None,
         usage_category: str | None = None,
         **kwargs,
@@ -196,7 +202,7 @@ class LLMClient:
             **kwargs,
         }
         effort = reasoning_effort or cfg.get("reasoning_effort")
-        if effort:
+        if effort and not disable_reasoning_effort:
             payload["reasoning_effort"] = effort
         streamed_text = ""
         prompt_tokens = completion_tokens = None

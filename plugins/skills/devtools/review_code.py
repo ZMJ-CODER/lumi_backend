@@ -72,9 +72,10 @@ class ReviewCodeSkill(Skill):
                     },
                 ],
                 temperature=0.1,
-                max_tokens=1024,
+                max_tokens=4096,
                 usage_user_id=context.user_id,
                 usage_category=CATEGORY_REVIEW,
+                reasoning_effort="low",
                 api_key=context.llm_api_key,
             )
             data = _extract_json(reply)

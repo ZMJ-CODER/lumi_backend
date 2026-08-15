@@ -42,6 +42,7 @@ def build_worker(client) -> "Worker":
     from app.agents.orchestration.temporal.activities import (
         cleanup_job_secrets_activity,
         execute_node_activity,
+        synthesize_final_answer_activity,
     )
     from app.agents.temporal_workflows import AgentDagWorkflow
 
@@ -49,7 +50,11 @@ def build_worker(client) -> "Worker":
         client,
         task_queue=settings.TEMPORAL_TASK_QUEUE,
         workflows=[AgentDagWorkflow],
-        activities=[execute_node_activity, cleanup_job_secrets_activity],
+        activities=[
+            execute_node_activity,
+            cleanup_job_secrets_activity,
+            synthesize_final_answer_activity,
+        ],
     )
 
 

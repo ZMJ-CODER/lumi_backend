@@ -71,6 +71,27 @@ _WEB_DECISION_PROMPT = (
     "不确定时倾向调用工具。"
 )
 
+_WEB_INTENT_KEYWORDS = (
+    "搜索", "搜一下", "查", "查询", "找", "最新", "新闻", "今天", "昨天", "明天",
+    "天气", "股票", "价格", "汇率", "行情", "实时", "动态", "报道", "热点",
+    "是什么", "怎么回事", "哪里", "什么时候", "谁的", "多少钱", "怎么样",
+)
+
+
+def _looks_like_chitchat(question: str) -> bool:
+    """简单闲聊/寒暄判断：很短且不含搜索意图关键词 → 跳过联网决策（省一次 LLM 调用）."""
+    q = (question or "").strip()
+    if not q:
+        return True
+    if len(q) > 40:
+        return False
+    return not any(k in q for k in _WEB_INTENT_KEYWORDS)
+
+
+def _chat_reasoning_effort(thinking_mode: str) -> str | None:
+    """聊天推理强度：fast=low（快速回复），think=None（沿用用户全局设置，通常是 high）."""
+    return None if thinking_mode == "think" else "low"
+
 # 角色提示词下的场景行为补充（角色负责性格，场景负责行为）
 _SCENE_BEHAVIOR = {
     "chat": "",
@@ -381,10 +402,11 @@ class Orchestrator:
         attachments: list | None = None,
         web_search_enabled: bool = False,
         llm_api_key: str | None = None,
+        thinking_mode: str = "fast",
     ) -> dict:
         """处理用户消息的核心流程（阻塞版，供旧接口/降级路径使用）."""
         transcript = await self._resolve_transcript(content, attachments)
-        content = transcript or content
+        content = transcript
 
         # 本地模式：仅记录，不生成回复（PC端已处理）
         if local_mode:
@@ -407,7 +429,15 @@ class Orchestrator:
             # 首条消息：回复与标题生成并行（大模型"阅读的同时"总结）
             reply_task = asyncio.create_task(
                 self._call_llm_auto(
-                    user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key
+                    user_id,
+                    prep["messages"],
+                    scene,
+                    image_uris,
+                    content,
+                    prep["citations"],
+                    conversation_id,
+                    llm_api_key,
+                    thinking_mode=thinking_mode,
                 )
             )
             title_task = asyncio.create_task(self._generate_title(content, user_id, llm_api_key))
@@ -416,7 +446,8 @@ class Orchestrator:
                 await self.save_conversation_title(conversation_id, title)
         else:
             reply = await self._call_llm_auto(
-                user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key
+                user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key,
+                thinking_mode=thinking_mode,
             )
 
         # 保存助手回复 + 摘要 + 记忆抽取
@@ -442,13 +473,14 @@ class Orchestrator:
         retrieval_query: str | None = None,
         attachments: list | None = None,
         llm_api_key: str | None = None,
+        thinking_mode: str = "fast",
     ):
         """流式处理用户消息：准备流程同 handle_message，LLM 走工具调用 + SSE 流式.
 
         Yields: {"type": "delta", "content": ...} / {"type": "done", ...}
         """
         transcript = await self._resolve_transcript(content, attachments)
-        content = transcript or content
+        content = transcript
 
         if local_mode:
             yield {
@@ -473,7 +505,8 @@ class Orchestrator:
 
         full_text = ""
         async for evt in self._stream_llm_auto(
-            user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key
+            user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key,
+            thinking_mode=thinking_mode,
         ):
             if evt["type"] == "delta":
                 full_text += evt["content"]
@@ -499,14 +532,19 @@ class Orchestrator:
     # ── 消息处理公共流程 ────────────────────────────────
 
     async def _resolve_transcript(self, content: str, attachments: list | None) -> str:
-        """语音附件 → Whisper 转写 + 纠错；无音频返回原内容."""
-        transcript = content or ""
-        if not transcript.strip():
-            for att in attachments or []:
-                if isinstance(att, dict) and att.get("type") == "audio" and att.get("url"):
-                    transcript = await speech_to_text(str(att["url"]))
-                    break
-        return transcript
+        """语音附件 → Whisper 转写 + 纠错；无论是否带文字，都把转写文本拼进消息."""
+        parts = []
+        for att in attachments or []:
+            if isinstance(att, dict) and att.get("type") == "audio" and att.get("url"):
+                t = await speech_to_text(str(att["url"]))
+                if t:
+                    parts.append(t)
+        if not parts:
+            return content or ""
+        head = (content or "").strip()
+        if head:
+            return f"{head}\n\n【语音转写】\n" + "\n\n".join(parts)
+        return "\n\n".join(parts)
 
     async def _prepare_chat(
         self,
@@ -659,6 +697,7 @@ class Orchestrator:
         citations: list[dict],
         conversation_id: str = "",
         llm_api_key: str | None = None,
+        thinking_mode: str = "fast",
     ) -> str:
         """阻塞版：技能循环（开启时）或 模型自主联网 + 场景模型回复."""
         if image_uris:
@@ -677,7 +716,12 @@ class Orchestrator:
 
         messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
         return await self._llm.chat(
-            messages, scene=scene, usage_user_id=user_id, usage_category=CATEGORY_CHAT, api_key=llm_api_key
+            messages,
+            scene=scene,
+            usage_user_id=user_id,
+            usage_category=CATEGORY_CHAT,
+            api_key=llm_api_key,
+            reasoning_effort=_chat_reasoning_effort(thinking_mode),
         )
 
     async def _stream_llm_auto(
@@ -690,6 +734,7 @@ class Orchestrator:
         citations: list[dict],
         conversation_id: str = "",
         llm_api_key: str | None = None,
+        thinking_mode: str = "fast",
     ):
         """流式版：技能循环（开启时）或 模型自主联网，最终回复流式产出."""
         if image_uris:
@@ -716,7 +761,12 @@ class Orchestrator:
 
         messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
         async for delta in self._llm.chat_stream(
-            messages, scene=scene, usage_user_id=user_id, usage_category=CATEGORY_CHAT, api_key=llm_api_key
+            messages,
+            scene=scene,
+            usage_user_id=user_id,
+            usage_category=CATEGORY_CHAT,
+            api_key=llm_api_key,
+            reasoning_effort=_chat_reasoning_effort(thinking_mode),
         ):
             yield {"type": "delta", "content": delta}
 
@@ -728,6 +778,9 @@ class Orchestrator:
             return messages
         question = self._extract_user_text(messages)
         if not question:
+            return messages
+        # 快速前置：明显是闲聊/寒暄（短且无搜索意图）→ 不调 qwen 决策，省一次 LLM 调用
+        if _looks_like_chitchat(question):
             return messages
         # 决策用独立的轻量提示，避免被对话人格/上下文带偏（只判断是否需要联网）
         decision_messages = [
@@ -877,6 +930,8 @@ class Orchestrator:
                     space_tags=space_tags,
                     top_k=settings.RAG_TOP_K,
                     threshold=settings.RAG_SIMILARITY_THRESHOLD,
+                    # 代码文件走 code 索引，不混入普通聊天/办公知识检索
+                    exclude_categories=["code"],
                 )
         except Exception as e:
             # 检索失败不阻塞对话主流程，仅记录并跳过知识库

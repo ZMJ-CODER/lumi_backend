@@ -67,9 +67,11 @@ class LlmReviewHook(ReviewHook):
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,
-                max_tokens=512,
+                max_tokens=4096,
                 usage_user_id=ctx.user_id,
                 usage_category=CATEGORY_REVIEW,
+                reasoning_effort="low",
+                disable_reasoning_effort=True,
                 api_key=ctx.llm_api_key,
             )
             data = _extract_json(reply)

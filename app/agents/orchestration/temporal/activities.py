@@ -113,6 +113,18 @@ async def execute_node_activity(payload: dict) -> dict:
         # 质检（不通过则重做，最多 max_retries 次）
         verdict = await review.review(node, result, ctx)
         if verdict.approved:
+            # 自动沉淀任务记忆（后续节点/汇总可回顾）
+            try:
+                from app.agents.memory.task_memory import remember
+
+                content = (result or {}).get("content") or (result or {}).get("output") or ""
+                await remember(
+                    job_id,
+                    f"节点:{node.agent}",
+                    f"{node.name or node.agent}：{str(content)[:300]}",
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return _json_safe({"status": "completed", "result": result, "retries": attempt})
         if attempt < max_retries:
             continue
@@ -123,6 +135,67 @@ async def execute_node_activity(payload: dict) -> dict:
             "error_code": "REVIEW_REJECTED",
             "retries": attempt,
         }
+
+
+@activity.defn
+async def synthesize_final_answer_activity(payload: dict) -> dict:
+    """任务收尾：把用户请求 + 各节点产出合成为最终交付答案（纯干活不交付的问题）."""
+    user_id = str(payload.get("user_id") or "")
+    request = str(payload.get("request") or "")
+    nodes = payload.get("nodes") or []
+    # 保存成功案例（Few-Shot 规划参考；失败静默）
+    try:
+        from app.agents.orchestration.cases import save_success_case
+
+        await save_success_case(user_id, request, nodes)
+    except Exception:  # noqa: BLE001
+        pass
+    if not nodes:
+        return {"final_answer": ""}
+    blocks = "\n\n".join(
+        f"【{n.get('title') or n.get('agent')}】\n{str(n.get('content') or '')}"
+        for n in nodes[:8]
+    )
+    # 任务记忆：把任务过程中的关键决策/已读文件一并交给汇总
+    try:
+        from app.agents.memory.task_memory import format_memory, recall
+
+        mem_text = format_memory(await recall(job_id))
+        if mem_text:
+            blocks += f"\n\n【任务记忆】\n{mem_text}"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.core.llm import LLMClient
+        from app.services.usage import CATEGORY_SKILL
+
+        llm = LLMClient()
+        reply = await llm.chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是办公助手。根据用户请求和下面各步骤的结果，直接输出最终交付内容"
+                        "（如总结、邮件正文、分析结论、待办清单等）。"
+                        "不要提及'步骤/agent'，不要重复过程，直接给出对用户有用的最终答案；"
+                        "如果用户请求无法从结果中得到答案，如实说明。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"用户请求：{request}\n\n各步骤结果：\n{blocks[:60000]}",
+                },
+            ],
+            scene="office",
+            max_tokens=6000,
+            temperature=0.3,
+            usage_user_id=user_id or None,
+            usage_category=CATEGORY_SKILL,
+            disable_reasoning_effort=True,
+        )
+        return {"final_answer": (reply or "").strip()}
+    except Exception:  # noqa: BLE001
+        return {"final_answer": ""}
 
     return {
         "status": "failed",

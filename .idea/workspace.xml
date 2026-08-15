@@ -4,11 +4,58 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="更换编排引擎，优化新增skills">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="新增一些skills，优化多agent些许哦下架构">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/workers.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/workers.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/core/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/core/base.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/core/tools.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/core/tools.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/dag.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/dag.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/models.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/models.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/planner.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/planner.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/progress.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/review.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/review.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/temporal/activities.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/activities.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/temporal/client.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/client.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/temporal/worker.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/worker.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/roles/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/roles/code/agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/code/agent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/roles/code/reader.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/code/reader.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/roles/code/reviewer.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/code/reviewer.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/roles/code/tester.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/code/tester.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/roles/code/writer.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/code/writer.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/roles/knowledge/retrieval.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/knowledge/retrieval.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/skills/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/base.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/executor.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/temporal_workflows.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/temporal_workflows.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/router.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/router.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/agents.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/agents.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/chat.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/chat.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/llm.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/llm.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/models/agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/agent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/models/conversation.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/conversation.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/client_tools.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/client_tools.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/rag/knowledge.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/knowledge.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/plugins/skills/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/desktop/open_file.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/desktop/open_file.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/devtools/analyze_logs.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/devtools/analyze_logs.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/devtools/create_task_plan.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/devtools/create_task_plan.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/devtools/generate_tests.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/devtools/generate_tests.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/devtools/review_code.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/devtools/review_code.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/devtools/search_codebase.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/devtools/search_codebase.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/filesystem/client_file_ops.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/filesystem/client_file_ops.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/network/query_knowledge.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/network/query_knowledge.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/_tmp_e2e_agent.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/_tmp_e2e_test.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/_tmp_rag_rewrite_bench.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/_tmp_recheck.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/_tmp_tts_check.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/benchmark_rag.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/benchmark_rag.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_orchestration.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_orchestration.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -62,6 +109,9 @@
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="E:\pythonpycharm\lumi_backend\app" />
+    </key>
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="E:\pythonpycharm\lumi_backend\docs" />
     </key>
   </component>
   <component name="RunManager">
@@ -281,7 +331,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786611485389</updated>
     </task>
-    <option name="localTasksCounter" value="25" />
+    <task id="LOCAL-00025" summary="新增一些skills，优化多agent些许哦下架构">
+      <option name="closed" value="true" />
+      <created>1786616323493</created>
+      <option name="number" value="00025" />
+      <option name="presentableId" value="LOCAL-00025" />
+      <option name="project" value="LOCAL" />
+      <updated>1786616323493</updated>
+    </task>
+    <option name="localTasksCounter" value="26" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -320,6 +378,7 @@
     <MESSAGE value="新增dag下多agent协作，添加一个L1agent和一个L2agent，新增本地模型qwen2.5:3b" />
     <MESSAGE value="更换嵌入模型，添加代码相关agent和skills，优化前后端交互逻辑" />
     <MESSAGE value="更换编排引擎，优化新增skills" />
-    <option name="LAST_COMMIT_MESSAGE" value="更换编排引擎，优化新增skills" />
+    <MESSAGE value="新增一些skills，优化多agent些许哦下架构" />
+    <option name="LAST_COMMIT_MESSAGE" value="新增一些skills，优化多agent些许哦下架构" />
   </component>
 </project>

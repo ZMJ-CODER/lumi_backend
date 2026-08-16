@@ -65,10 +65,10 @@ default = true
 # torch 必须用 CUDA 版（PyPI 上是 CPU 版，uv sync 会把它覆盖导致嵌入模型无法用 GPU）
 # 仅 Windows 本地生效；Linux（CI/Docker）从索引解析 CPU 版
 torch = [
-  { url = "https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.13.0%2Bcu126-cp313-cp313-win_amd64.whl", markers = "sys_platform == 'win32'" },
+  { url = "https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.13.0%2Bcu126-cp313-cp313-win_amd64.whl", marker = "sys_platform == 'win32'" },
 ]
 torchvision = [
-  { url = "https://mirrors.aliyun.com/pytorch-wheels/cu126/torchvision-0.28.0%2Bcu126-cp313-cp313-win_amd64.whl", markers = "sys_platform == 'win32'" },
+  { url = "https://mirrors.aliyun.com/pytorch-wheels/cu126/torchvision-0.28.0%2Bcu126-cp313-cp313-win_amd64.whl", marker = "sys_platform == 'win32'" },
 ]
 
 [tool.uv]
@@ -88,7 +88,12 @@ target-version = "py313"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+# 收敛到"正确性"类规则：语法/未使用/未定义/常见 bug。
+# 移除 I(import 排序)、N(命名风格)、UP(pyupgrade 现代化)、SIM(简化建议) 等
+# 纯风格化/大规模重构类规则——本代码库历史积累量太大，保持这些规则只会制造噪音。
+select = ["E", "F", "W", "B"]
+# __init__.py 的导入视为包再导出，不报 F401
+ignore-init-module-imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

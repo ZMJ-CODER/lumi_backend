@@ -4,27 +4,10 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="新增多方位监控和异常处理，解决一些问题">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/state.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/state.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/registry.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/registry.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/base.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/executor.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/admin.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/admin_system.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/admin_system.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/auth.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/auth.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/control_log.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/control_log.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/db_base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/db_base.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/code_embedding.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/code_embedding.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/office_docs.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/office_docs.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/project_index.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/project_index.py" afterDir="false" />
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="修复一些问题">
       <change beforePath="$PROJECT_DIR$/docker-compose/README.md" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/docker-compose/dynamicconfig/README.md" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/docker-compose/tls/README.md" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_office_docs.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_office_docs.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_skills.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_skills.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_upload_sign.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_upload_sign.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -326,7 +309,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786882380372</updated>
     </task>
-    <option name="localTasksCounter" value="28" />
+    <task id="LOCAL-00028" summary="修复一些问题">
+      <option name="closed" value="true" />
+      <created>1786883668206</created>
+      <option name="number" value="00028" />
+      <option name="presentableId" value="LOCAL-00028" />
+      <option name="project" value="LOCAL" />
+      <updated>1786883668206</updated>
+    </task>
+    <option name="localTasksCounter" value="29" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -341,7 +332,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="添加redis动态加载模型配置" />
     <MESSAGE value="添加游客角色" />
     <MESSAGE value="添加统一异常管理，添加rag基座" />
     <MESSAGE value="实现rag主要业务以及部分优化，优化内容主要是数据清洗" />
@@ -366,6 +356,7 @@
     <MESSAGE value="新增一些skills，优化多agent些许哦下架构" />
     <MESSAGE value="重构项目，屏蔽codeagent，新增officeagent系列，引入mcp实现skill调用管理" />
     <MESSAGE value="新增多方位监控和异常处理，解决一些问题" />
-    <option name="LAST_COMMIT_MESSAGE" value="新增多方位监控和异常处理，解决一些问题" />
+    <MESSAGE value="修复一些问题" />
+    <option name="LAST_COMMIT_MESSAGE" value="修复一些问题" />
   </component>
 </project>

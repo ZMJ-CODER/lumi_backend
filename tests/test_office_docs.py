@@ -1,7 +1,6 @@
 """办公文档核心链路测试：格式识别 / 纯文本与 RTF 提取 / 文本与 PPT 编辑 / 撤销."""
 
 import asyncio
-import tempfile
 from pathlib import Path
 
 import pytest

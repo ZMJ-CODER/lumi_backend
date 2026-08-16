@@ -6,7 +6,6 @@
 
 import uuid
 
-from loguru import logger
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 

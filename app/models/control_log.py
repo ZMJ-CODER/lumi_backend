@@ -1,6 +1,6 @@
 """操控日志模块数据模型."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class LogEntry(BaseModel):

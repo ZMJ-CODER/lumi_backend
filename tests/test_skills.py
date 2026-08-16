@@ -8,7 +8,7 @@ import pytest
 from app.agents.sandbox.local import LocalSandbox
 from app.agents.skills.base import Skill, SkillResult
 from app.agents.skills.executor import execute_tool_call, get_skills_for_scene, run_skill_loop, skills_to_tools
-from app.agents.skills.registry import SkillRegistry, init_skills
+from app.agents.skills.registry import SkillRegistry
 
 
 @pytest.fixture(autouse=True)

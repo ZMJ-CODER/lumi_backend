@@ -8,10 +8,9 @@
 import uuid
 
 from loguru import logger
-from sqlalchemy import bindparam, delete, select, text
+from sqlalchemy import bindparam, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.models.db_models import CodeEmbedding, Project
 from app.services.rag.embeddings import embed_query, embed_texts
 

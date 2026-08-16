@@ -4,7 +4,6 @@
 Redis 部署已开启 appendonly，容器重启后任务状态仍在。
 """
 
-import json
 from abc import ABC, abstractmethod
 
 from loguru import logger

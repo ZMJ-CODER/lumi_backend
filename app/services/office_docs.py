@@ -317,7 +317,6 @@ def _extract_legacy_com(path: Path, kind: str) -> str:
     """老版 Office 用本机 Office COM 提取全文（Windows，需安装 Office）."""
     try:
         import pythoncom
-        import win32com.client
         from win32com.client import gencache
     except ImportError as exc:  # noqa: BLE001
         raise ValueError(

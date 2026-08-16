@@ -15,11 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, ConflictException, ForbiddenException, UnauthorizedException
 from app.core.security import (
     create_access_token,
-    decode_token,
     generate_refresh_token,
     hash_password,
     hash_refresh_token,

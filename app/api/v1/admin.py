@@ -13,13 +13,7 @@ from app.core.deps import get_admin_verified_token, require_admin, require_super
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException
 from app.core.rag_config import set_rag_overrides
 from app.core.security import create_admin_verified_token, verify_admin_verified_token, verify_password
-from app.models.admin import (
-    LLMConfigRequest,
-    LLMResetRequest,
-    PublicKBSearchRequest,
-    RAGConfigRequest,
-    UpdateUserRequest,
-)
+from app.models.admin import LLMConfigRequest, LLMResetRequest, RAGConfigRequest, UpdateUserRequest
 from app.models.db_models import ControlLog, Document, KnowledgeSpace, User
 from app.models.knowledge import AdminPasswordVerifyRequest, RebuildIndexRequest
 from app.services.rag import knowledge as kb

@@ -29,8 +29,10 @@ dependencies = [
     "alembic>=1.13.0",
     "content>=0.0.1",
     "sentence-transformers>=5.7.0",
-    "torch==2.13.0+cu126",
-    "torchvision==0.28.0+cu126",
+    # CUDA 版 torch 仅通过 [tool.uv.sources] 在 Windows 上使用（本地 GPU 加速）；
+    # Linux/CI/Docker 走公开索引的 CPU 版本，保证 pip / uv --no-sources 可解析
+    "torch>=2.13.0",
+    "torchvision>=0.28.0",
     "docling>=2.118.0",
     "jieba>=0.42.1",
     # ── 语音（ASR + TTS 兜底）──
@@ -61,8 +63,21 @@ default = true
 
 [tool.uv.sources]
 # torch 必须用 CUDA 版（PyPI 上是 CPU 版，uv sync 会把它覆盖导致嵌入模型无法用 GPU）
-torch = { url = "https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.13.0%2Bcu126-cp313-cp313-win_amd64.whl" }
-torchvision = { url = "https://mirrors.aliyun.com/pytorch-wheels/cu126/torchvision-0.28.0%2Bcu126-cp313-cp313-win_amd64.whl" }
+# 仅 Windows 本地生效；Linux（CI/Docker）从索引解析 CPU 版
+torch = [
+  { url = "https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.13.0%2Bcu126-cp313-cp313-win_amd64.whl", markers = "sys_platform == 'win32'" },
+]
+torchvision = [
+  { url = "https://mirrors.aliyun.com/pytorch-wheels/cu126/torchvision-0.28.0%2Bcu126-cp313-cp313-win_amd64.whl", markers = "sys_platform == 'win32'" },
+]
+
+[tool.uv]
+# 本项目只面向 Windows 桌面端 + Linux 服务器，跳过 macOS 环境解析，
+# 避免 uv 全平台锁定时因 +cu126 没有 darwin wheel 而失败
+environments = [
+  "sys_platform == 'linux'",
+  "sys_platform == 'win32'",
+]
 
 [tool.setuptools.packages.find]
 include = ["app*", "celery_app*"]

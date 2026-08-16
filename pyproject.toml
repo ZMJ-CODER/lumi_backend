@@ -57,9 +57,8 @@ dev = [
     "ruff>=0.5.0",
 ]
 
-[[tool.uv.index]]
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
-default = true
+# 不强制默认索引为国内镜像：CI（GitHub Actions）访问清华源会 403。
+# 本机想用镜像时通过环境变量覆盖：UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 
 [tool.uv.sources]
 # torch 必须用 CUDA 版（PyPI 上是 CPU 版，uv sync 会把它覆盖导致嵌入模型无法用 GPU）
@@ -92,8 +91,12 @@ line-length = 120
 # 移除 I(import 排序)、N(命名风格)、UP(pyupgrade 现代化)、SIM(简化建议) 等
 # 纯风格化/大规模重构类规则——本代码库历史积累量太大，保持这些规则只会制造噪音。
 select = ["E", "F", "W", "B"]
-# __init__.py 的导入视为包再导出，不报 F401
-ignore-init-module-imports = true
+# 行长（E501）是纯排版噪音，忽略；代码库历史长行太多
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# __init__.py 的导入视为包再导出，不报 F401（代替已废弃的 ignore-init-module-imports）
+"__init__.py" = ["F401"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -24,9 +24,10 @@ WORKDIR /app
 # 先只复制依赖清单并安装项目（editable 模式），
 # 该层只要 pyproject.toml / uv.lock 不变就永远命中缓存
 COPY pyproject.toml uv.lock ./
-# 镜像源用 ENV 声明而非写死在 RUN 里：
-# 以后换源只改 ENV 值，RUN 指令字符串不变 → 依赖层缓存永久命中
-ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+# 镜像源用 ARG 声明而非写死在 RUN 里（默认 PyPI，CI/海外可直连）：
+# 国内构建时传 --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 # BuildKit 缓存挂载：下载好的 wheel 跨构建持久化。
 # 即使依赖层因 pyproject/uv.lock 变化或缓存失效而重建，
 # 也直接复用本地缓存安装，不用重新下载（torch 等大包从"半天"降到秒级）。

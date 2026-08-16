@@ -1,7 +1,7 @@
 """RAG 嵌入模块 —— 本地模型推理（sentence-transformers + bge）.
 
 设计:
-  - 默认模型 BAAI/bge-small-zh-v1.5（512 维），后期可直接切换 BAAI/bge-m3（1024 维）
+  - 当前模型 BAAI/bge-m3（1024 维），由 settings.EMBEDDING_MODEL / EMBEDDING_DIMENSION 控制
   - 模型懒加载单例，CPU 推理；异步接口通过线程池执行，避免阻塞事件循环
   - 查询向量带检索指令前缀（bge 中文检索最佳实践），文档向量不带
   - 输出统一 L2 归一化，保证 pgvector 的余弦距离 = 1 - 余弦相似度

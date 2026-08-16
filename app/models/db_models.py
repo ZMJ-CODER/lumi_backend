@@ -15,7 +15,7 @@ import uuid
 from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Float, ForeignKey, Index, Integer, SmallInteger, String, Text, UniqueConstraint, func, text
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, SmallInteger, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -190,6 +190,35 @@ class DocumentChunk(Base, UUIDMixin):
     )
 
 
+# ── 办公文档临时会话（聊天框上传，短期保留；知识空间文档走 documents 表长期保留） ──
+
+class OfficeSession(Base):
+    """聊天框上传的办公文档会话：DB 持久化（共享 Postgres，Docker/本地切换不丢）.
+
+    两条链路设计：
+      - 知识空间（设置/管理后台）上传 → documents + document_chunks 长期保留；
+      - 聊天框上传 → office_sessions 临时保留（TTL + 前端轮次上限），
+        磁盘 data/office/{user}/{doc_id} 仅为工作缓存，可随时从本表重建。
+    """
+
+    __tablename__ = "office_sessions"
+
+    doc_id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="会话 id（12 位 hex）")
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), default="text", nullable=False)
+    content_text: Mapped[str | None] = mapped_column(Text, comment="提取的全文（聊天注入 / RAG 索引用）")
+    file_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, comment="原始文件（编辑/保存用，可重建磁盘缓存）")
+    conversation_id: Mapped[str | None] = mapped_column(String(64), index=True, comment="关联会话（可选）")
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    expire_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
+
+
 # ── 长期记忆表 ─────────────────────────────────────────
 
 class Memory(Base, UUIDMixin):
@@ -263,6 +292,51 @@ class UserPrompt(Base, UUIDMixin):
 
     __table_args__ = (
         Index("idx_user_prompts_user", "user_id"),
+    )
+
+
+# ── 用户个性化偏好（多端同步，按用户隔离） ──────────────
+
+class UserPreference(Base):
+    """用户个性化偏好：每个用户一行（智能体头像 / 全局背景 / 回复风格 / 声音设置）.
+
+    首次使用为空（服务端返回默认值）；修改后保存到服务器，多端登录自动同步；
+    所有字段按 user_id 隔离，互不影响。
+    """
+
+    __tablename__ = "user_preferences"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    avatar: Mapped[str | None] = mapped_column(Text)            # 智能体头像 dataURL
+    background_image: Mapped[str | None] = mapped_column(Text)  # 全局主题背景 dataURL
+    reply_style: Mapped[str] = mapped_column(String(16), default="long")  # long / short
+    voice: Mapped[str | None] = mapped_column(Text)  # JSON: {voice, rate, pitch, referenceAudio, referenceName}
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+# ── 用户保存的方案（角色 / 声音预设，可命名切换） ────────
+
+class UserPreset(Base, UUIDMixin):
+    """用户保存的个性化方案：kind=character（角色+回复风格） / voice（声音设置）."""
+
+    __tablename__ = "user_presets"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)  # character / voice
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)     # JSON 内容
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_user_presets_user_kind", "user_id", "kind"),
     )
 
 

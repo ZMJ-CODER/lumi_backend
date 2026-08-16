@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.core.crypto import encrypt_memory_text
 from app.core.redis import get_redis
 from app.models.db_models import Memory
+from app.services.content_codec import normalize_content
 from app.services.rag.embeddings import embed_texts
 from app.services.usage import CATEGORY_MEMORY_EXTRACT, CATEGORY_MEMORY_MERGE, record_usage
 
@@ -164,7 +165,7 @@ def _build_dialog(messages: list[dict]) -> str:
     total = 0
     for m in messages:
         role = "用户" if m.get("role") == "user" else "助手"
-        content = str(m.get("content") or "").strip()
+        content = normalize_content(m.get("content") or "").strip()
         if not content:
             continue
         line = f"{role}: {content}"

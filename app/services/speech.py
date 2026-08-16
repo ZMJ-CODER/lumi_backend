@@ -120,7 +120,7 @@ async def correct_transcript(text: str) -> str:
 
 # ── TTS（千问 cosyvoice 优先，edge-tts 兜底） ─────────
 
-def _synthesize_sync(text: str) -> bytes:
+def _synthesize_sync(text: str, voice: str | None = None) -> bytes:
     """用千问 cosyvoice 同步合成语音（子线程执行），返回音频字节."""
     import dashscope
     from dashscope.audio.tts_v2 import AudioFormat, SpeechSynthesizer
@@ -128,7 +128,7 @@ def _synthesize_sync(text: str) -> bytes:
     dashscope.api_key = settings.QWEN_API_KEY
     synthesizer = SpeechSynthesizer(
         model=settings.TTS_MODEL,
-        voice=settings.TTS_VOICE,
+        voice=voice or settings.TTS_VOICE,
         format=(
             AudioFormat.MP3_24000HZ_MONO_256KBPS
             if settings.TTS_FORMAT == "mp3"
@@ -141,24 +141,61 @@ def _synthesize_sync(text: str) -> bytes:
     return audio
 
 
-async def _edge_tts(text: str) -> bytes:
-    """用 edge-tts（微软免费）合成语音."""
+async def _edge_tts(
+    text: str,
+    voice: str | None = None,
+    rate: str | None = None,
+    pitch: str | None = None,
+) -> bytes:
+    """用 edge-tts（微软免费）合成语音，支持音色/语速/音高.
+
+    用户自定义音色可能对应当前提供者（如千问 Cherry）而非 edge-tts 音色，
+    此时先按用户选择尝试一次，失败自动回退默认 edge 音色，保证功能可用。
+    """
     import edge_tts
 
-    communicate = edge_tts.Communicate(text, voice=settings.TTS_EDGE_VOICE)
-    audio = b""
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio += chunk["data"]
-    if not audio:
-        raise RuntimeError("edge-tts 未返回音频数据")
-    return audio
+    candidates = list(dict.fromkeys([voice or settings.TTS_EDGE_VOICE, settings.TTS_EDGE_VOICE]))
+    last_err: Exception | None = None
+    for candidate in candidates:
+        try:
+            communicate = edge_tts.Communicate(
+                text,
+                voice=candidate,
+                rate=rate or "+0%",
+                pitch=pitch or "+0Hz",
+            )
+            audio = b""
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio += chunk["data"]
+            if not audio:
+                raise RuntimeError("edge-tts 未返回音频数据")
+            return audio
+        except Exception as exc:  # noqa: BLE001 - 音色不可用时降级重试
+            last_err = exc
+            logger.warning("edge-tts 音色 {} 合成失败: {}", candidate, exc)
+    raise last_err or RuntimeError("edge-tts 合成失败")
 
 
-async def _local_qwen3_tts(text: str) -> bytes:
+async def _local_qwen3_tts(
+    text: str,
+    voice: str | None = None,
+    rate: str | None = None,
+    pitch: str | None = None,
+    reference_audio: str | None = None,
+) -> bytes:
     """调用本机/局域网部署的 qwen3-tts HTTP 服务（Linux/Apple Silicon 上运行）."""
+    body: dict = {"text": text}
+    if voice:
+        body["voice"] = voice
+    if rate:
+        body["rate"] = rate
+    if pitch:
+        body["pitch"] = pitch
+    if reference_audio:
+        body["reference_audio"] = reference_audio
     async with httpx.AsyncClient(timeout=settings.TTS_LOCAL_TIMEOUT) as client:
-        resp = await client.post(settings.TTS_LOCAL_URL, json={"text": text})
+        resp = await client.post(settings.TTS_LOCAL_URL, json=body)
         resp.raise_for_status()
         audio = resp.content
     if not audio:
@@ -166,21 +203,33 @@ async def _local_qwen3_tts(text: str) -> bytes:
     return audio
 
 
-async def synthesize_speech(text: str) -> bytes:
-    """文字转语音：按 TTS_PROVIDER 选择主提供者，失败自动回退 edge-tts."""
+async def synthesize_speech(
+    text: str,
+    voice: str | None = None,
+    rate: str | None = None,
+    pitch: str | None = None,
+    reference_audio: str | None = None,
+) -> bytes:
+    """文字转语音：按 TTS_PROVIDER 选择主提供者，失败自动回退 edge-tts.
+
+    voice / rate / pitch / reference_audio 均为可选覆盖参数（来自前端声音设置）：
+      - edge-tts 支持 voice/rate/pitch；
+      - 本地 qwen3-tts 额外支持 reference_audio（克隆音色）；
+      - 千问 cosyvoice 仅支持 voice（其余参数忽略）。
+    """
     provider = settings.TTS_PROVIDER
     if provider == "local_qwen3":
         try:
-            return await _local_qwen3_tts(text)
+            return await _local_qwen3_tts(text, voice, rate, pitch, reference_audio)
         except Exception as e:
             logger.warning("本地 qwen3-tts 失败，回退 edge-tts: {}", e)
     elif provider == "dashscope":
         try:
-            return await asyncio.to_thread(_synthesize_sync, text)
+            return await asyncio.to_thread(_synthesize_sync, text, voice)
         except Exception as e:
             # 常见原因：账号未开通 TTS 权限（引擎 418）等
             logger.warning("千问 TTS 失败，回退 edge-tts: {}", e)
-    return await _edge_tts(text)
+    return await _edge_tts(text, voice, rate, pitch)
 
 
 def detect_audio_meta(data: bytes) -> tuple[str, str]:

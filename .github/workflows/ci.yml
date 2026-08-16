@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+
+jobs:
+  backend:
+    name: 后端测试 + 迁移
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: lumi_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d lumi_db"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/lumi_db
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_BROKER_URL: redis://localhost:6379/1
+      CELERY_RESULT_BACKEND: redis://localhost:6379/2
+      JWT_SECRET_KEY: ci-only-not-secret
+      MEMORY_ENCRYPTION_KEY: YyxzKvqF/zpmGVZZQif1o8Cn1DMnKmjmyoQIlTTZfJQ=
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: 安装依赖
+        # --no-sources：跳过 pyproject 里 Windows CUDA torch 的私有源，CI(Linux) 用 PyPI 版本
+        run: uv sync --no-sources
+
+      - name: 数据库迁移（全新库跑基线）
+        run: uv run alembic upgrade head
+
+      - name: 单元测试
+        run: uv run pytest tests -q
+
+  lint:
+    name: 代码规范（ruff，非阻塞）
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Ruff 检查
+        run: uvx ruff check app tests
+
+  docker-build:
+    name: 后端镜像构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 构建镜像
+        run: docker build -t lumi-backend:ci .

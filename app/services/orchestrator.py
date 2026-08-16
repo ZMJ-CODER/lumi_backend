@@ -27,6 +27,7 @@ from app.core.llm import LLMClient
 from app.core.llm_config import get_llm_config
 from app.core.redis import get_redis
 from app.services.speech import speech_to_text
+from app.services.content_codec import normalize_content, serialize_content
 from app.services.rag.query_rewriter import get_retrieval_query
 from app.services.rag.knowledge import search_user_knowledge
 from app.services.scene_manager import get_scene_config, get_scene_knowledge_tags
@@ -35,6 +36,7 @@ from app.services.memory.privacy import resolve_decrypt_candidates
 from app.services.prompts import get_base_system_prompt, get_prompt_content
 from app.services.usage import (
     CATEGORY_CHAT,
+    CATEGORY_SKILL,
     CATEGORY_SUMMARY,
     CATEGORY_TITLE,
     CATEGORY_TOOL_DECISION,
@@ -91,6 +93,30 @@ def _looks_like_chitchat(question: str) -> bool:
 def _chat_reasoning_effort(thinking_mode: str) -> str | None:
     """聊天推理强度：fast=low（快速回复），think=None（沿用用户全局设置，通常是 high）."""
     return None if thinking_mode == "think" else "low"
+
+
+def _chat_model_override(scene: str, thinking_mode: str, llm_api_key: str | None) -> dict | None:
+    """普通模式快速/思考档模型切换：
+    - fast  → 云端 DS Flash（支持 1M 上下文，省钱省时）
+    - think → 强模型（默认 qwen-plus，价格适中，与现有千问密钥共用）
+    用户自备 API Key（BYOK）或非普通模式时不覆盖，尊重用户选择的模型。
+    """
+    if scene != "chat" or llm_api_key:
+        return None
+    if thinking_mode == "think":
+        return {
+            "base_url": (settings.CHAT_THINK_BASE_URL or settings.QWEN_BASE_URL).rstrip("/"),
+            "api_key": settings.CHAT_THINK_API_KEY or settings.QWEN_API_KEY,
+            "model": settings.CHAT_THINK_MODEL,
+            "timeout": 120.0,
+        }
+    return {
+        "base_url": (settings.DS_FLASH_BASE_URL or settings.DEEPSEEK_BASE_URL).rstrip("/"),
+        "api_key": settings.DS_FLASH_API_KEY or settings.DEEPSEEK_API_KEY,
+        "model": settings.DS_FLASH_MODEL or settings.DEEPSEEK_MODEL,
+        "timeout": float(settings.DS_FLASH_TIMEOUT),
+    }
+
 
 # 角色提示词下的场景行为补充（角色负责性格，场景负责行为）
 _SCENE_BEHAVIOR = {
@@ -170,19 +196,26 @@ class Orchestrator:
     async def _generate_summary(
         self, prev_summary: str | None, messages: list[dict], user_id: str
     ) -> str:
-        """用 qwen-turbo 生成/接力对话摘要（轻量低成本）. """
+        """用 qwen-turbo 生成/接力对话"剧情梗概"（轻量低成本）.
+
+        旧的 10 万 token 原始对话 → 约 5000 token 的中文回顾（10:1 压缩），
+        保留用户偏好与关键事实、结论/约定、未完成的任务。
+        """
         parts: list[str] = []
         if prev_summary:
-            parts.append(f"[之前的对话摘要]\n{prev_summary}")
+            parts.append(f"[之前的剧情梗概]\n{prev_summary}")
         for m in messages:
             speaker = "用户" if m.get("role") == "user" else "助手"
-            parts.append(f"{speaker}: {m.get('content', '')}")
+            parts.append(f"{speaker}: {normalize_content(m.get('content') or '')}")
         dialog = "\n".join(parts)
 
         system_prompt = (
-            "你是对话摘要助手。把对话浓缩成简洁的中文摘要，"
-            "保留关键信息：用户的偏好与重要事实、双方达成的结论/约定、未完成的任务。"
-            "若提供了之前的摘要，新摘要要继承其中仍然重要的信息。只输出摘要本身。"
+            "你是对话记忆整理助手。把一段较长的对话浓缩成中文\"剧情梗概\""
+            "（类似周报/剧情回顾），结构清晰、信息密度高。"
+            "必须保留：用户的偏好与重要事实、双方达成的结论与约定、未完成的任务/待办、"
+            "重要时间点与关键转折。"
+            "若提供了之前的梗概，新梗概要继承其中仍然重要的信息，避免丢失。"
+            "只输出梗概本身，不要任何解释或前缀。"
         )
         try:
             async with AsyncClient(
@@ -198,7 +231,7 @@ class Orchestrator:
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": f"对话内容：\n\n{dialog}"},
                         ],
-                        "max_tokens": 512,
+                        "max_tokens": 8192,
                         "temperature": 0.3,
                     },
                 )
@@ -217,34 +250,84 @@ class Orchestrator:
         except Exception as e:
             # 摘要失败不阻塞对话：保留旧摘要，下次触发再试
             logger.warning("对话摘要生成失败: {}", e)
-            return prev_summary or ""
+            return None
 
-    async def _maybe_summarize_context(self, conversation_id: str, user_id: str) -> None:
-        """上下文接近 token 预算时：把旧消息压缩成摘要，保留最近 N 轮."""
+    async def _generate_summary_chunked(
+        self, prev_summary: str | None, old_msgs: list[dict], user_id: str
+    ) -> str | None:
+        """分批接力生成梗概：单次 LLM 输入受限时按 chunk 依次压缩，前一轮输出作为下一轮上下文."""
+        if not old_msgs:
+            return prev_summary or ""
+        chunk_budget = settings.CONVERSATION_SUMMARY_CHUNK_TOKENS
+        chunks: list[list[dict]] = []
+        current: list[dict] = []
+        used = 0
+        for m in old_msgs:
+            cost = self._estimate_tokens(normalize_content(m.get("content") or ""))
+            if current and used + cost > chunk_budget:
+                chunks.append(current)
+                current = []
+                used = 0
+            current.append(m)
+            used += cost
+        if current:
+            chunks.append(current)
+
+        summary = prev_summary or ""
+        for chunk in chunks:
+            summary = await self._generate_summary(summary, chunk, user_id)
+            if summary is None:
+                # 任一分批失败：保留旧摘要与原始记录，本次不裁剪，下次触发再试
+                return None
+        return summary
+
+    async def _maybe_summarize_context(
+        self, conversation_id: str, user_id: str, scene: str = "chat"
+    ) -> None:
+        """普通模式超大滑动窗口：总 token 超过触发阈值后，压缩最早超出的原始对话.
+
+        规则：保留最新 KEEP_TOKENS（默认 15 万）token 原始记录 + 全部历史梗概链；
+        超出部分按 10:1 压缩成"剧情梗概"后从原始上下文删除。
+        办公模式同样做窗口滑动（保证当次任务连贯），但不触发长期记忆抽取。
+        """
         history = await self.get_context(conversation_id)
-        total = sum(self._estimate_tokens(str(m.get("content") or "")) for m in history)
+        total = sum(self._estimate_tokens(normalize_content(m.get("content") or "")) for m in history)
         if total < settings.CONVERSATION_SUMMARY_TRIGGER_TOKENS:
             return
 
-        keep = settings.CONVERSATION_SUMMARY_KEEP_ROUNDS * 2
-        if len(history) <= keep:
-            return
-        old_msgs = history[:-keep]
+        keep_tokens = settings.CONVERSATION_SUMMARY_KEEP_TOKENS
+        max_entries = settings.CONVERSATION_SUMMARY_KEEP_ROUNDS * 2
 
-        # 被压缩掉的旧消息若尚未做过记忆抽取 → 先异步抽取（批量）
-        await self._submit_unextracted(conversation_id, user_id, history, stop=len(history) - keep)
+        # 从最新往回累计：保留最新（token 预算为主，条数兜底）
+        kept: list[dict] = []
+        used = 0
+        for msg in reversed(history):
+            cost = self._estimate_tokens(normalize_content(msg.get("content") or ""))
+            if kept and (used + cost > keep_tokens or len(kept) >= max_entries):
+                break
+            kept.append(msg)
+            used += cost
+        if len(kept) == len(history):
+            return
+        old_msgs = history[: len(history) - len(kept)]
+
+        # 被压缩掉的旧消息若尚未做过记忆抽取 → 先异步抽取（仅普通模式；办公模式无长期记忆）
+        if scene != "work":
+            await self._submit_unextracted(
+                conversation_id, user_id, history, stop=len(history) - len(kept)
+            )
 
         prev_summary = await self.get_conversation_summary(conversation_id)
-        summary = await self._generate_summary(prev_summary, old_msgs, user_id)
+        summary = await self._generate_summary_chunked(prev_summary, old_msgs, user_id)
         if not summary:
-            # 摘要生成失败（且无旧摘要可继承）：不裁剪上下文，下次触发再试
+            # 摘要生成失败：不裁剪上下文，下次触发再试
             return
         await self.save_conversation_summary(conversation_id, summary)
 
-        # 裁剪 Redis 上下文：只保留最近 keep 条消息
+        # 裁剪 Redis 上下文：只保留最新 kept 条消息
         r = get_redis()
         key = CONTEXT_KEY.format(conversation_id=conversation_id)
-        await r.ltrim(key, -keep, -1)
+        await r.ltrim(key, -len(kept), -1)
         await r.expire(key, 604800)
 
     # ── 记忆抽取触发（异步，Celery）──────────────────────
@@ -403,6 +486,7 @@ class Orchestrator:
         web_search_enabled: bool = False,
         llm_api_key: str | None = None,
         thinking_mode: str = "fast",
+        reply_style: str | None = None,
     ) -> dict:
         """处理用户消息的核心流程（阻塞版，供旧接口/降级路径使用）."""
         transcript = await self._resolve_transcript(content, attachments)
@@ -420,7 +504,9 @@ class Orchestrator:
                 "transcript": transcript,
             }
 
-        prep = await self._prepare_chat(user_id, conversation_id, content, scene, retrieval_query, attachments)
+        prep = await self._prepare_chat(
+            user_id, conversation_id, content, scene, retrieval_query, attachments, reply_style
+        )
         image_uris = await self._load_image_data_uris(user_id, attachments)
 
         # 调用 LLM：工具调用（模型自主决定联网）+ 最终回复
@@ -450,8 +536,14 @@ class Orchestrator:
                 thinking_mode=thinking_mode,
             )
 
-        # 保存助手回复 + 摘要 + 记忆抽取
-        await self._finalize_reply(conversation_id, user_id, reply)
+        # 普通模式短句回复：把整段回复切成多条短句（存储时合并为一次交互）
+        segments = (
+            self._split_short_reply(reply)
+            if reply_style == "short" and scene == "chat"
+            else None
+        )
+        # 保存助手回复 + 摘要 + 记忆抽取（办公模式不做长期记忆）
+        await self._finalize_reply(conversation_id, user_id, reply, scene, segments=segments)
 
         return {
             "message_id": str(uuid.uuid4()),
@@ -461,6 +553,7 @@ class Orchestrator:
             "local_mode": False,
             "title": title or "",
             "transcript": transcript,
+            "segments": segments,
         }
 
     async def handle_message_stream(
@@ -474,6 +567,7 @@ class Orchestrator:
         attachments: list | None = None,
         llm_api_key: str | None = None,
         thinking_mode: str = "fast",
+        reply_style: str | None = None,
     ):
         """流式处理用户消息：准备流程同 handle_message，LLM 走工具调用 + SSE 流式.
 
@@ -493,7 +587,9 @@ class Orchestrator:
             }
             return
 
-        prep = await self._prepare_chat(user_id, conversation_id, content, scene, retrieval_query, attachments)
+        prep = await self._prepare_chat(
+            user_id, conversation_id, content, scene, retrieval_query, attachments, reply_style
+        )
         image_uris = await self._load_image_data_uris(user_id, attachments)
         message_id = str(uuid.uuid4())
         title = await self.get_conversation_title(conversation_id)
@@ -517,8 +613,14 @@ class Orchestrator:
             if title:
                 await self.save_conversation_title(conversation_id, title)
 
-        # 保存助手回复 + 摘要 + 记忆抽取
-        await self._finalize_reply(conversation_id, user_id, full_text)
+        # 普通模式短句回复：把整段回复切成多条短句（存储时合并为一次交互）
+        segments = (
+            self._split_short_reply(full_text)
+            if reply_style == "short" and scene == "chat"
+            else None
+        )
+        # 保存助手回复 + 摘要 + 记忆抽取（办公模式不做长期记忆）
+        await self._finalize_reply(conversation_id, user_id, full_text, scene, segments=segments)
 
         yield {
             "type": "done",
@@ -527,6 +629,7 @@ class Orchestrator:
             "citations": prep["citations"],
             "scene": scene,
             "title": title or "",
+            "segments": segments,
         }
 
     # ── 消息处理公共流程 ────────────────────────────────
@@ -554,25 +657,38 @@ class Orchestrator:
         scene: str,
         retrieval_query: str | None,
         attachments: list | None,
+        reply_style: str | None = None,
     ) -> dict:
         """LLM 调用前的公共准备：上下文、长期记忆、消息构建、RAG 检索、隐私解密门."""
         # 1. 保存用户消息到上下文
         is_first = len(await self.get_context(conversation_id)) == 0
         user_msg = {"role": "user", "content": content, "timestamp": datetime.now(timezone.utc).isoformat()}
         await self.append_context(conversation_id, user_msg)
-        # 新会话首条消息：立即异步抽取（身份类事实（如名字/职业）往往出现在开场白，不等攒批）
-        if is_first:
+        # 新会话首条消息：立即异步抽取（身份类事实（如名字/职业）往往出现在开场白，不等攒批）。
+        # 办公模式不建长期记忆，跳过抽取。
+        if is_first and scene != "work":
             await self._submit_unextracted(conversation_id, user_id, [user_msg])
 
         # 2. 上下文 + 长期记忆（画像常驻 + 事实按需召回）
         history = await self.get_context(conversation_id)
         summary = await self.get_conversation_summary(conversation_id)
-        profile, memory_facts = await self.get_memory_context(
-            user_id, query=content, retrieval_query=retrieval_query
-        )
+        if scene == "work":
+            # 办公模式：无长期记忆注入，只靠短期窗口保证当次任务连贯
+            profile, memory_facts = None, []
+        else:
+            profile, memory_facts = await self.get_memory_context(
+                user_id, query=content, retrieval_query=retrieval_query
+            )
 
         # 3. 消息列表（System Prompt + 画像 + 记忆 + 摘要 + 历史 + 当前提问）
         system_prompt = await self._get_system_prompt(user_id, scene)
+        if reply_style == "short" and scene == "chat":
+            system_prompt += (
+                "\n\n[回复风格]\n"
+                "请用多条短句分段回复用户：每句话一个意思、一句一行，"
+                "像聊天消息一样自然（豆包式短句风格），不要写成长段落。"
+                "每段尽量简短（一般不超过 30 字），整体控制在 3-8 段，避免机械逐字断句。"
+            )
         messages = self._build_messages(
             scene, profile, memory_facts, history, content, summary, system_prompt=system_prompt
         )
@@ -628,16 +744,29 @@ class Orchestrator:
                 return content + (f"\n\n{note}" if note else "")
         return get_scene_config(scene)["system_prompt"]
 
-    async def _finalize_reply(self, conversation_id: str, user_id: str, reply: str) -> None:
-        """保存助手回复到上下文，触发摘要与长期记忆抽取."""
+    async def _finalize_reply(
+        self,
+        conversation_id: str,
+        user_id: str,
+        reply: str,
+        scene: str = "chat",
+        segments: list[str] | None = None,
+    ) -> None:
+        """保存助手回复到上下文，触发摘要与长期记忆抽取.
+
+        content 以 JSON 数组形态存储（多短句合并为一次交互），
+        后续"多条短句回复"策略接入时直接往数组里追加分段即可。
+        """
         assistant_msg = {
             "role": "assistant",
-            "content": reply,
+            "content": serialize_content(segments if segments else reply),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         await self.append_context(conversation_id, assistant_msg)
-        await self._maybe_summarize_context(conversation_id, user_id)
-        await self._maybe_extract_memories(conversation_id, user_id)
+        await self._maybe_summarize_context(conversation_id, user_id, scene)
+        # 办公模式：无长期记忆
+        if scene != "work":
+            await self._maybe_extract_memories(conversation_id, user_id)
 
     # ── 工具调用与流式回复 ─────────────────────────────
 
@@ -648,8 +777,13 @@ class Orchestrator:
         citations: list[dict],
         tool_calls: list[dict],
     ) -> list[dict]:
-        """执行模型请求的工具（当前仅 web_search），把结果回填消息列表并追加引用."""
-        messages = list(messages) + [{"role": "assistant", "content": None, "tool_calls": tool_calls}]
+        """执行模型请求的工具（当前仅 web_search），把联网结果并入上下文并追加引用.
+
+        说明：联网决策由 Qwen 完成、主回复由 DeepSeek 生成，跨供应商的 assistant tool_calls
+        消息在 DeepSeek 思考模式下会因缺少 reasoning_content 而 400；
+        因此这里不注入 tool_calls 消息，改为把检索结果作为上下文追加给主模型。
+        """
+        web_blocks: list[str] = []
         for tc in tool_calls:
             fn = tc.get("function") or {}
             name = fn.get("name")
@@ -669,13 +803,8 @@ class Orchestrator:
                 f"[{i + 1}] {r['title']}\n{r['url']}\n{r['content'][:800]}"
                 for i, r in enumerate(results)
             )
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.get("id", ""),
-                    "content": block or "未检索到相关结果",
-                }
-            )
+            if block:
+                web_blocks.append(block)
             citations.extend(
                 {
                     "type": "web",
@@ -685,6 +814,16 @@ class Orchestrator:
                 }
                 for r in results
             )
+        if web_blocks:
+            messages = list(messages) + [
+                {
+                    "role": "user",
+                    "content": (
+                        "（以下是联网搜索到的资料，请优先基于这些资料回答；资料不足以支撑时明确说明）\n\n"
+                        + "\n\n".join(web_blocks)
+                    ),
+                }
+            ]
         return messages
 
     async def _call_llm_auto(
@@ -700,21 +839,58 @@ class Orchestrator:
         thinking_mode: str = "fast",
     ) -> str:
         """阻塞版：技能循环（开启时）或 模型自主联网 + 场景模型回复."""
+        # 先确定本次实际使用的模型（快速/思考档覆盖优先），再决定图片直传还是 VL 描述成文本
+        override = _chat_model_override(scene, thinking_mode, llm_api_key)
         if image_uris:
-            # 用用户当前选择的模型判断多模态，避免切换模型后图片注入失效
-            cfg = await get_llm_config(scene, self._llm.provider, user_id=user_id)
-            if self._is_multimodal_model(str(cfg.get("model") or "")):
+            target_model = override["model"] if override else str(
+                (await get_llm_config(scene, self._llm.provider, user_id=user_id)).get("model") or ""
+            )
+            if self._is_multimodal_model(target_model):
                 messages = self._attach_images(messages, image_uris)
+            else:
+                messages = await self._describe_images_to_text(messages, image_uris, user_id)
 
         # 技能模式：LLM function calling 决定调用技能，循环到最终回复
-        if settings.AGENT_SKILLS_ENABLED and get_skills_for_scene(scene):
-            final_text, records, skill_citations = await run_skill_loop(
-                self._llm, user_id, messages, scene, conversation_id=conversation_id, llm_api_key=llm_api_key
-            )
-            citations.extend(skill_citations)
-            return final_text or "（技能调用完成，未能生成回复，请稍后重试）"
+        # 普通聊天 / 办公直接对话启用（工具集统一用精简的聊天技能；DAG 由 agent 白名单决定）
+        if settings.AGENT_SKILLS_ENABLED and scene in ("chat", "office") and get_skills_for_scene(
+            "chat" if scene == "office" else scene
+        ):
+            try:
+                # 普通模式用快速/思考档模型做工具决策与回复（均支持 function calling）
+                final_text, records, skill_citations = await run_skill_loop(
+                    self._llm,
+                    user_id,
+                    messages,
+                    scene,
+                    conversation_id=conversation_id,
+                    llm_api_key=llm_api_key,
+                    llm_base_url=override["base_url"] if override else None,
+                    llm_model=override["model"] if override else None,
+                )
+                citations.extend(skill_citations)
+                return final_text or "（技能调用完成，未能生成回复，请稍后重试）"
+            except Exception as exc:  # noqa: BLE001 - 技能循环失败不阻塞，回退普通回复
+                logger.warning("技能循环失败，回退普通回复: {}", str(exc)[:160])
 
         messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
+        # 普通模式快速/思考档：显式切换模型（fast=DS Flash / think=强模型）
+        if override:
+            try:
+                return await self._llm.chat(
+                    messages,
+                    base_url=override["base_url"],
+                    api_key=override["api_key"],
+                    model=override["model"],
+                    timeout=override["timeout"],
+                    scene=scene,
+                    usage_user_id=user_id,
+                    usage_category=CATEGORY_CHAT,
+                )
+            except Exception as exc:  # noqa: BLE001 - 本地/强模型不可用时回退默认模型
+                logger.warning(
+                    "普通模式 {} 档模型 {} 调用失败，回退默认模型: {}",
+                    thinking_mode, override["model"], str(exc)[:160],
+                )
         return await self._llm.chat(
             messages,
             scene=scene,
@@ -737,29 +913,68 @@ class Orchestrator:
         thinking_mode: str = "fast",
     ):
         """流式版：技能循环（开启时）或 模型自主联网，最终回复流式产出."""
+        # 先确定本次实际使用的模型（快速/思考档覆盖优先），再决定图片直传还是 VL 描述成文本
+        override = _chat_model_override(scene, thinking_mode, llm_api_key)
         if image_uris:
-            cfg = await get_llm_config(scene, self._llm.provider, user_id=user_id)
-            if self._is_multimodal_model(str(cfg.get("model") or "")):
+            target_model = override["model"] if override else str(
+                (await get_llm_config(scene, self._llm.provider, user_id=user_id)).get("model") or ""
+            )
+            if self._is_multimodal_model(target_model):
                 messages = self._attach_images(messages, image_uris)
+            else:
+                messages = await self._describe_images_to_text(messages, image_uris, user_id)
 
         # 技能模式：循环内逐轮文本产出（工具调用中的"我来搜索…" + 最终回复）
-        if settings.AGENT_SKILLS_ENABLED and get_skills_for_scene(scene):
-            deltas: list[str] = []
-            final_text, records, skill_citations = await run_skill_loop(
-                self._llm,
-                user_id,
-                messages,
-                scene,
-                conversation_id=conversation_id,
-                llm_api_key=llm_api_key,
-                on_text=deltas.append,
-            )
-            citations.extend(skill_citations)
-            for piece in deltas:
-                yield {"type": "delta", "content": piece}
-            return
+        # 普通聊天 / 办公直接对话启用（工具集统一用精简的聊天技能；DAG 由 agent 白名单决定）
+        if settings.AGENT_SKILLS_ENABLED and scene in ("chat", "office") and get_skills_for_scene(
+            "chat" if scene == "office" else scene
+        ):
+            try:
+                deltas: list[str] = []
+                final_text, records, skill_citations = await run_skill_loop(
+                    self._llm,
+                    user_id,
+                    messages,
+                    scene,
+                    conversation_id=conversation_id,
+                    llm_api_key=llm_api_key,
+                    llm_base_url=override["base_url"] if override else None,
+                    llm_model=override["model"] if override else None,
+                    on_text=deltas.append,
+                )
+                citations.extend(skill_citations)
+                for piece in deltas:
+                    yield {"type": "delta", "content": piece}
+                return
+            except Exception as exc:  # noqa: BLE001 - 技能循环失败不阻塞，回退普通回复
+                logger.warning("技能循环失败，回退普通回复: {}", str(exc)[:160])
+                if deltas:
+                    # 已输出部分内容：先把已产出文本吐给前端（不整段重流，避免重复）
+                    for piece in deltas:
+                        yield {"type": "delta", "content": piece}
+                    return
 
         messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
+        # 普通模式快速/思考档：显式切换模型（fast=DS Flash / think=强模型）
+        if override:
+            try:
+                async for delta in self._llm.chat_stream(
+                    messages,
+                    base_url=override["base_url"],
+                    api_key=override["api_key"],
+                    model=override["model"],
+                    timeout=override["timeout"],
+                    scene=scene,
+                    usage_user_id=user_id,
+                    usage_category=CATEGORY_CHAT,
+                ):
+                    yield {"type": "delta", "content": delta}
+                return
+            except Exception as exc:  # noqa: BLE001 - 本地/强模型不可用时回退默认模型
+                logger.warning(
+                    "普通模式 {} 档模型 {} 流式调用失败，回退默认模型: {}",
+                    thinking_mode, override["model"], str(exc)[:160],
+                )
         async for delta in self._llm.chat_stream(
             messages,
             scene=scene,
@@ -827,12 +1042,43 @@ class Orchestrator:
         """粗略估算 token 数：中文按 1 字符 ≈ 1 token，其他按 3 字符 ≈ 1 token."""
         if not text:
             return 0
+        text = normalize_content(text)
         cjk = sum(
             1 for ch in text
             if "\u4e00" <= ch <= "\u9fff" or "\u3000" <= ch <= "\u303f" or "\uff00" <= ch <= "\uffef"
         )
         other = len(text) - cjk
         return cjk + other // 3 + 2
+
+    @staticmethod
+    def _split_short_reply(text: str, max_segments: int = 12) -> list[str]:
+        """把整段回复切成多条短句（豆包式多段短句显示）.
+
+        - 按句末标点 + 换行切分，标点随句保留；
+        - 过短的残句并入前一段，避免出现一两个字的分段；
+        - 无标点的超长句按 60 字硬切兜底；
+        - 超过 max_segments 段时，超出部分合并为最后一段。
+        """
+        if not text or not text.strip():
+            return []
+        import re
+
+        parts = re.split(r"(?<=[。！？!?；;…])\s*", text.strip())
+        parts = [p.strip() for p in parts if p and p.strip()]
+        segments: list[str] = []
+        for part in parts:
+            if segments and len(part) < 8:
+                segments[-1] += part
+                continue
+            while len(part) > 80:
+                segments.append(part[:60].strip())
+                part = part[60:].strip()
+            if part:
+                segments.append(part)
+        if len(segments) > max_segments:
+            merged = "".join(segments[max_segments - 1 :])
+            segments = segments[: max_segments - 1] + [merged]
+        return segments
 
     def _trim_history(self, history: list[dict], budget: int) -> list[dict]:
         """按 token 预算从旧到新裁剪历史，保留最近的消息（当前提问始终保留）."""
@@ -877,8 +1123,14 @@ class Orchestrator:
         messages = [{"role": "system", "content": system_prompt}]
 
         # 注入最近历史（token 预算内），排除最后一条（当前消息已包含）
-        for msg in self._trim_history(history, settings.LLM_HISTORY_MAX_TOKENS):
-            messages.append({"role": msg["role"], "content": msg["content"]})
+        # 普通模式超大窗口（25 万 token）；办公模式只保短期窗口（6 万 token）
+        budget = (
+            settings.LLM_HISTORY_MAX_TOKENS_WORK
+            if scene == "work"
+            else settings.LLM_HISTORY_MAX_TOKENS
+        )
+        for msg in self._trim_history(history, budget):
+            messages.append({"role": msg["role"], "content": normalize_content(msg.get("content") or "")})
 
         messages.append({"role": "user", "content": current})
         return messages
@@ -965,6 +1217,74 @@ class Orchestrator:
                 {"type": "text", "text": text},
                 *[{"type": "image_url", "image_url": {"url": uri}} for uri in images],
             ],
+        }
+        return result
+
+    async def _describe_one_image(self, image_uri: str, user_id: str) -> str | None:
+        """用本地 qwen2.5vl:7b 描述单张图片；本地不可用时回退云端 qwen-vl-plus."""
+        prompt = (
+            "请用中文详细描述这张图片的内容：主体、场景、动作、文字信息等，"
+            "描述要具体完整，供纯文本大模型理解这张图片。"
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_uri}},
+                ],
+            }
+        ]
+        # 本地 VL 优先（Ollama qwen2.5vl:7b）
+        if settings.VL_MODEL:
+            try:
+                desc = await self._llm.chat(
+                    messages,
+                    base_url=settings.VL_BASE_URL.rstrip("/"),
+                    api_key=settings.VL_API_KEY,
+                    model=settings.VL_MODEL,
+                    timeout=float(settings.VL_TIMEOUT),
+                    usage_user_id=user_id,
+                    usage_category=CATEGORY_SKILL,
+                )
+                if desc and desc.strip():
+                    return desc.strip()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Vision] 本地 VL 描述失败，回退云端: {}", str(exc)[:120])
+        # 云端 qwen-vl-plus 兜底
+        try:
+            desc = await self._llm.chat(
+                messages,
+                scene="chat",
+                model=settings.QWEN_VL_MODEL,
+                usage_user_id=user_id,
+                usage_category=CATEGORY_SKILL,
+            )
+            return (desc or "").strip() or None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Vision] 云端 VL 描述失败: {}", str(exc)[:120])
+            return None
+
+    async def _describe_images_to_text(
+        self, messages: list[dict], image_uris: list[str], user_id: str
+    ) -> list[dict]:
+        """主模型不支持图片时：VL 模型描述图片 → 文本注入最后一条用户消息."""
+        if not messages or messages[-1].get("role") != "user":
+            return messages
+        descriptions: list[str] = []
+        for i, uri in enumerate(image_uris, 1):
+            desc = await self._describe_one_image(uri, user_id)
+            if desc:
+                descriptions.append(f"【图片{i}】\n{desc}")
+        if not descriptions:
+            logger.warning("[Vision] 图片描述全部失败，图片内容不会提供给主模型")
+            return messages
+        text = str(messages[-1].get("content") or "")
+        result = list(messages)
+        result[-1] = {
+            "role": "user",
+            "content": f"{text}\n\n[用户上传的图片（已由视觉模型描述）]\n"
+            + "\n\n".join(descriptions),
         }
         return result
 

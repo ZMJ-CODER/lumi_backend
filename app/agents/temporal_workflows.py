@@ -427,6 +427,11 @@ class AgentDagWorkflow:
                 self._job["status"] = JOB_COMPLETED
             elif any(s in (STATUS_FAILED, STATUS_SKIPPED) for s in statuses):
                 self._job["status"] = JOB_FAILED
+            elif not statuses:
+                # 空任务树（防御性兜底）：有结果视为完成，无结果视为失败
+                self._job["status"] = (
+                    JOB_COMPLETED if self._job.get("result") else JOB_FAILED
+                )
             else:
                 self._job["status"] = JOB_RUNNING
         self._job["updated_at"] = self._now()

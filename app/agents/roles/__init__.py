@@ -18,6 +18,8 @@ from app.agents.roles.knowledge.web_research import WebResearchAgent
 from app.agents.roles.office.agents import (
     OfficeDocAgent,
     OfficeResearchAgent,
+    OfficeScriptAgent,
+    OfficeSystemAgent,
     OfficeTextAgent,
     OfficeTodoAgent,
 )
@@ -37,6 +39,8 @@ def register_all_agents() -> list[WorkerAgent]:
         OfficeResearchAgent(),
         OfficeTodoAgent(),
         OfficeDocAgent(),
+        OfficeScriptAgent(),
+        OfficeSystemAgent(),
         CodeAgent(),
         CodeReaderAgent(),
         CodeWriterAgent(),
@@ -62,6 +66,7 @@ __all__ = [
     "OfficeResearchAgent",
     "OfficeTodoAgent",
     "OfficeDocAgent",
+    "OfficeScriptAgent",
     "CodeAgent",
     "CodeReaderAgent",
     "CodeWriterAgent",

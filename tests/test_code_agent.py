@@ -6,7 +6,24 @@ import uuid
 from app.agents.orchestration.models import TaskNode
 from app.agents.orchestration.planner import LlmPlanner, RulePlanner
 from app.agents.orchestration.review import LlmReviewHook
-from app.agents.orchestration.workers import CodeAgent, WorkerContext
+from app.agents.core.base import WorkerContext
+from app.agents.roles.code.agent import CodeAgent
+
+
+def _register_code_stub(monkeypatch):
+    """code agent 已被 AGENT_DISABLED 屏蔽，测试里注册一个同名 stub 满足规划器路由."""
+    from app.agents.core.base import WorkerAgent
+    from app.agents.core.registry import AgentRegistry
+
+    class _Stub(WorkerAgent):
+        name = "code"
+        description = "stub"
+
+        async def execute(self, node, ctx):
+            return {"success": True}
+
+    if AgentRegistry.get("code") is None:
+        AgentRegistry.register(_Stub())
 
 
 def _node(**kw):
@@ -26,7 +43,7 @@ def test_code_agent_read_generate_write(monkeypatch):
     async def fake_locate(project_id, instruction, ctx):
         return {"path": "src/main.py"}
 
-    async def fake_generate(ctx, instruction, path, original):
+    async def fake_generate(ctx, instruction, path, original, project_files=None):
         assert original == "old code"
         return "new code"
 
@@ -75,6 +92,7 @@ def test_code_agent_locate_failure(monkeypatch):
 
 
 def test_rule_planner_routes_code_task(monkeypatch):
+    _register_code_stub(monkeypatch)
     # 显式 project_id → code 节点
     tree = asyncio.run(RulePlanner().plan("u1", "帮我实现登录功能", project_id="p1"))
     assert tree.nodes[0].agent == "code"
@@ -126,6 +144,7 @@ def test_code_agent_passes_byok_key_to_llm(monkeypatch):
 
 
 def test_llm_planner_builds_task_tree(monkeypatch):
+    _register_code_stub(monkeypatch)
     planner = LlmPlanner()
     plan = (
         '{"tasks": ['
@@ -134,7 +153,7 @@ def test_llm_planner_builds_task_tree(monkeypatch):
         '], "clarification": ""}'
     )
 
-    async def fake_call(user_id, context, llm_api_key):
+    async def fake_call(user_id, request, context, llm_api_key):
         return plan
 
     async def fake_list(user_id):
@@ -151,7 +170,7 @@ def test_llm_planner_builds_task_tree(monkeypatch):
 def test_llm_planner_clarification(monkeypatch):
     planner = LlmPlanner()
 
-    async def fake_call(user_id, context, llm_api_key):
+    async def fake_call(user_id, request, context, llm_api_key):
         return '{"tasks": [], "clarification": "你想在哪个项目里修改？"}'
 
     async def fake_list(user_id):
@@ -165,9 +184,10 @@ def test_llm_planner_clarification(monkeypatch):
 
 
 def test_llm_planner_falls_back_on_failure(monkeypatch):
+    _register_code_stub(monkeypatch)
     planner = LlmPlanner()
 
-    async def fake_call(user_id, context, llm_api_key):
+    async def fake_call(user_id, request, context, llm_api_key):
         return None
 
     monkeypatch.setattr(planner, "_call_planner", fake_call)
@@ -193,7 +213,7 @@ def test_llm_planner_uses_clarification_answer(monkeypatch):
     planner = LlmPlanner()
     captured = {}
 
-    async def fake_call(user_id, context, llm_api_key):
+    async def fake_call(user_id, request, context, llm_api_key):
         captured["context"] = context
         return '{"tasks": [], "clarification": ""}'
 
@@ -204,6 +224,7 @@ def test_llm_planner_uses_clarification_answer(monkeypatch):
 
 def test_rule_planner_uses_clarification_answer(monkeypatch):
     """LLM 规划失败回退规则时，澄清回答也应参与项目名匹配."""
+    _register_code_stub(monkeypatch)
     import app.services.project_index as pi
 
     class FakeProject:
@@ -234,6 +255,9 @@ def test_review_approves_non_code_and_missing_content():
 
 
 def test_review_llm_rejects_bad_code(monkeypatch):
+    import app.core.config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod.settings, "AGENT_REVIEW_ENABLED", True)
     hook = LlmReviewHook()
     code_node = TaskNode(
         id="t2",
@@ -260,6 +284,9 @@ def test_review_llm_rejects_bad_code(monkeypatch):
 
 
 def test_review_llm_failure_approves(monkeypatch):
+    import app.core.config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod.settings, "AGENT_REVIEW_ENABLED", True)
     hook = LlmReviewHook()
     code_node = TaskNode(id="t2", name="code", agent="code", params={})
     result = {"success": True, "new_content": "def ok(): pass", "instruction": "x", "path": "a.py"}

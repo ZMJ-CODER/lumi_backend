@@ -1,4 +1,4 @@
-"""安全相关：密码哈希、JWT、refresh_token 管理.
+﻿"""安全相关：密码哈希、JWT、refresh_token 管理.
 
 服务端单向哈希方案 v1.0:
   - 密码通过 HTTPS 传输

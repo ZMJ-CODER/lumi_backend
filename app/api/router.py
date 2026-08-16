@@ -4,8 +4,10 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     admin,
+    admin_system,
     agents,
     auth,
+    call,
     chat,
     control_logs,
     conversations,
@@ -16,6 +18,7 @@ from app.api.v1 import (
     local_corpus,
     memories,
     office_docs,
+    preferences,
     prompts,
     projects,
     public_kb,
@@ -48,6 +51,12 @@ api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 # 按需文字转语音
 api_router.include_router(tts.router, prefix="/tts", tags=["tts"])
 
+# 语音通话（Whisper + DS Flash + 流式 TTS）
+api_router.include_router(call.router, prefix="/call", tags=["call"])
+
+# 用户个性化偏好（多端同步）
+api_router.include_router(preferences.router, prefix="/preferences", tags=["preferences"])
+
 # 客户端工具（本地文件操作等：用户端轮询 + 结果回传）
 api_router.include_router(tools.router, prefix="/tools", tags=["tools"])
 
@@ -69,6 +78,7 @@ api_router.include_router(control_logs.router, prefix="/control-logs", tags=["co
 
 # 管理员
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
+api_router.include_router(admin_system.router, prefix="/admin/system", tags=["admin"])
 
 # 公共知识库
 api_router.include_router(public_kb.router, prefix="/public-kb", tags=["public-kb"])

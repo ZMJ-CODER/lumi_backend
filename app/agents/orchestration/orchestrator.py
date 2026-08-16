@@ -57,6 +57,79 @@ class AgentOrchestrator:
         # BYOK：legacy 路径的任务内临时 API key（仅内存，任务结束即释放）
         self._job_api_keys: dict[str, str] = {}
 
+    # ── 办公短期记忆：跨任务记住"上一步做了什么"（摘要，非全文） ──
+
+    _OFFICE_SUMMARY_KEY = "conv:office:sum:{conversation_id}"
+    _OFFICE_SUMMARY_RECORDED = "conv:office:summed:{job_id}"
+    _OFFICE_SUMMARY_MAX = 8
+
+    async def _load_office_summaries(self, conversation_id: str) -> str:
+        """读取该会话最近几次任务的摘要，拼接为给规划器的上下文（截断控制长度）."""
+        if not conversation_id:
+            return ""
+        try:
+            from app.core.redis import get_redis
+
+            r = get_redis()
+            items = await r.lrange(
+                self._OFFICE_SUMMARY_KEY.format(conversation_id=conversation_id), 0, -1
+            )
+            if not items:
+                return ""
+            lines = []
+            for idx, item in enumerate(reversed(items), 1):
+                lines.append(f"{idx}. {str(item)[:300]}")
+            return "\n".join(lines)[:3000]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("读取办公任务摘要失败: {}", exc)
+            return ""
+
+    async def _record_office_summary(self, job: Job) -> None:
+        """任务终结后把"请求+计划+结果"压成一条摘要，写入会话（幂等，每任务一次）."""
+        if not job or not job.conversation_id:
+            return
+        if job.status not in (
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.INTERRUPTED,
+        ):
+            return
+        try:
+            from app.core.redis import get_redis
+
+            r = get_redis()
+            recorded_key = self._OFFICE_SUMMARY_RECORDED.format(job_id=job.job_id)
+            if await r.exists(recorded_key):
+                return
+            result = job.result or {}
+            final = str(result.get("final_answer") or result.get("answer") or "")
+            summary = (
+                f"任务：{job.request[:120]}"
+                + (f" | 计划：{str(job.plan_text or '')[:150]}" if job.plan_text else "")
+                + (f" | 结果：{final[:250]}" if final else "")
+                + (f" | 失败：{str(job.error)[:100]}" if job.error else "")
+            )
+            key = self._OFFICE_SUMMARY_KEY.format(conversation_id=job.conversation_id)
+            await r.rpush(key, summary[:600])
+            await r.ltrim(key, -self._OFFICE_SUMMARY_MAX, -1)
+            await r.setex(recorded_key, 86400 * 7, "1")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("写入办公任务摘要失败: {}", exc)
+
+    async def _record_job_metric(self, job: Job) -> None:
+        """任务结果指标（每个 job 只记一次终态）."""
+        try:
+            from app.core.observability import inc_agent_job
+            from app.core.redis import get_redis
+
+            key = f"obs:job:{job.job_id}"
+            r = get_redis()
+            if await r.set(key, "1", ex=86400 * 7, nx=True):
+                inc_agent_job(str(job.status.value if hasattr(job.status, "value") else job.status))
+        except Exception:  # noqa: BLE001
+            pass
+
     # ── Temporal 可用性探测（成功缓存；失败 30s 后重试）──────────
 
     async def _probe_temporal(self) -> bool:
@@ -84,6 +157,7 @@ class AgentOrchestrator:
         user_id: str,
         request: str,
         scene: str = "office",
+        conversation_id: str | None = None,
         project_id: str | None = None,
         project_ids: list[str] | None = None,
         llm_api_key: str | None = None,
@@ -106,6 +180,10 @@ class AgentOrchestrator:
                     return j
         except Exception:  # noqa: BLE001
             pass
+        # 办公短期记忆：加载本会话此前任务的摘要，注入规划上下文
+        prior_summaries = (
+            await self._load_office_summaries(conversation_id) if conversation_id else ""
+        )
         tree = await self._planner.plan(
             user_id,
             request,
@@ -115,12 +193,14 @@ class AgentOrchestrator:
             llm_api_key,
             clarification_answer,
             office_docs,
+            prior_summaries,
         )
         job = Job(
             job_id=str(uuid.uuid4()),
             user_id=user_id,
             request=request,
             scene=scene,
+            conversation_id=conversation_id,
             status=JobStatus.RUNNING,
             nodes=tree.nodes,
             plan_text=tree.plan_text,
@@ -144,10 +224,13 @@ class AgentOrchestrator:
                     depends_on=[],
                 )
             ]
-        # 意图不明确：LLM 请求向用户澄清，任务以"待澄清"结果直接收敛
+        # 意图不明确：LLM 请求向用户澄清，任务以"待澄清"结果直接收敛（不启动执行）
         if tree.clarification and not tree.nodes:
             job.status = JobStatus.COMPLETED
             job.result = {"type": "clarification", "question": tree.clarification}
+            await self._store.create_job(job)
+            logger.info("任务需澄清（不启动执行）: {} | {}", job.job_id[:8], tree.clarification[:80])
+            return job
 
         if await self._probe_temporal():
             try:
@@ -252,7 +335,12 @@ class AgentOrchestrator:
                 logger.warning("查询 Temporal 任务状态失败，回退快照 {}: {}", job_id, exc)
         if job is None:
             job = await self._store.get_job(job_id)
-        return await self._attach_progress(job) if job else None
+        if job is None:
+            return None
+        # 办公短期记忆：任务终结时落一条"上一步做了什么"摘要（幂等）
+        await self._record_office_summary(job)
+        await self._record_job_metric(job)
+        return await self._attach_progress(job)
 
     async def _attach_progress(self, job: Job) -> Job:
         """把 Redis 中的节点实时进度合并进 node.metadata["progress"]（仅展示用）."""
@@ -272,6 +360,16 @@ class AgentOrchestrator:
     async def list_jobs(self, user_id: str, limit: int = 20) -> list[Job]:
         """按用户索引倒序列出任务（Temporal/legacy 混合列表均支持）."""
         ids = await self._store.list_job_ids(user_id, limit)
+        jobs: list[Job] = []
+        for jid in ids:
+            job = await self.get_job(jid)
+            if job:
+                jobs.append(job)
+        return jobs
+
+    async def admin_list_jobs(self, limit: int = 50) -> list[Job]:
+        """管理后台：跨用户列出最近任务（全量索引 + Temporal 查询）. """
+        ids = await self._store.list_all_job_ids(limit)
         jobs: list[Job] = []
         for jid in ids:
             job = await self.get_job(jid)

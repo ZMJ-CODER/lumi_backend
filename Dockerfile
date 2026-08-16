@@ -39,6 +39,8 @@ COPY celery_app ./celery_app
 COPY scripts ./scripts
 COPY tools ./tools
 COPY plugins ./plugins
+COPY alembic ./alembic
+COPY alembic.ini ./
 
 # 非 root 用户运行
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
@@ -47,5 +49,5 @@ USER appuser
 # API: 8000 / TTS: 8765
 EXPOSE 8000 8765
 
-# 默认启动 FastAPI（worker/tts 由 docker-compose 的 command 覆盖）
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 默认启动：先跑数据库迁移（幂等），再启动 FastAPI（worker/tts 由 docker-compose 覆盖）
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

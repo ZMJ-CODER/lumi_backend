@@ -258,6 +258,49 @@ def cleanup_conversations(self):
 
 
 @celery_app.task(bind=True)
+def cleanup_generated_files(self):
+    """定时清理后端生成的临时/产物文件：
+    - 过期办公文档会话（data/office）
+    - 通用脚本产物目录（data/uploads/office_outputs，超过 TTL 删除）
+    - 沙箱残留临时目录（系统 temp 下的 lumi_sandbox_*，崩溃遗留兜底）
+    """
+
+    async def _run() -> None:
+        from app.services.office_docs import cleanup_expired_sessions, cleanup_generic_outputs
+
+        expired_sessions = await cleanup_expired_sessions()
+        removed_outputs = cleanup_generic_outputs(settings.GENERATED_FILES_TTL_DAYS)
+
+        # 沙箱残留临时目录（正常路径即时清理，这里兜底崩溃遗留）
+        import shutil
+        import tempfile
+        import time
+        from pathlib import Path
+
+        base = Path(tempfile.gettempdir())
+        cutoff = time.time() - settings.SANDBOX_TEMP_TTL_HOURS * 3600
+        removed_sandbox = 0
+        for entry in base.glob("lumi_sandbox_*"):
+            try:
+                if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    removed_sandbox += 1
+            except OSError:
+                continue
+        logger.info(
+            "[Task] cleanup_generated_files: 过期会话={} 产物目录={} 沙箱临时={}",
+            expired_sessions,
+            removed_outputs,
+            removed_sandbox,
+        )
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[Task] cleanup_generated_files 失败: {}", exc)
+
+
+@celery_app.task(bind=True)
 def rebuild_index(self, space_id: str | None = None):
     """重建向量索引."""
     async def _run() -> None:

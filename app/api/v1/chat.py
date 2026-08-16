@@ -88,6 +88,7 @@ async def chat_stream(
                             "type": "done",
                             "message_id": replay.get("message_id"),
                             "content": replay.get("content", ""),
+                            "segments": replay.get("segments") or [],
                             "citations": replay.get("citations") or [],
                             "scene": req.scene,
                             "title": "",
@@ -105,6 +106,7 @@ async def chat_stream(
                 attachments=req.attachments,
                 llm_api_key=llm_api_key,
                 thinking_mode=req.thinking_mode,
+                reply_style=req.reply_style,
             ):
                 if evt["type"] == "delta":
                     full_text += evt["content"]
@@ -119,6 +121,7 @@ async def chat_stream(
                     persist_result = {
                         "message_id": result["message_id"],
                         "content": result.get("content", ""),
+                        "segments": result.get("segments"),
                         "citations": result.get("citations") or [],
                         "title": result.get("title") or "",
                     }

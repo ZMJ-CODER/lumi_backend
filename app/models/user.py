@@ -1,5 +1,7 @@
 """用户模块数据模型."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -33,3 +35,31 @@ class UserLlmConfigRequest(BaseModel):
         description="推理强度: low / medium / high（模型支持时生效）",
     )
     byok: bool = Field(default=False, description="是否自备 API key（key 本地保存，不上传）")
+
+
+class PreferencesUpdateRequest(BaseModel):
+    """用户个性化偏好更新（部分字段可缺省）."""
+
+    avatar: str | None = Field(default=None, description="智能体头像 dataURL")
+    background_image: str | None = Field(default=None, description="全局主题背景 dataURL")
+    reply_style: Literal["long", "short"] | None = Field(
+        default=None, description="回复风格：long=长句 / short=多段短句（仅普通模式）"
+    )
+    voice: dict | None = Field(
+        default=None,
+        description="声音设置：{voice, rate, pitch, referenceAudio, referenceName}",
+    )
+
+
+class PresetCreateRequest(BaseModel):
+    """保存个性化方案."""
+
+    kind: Literal["character", "voice"] = Field(..., description="方案类型")
+    name: str = Field(..., min_length=1, max_length=100, description="方案名称")
+    payload: dict = Field(..., description="方案内容（character: {prompt_id, reply_style?}；voice: 声音设置）")
+
+
+class DeleteAccountRequest(BaseModel):
+    """注销账号：需要输入当前密码确认."""
+
+    password: str = Field(..., description="当前登录密码")

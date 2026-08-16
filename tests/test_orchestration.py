@@ -139,6 +139,7 @@ def test_orchestrator_submit_and_cancel():
             llm_api_key=None,
             clarification_answer=None,
             office_docs=None,
+            prior_summaries="",
         ):
             return TaskTree(nodes=[_node("t1", agent="w1")])
 
@@ -201,6 +202,7 @@ def test_orchestrator_threads_byok_key_to_worker():
             llm_api_key=None,
             clarification_answer=None,
             office_docs=None,
+            prior_summaries="",
         ):
             return TaskTree(nodes=[_node("t1", agent="keyw")])
 

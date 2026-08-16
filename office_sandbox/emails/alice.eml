@@ -1,0 +1,29 @@
+Return-Path: <alice@example.com>
+Received: from mail.example.com (mail.example.com [10.0.0.8])
+	by mx.lumi.local (Postfix) with ESMTP id 4F3A2
+	for <team@lumi.local>; Mon, 11 Aug 2026 09:30:12 +0800 (CST)
+Message-ID: <alice-20260811-0930@example.com>
+Date: Mon, 11 Aug 2026 09:30:12 +0800
+From: "Alice Zhang" <alice@example.com>
+To: "Lumi Team" <team@lumi.local>
+Cc: "Bob Wang" <bob@example.com>
+Subject: Q3 项目进度同步与周五评审会
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+大家好，
+
+本周 Q3 项目整体进展顺利，同步几个关键信息：
+
+1. 登录模块已在本周一完成联调，测试覆盖率达到 92%；
+2. 支付模块开发进度 60%，预计下周五进入联调；
+3. 本周五（8月14日）下午 15:00 在 3 楼会议室召开产品评审会，
+   请各负责人提前把材料发到会议邮箱。
+
+另外，客户对我们上周交付的原型反馈很好，希望我们下周补充一份
+移动端适配方案。
+
+有问题随时找我。
+
+Alice

@@ -20,6 +20,7 @@ from app.models.db_models import (
     MemoryProfile,
     Message,
 )
+from app.services.content_codec import normalize_content
 
 router = APIRouter()
 
@@ -73,7 +74,7 @@ async def export_my_data(
                     {
                         "message_id": str(m.id),
                         "role": m.role,
-                        "content": m.content,
+                        "content": normalize_content(m.content),
                         "created_at": _iso(m.created_at),
                     }
                     for m in msgs

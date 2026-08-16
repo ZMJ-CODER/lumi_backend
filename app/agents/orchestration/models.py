@@ -64,6 +64,7 @@ class Job(BaseModel):
     user_id: str
     request: str                  # 用户原始请求
     scene: str = "office"
+    conversation_id: str | None = None  # 关联会话（办公短期记忆：跨任务记住上一步做了什么）
     status: JobStatus = JobStatus.PENDING
     nodes: list[TaskNode] = Field(default_factory=list)
     result: dict | None = None    # 汇总结果（如最终回复）

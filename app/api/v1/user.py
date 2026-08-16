@@ -3,6 +3,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends
+from loguru import logger
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,8 +11,33 @@ from app.core.database import get_db
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException
 from app.core.security import hash_password, validate_password_strength, verify_password
-from app.models.db_models import RefreshToken, User
-from app.models.user import ChangePasswordRequest, SetPromptRequest, UserProfileUpdateRequest
+from app.models.db_models import (
+    Attachment,
+    CodeEmbedding,
+    Conversation,
+    DailyTokenStat,
+    Document,
+    DocumentChunk,
+    KnowledgeSpace,
+    LLMUsage,
+    Memory,
+    MemoryProfile,
+    Message,
+    OfficeSession,
+    Project,
+    ProjectIndex,
+    RefreshToken,
+    User,
+    UserPreference,
+    UserPreset,
+    UserPrompt,
+)
+from app.models.user import (
+    ChangePasswordRequest,
+    DeleteAccountRequest,
+    SetPromptRequest,
+    UserProfileUpdateRequest,
+)
 from app.core.model_catalog import PROVIDER_BASE_URLS, find_model, get_model_catalog
 from app.models.user import UserLlmConfigRequest
 from app.services import user_llm_config
@@ -192,3 +218,75 @@ async def clear_llm_config_view(payload: dict = Depends(require_auth)):
     """恢复默认模型（清除用户级选择）."""
     await user_llm_config.clear_user_llm_config(payload["sub"])
     return {"code": 0, "message": "已恢复默认模型"}
+
+
+@router.delete("/account")
+async def delete_account(
+    req: DeleteAccountRequest,
+    payload: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """注销账号：校验密码后删除该用户的全部数据（会话/消息/记忆/知识库/角色/偏好等）."""
+    user = await _load_user(db, payload)
+    if not verify_password(req.password, user.password_hash):
+        raise BadRequestException("密码不正确")
+    uid = user.id
+
+    try:
+        # 1. 项目 / 代码索引 / 代码嵌入
+        await db.execute(delete(CodeEmbedding).where(CodeEmbedding.user_id == uid))
+        await db.execute(delete(ProjectIndex).where(ProjectIndex.user_id == uid))
+        await db.execute(delete(Project).where(Project.user_id == uid))
+        # 2. 知识库（分块 → 文档 → 空间）
+        await db.execute(delete(DocumentChunk).where(DocumentChunk.user_id == uid))
+        await db.execute(delete(Document).where(Document.user_id == uid))
+        await db.execute(delete(KnowledgeSpace).where(KnowledgeSpace.user_id == uid))
+        # 3. 长期记忆
+        await db.execute(delete(Memory).where(Memory.user_id == uid))
+        await db.execute(delete(MemoryProfile).where(MemoryProfile.user_id == uid))
+        # 4. 办公会话
+        await db.execute(delete(OfficeSession).where(OfficeSession.user_id == uid))
+        # 5. 会话及其消息/附件
+        conv_ids = (
+            (await db.execute(select(Conversation.id).where(Conversation.user_id == uid)))
+            .scalars()
+            .all()
+        )
+        if conv_ids:
+            msg_ids = select(Message.id).where(Message.conversation_id.in_(conv_ids))
+            await db.execute(delete(Attachment).where(Attachment.message_id.in_(msg_ids)))
+            await db.execute(delete(Message).where(Message.conversation_id.in_(conv_ids)))
+            await db.execute(delete(Conversation).where(Conversation.id.in_(conv_ids)))
+        # 6. 角色 / 偏好 / 方案
+        await db.execute(delete(UserPrompt).where(UserPrompt.user_id == uid))
+        await db.execute(delete(UserPreference).where(UserPreference.user_id == uid))
+        await db.execute(delete(UserPreset).where(UserPreset.user_id == uid))
+        # 7. 令牌 / 用量统计
+        await db.execute(delete(RefreshToken).where(RefreshToken.user_id == uid))
+        await db.execute(delete(LLMUsage).where(LLMUsage.user_id == uid))
+        await db.execute(delete(DailyTokenStat).where(DailyTokenStat.user_id == uid))
+        # 8. 用户行
+        await db.delete(user)
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        await db.rollback()
+        logger.warning("注销账号失败: {}", exc)
+        raise BadRequestException(f"注销失败，请稍后重试: {exc}") from exc
+
+    # 清理用户上传文件（尽力而为，不阻塞注销）
+    try:
+        import asyncio
+        import shutil
+        from pathlib import Path
+
+        from app.core.config import settings
+
+        base = Path(settings.UPLOAD_DIR)
+        for sub in ("chat", "tts_voice"):
+            target = (base / sub / str(uid)).resolve()
+            if base.resolve() in target.parents and target.exists():
+                await asyncio.to_thread(shutil.rmtree, target, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {"code": 0, "data": {"deleted": True}, "message": "账号已注销"}

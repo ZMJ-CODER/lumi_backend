@@ -1,5 +1,6 @@
 """RAG 文档解析与分块 —— 纯文本 v1，解析器按扩展名注册."""
 
+from datetime import datetime
 from pathlib import Path
 
 
@@ -9,6 +10,150 @@ _TEXT_EXTS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css",
     ".yaml", ".yml", ".ini", ".toml", ".xml",
 }
+
+# 结构化文本格式：不走 Docling，单独解析成可读文本
+_STRUCTURED_TEXT_EXTS = {".eml", ".ics"}
+
+
+def _strip_html(html: str) -> str:
+    """粗略剥离 HTML 标签，保留文本（用于 HTML 邮件正文）."""
+    from html.parser import HTMLParser
+
+    class _TextExtractor(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.parts: list[str] = []
+
+        def handle_data(self, data: str) -> None:
+            if data.strip():
+                self.parts.append(data.strip())
+
+        def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ARG002
+            if tag in ("p", "br", "div", "li", "tr", "h1", "h2", "h3"):
+                self.parts.append("\n")
+
+    parser = _TextExtractor()
+    try:
+        parser.feed(html)
+    except Exception:  # noqa: BLE001 - HTML 异常不阻塞正文提取
+        return html
+    return "\n".join(x for x in parser.parts if x)
+
+
+def parse_eml(file_path: str) -> str:
+    """EML 邮件 → 可读文本（发件人/收件人/主题/日期 + 正文）."""
+    import email
+    from email import policy
+
+    raw = Path(file_path).read_bytes()
+    try:
+        msg = email.message_from_bytes(raw, policy=policy.default)
+    except Exception:  # noqa: BLE001 - 解析失败降级为原始文本
+        return raw.decode("utf-8", errors="replace")
+
+    lines: list[str] = []
+
+    def _field(name: str, label: str) -> None:
+        v = (msg.get(name) or "").strip()
+        if v:
+            lines.append(f"{label}：{v}")
+
+    _field("From", "发件人")
+    _field("To", "收件人")
+    _field("Cc", "抄送")
+    _field("Subject", "主题")
+    _field("Date", "日期")
+
+    body_parts: list[str] = []
+    try:
+        if msg.is_multipart():
+            for part in msg.walk():
+                ctype = part.get_content_type()
+                if ctype == "text/plain":
+                    try:
+                        body_parts.append(str(part.get_content() or ""))
+                    except Exception:  # noqa: BLE001
+                        payload = part.get_payload(decode=True) or b""
+                        body_parts.append(payload.decode("utf-8", errors="replace"))
+                elif ctype == "text/html" and not body_parts:
+                    html = str(part.get_content() or "")
+                    body_parts.append(_strip_html(html))
+        else:
+            ctype = msg.get_content_type()
+            if ctype == "text/plain":
+                body_parts.append(str(msg.get_content() or ""))
+            elif ctype == "text/html":
+                body_parts.append(_strip_html(str(msg.get_content() or "")))
+    except Exception:  # noqa: BLE001
+        pass
+
+    body = "\n".join(p.strip() for p in body_parts if p and p.strip())
+    if body:
+        lines.append("\n正文：\n" + body)
+    return "\n".join(lines) or "（空邮件）"
+
+
+def _fmt_ics_datetime(value: str) -> str:
+    """ICS 时间值（20260814T070000Z / 20260814）→ 可读时间."""
+    if not value:
+        return ""
+    v = value.replace("Z", "").replace("T", " ")
+    try:
+        if " " in v:
+            return datetime.strptime(v[:15], "%Y%m%d %H%M%S").strftime("%Y-%m-%d %H:%M")
+        return datetime.strptime(v[:8], "%Y%m%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return value
+
+
+def parse_ics(file_path: str) -> str:
+    """ICS 日历 → 可读文本（逐个事件：时间/主题/地点/说明）."""
+    raw = Path(file_path).read_bytes()
+    text = raw.decode("utf-8", errors="replace")
+    # 展开折叠行（续行以空格/制表符开头）
+    lines: list[str] = []
+    for line in text.splitlines():
+        if line.startswith((" ", "\t")) and lines:
+            lines[-1] += line[1:]
+        else:
+            lines.append(line)
+
+    events: list[dict[str, str]] = []
+    cur: dict[str, str] = {}
+    in_event = False
+    for line in lines:
+        key, _, value = line.partition(":")
+        key = key.upper().strip()
+        if key == "BEGIN" and value.strip().upper() == "VEVENT":
+            cur = {}
+            in_event = True
+            continue
+        if key == "END" and value.strip().upper() == "VEVENT":
+            if cur.get("SUMMARY"):
+                events.append(cur)
+            cur = {}
+            in_event = False
+            continue
+        if not in_event or key not in (
+            "SUMMARY", "DTSTART", "DTEND", "LOCATION", "DESCRIPTION", "STATUS",
+        ):
+            continue
+        cur[key] = value.strip()
+
+    out: list[str] = []
+    for i, ev in enumerate(events, 1):
+        out.append(f"事件{i}：{ev.get('SUMMARY', '')}")
+        start = _fmt_ics_datetime(ev.get("DTSTART", ""))
+        end = _fmt_ics_datetime(ev.get("DTEND", ""))
+        if start:
+            out.append(f"  开始：{start}" + (f"  结束：{end}" if end else ""))
+        if ev.get("LOCATION"):
+            out.append(f"  地点：{ev['LOCATION']}")
+        if ev.get("DESCRIPTION"):
+            out.append(f"  说明：{ev['DESCRIPTION']}")
+        if ev.get("STATUS"):
+            out.append(f"  状态：{ev['STATUS']}")
+    return "\n".join(out) or "（日历中没有事件）"
 
 
 def parse_file(file_path: str, filename: str | None = None) -> str:
@@ -55,6 +200,10 @@ def parse_document(file_path: str, filename: str | None = None) -> str:
     ext = Path(name).suffix.lower()
     if ext in _TEXT_EXTS:
         return parse_file(file_path, filename)
+    if ext == ".eml":
+        return parse_eml(file_path)
+    if ext == ".ics":
+        return parse_ics(file_path)
 
     # 延迟导入 Docling，避免纯文本流程加载重型依赖
     from app.services.rag.docling_parser import parse_with_docling

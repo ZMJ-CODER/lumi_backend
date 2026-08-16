@@ -29,6 +29,10 @@ class SendMessageRequest(BaseModel):
         default="fast",
         description="推理模式：fast=低推理（快速回复）/ think=高推理（深度思考）；仅影响普通聊天主回复",
     )
+    reply_style: str | None = Field(
+        default=None,
+        description="回复风格：long=长句整体回复 / short=多条短句分段回复；仅普通模式（chat）生效",
+    )
     message_id: str | None = Field(
         default=None, description="客户端消息 ID（UUID，用于幂等去重，防止重复提交）"
     )

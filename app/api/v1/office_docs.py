@@ -27,6 +27,14 @@ def _session_or_404(user_id: str, doc_id: str) -> dict:
         raise NotFoundException(str(exc)) from exc
 
 
+async def _ensure_session_or_404(user_id: str, doc_id: str) -> dict:
+    """确保会话可用（磁盘缺失时从 DB 重建），失败转 404."""
+    try:
+        return await office_docs.ensure_session(user_id, doc_id)
+    except LookupError as exc:
+        raise NotFoundException(str(exc)) from exc
+
+
 @router.post("")
 async def upload_office_doc(
     file: UploadFile = File(...),
@@ -40,6 +48,14 @@ async def upload_office_doc(
     except ValueError as exc:
         raise BadRequestException(str(exc)) from exc
     info = office_docs.read_structure(payload["sub"], meta["doc_id"])
+    # 聊天框链路：临时会话写入 DB（跨实例可恢复）+ 顺带清理过期会话
+    await office_docs.persist_session_record(
+        payload["sub"], meta, content, content_text=info.get("structure")
+    )
+    try:
+        await office_docs.cleanup_expired_sessions()
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "code": 0,
         "data": {
@@ -52,9 +68,44 @@ async def upload_office_doc(
     }
 
 
+# 通用脚本产物（新建文件，无源文档）：按任务/会话 id 隔离
+@router.get("/outputs")
+async def list_generic_outputs(conv_id: str, payload: dict = Depends(require_auth)):
+    """列出某个任务/会话的通用产物（脚本新建的文件）."""
+    items = office_docs.list_generic_outputs(payload["sub"], conv_id)
+    return {"code": 0, "data": {"items": items}}
+
+
+@router.get("/outputs/{name}")
+async def get_generic_output(
+    conv_id: str,
+    name: str,
+    payload: dict = Depends(require_auth),
+):
+    """下载通用产物文件字节."""
+    path = office_docs.resolve_generic_output(payload["sub"], conv_id, name)
+    if path is None:
+        raise NotFoundException("产物不存在")
+    return FileResponse(str(path), filename=path.name)
+
+
+@router.delete("/outputs/{name}")
+async def delete_generic_output(
+    conv_id: str,
+    name: str,
+    payload: dict = Depends(require_auth),
+):
+    """删除通用产物（客户端已投递到本地下载目录后清理后端副本）."""
+    removed = office_docs.delete_generic_output(payload["sub"], conv_id, name)
+    if not removed:
+        raise NotFoundException("产物不存在或已删除")
+    return {"code": 0, "data": {"deleted": True}}
+
+
 @router.get("/{doc_id}")
 async def get_office_doc(doc_id: str, payload: dict = Depends(require_auth)):
     """查看文档结构与缓冲状态."""
+    await _ensure_session_or_404(payload["sub"], doc_id)
     info = office_docs.read_structure(payload["sub"], doc_id)
     meta = _session_or_404(payload["sub"], doc_id)
     from pathlib import Path
@@ -80,6 +131,7 @@ async def edit_office_doc(
     instruction = (req.instruction or "").strip()
     if not instruction:
         raise BadRequestException("缺少编辑指令 instruction")
+    await _ensure_session_or_404(payload["sub"], doc_id)
     info = office_docs.read_structure(payload["sub"], doc_id)
     ops = await office_docs.plan_edits(
         instruction,
@@ -89,12 +141,16 @@ async def edit_office_doc(
         api_key=None,
     )
     records = office_docs.apply_edits(payload["sub"], doc_id, ops)
+    # 只写入缓冲副本：用户在前端预览确认（保留/撤销）后才落盘
     after = office_docs.read_structure(payload["sub"], doc_id)
     return {
         "code": 0,
         "data": {
             "doc_id": doc_id,
             "records": records,
+            "committed": False,
+            "pending_commit": True,
+            "message": "修改已生成预览，请在前端确认后写入实际文档文件",
             "ops": ops,
             "structure_after": after["structure"][:30000],
             "has_buffer": True,
@@ -102,9 +158,47 @@ async def edit_office_doc(
     }
 
 
+@router.post("/{doc_id}/commit")
+async def commit_office_doc(doc_id: str, payload: dict = Depends(require_auth)):
+    """确认修改：把缓冲写入实际文档文件（用户预览后点"保留"）."""
+    try:
+        await _ensure_session_or_404(payload["sub"], doc_id)
+        await office_docs.commit_session(payload["sub"], doc_id)
+    except LookupError as exc:
+        raise NotFoundException(str(exc)) from exc
+    return {"code": 0, "message": "已写入实际文档文件"}
+
+
+@router.post("/{doc_id}/revert")
+async def revert_office_doc(doc_id: str, payload: dict = Depends(require_auth)):
+    """撤销修改：丢弃缓冲，文档保持原样（用户预览后点"撤销"）."""
+    try:
+        await _ensure_session_or_404(payload["sub"], doc_id)
+        office_docs.revert_edits(payload["sub"], doc_id)
+    except LookupError as exc:
+        raise NotFoundException(str(exc)) from exc
+    return {"code": 0, "message": "已撤销修改，文档保持原样"}
+
+
 @router.get("/{doc_id}/file")
 async def download_office_doc(doc_id: str, payload: dict = Depends(require_auth)):
-    """获取编辑后的缓冲文件（用户审核通过后落盘）."""
+    """获取实际文档文件（未确认的修改不进入下载，用户需先"保留"）."""
+    await _ensure_session_or_404(payload["sub"], doc_id)
+    meta = _session_or_404(payload["sub"], doc_id)
+    from pathlib import Path
+
+    path = Path(meta["_session"]) / f"original{meta['ext']}"
+    return FileResponse(
+        str(path),
+        media_type="application/octet-stream",
+        filename=meta["filename"],
+    )
+
+
+@router.get("/{doc_id}/preview")
+async def preview_office_doc(doc_id: str, payload: dict = Depends(require_auth)):
+    """获取修改后的预览文件（缓冲优先；未编辑时返回原文件）—— 前端 WYSIWYG 渲染用."""
+    await _ensure_session_or_404(payload["sub"], doc_id)
     meta = _session_or_404(payload["sub"], doc_id)
     from pathlib import Path
 
@@ -114,6 +208,37 @@ async def download_office_doc(doc_id: str, payload: dict = Depends(require_auth)
         str(path),
         media_type="application/octet-stream",
         filename=meta["filename"],
+    )
+
+
+@router.get("/{doc_id}/outputs")
+async def list_office_outputs(doc_id: str, payload: dict = Depends(require_auth)):
+    """列出脚本产物（格式转换/批量处理生成的文件，如 csv）. """
+    await _ensure_session_or_404(payload["sub"], doc_id)
+    items = office_docs.list_doc_outputs(payload["sub"], doc_id)
+    return {"code": 0, "data": {"items": items}}
+
+
+@router.get("/{doc_id}/outputs/{name}")
+async def download_office_output(
+    doc_id: str,
+    name: str,
+    payload: dict = Depends(require_auth),
+):
+    """下载脚本产物文件."""
+    await _ensure_session_or_404(payload["sub"], doc_id)
+    from pathlib import Path
+
+    out_dir = office_docs.doc_output_dir(payload["sub"], doc_id)
+    # 防目录穿越
+    safe = Path(name).name
+    target = out_dir / safe
+    if not target.is_file():
+        raise NotFoundException("产物文件不存在")
+    return FileResponse(
+        str(target),
+        media_type="application/octet-stream",
+        filename=safe,
     )
 
 

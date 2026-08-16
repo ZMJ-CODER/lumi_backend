@@ -1,0 +1,25 @@
+Return-Path: <bob@example.com>
+Received: from mail.example.com (mail.example.com [10.0.0.9])
+	by mx.lumi.local (Postfix) with ESMTP id 8B1C0
+	for <team@lumi.local>; Tue, 12 Aug 2026 18:05:44 +0800 (CST)
+Message-ID: <bob-20260812-1805@example.com>
+Date: Tue, 12 Aug 2026 18:05:44 +0800
+From: "Bob Wang" <bob@example.com>
+To: "Lumi Team" <team@lumi.local>
+Subject: 付款申请与测试环境升级通知
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+各位，
+
+两件事：
+
+1. 本周云服务器账单已出（发票见附件），共 12,800 元，
+   请财务在 8 月 20 日前完成付款，发票号 INV-2026-0917；
+2. 测试环境将于本周六凌晨 2:00-4:00 升级数据库版本，
+   期间测试环境不可用，请提前安排好回归用例。
+
+谢谢。
+
+Bob

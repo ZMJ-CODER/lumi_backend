@@ -45,6 +45,7 @@ class Planner(ABC):
         llm_api_key: str | None = None,
         clarification_answer: str | None = None,
         office_docs: list[dict] | None = None,
+        prior_summaries: str = "",
     ) -> TaskTree:
         ...
 
@@ -68,14 +69,38 @@ class RulePlanner(Planner):
         llm_api_key: str | None = None,
         clarification_answer: str | None = None,
         office_docs: list[dict] | None = None,
+        prior_summaries: str = "",
     ) -> TaskTree:
         # 代码任务：显式指定 project_id，或在请求+澄清回答中匹配到已注册项目名
         combined = request + (f" {clarification_answer}" if clarification_answer else "")
+        # 脚本任务（规则兜底）：带文档 + 转换/导出/批量/脚本关键词 → office_script
+        if office_docs:
+            from app.agents.orchestration.intent import classify
+
+            if classify(request, office_docs).get("task_type") == "script":
+                from app.agents.core.registry import AgentRegistry
+
+                if AgentRegistry.get("office_script") is not None:
+                    doc_ids = [str(d.get("doc_id")) for d in office_docs if d.get("doc_id")]
+                    if doc_ids:
+                        return TaskTree(
+                            nodes=[
+                                TaskNode(
+                                    id=f"s{int(time.time())}-{uuid.uuid4().hex[:6]}",
+                                    name="脚本处理文档",
+                                    agent="office_script",
+                                    params={"task": request, "doc_ids": doc_ids},
+                                    depends_on=[],
+                                )
+                            ],
+                            plan_text=f"按脚本任务执行：{request}",
+                        )
         # 办公文档任务（规则回退）：带文档 → 直接建 office_doc 分析节点
         if office_docs:
             from app.agents.core.registry import AgentRegistry
 
             if AgentRegistry.get("office_doc") is not None:
+                mem_suffix = f"\n（此前已完成的任务摘要：{prior_summaries}）" if prior_summaries else ""
                 nodes = []
                 for d in office_docs or []:
                     doc_id = str(d.get("doc_id") or "")
@@ -88,7 +113,7 @@ class RulePlanner(Planner):
                             agent="office_doc",
                             params={
                                 "doc_id": doc_id,
-                                "instruction": request,
+                                "instruction": request + mem_suffix,
                                 "mode": "analyze",
                                 "analyze_mode": "qa",
                             },
@@ -239,15 +264,32 @@ class LlmPlanner(Planner):
         llm_api_key: str | None = None,
         clarification_answer: str | None = None,
         office_docs: list[dict] | None = None,
+        prior_summaries: str = "",
     ) -> TaskTree:
         projects = await self._list_projects(user_id)
         tree = await self._plan_with_llm(
-            user_id, request, project_id, project_ids, llm_api_key, projects, clarification_answer, office_docs
+            user_id,
+            request,
+            project_id,
+            project_ids,
+            llm_api_key,
+            projects,
+            clarification_answer,
+            office_docs,
+            prior_summaries,
         )
         if tree is not None:
             return tree
         return await self._fallback.plan(
-            user_id, request, scene, project_id, project_ids, llm_api_key, clarification_answer, office_docs
+            user_id,
+            request,
+            scene,
+            project_id,
+            project_ids,
+            llm_api_key,
+            clarification_answer,
+            office_docs,
+            prior_summaries,
         )
 
     async def _list_projects(self, user_id: str) -> list[dict]:
@@ -271,6 +313,7 @@ class LlmPlanner(Planner):
         projects: list[dict],
         clarification_answer: str | None = None,
         office_docs: list[dict] | None = None,
+        prior_summaries: str = "",
     ) -> TaskTree | None:
         # 只展示用户本机项目（自动定位时聚焦这些项目，避免无关项目干扰）
         if project_ids:
@@ -302,6 +345,11 @@ class LlmPlanner(Planner):
             + (f"\n用户指定的项目 ID：{project_id}" if project_id else "")
             + (f"\n用户补充说明：{clarification_answer}" if clarification_answer else "")
             + (
+                f"\n此前已完成的任务摘要（延续上下文用，简要参考即可，不要重复执行已完成步骤）：\n{prior_summaries}"
+                if prior_summaries
+                else ""
+            )
+            + (
                 "\n当前办公文档："
                 + "、".join(
                     f"{d.get('filename')}(doc_id={d.get('doc_id')})"
@@ -317,14 +365,37 @@ class LlmPlanner(Planner):
         intent = classify(request, office_docs)
         if intent["task_type"] == "template":
             templated = await self._plan_with_template(
-                user_id, request, office_docs, llm_api_key, force_template=intent["template"]
+                user_id,
+                request,
+                office_docs,
+                llm_api_key,
+                force_template=intent["template"],
+                prior_summaries=prior_summaries,
             )
             if templated is not None:
                 return templated
         elif intent["task_type"] == "semi_structured":
-            patterned = await self._plan_with_pattern(user_id, request, office_docs, llm_api_key)
+            patterned = await self._plan_with_pattern(
+                user_id, request, office_docs, llm_api_key, prior_summaries=prior_summaries
+            )
             if patterned is not None:
                 return patterned
+        elif intent["task_type"] == "script":
+            # 脚本任务：直接建 office_script 节点（写脚本处理文档，不逐步查看）
+            doc_ids = [str(d.get("doc_id")) for d in office_docs or [] if d.get("doc_id")]
+            if doc_ids:
+                return TaskTree(
+                    nodes=[
+                        TaskNode(
+                            id=f"s{int(time.time())}-{uuid.uuid4().hex[:6]}",
+                            name="脚本处理文档",
+                            agent="office_script",
+                            params={"task": request, "doc_ids": doc_ids},
+                            depends_on=[],
+                        )
+                    ],
+                    plan_text=f"按脚本任务执行：{request}",
+                )
         # free / 兜底：Plan-then-Execute（LLM 自由规划，含 office_doc 兜底注入）
         raw = await self._call_planner(user_id, request, context, llm_api_key)
         data = _extract_json(raw) if raw else None
@@ -399,6 +470,7 @@ class LlmPlanner(Planner):
         office_docs: list[dict] | None,
         llm_api_key: str | None,
         force_template: str | None = None,
+        prior_summaries: str = "",
     ) -> TaskTree | None:
         """模板优先：规则分类命中 → 规则抽参（免 LLM）→ 模板构造器生成确定性 DAG."""
         from app.core.llm import LLMClient
@@ -428,6 +500,7 @@ class LlmPlanner(Planner):
             "可用模板：\n"
             + template_catalog_text()
             + f"\n当前上传的文档：{doc_desc or '（无）'}\n"
+            + (f"\n此前已完成的任务摘要（延续上下文用）：\n{prior_summaries}\n" if prior_summaries else "")
             + "只输出 JSON（不要 Markdown 围栏、不要解释）："
             '{"template": "模板名或null", "params": {"参数名": 值}}\n'
             "没有合适模板时 template 为 null。"
@@ -467,6 +540,7 @@ class LlmPlanner(Planner):
         request: str,
         office_docs: list[dict] | None,
         llm_api_key: str | None,
+        prior_summaries: str = "",
     ) -> TaskTree | None:
         """半结构任务：LLM 选模式 + 填参数 → 模式构造器生成 DAG."""
         from app.core.llm import LLMClient
@@ -477,6 +551,7 @@ class LlmPlanner(Planner):
             "你是办公流程规划器。用户请求是带条件的半结构任务，请选择一个模式并抽取参数。\n"
             + pattern_catalog_text()
             + "\n只输出 JSON（不要 Markdown 围栏）：{\"pattern\": \"模式名\", \"params\": {\"参数名\": 值}}\n"
+            + (f"此前已完成的任务摘要（延续上下文用）：\n{prior_summaries}\n" if prior_summaries else "")
         )
         try:
             llm = LLMClient()

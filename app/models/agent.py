@@ -8,6 +8,10 @@ class CreateAgentJobRequest(BaseModel):
 
     request: str = Field(..., min_length=1, max_length=2000, description="用户请求（办公模式）")
     scene: str = Field(default="office", description="场景：office")
+    conversation_id: str | None = Field(
+        default=None,
+        description="关联会话 ID（办公短期记忆：把上一步任务摘要注入后续任务规划）",
+    )
     project_id: str | None = Field(
         default=None, description="本地项目 ID（代码任务；缺省时按请求中的项目名匹配）"
     )

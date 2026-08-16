@@ -208,3 +208,273 @@ class OfficeDocAgent(WorkerAgent):
         if result.get("success"):
             result["step_title"] = {"read": "读取文档结构", "edit": "编辑文档", "analyze": "分析文档"}.get(mode, "办公文档")
         return result
+
+
+class OfficeScriptAgent(WorkerAgent):
+    """办公脚本：写 Python 脚本处理上传的文档（批量/重复任务），执行并返回产物.
+
+    适用场景：格式转换（xlsx→csv）、批量替换、数据导出、文件整理等，
+    不需要逐步查看文件内容，直接写脚本一次完成。
+    """
+
+    name = "office_script"
+    description = (
+        "写 Python 脚本处理上传的办公文档（批量/重复任务：格式转换如 xlsx→csv、"
+        "批量替换、数据导出、文件整理等）。脚本读取文档并把产物写入输出目录"
+    )
+    params_help = (
+        'params 用 {"task": "任务描述", "doc_ids": ["doc_id", ...], "instruction": "补充要求"}'
+    )
+    skills = ["python_exec", "office_doc_read", "task_memory"]
+
+    async def execute(self, node: "TaskNode", ctx: WorkerContext) -> dict:
+        task = str(node.params.get("task") or node.params.get("instruction") or "").strip()
+        doc_ids = [str(x) for x in (node.params.get("doc_ids") or []) if x]
+        if not task:
+            return {
+                "success": False,
+                "error": "办公脚本任务缺少 task",
+                "error_code": "INVALID_ARGS",
+            }
+        await _report_progress(ctx.job_id, node.id, "正在编写并执行脚本…")
+        try:
+            from app.services import office_docs
+
+            doc_names = []
+            for doc_id in doc_ids:
+                try:
+                    await office_docs.ensure_session(ctx.user_id, doc_id)
+                    meta = office_docs.load_session(ctx.user_id, doc_id)
+                    doc_names.append(meta.get("filename") or doc_id)
+                except Exception:  # noqa: BLE001
+                    doc_names.append(doc_id)
+            code = await self._generate_script(task, doc_names, ctx)
+            if not code:
+                return {
+                    "success": False,
+                    "error": "脚本生成失败（模型未返回有效代码）",
+                    "error_code": "EXEC_ERROR",
+                }
+            result = await self.run_skill(
+                "python_exec",
+                {"code": code, "doc_ids": doc_ids, "timeout": 60},
+                ctx,
+            )
+            if not result.get("success"):
+                return result
+            return {
+                **result,
+                "script": code[:8000],
+                "step_title": "脚本执行",
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Agent:office_script] 执行失败: {}", exc)
+            return {
+                "success": False,
+                "error": str(exc) or "脚本执行失败",
+                "error_code": "EXEC_ERROR",
+            }
+
+    async def _generate_script(self, task: str, doc_names: list[str], ctx: WorkerContext) -> str:
+        """两阶段生成脚本：先伪代码（逻辑层）→ 再基于伪代码写 Python 代码（实现层）.
+
+        策略：解耦"逻辑设计"与"语法实现"——
+        第一步先让模型用自然语言描述实现步骤（读取什么/怎么处理/输出什么），
+        逻辑错了可以低成本修正；逻辑通了再"翻译"成代码，避免直接写代码时
+        陷入语法细节反复试错。
+        """
+        from app.core.llm import LLMClient
+        from app.services.usage import CATEGORY_PLAN
+
+        llm = LLMClient()
+        doc_line = "、".join(doc_names) or "（无）"
+
+        # ── 第一步：逻辑层（伪代码，禁止写代码） ──
+        logic_prompt = (
+            "你是办公脚本设计器。先不要写任何代码，用自然语言把任务的实现步骤描述清楚：\n"
+            "1. 数据来源：读取什么（文件/环境变量里的路径）；\n"
+            "2. 处理逻辑：如何转换/计算/批量处理（循环、判断、清洗）；\n"
+            "3. 输出：产物文件名与写入哪个目录。\n"
+            "要求步骤清晰、可执行，但要足够抽象（不涉及具体语法）。\n"
+            f"任务：{task}\n"
+            f"涉及文档：{doc_line}\n"
+            "只输出分步逻辑描述，不要输出任何代码。"
+        )
+        try:
+            logic = await llm.chat(
+                [{"role": "user", "content": logic_prompt}],
+                scene=ctx.scene,
+                max_tokens=1500,
+                temperature=0.2,
+                usage_user_id=ctx.user_id,
+                usage_category=CATEGORY_PLAN,
+                disable_reasoning_effort=True,
+                api_key=ctx.llm_api_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Agent:office_script] 伪代码生成失败: {}", exc)
+            return ""
+        logic = (logic or "").strip()
+        if not logic:
+            return ""
+
+        # ── 第二步：实现层（基于伪代码写 Python 代码） ──
+        code_prompt = (
+            "你是 Python 脚本实现器。根据下面已确认的逻辑步骤，编写完整、可直接运行的 Python 代码。\n"
+            "环境约定：\n"
+            '- 文档通过 os.environ["LUMI_DOC_PATHS"] 读取，是 JSON（文件名→绝对路径）；\n'
+            '- 产物写入 os.environ["LUMI_DOC_OUTPUT_DIRS"] 对应文件名的目录；\n'
+            "- 新建文件（没有源文档时）统一写入 os.environ[\"LUMI_OUTPUT_DIR\"] 指向的目录；\n"
+            "编写要求：\n"
+            "- 用 os/pandas 等库，路径统一用绝对路径（从环境变量读取）；\n"
+            "- 必须包含异常处理（文件不存在、空值、解析失败等），打印关键进度；\n"
+            "- 可用库：openpyxl（xlsx）、python-docx（docx）、python-pptx（pptx）、csv、json、re、pathlib；\n"
+            "- 所有产物文件必须写入 os.environ[\"LUMI_OUTPUT_DIR\"] 指向的目录"
+            "（脚本开头用 os.makedirs(..., exist_ok=True) 确保目录存在），"
+            "严禁写到当前工作目录或相对路径；\n"
+            "- 产物文件名用文档原名（去扩展名）命名，如 销售数据.xlsx → 销售数据.csv；\n"
+            "- 脚本必须是纯 Python 代码，能直接执行。\n"
+            f"逻辑步骤：\n{logic}\n"
+            f"任务：{task}\n"
+            "只输出 Python 代码（不要 Markdown 围栏、不要任何解释）。"
+        )
+        try:
+            reply = await llm.chat(
+                [{"role": "user", "content": code_prompt}],
+                scene=ctx.scene,
+                max_tokens=5000,
+                temperature=0.1,
+                usage_user_id=ctx.user_id,
+                usage_category=CATEGORY_PLAN,
+                disable_reasoning_effort=True,
+                api_key=ctx.llm_api_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Agent:office_script] 脚本生成调用失败: {}", exc)
+            return ""
+        text = (reply or "").strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.startswith("python"):
+                text = text[6:]
+            elif text.startswith("py"):
+                text = text[2:]
+        return text.strip()
+
+
+class OfficeSystemAgent(WorkerAgent):
+    """办公系统操作：打开软件 / 打开文件 / 起草邮件 / 进程 / 系统信息 / 网络请求."""
+
+    name = "office_system"
+    description = (
+        "打开用户电脑上的软件或文件、起草邮件、查看/结束进程、读取环境变量与时间、"
+        "发起网络请求等系统操作。当用户要求打开某个软件/应用/文件、查看进程、"
+        "读取系统信息、发邮件或访问某个网址时使用。"
+    )
+    params_help = (
+        'params 用 {"task": "open_app|open_file|open_url|send_email|ps|kill|env|datetime|curl", '
+        '"instruction": "指令/参数"}'
+    )
+    skills = ["open_app", "open_file", "open_url", "send_email", "ps", "kill", "env", "get_datetime", "curl"]
+
+    _TASK_SKILL = {
+        "open_app": "open_app",
+        "open_file": "open_file",
+        "open_url": "open_url",
+        "send_email": "send_email",
+        "ps": "ps",
+        "kill": "kill",
+        "env": "env",
+        "datetime": "get_datetime",
+        "curl": "curl",
+    }
+
+    _STEP_TITLES = {
+        "open_app": "打开软件",
+        "open_file": "打开文件",
+        "open_url": "打开网页",
+        "send_email": "起草邮件",
+        "ps": "查看进程",
+        "kill": "结束进程",
+        "env": "读取环境变量",
+        "datetime": "获取时间",
+        "curl": "网络请求",
+    }
+
+    async def execute(self, node: "TaskNode", ctx: WorkerContext) -> dict:
+        task = str(node.params.get("task") or "").strip().lower()
+        instruction = str(node.params.get("instruction") or "").strip()
+        if not task:
+            # 兜底：按指令文本粗判（规划器漏标 task 时仍可执行）
+            low = instruction.lower()
+            if low.startswith(("http://", "https://")):
+                task = "curl"
+            elif "进程" in instruction or "运行" in instruction:
+                task = "ps"
+            else:
+                task = "open_app"
+        skill = self._TASK_SKILL.get(task)
+        if not skill:
+            return {
+                "success": False,
+                "error": f"不支持的 office_system task: {task}",
+                "error_code": "INVALID_ARGS",
+            }
+        await _report_progress(ctx.job_id, node.id, "正在执行系统操作…")
+        params = self._build_params(task, node.params, instruction)
+        if params is None:
+            return {
+                "success": False,
+                "error": "缺少必要参数（请提供要操作的软件/文件/URL 等）",
+                "error_code": "INVALID_ARGS",
+            }
+        result = await self.run_skill(skill, params, ctx)
+        if result.get("success"):
+            result["step_title"] = self._STEP_TITLES.get(task, "系统操作")
+        return result
+
+    @staticmethod
+    def _build_params(task: str, raw: dict, instruction: str) -> dict | None:
+        if task == "open_app":
+            name = instruction or str(raw.get("name") or "").strip()
+            return {"name": name, "args": list(raw.get("args") or [])} if name else None
+        if task == "open_file":
+            path = instruction or str(raw.get("path") or "").strip()
+            return {"path": path} if path else None
+        if task == "open_url":
+            url = instruction or str(raw.get("url") or "").strip()
+            return {"url": url} if url else None
+        if task == "send_email":
+            to = str(raw.get("to") or "").strip() or instruction
+            return {
+                "to": to,
+                "subject": str(raw.get("subject") or ""),
+                "body": str(raw.get("body") or ""),
+                "cc": str(raw.get("cc") or ""),
+            }
+        if task == "ps":
+            return {
+                "pattern": str(raw.get("pattern") or instruction or "").strip(),
+                "max_results": int(raw.get("max_results") or 50),
+            }
+        if task == "kill":
+            return {
+                "pid": raw.get("pid"),
+                "name": str(raw.get("name") or instruction or "").strip() or None,
+                "force": bool(raw.get("force", True)),
+            }
+        if task == "env":
+            keys = raw.get("keys") or ([instruction] if instruction else [])
+            return {"keys": list(keys) if isinstance(keys, list) else [str(keys)]}
+        if task == "datetime":
+            return {}
+        if task == "curl":
+            url = instruction or str(raw.get("url") or "").strip()
+            return {
+                "url": url,
+                "method": str(raw.get("method") or "GET"),
+                "headers": raw.get("headers") or {},
+                "body": raw.get("body") or {},
+                "timeout": int(raw.get("timeout") or 20),
+            }
+        return None

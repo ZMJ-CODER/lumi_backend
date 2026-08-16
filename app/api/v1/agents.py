@@ -26,6 +26,7 @@ async def create_agent_job(
         payload["sub"],
         req.request,
         req.scene,
+        req.conversation_id,
         req.project_id,
         req.project_ids,
         llm_api_key,

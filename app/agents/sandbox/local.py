@@ -14,6 +14,7 @@
 import asyncio
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -38,7 +39,13 @@ class LocalSandbox(Sandbox):
 
     name = "local"
 
-    async def run_script(self, code: str, language: str = "python", timeout: int = 30) -> SandboxResult:
+    async def run_script(
+        self,
+        code: str,
+        language: str = "python",
+        timeout: int = 30,
+        env_extra: dict | None = None,
+    ) -> SandboxResult:
         if language != "python":
             return SandboxResult(
                 status="rejected",
@@ -53,21 +60,59 @@ class LocalSandbox(Sandbox):
             "LANG": "C.UTF-8",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONIOENCODING": "utf-8",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONSAFEPATH": "1",
+            **(env_extra or {}),
         }
-        cmd = [sys.executable, "-I", "-c", code]
+        # Windows：补齐系统目录，避免 CreateProcess 因找不到系统 DLL/可执行文件失败
+        if os.name == "nt":
+            env.setdefault("SYSTEMROOT", os.environ.get("SYSTEMROOT", r"C:\Windows"))
+            env.setdefault("SYSTEMDRIVE", os.environ.get("SYSTEMDRIVE", "C:"))
+            env.setdefault("WINDIR", os.environ.get("WINDIR", r"C:\Windows"))
+            env["PATH"] = os.environ.get("PATH", "") + os.pathsep + env.get("PATH", "")
+        # 不用 -I：允许脚本使用项目 venv 的第三方库（openpyxl / python-docx 等办公处理库）。
+        # 本地子进程并非严格隔离（可读文件系统），超时/输出截断仍然生效；
+        # 生产如需严格隔离可注册 docker 沙箱实现。
+        cmd = [sys.executable, "-c", code]
+        # Windows 非 Proactor 事件循环（如 Temporal Activity 线程）不支持 asyncio 子进程，
+        # 改用线程同步执行（subprocess.run），功能一致。
+        if os.name == "nt" and not isinstance(
+            asyncio.get_running_loop(), asyncio.ProactorEventLoop
+        ):
+            try:
+                return await asyncio.to_thread(
+                    self._run_script_sync, code, workdir, env, timeout, t0
+                )
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
         try:
             # preexec_fn 仅 POSIX 支持（生产 Linux 容器启用资源限制；Windows 开发机跳过）
             proc_kwargs = {}
             if os.name == "posix":
                 proc_kwargs["preexec_fn"] = _limit_resources
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=workdir,
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **proc_kwargs,
-            )
+            last_exc: Exception | None = None
+            for attempt in range(2):
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        cwd=workdir,
+                        env=env,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        **proc_kwargs,
+                    )
+                    break
+                except Exception as exc:  # noqa: BLE001 - 偶发 CreateProcess 失败，重试一次
+                    last_exc = exc
+                    if attempt == 0:
+                        await asyncio.sleep(0.3)
+                        continue
+                    return SandboxResult(
+                        status="error",
+                        error=f"启动沙箱进程失败: {exc!r}",
+                        duration_ms=int((time.monotonic() - t0) * 1000),
+                        resource_usage={"sandbox": self.name, "attempts": 2},
+                    )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
@@ -82,7 +127,7 @@ class LocalSandbox(Sandbox):
         except Exception as exc:  # noqa: BLE001
             return SandboxResult(
                 status="error",
-                error=f"启动沙箱进程失败: {exc}",
+                error=f"启动沙箱进程失败: {exc!r}",
                 duration_ms=int((time.monotonic() - t0) * 1000),
                 resource_usage={"sandbox": self.name},
             )
@@ -101,6 +146,56 @@ class LocalSandbox(Sandbox):
             duration_ms=int((time.monotonic() - t0) * 1000),
             resource_usage={
                 "exit_code": proc.returncode,
+                "truncated": truncated,
+                "sandbox": self.name,
+            },
+        )
+
+    def _run_script_sync(
+        self,
+        code: str,
+        workdir: str,
+        env: dict,
+        timeout: int,
+        t0: float,
+    ) -> SandboxResult:
+        """同步子进程执行（Windows 非 Proactor 事件循环回退）."""
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", code],
+                cwd=workdir,
+                env=env,
+                capture_output=True,
+                timeout=timeout,
+            )
+            stdout, stderr = proc.stdout, proc.stderr
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            return SandboxResult(
+                status="timeout",
+                error=f"代码执行超时（>{timeout}s）",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+                resource_usage={"sandbox": self.name},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return SandboxResult(
+                status="error",
+                error=f"启动沙箱进程失败: {exc!r}",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+                resource_usage={"sandbox": self.name},
+            )
+        out = stdout.decode("utf-8", errors="replace")
+        err = stderr.decode("utf-8", errors="replace")
+        max_chars = settings.AGENT_SANDBOX_MAX_OUTPUT_CHARS
+        truncated = len(out) > max_chars or len(err) > max_chars
+        return SandboxResult(
+            status="success" if returncode == 0 else "error",
+            stdout=out[:max_chars],
+            stderr=err[:max_chars],
+            error=None if returncode == 0 else (err[:500] or f"退出码 {returncode}"),
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            resource_usage={
+                "exit_code": returncode,
                 "truncated": truncated,
                 "sandbox": self.name,
             },

@@ -40,6 +40,11 @@ celery_app.conf.beat_schedule = {
         "task": "celery_app.tasks.cleanup_conversations",
         "schedule": crontab(hour=3, minute=0),
     },
+    # 每日清理后端生成的临时/产物文件（办公会话、脚本产物、沙箱残留）
+    "cleanup-generated-files": {
+        "task": "celery_app.tasks.cleanup_generated_files",
+        "schedule": crontab(hour=1, minute=0),
+    },
     # 每日聚合 LLM token 用量（低频率，避免统计查询压力）
     "aggregate-token-stats": {
         "task": "celery_app.tasks.aggregate_token_stats",

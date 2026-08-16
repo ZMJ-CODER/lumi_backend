@@ -22,13 +22,16 @@ from app.api.router import api_router
 from app.core.config import settings
 from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import setup_logging
+from app.core.observability import init_sentry, metrics_middleware, metrics_text
 from app.core.redis import close_redis, init_redis
+from app.core.security_hardening import rate_limit_middleware, security_headers_middleware
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理."""
     setup_logging()
+    init_sentry()
     logger.info(f" {settings.PROJECT_NAME} v{settings.VERSION} 启动中...")
     if settings.JWT_SECRET_KEY == "change-me-in-production":
         logger.warning("JWT_SECRET_KEY 仍为默认值！请在 .env 中配置随机密钥，否则令牌可被伪造")
@@ -39,11 +42,28 @@ async def lifespan(app: FastAPI):
 
     init_skills()
     await init_redis()
+    # 自动补齐缺失的数据表（幂等：仅创建不存在的表；新增表如 user_preferences 无需手动迁移）
+    try:
+        from app.core.database import engine
+        from app.models.db_models import Base
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as exc:  # noqa: BLE001 - 建表失败不阻塞启动（可能无 DB 权限）
+        logger.warning("自动建表跳过（可运行 scripts/init_db.py 手动补齐）: {}", exc)
     # 多智能体编排：Temporal Worker 随后端进程启动（未开则需独立进程跑 worker）
     if settings.AGENT_ORCHESTRATION == "temporal" and settings.TEMPORAL_RUN_WORKER_INPROCESS:
         from app.agents.orchestration.temporal.runtime import start_inprocess_worker
 
         await start_inprocess_worker()
+    # 启动时兜底清理一次后端生成的临时/产物文件（定时任务由 Celery beat 负责）
+    try:
+        from app.services.office_docs import cleanup_expired_sessions, cleanup_generic_outputs
+
+        await cleanup_expired_sessions()
+        cleanup_generic_outputs(settings.GENERATED_FILES_TTL_DAYS)
+    except Exception as exc:  # noqa: BLE001 - 清理失败不阻塞启动
+        logger.warning("启动清理生成文件失败（忽略）: {}", exc)
     logger.info("基础设施初始化完成")
 
     yield
@@ -75,6 +95,16 @@ def create_app() -> FastAPI:
 
     # 注册全局统一异常处理器（所有未捕获/业务异常统一输出规范格式并完整记录日志）
     register_exception_handlers(app)
+    app.middleware("http")(metrics_middleware)
+    app.middleware("http")(rate_limit_middleware)
+    app.middleware("http")(security_headers_middleware)
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics():
+        """Prometheus 指标（可观测性；配合 Grafana 告警）."""
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse(metrics_text())
 
     app.include_router(api_router, prefix="/api/v1")
 

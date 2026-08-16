@@ -1,4 +1,4 @@
-"""RAG 知识库服务 —— 知识空间 / 文档 / 分块入库 / 向量检索（pgvector + bge-small-zh-v1.5嵌入）.
+"""RAG 知识库服务 —— 知识空间 / 文档 / 分块入库 / 向量检索（pgvector + bge-m3 嵌入）.
 
 数据流:
   上传文档 → 落盘 + documents 表(pending) → Celery 处理管线
@@ -468,6 +468,7 @@ def _hybrid_fuse(vector_rows, keyword_rows, top_k: int) -> list[dict]:
                 "category": row["category"],
                 "similarity": round(float(row["similarity"]), 4),
                 "score": 0.0,
+                "kw_hit": False,
             },
         )
         entry["score"] += 1.0 / (rrf_k + rank)
@@ -475,6 +476,7 @@ def _hybrid_fuse(vector_rows, keyword_rows, top_k: int) -> list[dict]:
         cid = str(row["chunk_id"])
         entry = merged.get(cid)
         if entry:
+            entry["kw_hit"] = True
             entry["score"] += 1.0 / (rrf_k + rank)
         else:
             merged[cid] = {
@@ -487,8 +489,19 @@ def _hybrid_fuse(vector_rows, keyword_rows, top_k: int) -> list[dict]:
                 "category": row["category"],
                 "similarity": None,
                 "score": 1.0 / (rrf_k + rank),
+                "kw_hit": True,
             }
     return sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:top_k]
+
+
+def _passes_similarity_gate(row: dict, threshold: float) -> bool:
+    """相关性硬门槛：关键词精确命中（kw_hit）或关键词路独有（无向量相似度）放行；
+    向量路相似度低于阈值的引用丢弃."""
+    if row.get("kw_hit"):
+        return True
+    if row.get("similarity") is None:
+        return True
+    return float(row.get("similarity") or 0.0) >= threshold
 
 
 def _scope_conditions(
@@ -496,8 +509,14 @@ def _scope_conditions(
     space_tags: list[str],
     need_embedding: bool,
     exclude_categories: list[str] | None = None,
+    own_space_override: bool = True,
 ) -> tuple[list[str], dict]:
-    """构造检索范围条件（个人空间 + 公共空间，按场景标签过滤；可排除类别如 code）."""
+    """构造检索范围条件（个人空间 + 公共空间，按场景标签过滤；可排除类别如 code）.
+
+    个人检索规则：用户自己的空间（含办公文档会话 officedoc_* 空间）始终可检索，
+    场景标签只约束公共空间 —— 否则用户在办公模式上传的文档在聊天场景会完全检索不到。
+    own_space_override=False 时恢复"标签精确匹配"（文档分析等场景只搜目标空间，不混入其他文档）。
+    """
     conds: list[str] = []
     params: dict = {}
     if need_embedding:
@@ -513,7 +532,11 @@ def _scope_conditions(
     else:
         conds.append("s.is_public = true")
     if space_tags:
-        conds.append("s.scene_tag IN :tags")
+        if uid and own_space_override:
+            # 自己上传的空间（无论标签）始终参与检索；标签过滤仅用于公共空间
+            conds.append("(s.is_public = false OR s.scene_tag IN :tags)")
+        else:
+            conds.append("s.scene_tag IN :tags")
         params["tags"] = list(space_tags)
     if exclude_categories:
         conds.append("d.category NOT IN :excl_cats")
@@ -532,6 +555,7 @@ async def search_user_knowledge(
     top_k: int | None = None,
     threshold: float | None = None,
     exclude_categories: list[str] | None = None,
+    own_space_override: bool = True,
 ) -> tuple[str, list[dict]]:
     """对话 RAG 混合检索：向量相似度 top-N + 关键词检索，RRF 融合.
 
@@ -546,7 +570,11 @@ async def search_user_knowledge(
         return "", []
 
     conds, params = _scope_conditions(
-        user_id, space_tags, need_embedding=True, exclude_categories=exclude_categories
+        user_id,
+        space_tags,
+        need_embedding=True,
+        exclude_categories=exclude_categories,
+        own_space_override=own_space_override,
     )
     fused: list[dict] = []
 
@@ -581,7 +609,11 @@ async def search_user_knowledge(
     if keywords:
         kw_top = settings.RAG_HYBRID_KEYWORD_TOP_K
         kw_conds, kw_params = _scope_conditions(
-            user_id, space_tags, need_embedding=False, exclude_categories=exclude_categories
+            user_id,
+            space_tags,
+            need_embedding=False,
+            exclude_categories=exclude_categories,
+            own_space_override=own_space_override,
         )
         kw_conds.append(
             "(" + " OR ".join(f"c.chunk_text ILIKE :kw{i}" for i in range(len(keywords))) + ")"
@@ -614,9 +646,9 @@ async def search_user_knowledge(
     # 时效性加权：相关性为主，新文档占优（时间意图查询权重更高）
     fused = _apply_recency(fused, _time_intent_weight(query))
 
-    # 相关性硬门槛（宁缺毋滥）：相似度低于阈值的引用完全不可信，直接丢弃；
-    # 仅关键词命中、无向量相似度（similarity=None）的引用同样不可信。
-    fused = [r for r in fused if (r.get("similarity") or 0.0) >= threshold]
+    # 相关性硬门槛（宁缺毋滥）：向量路相似度低于阈值的引用完全不可信，直接丢弃；
+    # 关键词路精确命中（子串 ILIKE 匹配）是强证据，无论其向量相似度高低都保留。
+    fused = [r for r in fused if _passes_similarity_gate(r, threshold)]
 
     context_parts: list[str] = []
     citations: list[dict] = []
@@ -642,6 +674,12 @@ async def search_user_knowledge(
 
     if citations:
         logger.debug("🔍 RAG 命中 {} 条引用", len(citations))
+    try:
+        from app.core.observability import inc_rag_search
+
+        inc_rag_search(len(citations))
+    except Exception:  # noqa: BLE001
+        pass
     return "\n\n".join(context_parts), citations
 
 
@@ -735,9 +773,9 @@ async def search_public_vectors(
     # 时效性加权：相关性为主，新文档占优（时间意图查询权重更高）
     fused = _apply_recency(fused, _time_intent_weight(query))
 
-    # 相关性硬门槛（宁缺毋滥）：相似度低于阈值的引用完全不可信，直接丢弃；
-    # 仅关键词命中、无向量相似度（similarity=None）的引用同样不可信。
-    fused = [r for r in fused if (r.get("similarity") or 0.0) >= threshold]
+    # 相关性硬门槛（宁缺毋滥）：向量路相似度低于阈值的引用完全不可信，直接丢弃；
+    # 关键词路精确命中（子串 ILIKE 匹配）是强证据，无论其向量相似度高低都保留。
+    fused = [r for r in fused if _passes_similarity_gate(r, threshold)]
 
     return [
         {

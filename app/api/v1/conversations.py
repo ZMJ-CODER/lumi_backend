@@ -31,6 +31,7 @@ from app.models.conversation import (
     UpdateConversationRequest,
 )
 from app.models.db_models import Attachment, Conversation, Message
+from app.services.content_codec import normalize_content, serialize_content, split_segments
 from app.services.orchestrator import orchestrator
 from app.services.speech import detect_audio_meta, save_audio_file, synthesize_speech
 
@@ -119,7 +120,8 @@ async def _find_duplicate(db: AsyncSession, conversation_id: str, client_message
         return None  # 用户消息已存但回复未完成（中断场景）→ 重新处理
     return {
         "message_id": str(assistant.id),
-        "content": assistant.content,
+        "content": normalize_content(assistant.content),
+        "segments": split_segments(assistant.content),
         "citations": json.loads(assistant.citations) if assistant.citations else [],
         "scene": None,
         "local_mode": False,
@@ -158,7 +160,9 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
             id=uuid.UUID(result["message_id"]),
             conversation_id=conv.id,
             role="assistant",
-            content=result.get("content", ""),
+            # assistant 内容按"一次交互"存储：content 为 JSON 数组（短句合并），
+            # 后续"多条短句回复"策略直接向数组追加分段，不新增消息行。
+            content=serialize_content(result.get("segments") or result.get("content", "")),
             citations=json.dumps(result.get("citations") or [], ensure_ascii=False),
         )
         db.add(assistant_msg)
@@ -167,7 +171,7 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
             id=uuid.uuid4(),
             conversation_id=conv.id,
             role="assistant",
-            content=result.get("content", ""),
+            content=serialize_content(result.get("segments") or result.get("content", "")),
             citations=json.dumps(result.get("citations") or [], ensure_ascii=False),
         )
         db.add(assistant_msg)
@@ -256,6 +260,7 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
             "client_message_id": None,
             "role": "assistant",
             "content": result.get("content", ""),
+            "segments": result.get("segments") or [],
             "citations": result.get("citations") or [],
             "created_at": datetime.now(timezone.utc).isoformat(),
         },
@@ -558,6 +563,8 @@ async def send_message(
             attachments=req.attachments,
             web_search_enabled=req.web_search,
             llm_api_key=llm_api_key,
+            thinking_mode=req.thinking_mode,
+            reply_style=req.reply_style,
         )
 
         # 服务端持久化（仅登录用户；游客保持 Redis-only）
@@ -637,7 +644,8 @@ async def get_messages(
         {
             "message_id": str(m.id),
             "role": m.role,
-            "content": m.content,
+            "content": normalize_content(m.content),
+            "segments": split_segments(m.content),
             "client_message_id": m.client_message_id,
             "citations": json.loads(m.citations) if m.citations else [],
             "attachments": attachments_by_message.get(str(m.id), []),

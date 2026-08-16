@@ -28,6 +28,7 @@ class OfficeDocReadSkill(Skill):
         if not doc_id:
             return SkillResult(success=False, error="缺少 doc_id", error_code="INVALID_ARGS", retryable=False)
         try:
+            await office_docs.ensure_session(context.user_id, doc_id)
             info = office_docs.read_structure(context.user_id, doc_id)
         except LookupError as exc:
             return SkillResult(success=False, error=str(exc), error_code="EXEC_ERROR", retryable=False)
@@ -66,7 +67,15 @@ class OfficeDocEditSkill(Skill):
         if not doc_id or not instruction:
             return SkillResult(success=False, error="缺少 doc_id / instruction", error_code="INVALID_ARGS", retryable=False)
         try:
+            await office_docs.ensure_session(context.user_id, doc_id)
             info = office_docs.read_structure(context.user_id, doc_id)
+            if info["kind"] in ("pdf", "doc", "xls", "ppt", "rtf", "odt", "docm", "xlsm", "pptm"):
+                return SkillResult(
+                    success=False,
+                    error=f"{info['kind'].upper()} 格式暂不支持结构化编辑（可读取/分析/问答）",
+                    error_code="UNSUPPORTED_FORMAT",
+                    retryable=False,
+                )
             ops = await office_docs.plan_edits(
                 instruction,
                 info["structure"],
@@ -76,14 +85,28 @@ class OfficeDocEditSkill(Skill):
             )
             records = office_docs.apply_edits(context.user_id, doc_id, ops)
             after = office_docs.read_structure(context.user_id, doc_id)
+            has_failures = any(r.startswith("❌") or r.startswith("⚠️") for r in records)
         except LookupError as exc:
             return SkillResult(success=False, error=str(exc), error_code="EXEC_ERROR", retryable=False)
         return SkillResult(
             success=True,
-            output="\n".join(records) + "\n\n—— 修改后结构预览 ——\n" + after["structure"][:40000],
+            output=(
+                ("⚠️ 未能执行有效的修改（文档未修改或部分操作失败）：\n\n" if has_failures else "✅ 修改已生成预览（未写入实际文件，等待你确认）\n\n")
+                + "\n".join(records)
+                + (
+                    "\n\n—— 修改后结构预览 ——\n" + after["structure"][:40000]
+                    if not has_failures
+                    else ""
+                )
+            ),
             metadata={
                 "doc_id": doc_id,
+                "kind": after["kind"],
+                "filename": after["filename"],
                 "records": records,
+                "committed": False,
+                "pending_commit": not has_failures,
+                "preview": after["structure"][:40000] if not has_failures else "",
                 "ops": ops,
                 "buffered": True,
             },

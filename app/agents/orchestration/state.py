@@ -55,6 +55,12 @@ class RedisStateStore(StateStore):
         await r.lpush(index_key, job.job_id)
         await r.ltrim(index_key, 0, 999)
         await r.expire(index_key, self._ttl)
+        # 全量任务索引（管理后台跨用户查看）
+        all_key = "multiagent:all_jobs"
+        await r.lrem(all_key, 0, job.job_id)
+        await r.lpush(all_key, job.job_id)
+        await r.ltrim(all_key, 0, 4999)
+        await r.expire(all_key, self._ttl)
 
     async def get_job(self, job_id: str) -> Job | None:
         r = get_redis()
@@ -85,6 +91,10 @@ class RedisStateStore(StateStore):
         key = f"multiagent:user_jobs:{user_id}"
         return [str(x) for x in await r.lrange(key, 0, limit - 1)]
 
+    async def list_all_job_ids(self, limit: int = 50) -> list[str]:
+        r = get_redis()
+        return [str(x) for x in await r.lrange("multiagent:all_jobs", 0, limit - 1)]
+
     async def delete_job(self, job_id: str) -> None:
         r = get_redis()
         await r.delete(_key(job_id))
@@ -96,13 +106,20 @@ class InMemoryStateStore(StateStore):
     def __init__(self):
         self._jobs: dict[str, Job] = {}
         self._user_index: dict[str, list[str]] = {}
+        self._all_index: list[str] = []
 
     async def create_job(self, job: Job) -> None:
         self._jobs[job.job_id] = job.model_copy(deep=True)
         self._user_index.setdefault(job.user_id, []).insert(0, job.job_id)
+        if job.job_id in self._all_index:
+            self._all_index.remove(job.job_id)
+        self._all_index.insert(0, job.job_id)
 
     async def list_job_ids(self, user_id: str, limit: int = 20) -> list[str]:
         return list(self._user_index.get(user_id, [])[:limit])
+
+    async def list_all_job_ids(self, limit: int = 50) -> list[str]:
+        return list(self._all_index[:limit])
 
     async def get_job(self, job_id: str) -> Job | None:
         job = self._jobs.get(job_id)

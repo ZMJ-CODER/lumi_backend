@@ -3,7 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # 项目根目录：app/core/config.py → 上溯三级
@@ -15,6 +15,15 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Lumi Backend"
     VERSION: str = "0.1.0"
     DEBUG: bool = False
+
+    # ── 可观测性 ──
+    SENTRY_DSN: str = ""            # 错误上报；为空则不启用 Sentry
+    METRICS_ENABLED: bool = True    # /metrics Prometheus 指标
+
+    # ── 安全（全局限流） ──
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_GENERAL_PER_MINUTE: int = 300   # 通用接口：每 IP 每分钟（客户端轮询 1s/次，需留余量）
+    RATE_LIMIT_AUTH_PER_MINUTE: int = 20       # 登录/注册/验证码：更严
 
     # ── CORS ──
     CORS_ORIGINS: list[str] = ["*"]  # 生产环境收敛为具体域名（通配符时不允许带凭据）
@@ -65,9 +74,27 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
     DEEPSEEK_MODEL: str = "deepseek-chat"
+    # ── LLM: DS Flash（普通模式"快速"档 + 语音通话回复模型；支持 1M 上下文）──
+    # 云端调用，省钱省时；空值自动复用 DEEPSEEK_* 配置
+    DS_FLASH_BASE_URL: str = ""
+    DS_FLASH_API_KEY: str = ""
+    DS_FLASH_MODEL: str = ""       # 空则复用 DEEPSEEK_MODEL；如 deepseek-flash 等
+    DS_FLASH_TIMEOUT: int = 180
+    # ── LLM: 本地多模态描述（图片 → 文本）：qwen2.5vl:7b（Ollama）──
+    # 快速/思考档主模型均为纯文本模型，图片先由本地 VL 模型描述成文字再发给主模型
+    VL_BASE_URL: str = "http://localhost:11434/v1"
+    VL_MODEL: str = "qwen2.5vl:7b"
+    VL_API_KEY: str = "ollama"     # Ollama 不校验密钥，占位
+    VL_TIMEOUT: int = 120
+    # ── LLM: 普通模式"思考"档（强模型，价格适中）──
+    # 默认 qwen-plus：与现有千问密钥共用，性价比高、中文对话与推理能力强
+    CHAT_THINK_MODEL: str = "qwen-plus"
+    CHAT_THINK_BASE_URL: str = ""  # 空则复用 QWEN_BASE_URL
+    CHAT_THINK_API_KEY: str = ""   # 空则复用 QWEN_API_KEY
 
     # ── LLM 默认选用 ──
     LLM_PROVIDER: str = "deepseek"  # qwen / deepseek
+    LLM_FALLBACK_PROVIDER: str = ""  # 主供应商失败时自动切换（deepseek/qwen；空=不降级）
 
     # ── 嵌入模型（本地推理，sentence-transformers）──
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
@@ -82,6 +109,13 @@ class Settings(BaseSettings):
     # ── 文件上传 ──
     UPLOAD_DIR: str = "data/uploads"
     UPLOAD_TOKEN_TTL_SECONDS: int = 3600  # 附件签名 URL 有效期（秒）
+
+    # ── 办公文档临时会话（聊天框上传链路，短期保留） ──
+    # TTL（小时）：会话被读取/分析/编辑时刷新；过期后由清理任务删除。
+    # 前端另有"轮次上限"（OFFICE_DOC_MAX_ROUNDS），双重保险防会话无限堆积。
+    OFFICE_SESSION_TTL_HOURS: int = 24
+    # 办公文档分析：全文 ≤ 该字符数时直接注入 LLM（不依赖 RAG 阈值，小文档更可靠）
+    OFFICE_DOC_FULL_TEXT_LIMIT: int = 20000
 
     # ── Docling 文档解析（PDF / Office / 图片等）──
     DOCLING_ENABLE_OCR: bool = True      # 扫描件/图片 OCR（依赖 RapidOCR，首次使用自动下载模型）
@@ -124,7 +158,7 @@ class Settings(BaseSettings):
     RAG_QUERY_REWRITE_TIMEOUT_SECONDS: int = 15
 
     # ── 智能体技能与沙箱（预留，默认关闭）──
-    AGENT_SKILLS_ENABLED: bool = False   # 技能调用开关（默认关闭，开启后 LLM 可请求调用技能）
+    AGENT_SKILLS_ENABLED: bool = True    # 技能调用开关（LLM 可请求调用技能；快速/思考档模型均支持 function calling）
     AGENT_SANDBOX_TYPE: str = "local"    # 沙箱类型：local / docker / wasm（预留）
     AGENT_SANDBOX_TIMEOUT_SECONDS: int = 30
     AGENT_SANDBOX_MAX_OUTPUT_CHARS: int = 8000
@@ -181,15 +215,24 @@ class Settings(BaseSettings):
     }
 
     # ── 会话 ──
-    CONVERSATION_CONTEXT_ROUNDS: int = 200
-    # 发送给模型的最近历史 token 预算（Qwen-VL-Plus 上下文 131k，给历史留 32k，
-    # 其余留给 system prompt / RAG 上下文 / 输出；可按需调整）
-    LLM_HISTORY_MAX_TOKENS: int = 32768
-    # 对话摘要（qwen-turbo）：上下文接近发送预算时，把旧消息压缩成摘要，
-    # 既省 token 又保留整段对话的记忆；触发阈值、保留轮数、摘要长度上限
-    CONVERSATION_SUMMARY_TRIGGER_TOKENS: int = 24576
-    CONVERSATION_SUMMARY_KEEP_ROUNDS: int = 20
-    CONVERSATION_SUMMARY_MAX_CHARS: int = 2000
+    # Redis 上下文保留条数上限（安全兜底；真正的窗口按 token 预算裁剪）
+    CONVERSATION_CONTEXT_ROUNDS: int = 2000
+    # 普通模式短期记忆窗口：超大滑动窗口（20-30 万 token，适配 1M 上下文模型）。
+    # 历史超出该预算时按"最新优先"裁剪；如当前模型上下文不足请在 .env 调低。
+    LLM_HISTORY_MAX_TOKENS: int = 250000
+    # 办公模式短期记忆：只保证当次任务连贯，不需要长窗口
+    LLM_HISTORY_MAX_TOKENS_WORK: int = 60000
+    # 对话摘要（qwen-turbo）：上下文总 token 超过触发阈值后，
+    # 把最早超出"保留预算"的原始对话压缩成"剧情梗概"（约 10:1），
+    # 上下文里始终保留最新 15 万 token 原始记录 + 历史摘要链。
+    CONVERSATION_SUMMARY_TRIGGER_TOKENS: int = 250000
+    CONVERSATION_SUMMARY_KEEP_TOKENS: int = 150000
+    CONVERSATION_SUMMARY_KEEP_ROUNDS: int = 1000   # 保留条数兜底上限
+    CONVERSATION_SUMMARY_CHUNK_TOKENS: int = 30000 # 单次摘要输入预算（分批接力）
+    CONVERSATION_SUMMARY_MAX_CHARS: int = 20000    # 梗概 ≈5000 token / 2 万字符
+    # ── 后端生成文件清理 ──
+    GENERATED_FILES_TTL_DAYS: int = 7    # 通用脚本产物（office_outputs）保留天数，到期定时删除
+    SANDBOX_TEMP_TTL_HOURS: int = 6      # 沙箱残留临时目录（lumi_sandbox_*）兜底清理时长
 
     # ── 语音（ASR + TTS）──
     WHISPER_MODEL: str = "base"        # openai-whisper：tiny/base/small/medium/large
@@ -208,6 +251,9 @@ class Settings(BaseSettings):
     # ── 长期记忆 ──
     MEMORY_ENCRYPTION_KEY: str = ""          # base64 编码的 32 字节主密钥；缺失时记忆加密不可用
     MEMORY_ENCRYPTION_KEY_VERSION: int = 1   # 密钥版本，轮换时 +1 并触发全量重加密
+
+    # ── Docker secret 注入目录（容器内 /run/secrets；非 Docker 环境不存在则跳过） ──
+    SECRETS_DIR: str = "/run/secrets"
     MEMORY_EXTRACTION_MODEL: str = "qwen-turbo"  # 记忆抽取/合并/画像聚合用轻量模型
     MEMORY_EXTRACTION_MIN_CONFIDENCE: float = 0.6  # 低于该置信度的事实不落库
     MEMORY_FACT_TOP_K: int = 5               # 每轮对话注入的记忆事实上限
@@ -256,6 +302,28 @@ class Settings(BaseSettings):
         if value and not Path(value).is_absolute():
             return str(PROJECT_ROOT / value)
         return value
+
+    # 支持从 Docker secret 文件注入的敏感字段（环境变量仍为默认来源，文件优先覆盖）
+    _SECRET_FILE_FIELDS = (
+        "JWT_SECRET_KEY",
+        "MEMORY_ENCRYPTION_KEY",
+        "DEEPSEEK_API_KEY",
+        "QWEN_API_KEY",
+        "TAVILY_API_KEY",
+    )
+
+    @model_validator(mode="after")
+    def _load_docker_secrets(self):
+        """Docker secret 注入：<SECRETS_DIR>/<字段名> 文件存在时用文件内容覆盖."""
+        secrets_dir = Path(getattr(self, "SECRETS_DIR", "/run/secrets"))
+        for field in self._SECRET_FILE_FIELDS:
+            try:
+                content = (secrets_dir / field).read_text(encoding="utf-8").strip()
+                if content:
+                    setattr(self, field, content)
+            except Exception:  # noqa: BLE001
+                pass
+        return self
 
 
 @lru_cache

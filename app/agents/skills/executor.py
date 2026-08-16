@@ -97,6 +97,12 @@ async def execute_tool_call(
     )
     try:
         result = await skill.execute(args, context)
+        try:
+            from app.core.observability import inc_skill_call
+
+            inc_skill_call(name, result.success)
+        except Exception:  # noqa: BLE001
+            pass
     except Exception as exc:  # noqa: BLE001
         logger.warning("技能执行异常: {} | {}", name, exc)
         result = SkillResult(
@@ -106,6 +112,12 @@ async def execute_tool_call(
             retryable=True,
             metadata={"skill": name},
         )
+        try:
+            from app.core.observability import inc_skill_call
+
+            inc_skill_call(name, False)
+        except Exception:  # noqa: BLE001
+            pass
     await _record_skill_log(user_id, skill, args, result)
     return result
 
@@ -237,6 +249,8 @@ async def run_skill_loop(
     scene: str = "chat",
     conversation_id: str = "",
     llm_api_key: str | None = None,
+    llm_base_url: str | None = None,
+    llm_model: str | None = None,
     on_text=None,
 ) -> tuple[str, list[dict], list[dict]]:
     """技能调用主循环.
@@ -256,10 +270,13 @@ async def run_skill_loop(
         - records: 技能调用记录 [{skill, success, error_code}]
         - citations: 技能返回的引用列表（web_search / query_knowledge）
     """
-    skills = get_skills_for_scene(scene)
+    # 办公直接对话复用精简的聊天工具集（避免一次暴露 60+ 代码/项目工具）；
+    # 多智能体 DAG 由各 agent 的 skills 白名单自行决定工具
+    tool_scene = "chat" if scene == "office" else scene
+    skills = get_skills_for_scene(tool_scene)
     if not skills:
         return "", [], []
-    tools = skills_to_tools(scene)
+    tools = skills_to_tools(tool_scene)
     max_rounds = settings.AGENT_SKILLS_MAX_ROUNDS
     records: list[dict] = []
     citations: list[dict] = []
@@ -271,6 +288,8 @@ async def run_skill_loop(
             messages,
             tools,
             scene=scene,
+            base_url=llm_base_url,
+            model=llm_model,
             usage_user_id=user_id,
             usage_category=CATEGORY_SKILL,
             api_key=llm_api_key,

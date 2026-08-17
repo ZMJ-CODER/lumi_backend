@@ -56,7 +56,7 @@ async def _load_user(db: AsyncSession, payload: dict) -> User:
     try:
         user_uuid = uuid.UUID(user_id)
     except (ValueError, AttributeError):
-        raise UnauthorizedException("令牌无效")
+        raise UnauthorizedException("令牌无效") from None
 
     result = await db.execute(select(User).where(User.id == user_uuid))
     user = result.scalar_one_or_none()

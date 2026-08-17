@@ -10,6 +10,7 @@
 import asyncio
 
 from loguru import logger
+from temporalio.worker import Worker
 
 from app.core.config import settings
 
@@ -37,8 +38,6 @@ async def main() -> None:
 
 def build_worker(client) -> "Worker":
     """构造 Temporal Worker（注册 AgentDagWorkflow + 执行 Activities）."""
-    from temporalio.worker import Worker
-
     from app.agents.orchestration.temporal.activities import (
         cleanup_job_secrets_activity,
         execute_node_activity,

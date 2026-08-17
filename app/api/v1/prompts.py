@@ -42,7 +42,7 @@ async def create_prompt(
     try:
         uid = uuid.UUID(str(user_id))
     except (ValueError, TypeError):
-        raise BadRequestException("令牌无效")
+        raise BadRequestException("令牌无效") from None
     user = await db.get(User, uid)
     if not user:
         raise NotFoundException("用户不存在")

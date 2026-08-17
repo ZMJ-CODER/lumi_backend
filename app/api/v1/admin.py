@@ -314,14 +314,14 @@ async def get_control_logs_summary(
     ).scalars().all()
     recent_items = [
         {
-            "log_id": str(l.id),
-            "user_id": str(l.user_id),
-            "action": l.action,
-            "target": l.target,
-            "success": l.success,
-            "created_at": l.created_at.isoformat() if l.created_at else None,
+            "log_id": str(log.id),
+            "user_id": str(log.user_id),
+            "action": log.action,
+            "target": log.target,
+            "success": log.success,
+            "created_at": log.created_at.isoformat() if log.created_at else None,
         }
-        for l in recent
+        for log in recent
     ]
     return {
         "code": 0,

@@ -53,7 +53,7 @@ async def register_project(
         )
     except ValueError as exc:
         logger.warning("[Project] 注册项目失败 user={} name={} err={}", payload["sub"][:8], req.name, exc)
-        raise BadRequestException(str(exc))
+        raise BadRequestException(str(exc)) from exc
     return {"code": 0, "data": _project_view(project), "message": "项目索引已建立"}
 
 
@@ -120,10 +120,10 @@ async def upload_code_embeddings(
         )
     except PermissionError as exc:
         logger.warning("[Project] 上传代码向量无权限 project={} err={}", project_id[:8], exc)
-        raise NotFoundException(str(exc))
+        raise NotFoundException(str(exc)) from exc
     except ValueError as exc:
         logger.warning("[Project] 上传代码向量参数错误 project={} err={}", project_id[:8], exc)
-        raise BadRequestException(str(exc))
+        raise BadRequestException(str(exc)) from exc
     return {"code": 0, "data": {"count": count}, "message": f"已入库 {count} 条代码向量"}
 
 
@@ -149,10 +149,10 @@ async def upload_code_chunks(
         )
     except PermissionError as exc:
         logger.warning("[Project] 上传代码块无权限 project={} err={}", project_id[:8], exc)
-        raise NotFoundException(str(exc))
+        raise NotFoundException(str(exc)) from exc
     except RuntimeError as exc:
         logger.warning("[Project] 上传代码块失败 project={} err={}", project_id[:8], exc)
-        raise BadRequestException(str(exc))
+        raise BadRequestException(str(exc)) from exc
     return {"code": 0, "data": {"count": count}, "message": f"已嵌入 {count} 条代码块"}
 
 
@@ -170,7 +170,7 @@ async def set_project_vector(
         )
         await db.commit()
     except PermissionError as exc:
-        raise NotFoundException(str(exc))
+        raise NotFoundException(str(exc)) from exc
     return {"code": 0, "data": {"vector_enabled": result}, "message": "已更新"}
 
 
@@ -188,5 +188,5 @@ async def search_code_vectors(
             db, payload["sub"], project_id, q, top_k
         )
     except PermissionError as exc:
-        raise NotFoundException(str(exc))
+        raise NotFoundException(str(exc)) from exc
     return {"code": 0, "data": {"items": items}}

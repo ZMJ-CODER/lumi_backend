@@ -46,5 +46,6 @@ class Sandbox(ABC):
         """在隔离环境执行命令."""
         ...
 
+    @abstractmethod
     async def close(self) -> None:
         """释放沙箱资源（进程/容器等）."""

@@ -85,9 +85,9 @@ async def list_documents(
     try:
         items = await kb.list_documents(db, payload["sub"], space_id, status, limit)
     except LookupError as e:
-        raise NotFoundException(str(e))
+        raise NotFoundException(str(e)) from e
     except PermissionError as e:
-        raise ForbiddenException(str(e))
+        raise ForbiddenException(str(e)) from e
     return {"code": 0, "data": {"items": items, "total": len(items)}}
 
 
@@ -97,9 +97,9 @@ async def delete_document(document_id: str, db: AsyncSession = Depends(get_db), 
     try:
         await kb.delete_document(db, document_id, payload["sub"])
     except LookupError as e:
-        raise NotFoundException(str(e))
+        raise NotFoundException(str(e)) from e
     except PermissionError as e:
-        raise ForbiddenException(str(e))
+        raise ForbiddenException(str(e)) from e
     await db.commit()
     return {"code": 0, "message": "已删除"}
 
@@ -123,7 +123,7 @@ async def create_space(
             is_public=req.is_public if _is_admin(payload) else False,
         )
     except ValueError as e:
-        raise BadRequestException(str(e))
+        raise BadRequestException(str(e)) from e
     await db.commit()
     return {
         "code": 0,
@@ -163,11 +163,11 @@ async def update_space(
             is_admin=_is_admin(payload),
         )
     except LookupError as e:
-        raise NotFoundException(str(e))
+        raise NotFoundException(str(e)) from e
     except PermissionError as e:
-        raise ForbiddenException(str(e))
+        raise ForbiddenException(str(e)) from e
     except ValueError as e:
-        raise BadRequestException(str(e))
+        raise BadRequestException(str(e)) from e
     await db.commit()
     return {"code": 0, "message": "已更新"}
 
@@ -182,8 +182,8 @@ async def delete_space(
     try:
         await kb.delete_space(db, space_id, payload["sub"])
     except LookupError as e:
-        raise NotFoundException(str(e))
+        raise NotFoundException(str(e)) from e
     except PermissionError as e:
-        raise ForbiddenException(str(e))
+        raise ForbiddenException(str(e)) from e
     await db.commit()
     return {"code": 0, "message": "已删除"}

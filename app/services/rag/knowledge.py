@@ -32,7 +32,7 @@ MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
 CODE_FILE_EXTS = {
     ".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".go", ".java", ".c", ".h",
     ".cpp", ".hpp", ".cs", ".rs", ".php", ".rb", ".sh", ".bash", ".sql", ".kt", ".kts",
-    ".swift", ".dart", ".scala", ".lua", ".pl", ".r", ".vue", ".svelte", ".tsx",
+    ".swift", ".dart", ".scala", ".lua", ".pl", ".r", ".vue", ".svelte",
 }
 
 
@@ -328,7 +328,7 @@ async def process_document_pipeline(
             embeddings = await embed_texts(chunks)
             if len(embeddings) != len(chunks):
                 raise RuntimeError("嵌入数量与分块数量不一致")
-            for i, (chunk_text, vec) in enumerate(zip(chunks, embeddings)):
+            for i, (chunk_text, vec) in enumerate(zip(chunks, embeddings, strict=False)):
                 session.add(
                     DocumentChunk(
                         document_id=doc.id,

@@ -141,6 +141,7 @@ async def execute_node_activity(payload: dict) -> dict:
 async def synthesize_final_answer_activity(payload: dict) -> dict:
     """任务收尾：把用户请求 + 各节点产出合成为最终交付答案（纯干活不交付的问题）."""
     user_id = str(payload.get("user_id") or "")
+    job_id = str(payload.get("job_id") or "")
     request = str(payload.get("request") or "")
     nodes = payload.get("nodes") or []
     # 保存成功案例（Few-Shot 规划参考；失败静默）
@@ -196,14 +197,6 @@ async def synthesize_final_answer_activity(payload: dict) -> dict:
         return {"final_answer": (reply or "").strip()}
     except Exception:  # noqa: BLE001
         return {"final_answer": ""}
-
-    return {
-        "status": "failed",
-        "result": None,
-        "error": "执行失败",
-        "error_code": "EXEC_ERROR",
-        "retries": max_retries,
-    }
 
 
 @activity.defn

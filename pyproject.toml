@@ -94,6 +94,21 @@ select = ["E", "F", "W", "B"]
 # 行长（E501）是纯排版噪音，忽略；代码库历史长行太多
 ignore = ["E501"]
 
+# FastAPI 的 Depends/File/Query 等是声明式"不可变调用"，属于标准用法，
+# 不是 bugbear 说的"默认参数里做函数调用"，显式豁免，避免几百处误报。
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+  "fastapi.Depends",
+  "fastapi.File",
+  "fastapi.Form",
+  "fastapi.Query",
+  "fastapi.Header",
+  "fastapi.Path",
+  "fastapi.Body",
+  "fastapi.Cookie",
+  "fastapi.security.HTTPBearer",
+]
+
 [tool.ruff.lint.per-file-ignores]
 # __init__.py 的导入视为包再导出，不报 F401（代替已废弃的 ignore-init-module-imports）
 "__init__.py" = ["F401"]

@@ -180,7 +180,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
     """余弦相似度（嵌入已 L2 归一化，点积即余弦）."""
     if not a or not b or len(a) != len(b):
         return 0.0
-    return float(sum(x * y for x, y in zip(a, b)))
+    return float(sum(x * y for x, y in zip(a, b, strict=False)))
 
 
 async def _existing_active_memories(session: AsyncSession, uid: uuid.UUID) -> list[Memory]:

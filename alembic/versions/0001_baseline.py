@@ -18,11 +18,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """基线：create_all（CREATE TABLE IF NOT EXISTS 语义），
-    已有库不受影响，新库一次到位；后续模型变更走 autogenerate diff."""
+    已有库不受影响，新库一次到位；后续模型变更走 autogenerate diff.
+
+    全新库必须先启用 pgvector 扩展，否则带 Vector 列的表（document_chunks /
+    code_chunks / memories 等）建表时报 "type 'vector' does not exist"。
+    """
     from app.models.db_base import Base
     from app.models import db_models  # noqa: F401
 
     bind = op.get_bind()
+    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
     Base.metadata.create_all(bind=bind)
 
 

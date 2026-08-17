@@ -43,7 +43,7 @@ async def export_my_data(
     try:
         uid = uuid.UUID(str(user_id))
     except (ValueError, TypeError):
-        raise BadRequestException("令牌无效")
+        raise BadRequestException("令牌无效") from None
 
     # 1. 对话 + 消息
     conversations = []
@@ -165,7 +165,6 @@ async def delete_my_data(payload: dict = Depends(require_auth)):
     设计文档承诺：服务端 24 小时内执行并确认。
     实际实现：立即软删除，后台任务物理清理。
     """
-    user_id = payload.get("sub", "")
     # TODO:
     # 1. 软删除用户 (is_active = false)
     # 2. Celery 任务：24h 内物理删除 conversations, messages, memories,

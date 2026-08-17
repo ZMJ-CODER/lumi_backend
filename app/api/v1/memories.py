@@ -39,7 +39,7 @@ def _to_uid(user_id: str) -> uuid.UUID:
     try:
         return uuid.UUID(str(user_id))
     except (ValueError, TypeError):
-        raise BadRequestException("user_id 无效")
+        raise BadRequestException("user_id 无效") from None
 
 
 @router.get("")
@@ -79,7 +79,7 @@ async def update_memory(
     try:
         mid = uuid.UUID(memory_id)
     except (ValueError, TypeError):
-        raise BadRequestException("memory_id 无效")
+        raise BadRequestException("memory_id 无效") from None
     mem = await db.get(Memory, mid)
     if not mem:
         raise NotFoundException("记忆不存在")
@@ -113,7 +113,7 @@ async def delete_memory(
     try:
         mid = uuid.UUID(memory_id)
     except (ValueError, TypeError):
-        raise BadRequestException("memory_id 无效")
+        raise BadRequestException("memory_id 无效") from None
     mem = await db.get(Memory, mid)
     if not mem:
         raise NotFoundException("记忆不存在")

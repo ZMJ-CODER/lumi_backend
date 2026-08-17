@@ -41,12 +41,12 @@ def chunk_code(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
         if cur and is_top and _PY_TOP_LEVEL_RE.match(line) and len(cur) >= 2:
             chunks.append("\n".join(cur))
             cur = cur[-overlap_lines:]
-            cur_len = sum(len(l) + 1 for l in cur)
+            cur_len = sum(len(ln) + 1 for ln in cur)
         # 断点 2：缩进从深层回退到 0（代码块结束）且当前块已达半满
         elif cur and prev_indent is not None and prev_indent > 0 and indent == 0 and cur_len >= chunk_size // 2:
             chunks.append("\n".join(cur))
             cur = cur[-overlap_lines:]
-            cur_len = sum(len(l) + 1 for l in cur)
+            cur_len = sum(len(ln) + 1 for ln in cur)
 
         cur.append(line)
         cur_len += len(line) + 1
@@ -56,7 +56,7 @@ def chunk_code(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
         if cur_len >= chunk_size:
             chunks.append("\n".join(cur))
             cur = cur[-overlap_lines:]
-            cur_len = sum(len(l) + 1 for l in cur)
+            cur_len = sum(len(ln) + 1 for ln in cur)
 
     if cur:
         chunks.append("\n".join(cur))

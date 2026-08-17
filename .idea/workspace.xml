@@ -4,30 +4,37 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="修复一些问题">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="优化一些性能和并发问题">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/roles/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/roles/office/agents.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/office/agents.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/router.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/router.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/health.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/health.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/office_docs.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/office_docs.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/preferences.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/preferences.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/database.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/database.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/logging.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/logging.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/db_models.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/db_models.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/user.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/user.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/alembic/versions/0001_baseline.py" beforeDir="false" afterPath="$PROJECT_DIR$/alembic/versions/0001_baseline.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/temporal/activities.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/activities.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/temporal/worker.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/worker.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/workers.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/workers.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/sandbox/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/sandbox/base.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/sandbox/local.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/sandbox/local.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/temporal_workflows.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/temporal_workflows.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/admin.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/agents.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/agents.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/data_export.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/data_export.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/knowledge.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/knowledge.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/memories.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/memories.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/projects.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/projects.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/prompts.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/prompts.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/user.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/user.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/deps.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/deps.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/exceptions.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/exceptions.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/captcha_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/captcha_service.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/memory/extraction.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/memory/extraction.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/services/office_docs.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/office_docs.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/docling_parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/docling_parser.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/embeddings.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/embeddings.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/speech.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/speech.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/rag/chunker.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/chunker.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/rag/classifier.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/classifier.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/rag/document_parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/document_parser.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/rag/knowledge.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/knowledge.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/rate_limit_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rate_limit_service.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/docker-compose/README.md" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/docker-compose/dynamicconfig/README.md" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/docker-compose/tls/README.md" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/plugins/skills/desktop/send_email.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/desktop/send_email.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/plugins/skills/office/office_docs.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/office/office_docs.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -345,7 +352,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786884568034</updated>
     </task>
-    <option name="localTasksCounter" value="30" />
+    <task id="LOCAL-00030" summary="优化一些性能和并发问题">
+      <option name="closed" value="true" />
+      <created>1786938022402</created>
+      <option name="number" value="00030" />
+      <option name="presentableId" value="LOCAL-00030" />
+      <option name="project" value="LOCAL" />
+      <updated>1786938022402</updated>
+    </task>
+    <option name="localTasksCounter" value="31" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -360,7 +375,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="添加游客角色" />
     <MESSAGE value="添加统一异常管理，添加rag基座" />
     <MESSAGE value="实现rag主要业务以及部分优化，优化内容主要是数据清洗" />
     <MESSAGE value="rag新增关键词检索" />
@@ -385,6 +399,7 @@
     <MESSAGE value="重构项目，屏蔽codeagent，新增officeagent系列，引入mcp实现skill调用管理" />
     <MESSAGE value="新增多方位监控和异常处理，解决一些问题" />
     <MESSAGE value="修复一些问题" />
-    <option name="LAST_COMMIT_MESSAGE" value="修复一些问题" />
+    <MESSAGE value="优化一些性能和并发问题" />
+    <option name="LAST_COMMIT_MESSAGE" value="优化一些性能和并发问题" />
   </component>
 </project>

@@ -222,7 +222,9 @@ class AgentDagWorkflow:
                 node["status"] = STATUS_RUNNING
                 node["error"] = None
                 await workflow.wait_condition(
-                    lambda: nid in self._approvals or self._cancel_requested or self._paused
+                    lambda nid=nid: nid in self._approvals
+                    or self._cancel_requested
+                    or self._paused
                 )
                 if self._cancel_requested or self._paused:
                     runnable.append(nid)  # 走后续统一取消/暂停处理
@@ -241,7 +243,7 @@ class AgentDagWorkflow:
             # wait_condition 是确定性原语（活动完成 / 信号到达都会唤醒并重新求值），
             # 避免使用 asyncio.wait（沙箱会告警非确定性）。
             await workflow.wait_condition(
-                lambda: all(t.done() for t in node_tasks)
+                lambda node_tasks=node_tasks: all(t.done() for t in node_tasks)
                 or self._cancel_requested
                 or self._paused
             )

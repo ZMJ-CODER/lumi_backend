@@ -90,7 +90,6 @@ class LocalSandbox(Sandbox):
             proc_kwargs = {}
             if os.name == "posix":
                 proc_kwargs["preexec_fn"] = _limit_resources
-            last_exc: Exception | None = None
             for attempt in range(2):
                 try:
                     proc = await asyncio.create_subprocess_exec(
@@ -103,7 +102,6 @@ class LocalSandbox(Sandbox):
                     )
                     break
                 except Exception as exc:  # noqa: BLE001 - 偶发 CreateProcess 失败，重试一次
-                    last_exc = exc
                     if attempt == 0:
                         await asyncio.sleep(0.3)
                         continue
@@ -223,3 +221,7 @@ class LocalSandbox(Sandbox):
             error="命令执行通道暂未开放",
             resource_usage={"op": "run_command", "sandbox": self.name},
         )
+
+    async def close(self) -> None:
+        """本地子进程沙箱无长驻资源，无需额外清理."""
+        return None

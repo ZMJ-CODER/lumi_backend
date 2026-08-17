@@ -110,7 +110,7 @@ async def _embedding_classify(text: str) -> str:
         desc_vecs = await embed_texts(list(CATEGORY_LABELS.values()))
         best = max(
             range(len(desc_vecs)),
-            key=lambda i: sum(a * b for a, b in zip(doc_vec, desc_vecs[i])),
+            key=lambda i: sum(a * b for a, b in zip(doc_vec, desc_vecs[i], strict=False)),
         )
         return CATEGORY_KEYS[best]
     except Exception as e:

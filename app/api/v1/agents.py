@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from app.agents.orchestration import orchestrator
 from app.core.deps import require_auth
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import BadRequestException, NotFoundException
 from app.models.agent import ApproveAgentJobRequest, CancelAgentJobRequest, CreateAgentJobRequest
 
 router = APIRouter()

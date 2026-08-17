@@ -183,7 +183,7 @@ def parse_file(file_path: str, filename: str | None = None) -> str:
                 return raw.decode(encoding)
             except UnicodeDecodeError:
                 continue
-        raise ValueError("文件编码无法识别（支持 UTF-8 / GB18030）")
+        raise ValueError("文件编码无法识别（支持 UTF-8 / GB18030）") from None
 
 
 def parse_document(file_path: str, filename: str | None = None) -> str:

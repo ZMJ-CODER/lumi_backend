@@ -1145,7 +1145,7 @@ async def analyze_doc(
     from app.services.rag.knowledge import search_user_knowledge
 
     try:
-        meta = await ensure_session(user_id, doc_id)
+        await ensure_session(user_id, doc_id)
         space_tag = _space_tag(doc_id)
         office_session = True
     except LookupError:
@@ -1154,7 +1154,7 @@ async def analyze_doc(
         office_session = False
         space_tag = await _kb_doc_space_tag(user_id, doc_id)
         if space_tag is None:
-            raise LookupError("办公文档会话不存在，且未找到对应知识空间文档")
+            raise LookupError("办公文档会话不存在，且未找到对应知识空间文档") from None
 
     if office_session:
         from app.core.executors import run_in_compute

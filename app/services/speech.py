@@ -8,7 +8,6 @@
     Windows 上无法加载（DLL 报错），因此这里走云端 qwen-tts，复用 .env 的千问 API Key。
 """
 
-import asyncio
 import os
 import threading
 import uuid
@@ -67,7 +66,9 @@ def _transcribe_sync(file_path: str) -> str:
 async def transcribe_audio(file_path: str) -> str:
     """语音转文字（子线程执行，不阻塞事件循环）."""
     try:
-        return await asyncio.to_thread(_transcribe_sync, file_path)
+        from app.core.executors import run_in_compute
+
+        return await run_in_compute(_transcribe_sync, file_path)
     except Exception as e:
         logger.warning("Whisper 转写失败: {}", e)
         return ""
@@ -225,7 +226,9 @@ async def synthesize_speech(
             logger.warning("本地 qwen3-tts 失败，回退 edge-tts: {}", e)
     elif provider == "dashscope":
         try:
-            return await asyncio.to_thread(_synthesize_sync, text, voice)
+            from app.core.executors import run_in_compute
+
+            return await run_in_compute(_synthesize_sync, text, voice)
         except Exception as e:
             # 常见原因：账号未开通 TTS 权限（引擎 418）等
             logger.warning("千问 TTS 失败，回退 edge-tts: {}", e)

@@ -7,7 +7,6 @@
   - 输出统一 L2 归一化，保证 pgvector 的余弦距离 = 1 - 余弦相似度
 """
 
-import asyncio
 import os
 import threading
 
@@ -118,12 +117,16 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
     """批量生成文档向量（不附加检索指令）."""
     if not texts:
         return []
-    return await asyncio.to_thread(_encode_sync, list(texts), False)
+    from app.core.executors import run_in_compute
+
+    return await run_in_compute(_encode_sync, list(texts), False)
 
 
 async def embed_query(text: str) -> list[float]:
     """生成查询向量（附加 bge 检索指令前缀）."""
     if not text:
         return []
-    vectors = await asyncio.to_thread(_encode_sync, [text], True)
+    from app.core.executors import run_in_compute
+
+    vectors = await run_in_compute(_encode_sync, [text], True)
     return vectors[0] if vectors else []

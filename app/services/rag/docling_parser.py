@@ -5,6 +5,8 @@ Docling 首次使用时需要下载布局 / OCR 模型（HuggingFace，已配置
 """
 
 import os
+import contextlib
+import io
 import threading
 from pathlib import Path
 
@@ -14,6 +16,17 @@ from app.core.config import settings
 
 # 国内镜像兜底（用户已设置 HF_ENDPOINT 时尊重原值）
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+# huggingface_hub 1.x 默认走 xet 协议，文件实际从 cas-server.xethub.hf.co 拉取，
+# 国内网络不可达（401/超时）；禁用后回退普通 HTTP，经 HF_ENDPOINT 镜像下载。
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+# Windows 无符号链接权限时静默降级缓存（避免每次下载打印警告）
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+# Docling 布局模型默认 torch.compile，GPU 路径依赖 Triton（Windows 无 Triton 会直接失败）；
+# 关闭编译走 eager 推理，牺牲一点速度换取 Windows 可用。
+os.environ.setdefault("DOCLING_INFERENCE_COMPILE_TORCH_MODELS", "false")
+# 后端 stderr 被重定向到文件时，tqdm 进度条刷新 sys.stderr 会抛 OSError(22) 并中断模型加载；
+# 禁用进度条（若 tqdm 尚未 import 则生效）。
+os.environ.setdefault("TQDM_DISABLE", "1")
 
 _converter = None
 _lock = threading.Lock()
@@ -29,6 +42,13 @@ def _get_converter():
                 from docling.datamodel.pipeline_options import PdfPipelineOptions
                 from docling.document_converter import DocumentConverter, PdfFormatOption
 
+                # 兜底：无论环境变量是否已生效，强制关闭 torch.compile（Windows 无 Triton）
+                try:
+                    from docling.datamodel import settings as _dl_settings
+
+                    _dl_settings.settings.inference.compile_torch_models = False
+                except Exception:  # noqa: BLE001
+                    pass
                 pipeline_options = PdfPipelineOptions()
                 pipeline_options.do_ocr = settings.DOCLING_ENABLE_OCR
                 logger.debug("Docling 初始化：OCR={}", pipeline_options.do_ocr)
@@ -68,13 +88,18 @@ def parse_with_docling(file_path: str, filename: str | None = None) -> str:
     try:
         converter = _get_converter()
         logger.debug("Docling 解析文档: {}", filename or file_path)
-        result = converter.convert(Path(file_path))
+        # tqdm 的 status_printer 会 flush 全局 sys.stderr；后端 stderr 指向被重定向的文件句柄时
+        # Windows 下 flush 可能抛 OSError(22)。转换期间把 stderr 重定向到内存缓冲，彻底绕开。
+        with contextlib.redirect_stderr(io.StringIO()):
+            result = converter.convert(Path(file_path))
         markdown = result.document.export_to_markdown()
         logger.debug("Docling 解析完成: {} -> {} 字符", filename or file_path, len(markdown))
         if markdown.strip():
             return markdown
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Docling 解析失败（尝试降级 pypdf）: {}", str(exc)[:200])
+        logger.opt(exception=True).warning(
+            "Docling 解析失败（尝试降级 pypdf）: {}", str(exc)[:300]
+        )
     # 降级：纯文本 PDF 用 pypdf 直接提取（无需下载布局/OCR 模型）
     try:
         from pypdf import PdfReader
@@ -93,5 +118,5 @@ def parse_with_docling(file_path: str, filename: str | None = None) -> str:
             logger.debug("pypdf 降级解析完成: {} -> {} 字符", filename or file_path, len(text))
             return text
     except Exception as exc:  # noqa: BLE001
-        logger.warning("pypdf 降级解析失败: {}", str(exc)[:200])
-    raise ValueError("PDF 解析失败：文档无可提取文本（扫描件需要 Docling OCR，当前模型不可用）")
+        logger.opt(exception=True).warning("pypdf 降级解析失败: {}", str(exc)[:300])
+    raise ValueError("文档解析失败：无可提取文本（扫描件需要 Docling OCR，当前模型不可用）")

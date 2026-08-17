@@ -5,9 +5,29 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="修复一些问题">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/roles/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/roles/office/agents.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/office/agents.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/router.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/router.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/health.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/health.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/office_docs.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/office_docs.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/preferences.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/preferences.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/database.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/database.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/logging.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/logging.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/models/db_models.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/db_models.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/models/user.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/user.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/office_docs.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/office_docs.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/rag/docling_parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/docling_parser.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/rag/embeddings.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/embeddings.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/speech.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/speech.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/docker-compose/README.md" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/docker-compose/dynamicconfig/README.md" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/docker-compose/tls/README.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/desktop/send_email.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/desktop/send_email.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/office/office_docs.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/office/office_docs.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -45,21 +65,21 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "Docker.lumi.executor": "Run",
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "Python.install_new_dependencies.executor": "Run",
-    "Python.main.executor": "Run",
-    "Python.manager.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "git-widget-placeholder": "master",
-    "last_opened_file_path": "E:/pythonpycharm/lumi_backend",
-    "settings.editor.selected.configurable": "Docker"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;Docker.lumi.executor&quot;: &quot;Run&quot;,
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.install_new_dependencies.executor&quot;: &quot;Run&quot;,
+    &quot;Python.main.executor&quot;: &quot;Run&quot;,
+    &quot;Python.manager.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+    &quot;last_opened_file_path&quot;: &quot;E:/pythonpycharm/lumi_backend&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;Docker&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="E:\pythonpycharm\lumi_backend\app" />
@@ -317,7 +337,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786883668206</updated>
     </task>
-    <option name="localTasksCounter" value="29" />
+    <task id="LOCAL-00029" summary="修复一些问题">
+      <option name="closed" value="true" />
+      <created>1786884568034</created>
+      <option name="number" value="00029" />
+      <option name="presentableId" value="LOCAL-00029" />
+      <option name="project" value="LOCAL" />
+      <updated>1786884568034</updated>
+    </task>
+    <option name="localTasksCounter" value="30" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">

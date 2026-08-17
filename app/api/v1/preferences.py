@@ -61,6 +61,7 @@ async def _prefs_dict(db: AsyncSession, uid: uuid.UUID) -> dict:
         "avatar": (pref.avatar if pref and pref.avatar else ""),
         "background_image": (pref.background_image if pref and pref.background_image else ""),
         "reply_style": (pref.reply_style if pref and pref.reply_style else "long"),
+        "email_client": (pref.email_client if pref and pref.email_client else ""),
         "voice": _decode_voice(pref.voice if pref else None),
         "prompt_id": (user.prompt_id or "") if user else "",
     }
@@ -112,6 +113,8 @@ async def update_preferences(
             pref.background_image = req.background_image or None
         if req.reply_style is not None:
             pref.reply_style = req.reply_style
+        if req.email_client is not None:
+            pref.email_client = (req.email_client or "").strip()[:32]
         if req.voice is not None:
             pref.voice = json.dumps({**_DEFAULT_VOICE, **req.voice}, ensure_ascii=False)
         await db.commit()

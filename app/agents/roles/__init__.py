@@ -16,6 +16,7 @@ from loguru import logger
 from app.agents.roles.knowledge.retrieval import RetrievalAgent
 from app.agents.roles.knowledge.web_research import WebResearchAgent
 from app.agents.roles.office.agents import (
+    OfficeCalendarAgent,
     OfficeDocAgent,
     OfficeResearchAgent,
     OfficeScriptAgent,
@@ -38,6 +39,7 @@ def register_all_agents() -> list[WorkerAgent]:
         OfficeTextAgent(),
         OfficeResearchAgent(),
         OfficeTodoAgent(),
+        OfficeCalendarAgent(),
         OfficeDocAgent(),
         OfficeScriptAgent(),
         OfficeSystemAgent(),

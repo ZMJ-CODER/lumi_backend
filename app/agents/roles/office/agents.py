@@ -168,6 +168,40 @@ class OfficeTodoAgent(WorkerAgent):
         return result
 
 
+class OfficeCalendarAgent(WorkerAgent):
+    """日历日程：新增/查看/修改/删除事件、导出 ICS（可导入真实日历）、导入 ICS."""
+
+    name = "office_calendar"
+    description = (
+        "个人日历管理：新增/查看/修改/删除日历事件；导出 ICS 文件"
+        "（Outlook / Google Calendar / Thunderbird / 苹果日历可直接导入）；导入 ICS 日历内容"
+    )
+    params_help = (
+        'params 用 {"action": "add/list/update/delete/export/import", '
+        '"title": "…", "start": "2026-08-20 09:00", "end": "…", '
+        '"item_id": "…", "content": "ICS 内容（import 用）"}'
+    )
+    skills = ["calendar_manager", "task_memory"]
+
+    async def execute(self, node: "TaskNode", ctx: WorkerContext) -> dict:
+        action = str(node.params.get("action") or "").strip()
+        if not action:
+            return {
+                "success": False,
+                "error": "日历任务缺少 action",
+                "error_code": "INVALID_ARGS",
+            }
+        await _report_progress(ctx.job_id, node.id, "正在处理日历日程…")
+        result = await self.run_skill(
+            "calendar_manager",
+            {k: v for k, v in (node.params or {}).items() if k != "task"},
+            ctx,
+        )
+        if result.get("success"):
+            result["step_title"] = "日历日程"
+        return result
+
+
 class OfficeDocAgent(WorkerAgent):
     """办公文档：读取结构 / 结构化编辑（缓冲）/ 分析问答总结（会话 RAG）."""
 
@@ -451,6 +485,7 @@ class OfficeSystemAgent(WorkerAgent):
                 "subject": str(raw.get("subject") or ""),
                 "body": str(raw.get("body") or ""),
                 "cc": str(raw.get("cc") or ""),
+                "client": str(raw.get("client") or "").strip(),
             }
         if task == "ps":
             return {

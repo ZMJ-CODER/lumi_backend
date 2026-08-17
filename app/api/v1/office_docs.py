@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, NotFoundException
+from app.core.executors import run_in_compute
 from app.services import office_docs
 
 router = APIRouter()
@@ -45,15 +46,16 @@ async def upload_office_doc(
     filename = file.filename or "document.txt"
     try:
         meta = office_docs.create_session(payload["sub"], filename, content)
+        # OCR / Docling 解析是 CPU 密集同步操作，放线程池避免阻塞事件循环
+        info = await run_in_compute(office_docs.read_structure, payload["sub"], meta["doc_id"])
     except ValueError as exc:
         raise BadRequestException(str(exc)) from exc
-    info = office_docs.read_structure(payload["sub"], meta["doc_id"])
     # 聊天框链路：临时会话写入 DB（跨实例可恢复）+ 顺带清理过期会话
     await office_docs.persist_session_record(
         payload["sub"], meta, content, content_text=info.get("structure")
     )
     try:
-        await office_docs.cleanup_expired_sessions()
+        await run_in_compute(office_docs.cleanup_expired_sessions)
     except Exception:  # noqa: BLE001
         pass
     return {
@@ -106,7 +108,7 @@ async def delete_generic_output(
 async def get_office_doc(doc_id: str, payload: dict = Depends(require_auth)):
     """查看文档结构与缓冲状态."""
     await _ensure_session_or_404(payload["sub"], doc_id)
-    info = office_docs.read_structure(payload["sub"], doc_id)
+    info = await run_in_compute(office_docs.read_structure, payload["sub"], doc_id)
     meta = _session_or_404(payload["sub"], doc_id)
     from pathlib import Path
 
@@ -132,7 +134,7 @@ async def edit_office_doc(
     if not instruction:
         raise BadRequestException("缺少编辑指令 instruction")
     await _ensure_session_or_404(payload["sub"], doc_id)
-    info = office_docs.read_structure(payload["sub"], doc_id)
+    info = await run_in_compute(office_docs.read_structure, payload["sub"], doc_id)
     ops = await office_docs.plan_edits(
         instruction,
         info["structure"],
@@ -140,9 +142,9 @@ async def edit_office_doc(
         payload["sub"],
         api_key=None,
     )
-    records = office_docs.apply_edits(payload["sub"], doc_id, ops)
+    records = await run_in_compute(office_docs.apply_edits, payload["sub"], doc_id, ops)
     # 只写入缓冲副本：用户在前端预览确认（保留/撤销）后才落盘
-    after = office_docs.read_structure(payload["sub"], doc_id)
+    after = await run_in_compute(office_docs.read_structure, payload["sub"], doc_id)
     return {
         "code": 0,
         "data": {

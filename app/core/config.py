@@ -16,6 +16,19 @@ class Settings(BaseSettings):
     VERSION: str = "0.1.0"
     DEBUG: bool = False
 
+    # ── 数据库连接池（每进程） ──
+    # 默认 10 + 20 溢出 = 30 连接/进程：单进程足够，多 worker 部署也不会打爆
+    # Postgres max_connections（默认 100）。高并发生产环境按需调大。
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
+    # 取连接时是否先 SELECT 1 探活。本地/局域网稳定环境下关闭可降低每请求 1 次
+    # 额外 DB 往返（压测约 +20% 吞吐）；公网/容器网络抖动环境建议开启。
+    DB_PRE_PING: bool = False
+
+    # ── 计算密集型任务线程池（OCR / Embedding / TTS 等，每进程） ──
+    # 独立于 asyncio 默认线程池，避免并发上传把 Web 服务后台线程占满。
+    COMPUTE_THREADS: int = 4
+
     # ── 可观测性 ──
     SENTRY_DSN: str = ""            # 错误上报；为空则不启用 Sentry
     METRICS_ENABLED: bool = True    # /metrics Prometheus 指标

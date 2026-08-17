@@ -96,6 +96,8 @@ STRUCTURED_EXTS = {".docx", ".xlsx", ".pptx", ".docm", ".xlsm", ".pptm"}
 LEGACY_EXTS = {".doc", ".xls", ".ppt", ".rtf"}
 # 需 Docling 解析的格式（PDF / ODT 等）：可读可分析，暂不支持结构化编辑
 DOCLING_EXTS = {".pdf", ".odt"}
+# 图片（扫描件/发票/截图）：Docling OCR 提取文本，可读可分析，不支持结构化编辑
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 MAX_OFFICE_SIZE = 30 * 1024 * 1024
 
 # 各格式允许的编辑操作（LLM 规划指令时用）
@@ -199,6 +201,8 @@ def detect_kind(filename: str) -> str:
     if ext in LEGACY_EXTS:
         return ext.lstrip(".")
     if ext in DOCLING_EXTS:
+        return ext.lstrip(".")
+    if ext in IMAGE_EXTS:
         return ext.lstrip(".")
     return "text"
 
@@ -649,6 +653,11 @@ def extract_full_text(user_id: str, doc_id: str) -> str:
         from app.services.rag.document_parser import parse_document
 
         return parse_document(str(path), meta["filename"])
+    if kind in {e.lstrip(".") for e in IMAGE_EXTS}:
+        # 图片（扫描件/发票/截图）：Docling OCR 提取文本
+        from app.services.rag.document_parser import parse_document
+
+        return parse_document(str(path), meta["filename"])
     return path.read_text(encoding="utf-8", errors="replace")
 
 
@@ -712,6 +721,11 @@ def read_structure(user_id: str, doc_id: str) -> dict:
         structure = _legacy_extract_text(path, kind)[:120000]
     elif kind in {e.lstrip(".") for e in DOCLING_EXTS}:
         # PDF / 老版 Office：Docling 解析全文作为结构（只读/分析，不支持结构化编辑）
+        from app.services.rag.document_parser import parse_document
+
+        structure = parse_document(str(path), meta["filename"])[:120000]
+    elif kind in {e.lstrip(".") for e in IMAGE_EXTS}:
+        # 图片（扫描件/发票/截图）：Docling OCR 提取文本作为结构（只读/分析）
         from app.services.rag.document_parser import parse_document
 
         structure = parse_document(str(path), meta["filename"])[:120000]
@@ -786,6 +800,8 @@ def apply_edits(user_id: str, doc_id: str, ops: list[dict]) -> list[str]:
         records.append("⚠️ 未生成任何可执行的编辑操作（文档未修改）")
         return records
     kind = meta["kind"]
+    if kind in {e.lstrip(".") for e in IMAGE_EXTS}:
+        raise ValueError("图片仅支持读取/分析（OCR 提取文字），不支持结构化编辑")
     for op in ops or []:
         try:
             if kind == "docx":
@@ -1079,7 +1095,9 @@ async def ensure_rag_index(user_id: str, doc_id: str) -> dict:
     from app.services.rag.knowledge import create_space, process_document_pipeline, upload_document_file
 
     meta = await ensure_session(user_id, doc_id)
-    text = extract_full_text(user_id, doc_id)
+    from app.core.executors import run_in_compute
+
+    text = await run_in_compute(extract_full_text, user_id, doc_id)
     if not text.strip():
         raise ValueError("文档无可索引文本")
     content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
@@ -1139,7 +1157,9 @@ async def analyze_doc(
             raise LookupError("办公文档会话不存在，且未找到对应知识空间文档")
 
     if office_session:
-        full_text = extract_full_text(user_id, doc_id)
+        from app.core.executors import run_in_compute
+
+        full_text = await run_in_compute(extract_full_text, user_id, doc_id)
         if full_text and len(full_text) <= settings.OFFICE_DOC_FULL_TEXT_LIMIT:
             # 小文档：全文直接注入，避免 RAG 相似度阈值漏召回
             rag_text = full_text

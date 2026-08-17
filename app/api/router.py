@@ -16,6 +16,7 @@ from app.api.v1 import (
     knowledge,
     local,
     local_corpus,
+    memory_manage,
     memories,
     office_docs,
     preferences,
@@ -56,6 +57,9 @@ api_router.include_router(call.router, prefix="/call", tags=["call"])
 
 # 用户个性化偏好（多端同步）
 api_router.include_router(preferences.router, prefix="/preferences", tags=["preferences"])
+
+# 用户记忆管理（查看/检索/删除自己的记忆与画像）
+api_router.include_router(memory_manage.router, prefix="/memory", tags=["memory"])
 
 # 客户端工具（本地文件操作等：用户端轮询 + 结果回传）
 api_router.include_router(tools.router, prefix="/tools", tags=["tools"])

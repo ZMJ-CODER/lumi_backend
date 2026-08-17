@@ -313,6 +313,9 @@ class UserPreference(Base):
     background_image: Mapped[str | None] = mapped_column(Text)  # 全局主题背景 dataURL
     reply_style: Mapped[str] = mapped_column(String(16), default="long")  # long / short
     voice: Mapped[str | None] = mapped_column(Text)  # JSON: {voice, rate, pitch, referenceAudio, referenceName}
+    email_client: Mapped[str] = mapped_column(
+        String(32), default="", server_default=""
+    )  # 默认邮件客户端：outlook/thunderbird/foxmail/mailmaster 等，空=系统默认
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

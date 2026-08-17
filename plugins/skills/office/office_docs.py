@@ -1,6 +1,7 @@
 """办公技能（office/文档编辑）：office_doc_read / office_doc_edit —— 结构化编辑可编辑办公文件."""
 
 from app.agents.skills.base import Skill, SkillContext, SkillResult
+from app.core.executors import run_in_compute
 from app.services import office_docs
 
 
@@ -29,7 +30,7 @@ class OfficeDocReadSkill(Skill):
             return SkillResult(success=False, error="缺少 doc_id", error_code="INVALID_ARGS", retryable=False)
         try:
             await office_docs.ensure_session(context.user_id, doc_id)
-            info = office_docs.read_structure(context.user_id, doc_id)
+            info = await run_in_compute(office_docs.read_structure, context.user_id, doc_id)
         except LookupError as exc:
             return SkillResult(success=False, error=str(exc), error_code="EXEC_ERROR", retryable=False)
         return SkillResult(
@@ -68,7 +69,7 @@ class OfficeDocEditSkill(Skill):
             return SkillResult(success=False, error="缺少 doc_id / instruction", error_code="INVALID_ARGS", retryable=False)
         try:
             await office_docs.ensure_session(context.user_id, doc_id)
-            info = office_docs.read_structure(context.user_id, doc_id)
+            info = await run_in_compute(office_docs.read_structure, context.user_id, doc_id)
             if info["kind"] in ("pdf", "doc", "xls", "ppt", "rtf", "odt", "docm", "xlsm", "pptm"):
                 return SkillResult(
                     success=False,
@@ -84,7 +85,7 @@ class OfficeDocEditSkill(Skill):
                 api_key=context.llm_api_key,
             )
             records = office_docs.apply_edits(context.user_id, doc_id, ops)
-            after = office_docs.read_structure(context.user_id, doc_id)
+            after = await run_in_compute(office_docs.read_structure, context.user_id, doc_id)
             has_failures = any(r.startswith("❌") or r.startswith("⚠️") for r in records)
         except LookupError as exc:
             return SkillResult(success=False, error=str(exc), error_code="EXEC_ERROR", retryable=False)

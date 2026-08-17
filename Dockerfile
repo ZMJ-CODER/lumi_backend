@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # ── Lumi Backend ──
 FROM python:3.13-slim
 
@@ -19,6 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
+# ── CUDA 版 torch（可选：镜像默认装 CUDA 版；构建时不想要 GPU 可传
+#    --build-arg ENABLE_CUDA_TORCH=false 退回 PyPI CPU 版） ──
+ARG ENABLE_CUDA_TORCH=true
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126
+RUN if [ "$ENABLE_CUDA_TORCH" = "true" ]; then \
+        pip install --index-url ${TORCH_INDEX_URL} torch==2.13.0+cu126 torchvision==0.28.0+cu126; \
+    fi
+
 WORKDIR /app
 
 # 先只复制依赖清单并安装项目（editable 模式），
@@ -31,6 +37,7 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 # BuildKit 缓存挂载：下载好的 wheel 跨构建持久化。
 # 即使依赖层因 pyproject/uv.lock 变化或缓存失效而重建，
 # 也直接复用本地缓存安装，不用重新下载（torch 等大包从"半天"降到秒级）。
+# 说明：此处 pip install -e . 不会再降级 torch——2.13.0+cu126 满足 torch>=2.13.0（PEP 440 忽略本地版本段）。
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -e .
 

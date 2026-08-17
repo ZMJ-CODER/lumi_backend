@@ -31,6 +31,9 @@ from app.core.security_hardening import rate_limit_middleware, security_headers_
 async def lifespan(app: FastAPI):
     """应用生命周期管理."""
     setup_logging()
+    from app.core.logging import setup_uvicorn_queue_logging
+
+    setup_uvicorn_queue_logging()
     init_sentry()
     logger.info(f" {settings.PROJECT_NAME} v{settings.VERSION} 启动中...")
     if settings.JWT_SECRET_KEY == "change-me-in-production":
@@ -51,6 +54,20 @@ async def lifespan(app: FastAPI):
             await conn.run_sync(Base.metadata.create_all)
     except Exception as exc:  # noqa: BLE001 - 建表失败不阻塞启动（可能无 DB 权限）
         logger.warning("自动建表跳过（可运行 scripts/init_db.py 手动补齐）: {}", exc)
+    # 增量字段补齐（幂等）：create_all 只建新表，老表新增列需显式 ALTER
+    try:
+        from sqlalchemy import text as _sql_text
+        from app.core.database import engine as _engine
+
+        async with _engine.begin() as _conn:
+            await _conn.execute(
+                _sql_text(
+                    "ALTER TABLE user_preferences "
+                    "ADD COLUMN IF NOT EXISTS email_client VARCHAR(32) NOT NULL DEFAULT ''"
+                )
+            )
+    except Exception as exc:  # noqa: BLE001 - 列已存在/无权限时静默
+        logger.debug("增量字段补齐跳过: {}", exc)
     # 多智能体编排：Temporal Worker 随后端进程启动（未开则需独立进程跑 worker）
     if settings.AGENT_ORCHESTRATION == "temporal" and settings.TEMPORAL_RUN_WORKER_INPROCESS:
         from app.agents.orchestration.temporal.runtime import start_inprocess_worker

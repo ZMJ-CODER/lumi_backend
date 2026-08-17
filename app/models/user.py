@@ -49,6 +49,11 @@ class PreferencesUpdateRequest(BaseModel):
         default=None,
         description="声音设置：{voice, rate, pitch, referenceAudio, referenceName}",
     )
+    email_client: str | None = Field(
+        default=None,
+        max_length=32,
+        description="默认邮件客户端：outlook/thunderbird/foxmail/mailmaster 等；空=系统默认",
+    )
 
 
 class PresetCreateRequest(BaseModel):

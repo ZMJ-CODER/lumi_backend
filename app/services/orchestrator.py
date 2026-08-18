@@ -20,7 +20,6 @@ from loguru import logger
 
 from app.agents.base import AgentContext
 from app.agents.registry import AgentRegistry
-from app.agents.skills.executor import get_skills_for_scene, run_skill_loop
 from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.llm import LLMClient
@@ -312,7 +311,7 @@ class Orchestrator:
         old_msgs = history[: len(history) - len(kept)]
 
         # 被压缩掉的旧消息若尚未做过记忆抽取 → 先异步抽取（仅普通模式；办公模式无长期记忆）
-        if scene != "work":
+        if scene != "office":
             await self._submit_unextracted(
                 conversation_id, user_id, history, stop=len(history) - len(kept)
             )
@@ -483,10 +482,12 @@ class Orchestrator:
         local_mode: bool = False,
         retrieval_query: str | None = None,
         attachments: list | None = None,
+        office_docs: list[dict] | None = None,
         web_search_enabled: bool = False,
         llm_api_key: str | None = None,
         thinking_mode: str = "fast",
         reply_style: str | None = None,
+        user_role: str = "user",
     ) -> dict:
         """处理用户消息的核心流程（阻塞版，供旧接口/降级路径使用）."""
         transcript = await self._resolve_transcript(content, attachments)
@@ -508,6 +509,33 @@ class Orchestrator:
             user_id, conversation_id, content, scene, retrieval_query, attachments, reply_style
         )
         image_uris = await self._load_image_data_uris(user_id, attachments)
+
+        if scene == "office":
+            reply, office_steps, office_citations = await self._run_office_job(
+                user_id,
+                conversation_id,
+                content,
+                office_docs or [],
+                llm_api_key,
+                user_role,
+            )
+            prep["citations"].extend(office_citations)
+            title = await self.get_conversation_title(conversation_id)
+            if prep["is_first"] and not title:
+                title = await self._generate_title(content, user_id, llm_api_key)
+                if title:
+                    await self.save_conversation_title(conversation_id, title)
+            await self._finalize_reply(conversation_id, user_id, reply, scene)
+            return {
+                "message_id": str(uuid.uuid4()),
+                "content": reply,
+                "citations": prep["citations"],
+                "scene": scene,
+                "local_mode": False,
+                "title": title or "",
+                "transcript": transcript,
+                "steps": office_steps,
+            }
 
         # 调用 LLM：工具调用（模型自主决定联网）+ 最终回复
         title = await self.get_conversation_title(conversation_id)
@@ -565,9 +593,11 @@ class Orchestrator:
         local_mode: bool = False,
         retrieval_query: str | None = None,
         attachments: list | None = None,
+        office_docs: list[dict] | None = None,
         llm_api_key: str | None = None,
         thinking_mode: str = "fast",
         reply_style: str | None = None,
+        user_role: str = "user",
     ):
         """流式处理用户消息：准备流程同 handle_message，LLM 走工具调用 + SSE 流式.
 
@@ -600,12 +630,33 @@ class Orchestrator:
             title_task = asyncio.create_task(self._generate_title(content, user_id, llm_api_key))
 
         full_text = ""
-        async for evt in self._stream_llm_auto(
-            user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key,
-            thinking_mode=thinking_mode,
-        ):
+        atomic_steps: dict[str, dict] = {}
+        stream = (
+            self._stream_office_job(
+                user_id,
+                conversation_id,
+                content,
+                office_docs or [],
+                llm_api_key,
+                prep["citations"],
+                user_role,
+            )
+            if scene == "office"
+            else self._stream_llm_auto(
+                user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key,
+                thinking_mode=thinking_mode,
+            )
+        )
+        async for evt in stream:
             if evt["type"] == "delta":
                 full_text += evt["content"]
+            elif evt["type"] == "step":
+                step = evt.get("step") or {}
+                if step.get("id"):
+                    atomic_steps[str(step["id"])] = {
+                        **atomic_steps.get(str(step["id"]), {}),
+                        **step,
+                    }
             yield evt
 
         if title_task is not None:
@@ -630,7 +681,157 @@ class Orchestrator:
             "scene": scene,
             "title": title or "",
             "segments": segments,
+            "steps": list(atomic_steps.values()),
         }
+
+    @staticmethod
+    def _job_step(node) -> dict:
+        result = node.result or {}
+        raw_status = node.status.value if hasattr(node.status, "value") else str(node.status)
+        if raw_status in {"ready", "pending"}:
+            display_status = "pending"
+        elif raw_status in {"running", "retrying"}:
+            display_status = "running"
+        elif raw_status == "completed":
+            display_status = "completed"
+        else:
+            display_status = "failed"
+        return {
+            "id": node.id,
+            "title": node.name or result.get("step_title") or node.agent,
+            "status": display_status,
+            "runtime_status": raw_status,
+            "tool": result.get("tool") or node.params.get("preferred_tool") or node.agent,
+            "output": str(result.get("content") or result.get("output") or "")[:1000],
+            "error": node.error,
+            "depends_on": list(node.depends_on),
+            "resource_claims": [c.model_dump() for c in node.resource_claims],
+            "effect_status": node.effect_status,
+            "started_at": node.started_at,
+            "completed_at": node.completed_at,
+            "duration_ms": (
+                max(0, int((node.completed_at - node.started_at) * 1000))
+                if node.started_at is not None and node.completed_at is not None
+                else None
+            ),
+        }
+
+    @staticmethod
+    def _job_citations(job) -> list[dict]:
+        out: list[dict] = []
+        for node in job.nodes:
+            result = node.result or {}
+            metadata = result.get("tool_metadata") or result.get("metadata") or {}
+            if isinstance(metadata, dict) and isinstance(metadata.get("citations"), list):
+                out.extend(metadata["citations"])
+        return out
+
+    @staticmethod
+    def _job_answer(job) -> str:
+        result = job.result or {}
+        answer = str(result.get("final_answer") or result.get("answer") or "").strip()
+        if answer:
+            return answer
+        if result.get("type") == "clarification":
+            return str(result.get("question") or "请补充任务信息。")
+        blocks = []
+        for node in job.nodes:
+            node_result = node.result or {}
+            content = str(node_result.get("content") or node_result.get("output") or "").strip()
+            if content:
+                blocks.append(content)
+        if blocks:
+            return "\n\n".join(blocks)
+        return str(job.error or "办公任务未能完成，请检查失败步骤后重试。")
+
+    async def _run_office_job(
+        self,
+        user_id: str,
+        conversation_id: str,
+        content: str,
+        office_docs: list[dict],
+        llm_api_key: str | None,
+        user_role: str = "user",
+    ) -> tuple[str, list[dict], list[dict]]:
+        from app.agents.orchestration import orchestrator as agent_orchestrator
+        from app.agents.orchestration.models import JobStatus
+
+        job = await agent_orchestrator.submit_job(
+            user_id,
+            content,
+            "office",
+            conversation_id,
+            llm_api_key=llm_api_key,
+            office_docs=office_docs,
+            user_role=user_role,
+        )
+        terminal = {
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.INTERRUPTED,
+        }
+        while job.status not in terminal:
+            await asyncio.sleep(0.15)
+            job = await agent_orchestrator.get_job(job.job_id) or job
+        return self._job_answer(job), [self._job_step(n) for n in job.nodes], self._job_citations(job)
+
+    async def _stream_office_job(
+        self,
+        user_id: str,
+        conversation_id: str,
+        content: str,
+        office_docs: list[dict],
+        llm_api_key: str | None,
+        citations: list[dict],
+        user_role: str = "user",
+    ):
+        from app.agents.orchestration import orchestrator as agent_orchestrator
+        from app.agents.orchestration.models import JobStatus
+
+        job = await agent_orchestrator.submit_job(
+            user_id,
+            content,
+            "office",
+            conversation_id,
+            llm_api_key=llm_api_key,
+            office_docs=office_docs,
+            user_role=user_role,
+        )
+        yield {
+            "type": "job",
+            "job_id": job.job_id,
+            "conversation_id": conversation_id,
+            "created_at": job.created_at,
+        }
+        last: dict[str, tuple] = {}
+        terminal = {
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.INTERRUPTED,
+        }
+        try:
+            while True:
+                for node in job.nodes:
+                    step = self._job_step(node)
+                    signature = (step["status"], step["error"], step["output"], step["effect_status"])
+                    if last.get(node.id) != signature:
+                        last[node.id] = signature
+                        yield {"type": "step", "job_id": job.job_id, "step": step}
+                if job.status in terminal:
+                    break
+                await asyncio.sleep(0.15)
+                job = await agent_orchestrator.get_job(job.job_id) or job
+        except asyncio.CancelledError:
+            # SSE 连接属于客户端展示生命周期。切换会话、关闭窗口或网络抖动
+            # 都不代表用户明确终止任务；真实终止只能走 /jobs/{id}/cancel。
+            logger.info("办公任务流断开，任务继续后台执行: {}", job.job_id)
+            raise
+        citations.extend(self._job_citations(job))
+        answer = self._job_answer(job)
+        if answer:
+            yield {"type": "delta", "content": answer}
 
     # ── 消息处理公共流程 ────────────────────────────────
 
@@ -666,13 +867,13 @@ class Orchestrator:
         await self.append_context(conversation_id, user_msg)
         # 新会话首条消息：立即异步抽取（身份类事实（如名字/职业）往往出现在开场白，不等攒批）。
         # 办公模式不建长期记忆，跳过抽取。
-        if is_first and scene != "work":
+        if is_first and scene != "office":
             await self._submit_unextracted(conversation_id, user_id, [user_msg])
 
         # 2. 上下文 + 长期记忆（画像常驻 + 事实按需召回）
         history = await self.get_context(conversation_id)
         summary = await self.get_conversation_summary(conversation_id)
-        if scene == "work":
+        if scene == "office":
             # 办公模式：无长期记忆注入，只靠短期窗口保证当次任务连贯
             profile, memory_facts = None, []
         else:
@@ -765,7 +966,7 @@ class Orchestrator:
         await self.append_context(conversation_id, assistant_msg)
         await self._maybe_summarize_context(conversation_id, user_id, scene)
         # 办公模式：无长期记忆
-        if scene != "work":
+        if scene != "office":
             await self._maybe_extract_memories(conversation_id, user_id)
 
     # ── 工具调用与流式回复 ─────────────────────────────
@@ -850,29 +1051,6 @@ class Orchestrator:
             else:
                 messages = await self._describe_images_to_text(messages, image_uris, user_id)
 
-        # 技能模式：LLM function calling 决定调用技能，循环到最终回复
-        # 普通聊天 / 办公直接对话启用（工具集统一用精简的聊天技能；DAG 由 agent 白名单决定）
-        if settings.AGENT_SKILLS_ENABLED and scene in ("chat", "office") and get_skills_for_scene(
-            "chat" if scene == "office" else scene
-        ):
-            try:
-                # 普通模式用快速/思考档模型做工具决策与回复（均支持 function calling）
-                final_text, records, skill_citations = await run_skill_loop(
-                    self._llm,
-                    user_id,
-                    messages,
-                    scene,
-                    conversation_id=conversation_id,
-                    llm_api_key=llm_api_key,
-                    llm_base_url=override["base_url"] if override else None,
-                    llm_model=override["model"] if override else None,
-                )
-                citations.extend(skill_citations)
-                return final_text or "（技能调用完成，未能生成回复，请稍后重试）"
-            except Exception as exc:  # noqa: BLE001 - 技能循环失败不阻塞，回退普通回复
-                logger.warning("技能循环失败，回退普通回复: {}", str(exc)[:160])
-
-        messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
         # 普通模式快速/思考档：显式切换模型（fast=DS Flash / think=强模型）
         if override:
             try:
@@ -924,37 +1102,6 @@ class Orchestrator:
             else:
                 messages = await self._describe_images_to_text(messages, image_uris, user_id)
 
-        # 技能模式：循环内逐轮文本产出（工具调用中的"我来搜索…" + 最终回复）
-        # 普通聊天 / 办公直接对话启用（工具集统一用精简的聊天技能；DAG 由 agent 白名单决定）
-        if settings.AGENT_SKILLS_ENABLED and scene in ("chat", "office") and get_skills_for_scene(
-            "chat" if scene == "office" else scene
-        ):
-            try:
-                deltas: list[str] = []
-                final_text, records, skill_citations = await run_skill_loop(
-                    self._llm,
-                    user_id,
-                    messages,
-                    scene,
-                    conversation_id=conversation_id,
-                    llm_api_key=llm_api_key,
-                    llm_base_url=override["base_url"] if override else None,
-                    llm_model=override["model"] if override else None,
-                    on_text=deltas.append,
-                )
-                citations.extend(skill_citations)
-                for piece in deltas:
-                    yield {"type": "delta", "content": piece}
-                return
-            except Exception as exc:  # noqa: BLE001 - 技能循环失败不阻塞，回退普通回复
-                logger.warning("技能循环失败，回退普通回复: {}", str(exc)[:160])
-                if deltas:
-                    # 已输出部分内容：先把已产出文本吐给前端（不整段重流，避免重复）
-                    for piece in deltas:
-                        yield {"type": "delta", "content": piece}
-                    return
-
-        messages = await self._maybe_decide_web(user_id, messages, user_content, citations)
         # 普通模式快速/思考档：显式切换模型（fast=DS Flash / think=强模型）
         if override:
             try:
@@ -1126,7 +1273,7 @@ class Orchestrator:
         # 普通模式超大窗口（25 万 token）；办公模式只保短期窗口（6 万 token）
         budget = (
             settings.LLM_HISTORY_MAX_TOKENS_WORK
-            if scene == "work"
+            if scene == "office"
             else settings.LLM_HISTORY_MAX_TOKENS
         )
         for msg in self._trim_history(history, budget):

@@ -57,6 +57,18 @@ def _uid(payload: dict) -> uuid.UUID | None:
         return None
 
 
+def _message_steps(message: Message | None) -> list[dict]:
+    """兼容历史消息：metadata 非法或不是对象时返回空步骤."""
+    if not message or not message.metadata_:
+        return []
+    try:
+        data = json.loads(message.metadata_)
+        steps = data.get("steps") if isinstance(data, dict) else None
+        return steps if isinstance(steps, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
 async def _get_owned_conversation(
     db: AsyncSession,
     conversation_id: str,
@@ -123,6 +135,7 @@ async def _find_duplicate(db: AsyncSession, conversation_id: str, client_message
         "content": normalize_content(assistant.content),
         "segments": split_segments(assistant.content),
         "citations": json.loads(assistant.citations) if assistant.citations else [],
+        "steps": _message_steps(assistant),
         "scene": None,
         "local_mode": False,
         "replayed": True,
@@ -144,13 +157,13 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
         ).scalar_one_or_none()
     if existing_user is not None:
         user_msg = existing_user
-        user_msg.content = req.content
+        user_msg.content = req.display_content if req.display_content is not None else req.content
     else:
         user_msg = Message(
             id=uuid.uuid4(),
             conversation_id=conv.id,
             role="user",
-            content=req.content,
+            content=req.display_content if req.display_content is not None else req.content,
             client_message_id=req.message_id,
             metadata_=json.dumps({"guest_id": req.guest_id}, ensure_ascii=False) if req.guest_id else None,
         )
@@ -164,6 +177,7 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
             # 后续"多条短句回复"策略直接向数组追加分段，不新增消息行。
             content=serialize_content(result.get("segments") or result.get("content", "")),
             citations=json.dumps(result.get("citations") or [], ensure_ascii=False),
+            metadata_=json.dumps({"steps": result.get("steps") or []}, ensure_ascii=False),
         )
         db.add(assistant_msg)
     except (ValueError, TypeError, KeyError):
@@ -173,6 +187,7 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
             role="assistant",
             content=serialize_content(result.get("segments") or result.get("content", "")),
             citations=json.dumps(result.get("citations") or [], ensure_ascii=False),
+            metadata_=json.dumps({"steps": result.get("steps") or []}, ensure_ascii=False),
         )
         db.add(assistant_msg)
         result["message_id"] = str(assistant_msg.id)
@@ -262,6 +277,7 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
             "content": result.get("content", ""),
             "segments": result.get("segments") or [],
             "citations": result.get("citations") or [],
+            "steps": result.get("steps") or [],
             "created_at": datetime.now(timezone.utc).isoformat(),
         },
     )
@@ -561,10 +577,12 @@ async def send_message(
             local_mode=req.local_mode,
             retrieval_query=req.retrieval_query,
             attachments=req.attachments,
+            office_docs=req.office_docs,
             web_search_enabled=req.web_search,
             llm_api_key=llm_api_key,
             thinking_mode=req.thinking_mode,
             reply_style=req.reply_style,
+            user_role=payload.get("role", "user"),
         )
 
         # 服务端持久化（仅登录用户；游客保持 Redis-only）
@@ -648,6 +666,7 @@ async def get_messages(
             "segments": split_segments(m.content),
             "client_message_id": m.client_message_id,
             "citations": json.loads(m.citations) if m.citations else [],
+            "steps": _message_steps(m),
             "attachments": attachments_by_message.get(str(m.id), []),
             "created_at": m.created_at.isoformat() if m.created_at else None,
         }

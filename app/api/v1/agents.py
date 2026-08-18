@@ -3,8 +3,17 @@
 from fastapi import APIRouter, Depends, Query, Request
 
 from app.agents.orchestration import orchestrator
+from app.agents.orchestration.orchestrator import (
+    ActiveConversationJobError,
+    UserJobLimitError,
+)
 from app.core.deps import require_auth
-from app.core.exceptions import BadRequestException, NotFoundException
+from app.core.exceptions import (
+    BadRequestException,
+    ConflictException,
+    NotFoundException,
+    RateLimitException,
+)
 from app.models.agent import ApproveAgentJobRequest, CancelAgentJobRequest, CreateAgentJobRequest
 
 router = APIRouter()
@@ -22,17 +31,23 @@ async def create_agent_job(
     仅任务执行期间保存在内存，任务结束即释放，不落库不写日志。
     """
     llm_api_key = request.headers.get("x-llm-api-key") or None
-    job = await orchestrator.submit_job(
-        payload["sub"],
-        req.request,
-        req.scene,
-        req.conversation_id,
-        req.project_id,
-        req.project_ids,
-        llm_api_key,
-        req.clarification_answer,
-        req.office_docs,
-    )
+    try:
+        job = await orchestrator.submit_job(
+            payload["sub"],
+            req.request,
+            req.scene,
+            req.conversation_id,
+            req.project_id,
+            req.project_ids,
+            llm_api_key,
+            req.clarification_answer,
+            req.office_docs,
+            payload.get("role", "user"),
+        )
+    except ActiveConversationJobError as exc:
+        raise ConflictException(str(exc), error_code="OFFICE_JOB_CONFLICT") from exc
+    except UserJobLimitError as exc:
+        raise RateLimitException(str(exc), error_code="OFFICE_JOB_LIMIT") from exc
     return {"code": 0, "data": job.model_dump()}
 
 

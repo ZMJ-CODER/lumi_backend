@@ -11,6 +11,8 @@
 """
 
 import asyncio
+import hashlib
+import json
 import time
 import uuid
 
@@ -23,6 +25,14 @@ from app.agents.orchestration.review import ReviewHook, get_reviewer
 from app.agents.orchestration.state import RedisStateStore, StateStore
 from app.agents.orchestration.workers import WORKERS
 from app.core.config import settings
+
+
+class ActiveConversationJobError(RuntimeError):
+    """同一会话已有尚未结束的办公任务。"""
+
+
+class UserJobLimitError(RuntimeError):
+    """单个用户同时运行的办公任务达到上限。"""
 
 
 class AgentOrchestrator:
@@ -52,10 +62,13 @@ class AgentOrchestrator:
         )
         self._temporal_available = False
         self._temporal_probe_at = 0.0
+        self._temporal_unavailable_until = 0.0
         # ── legacy 自建 DAG 后台任务 ──
         self._tasks: dict[str, asyncio.Task] = {}  # job_id -> 后台执行任务
         # BYOK：legacy 路径的任务内临时 API key（仅内存，任务结束即释放）
         self._job_api_keys: dict[str, str] = {}
+        # 同进程内串行化同一用户的“检查并提交”，避免两个并发请求同时越过限流检查。
+        self._submission_locks: dict[str, asyncio.Lock] = {}
 
     # ── 办公短期记忆：跨任务记住"上一步做了什么"（摘要，非全文） ──
 
@@ -137,16 +150,23 @@ class AgentOrchestrator:
             return False
         if self._temporal_available:
             return True
-        if time.monotonic() - self._temporal_probe_at < 30:
+        now = time.monotonic()
+        if now < self._temporal_unavailable_until:
             return False
-        self._temporal_probe_at = time.monotonic()
+        if now - self._temporal_probe_at < 30:
+            return False
+        self._temporal_probe_at = now
         try:
             from app.agents.orchestration.temporal.client import get_temporal_client
 
             await get_temporal_client()
             self._temporal_available = True
+            self._temporal_unavailable_until = 0.0
             logger.info("Temporal 已连接: {}", settings.TEMPORAL_ADDRESS)
         except Exception as exc:  # noqa: BLE001
+            # 开发环境/临时降级时，Temporal 不可用不应给每个办公任务增加连接超时。
+            # 失败后较长时间负缓存，服务恢复后重启或管理员健康检查即可重新探测。
+            self._temporal_unavailable_until = now + 300
             logger.warning("Temporal 不可用（{}），多智能体任务回退自建 DAG", exc)
         return self._temporal_available
 
@@ -163,15 +183,30 @@ class AgentOrchestrator:
         llm_api_key: str | None = None,
         clarification_answer: str | None = None,
         office_docs: list[dict] | None = None,
+        user_role: str = "user",
     ) -> Job:
         """规划任务树并启动执行（Temporal 优先），立即返回 Job."""
+        submission_material = {
+            "request": request,
+            "scene": scene,
+            "conversation_id": conversation_id,
+            "project_id": project_id,
+            "project_ids": sorted(str(x) for x in (project_ids or [])),
+            "office_docs": sorted(
+                str(d.get("doc_id")) for d in (office_docs or []) if d.get("doc_id")
+            ),
+            "clarification_answer": clarification_answer,
+        }
+        submission_key = hashlib.sha256(
+            json.dumps(submission_material, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
         # 幂等：30 秒内相同请求且任务未结束 → 直接返回（防双击/重复提交）
         try:
             for jid in await self._store.list_job_ids(user_id, 5):
                 j = await self._store.get_job(jid)
                 if (
                     j
-                    and j.request == request
+                    and j.submission_key == submission_key
                     and time.time() - (j.created_at or 0) < 30
                     and j.status
                     in (JobStatus.RUNNING, JobStatus.PENDING, JobStatus.WAITING_APPROVAL)
@@ -180,6 +215,72 @@ class AgentOrchestrator:
                     return j
         except Exception:  # noqa: BLE001
             pass
+        submission_lock = self._submission_locks.setdefault(user_id, asyncio.Lock())
+        async with submission_lock:
+            # 锁内再次检查幂等，覆盖两个并发双击请求同时通过锁外检查的竞态。
+            try:
+                for jid in await self._store.list_job_ids(user_id, 5):
+                    existing = await self._store.get_job(jid)
+                    if (
+                        existing
+                        and existing.submission_key == submission_key
+                        and time.time() - (existing.created_at or 0) < 30
+                        and existing.status
+                        in (JobStatus.RUNNING, JobStatus.PENDING, JobStatus.WAITING_APPROVAL)
+                    ):
+                        return existing
+            except Exception:  # noqa: BLE001
+                pass
+            active_statuses = {
+                JobStatus.PENDING,
+                JobStatus.RUNNING,
+                JobStatus.PAUSED,
+                JobStatus.WAITING_APPROVAL,
+            }
+            active_jobs = [
+                job
+                for job in await self.list_jobs(user_id, 50)
+                if job.status in active_statuses
+            ]
+            if conversation_id and any(
+                job.conversation_id == conversation_id for job in active_jobs
+            ):
+                raise ActiveConversationJobError(
+                    "当前会话已有办公任务正在执行，请等待完成或主动终止任务。"
+                )
+            if len(active_jobs) >= 2:
+                raise UserJobLimitError("当前有任务正在进行中，请切换到普通模式对话")
+
+            return await self._submit_job_unlocked(
+                user_id=user_id,
+                request=request,
+                scene=scene,
+                conversation_id=conversation_id,
+                project_id=project_id,
+                project_ids=project_ids,
+                llm_api_key=llm_api_key,
+                clarification_answer=clarification_answer,
+                office_docs=office_docs,
+                user_role=user_role,
+                submission_key=submission_key,
+            )
+
+    async def _submit_job_unlocked(
+        self,
+        *,
+        user_id: str,
+        request: str,
+        scene: str,
+        conversation_id: str | None,
+        project_id: str | None,
+        project_ids: list[str] | None,
+        llm_api_key: str | None,
+        clarification_answer: str | None,
+        office_docs: list[dict] | None,
+        user_role: str,
+        submission_key: str,
+    ) -> Job:
+        """已持有用户提交锁时完成规划和任务创建。"""
         # 办公短期记忆：加载本会话此前任务的摘要，注入规划上下文
         prior_summaries = (
             await self._load_office_summaries(conversation_id) if conversation_id else ""
@@ -195,16 +296,24 @@ class AgentOrchestrator:
             office_docs,
             prior_summaries,
         )
+        self._prefer_atomic_steps(tree.nodes, request)
+        self._serialize_steps(tree.nodes)
         job = Job(
             job_id=str(uuid.uuid4()),
             user_id=user_id,
+            user_role=user_role,
             request=request,
             scene=scene,
             conversation_id=conversation_id,
+            submission_key=submission_key,
             status=JobStatus.RUNNING,
             nodes=tree.nodes,
             plan_text=tree.plan_text,
         )
+        from app.agents.orchestration.safety import prepare_node_safety
+
+        for node in job.nodes:
+            prepare_node_safety(node, user_id, job.job_id)
         # DAG 静态校验：agent 已注册 / 必选参数 / 无环 / id 唯一；
         # 校验失败 → 降级为知识库检索（简化流程），避免"LLM 瞎指挥"产生必失败的 DAG
         from app.agents.orchestration.dag import validate_planned_dag
@@ -219,8 +328,12 @@ class AgentOrchestrator:
                 TaskNode(
                     id=f"r{int(time.time())}-{uuid.uuid4().hex[:6]}",
                     name="知识库检索（规划降级）",
-                    agent="retrieval",
-                    params={"query": request, "top_k": 5},
+                    agent="atomic_step",
+                    params={
+                        "instruction": request,
+                        "preferred_tool": "query_knowledge",
+                        "inputs": {"query": request, "top_k": 5},
+                    },
                     depends_on=[],
                 )
             ]
@@ -259,6 +372,112 @@ class AgentOrchestrator:
         )
         return job
 
+    @staticmethod
+    def _prefer_atomic_steps(nodes, request: str) -> None:
+        """把常见办公角色节点迁移为无角色能力锁的通用原子步骤.
+
+        旧 agent/API 继续兼容；代码编写、脚本生成等复合实现暂保留专业执行器。
+        """
+        tool_map = {
+            "retrieval": "query_knowledge",
+            "web_research": "web_search",
+            "office_todo": "todo_manager",
+            "office_calendar": "calendar_manager",
+        }
+        text_tools = {
+            "email": "compose_email",
+            "doc": "compose_official_doc",
+            "rewrite": "rewrite_text",
+            "summary": "summarize_text",
+            "minutes": "meeting_minutes",
+            "extract": "extract_info",
+            "invoice": "invoice_parse",
+            "compliance": "compliance_check",
+        }
+        research_tools = {
+            "competitor": "competitor_analysis",
+            "document_qa": "document_qa",
+            "customer_service": "customer_service",
+            "daily_report": "daily_report",
+        }
+        doc_tools = {
+            "read": "office_doc_read",
+            "edit": "office_doc_edit",
+            "analyze": "office_doc_analyze",
+        }
+        system_tools = {
+            "open_app": "open_app",
+            "open_file": "open_file",
+            "open_url": "open_url",
+            "send_email": "send_email",
+            "ps": "ps",
+            "kill": "kill",
+            "env": "env",
+            "datetime": "get_datetime",
+            "curl": "curl",
+        }
+        for node in nodes:
+            preferred = tool_map.get(node.agent)
+            if node.agent == "office_text":
+                preferred = text_tools.get(str(node.params.get("task") or ""))
+            elif node.agent == "office_research":
+                preferred = research_tools.get(str(node.params.get("mode") or ""))
+            elif node.agent == "office_doc":
+                preferred = doc_tools.get(str(node.params.get("mode") or "read"))
+            elif node.agent == "office_system":
+                preferred = system_tools.get(str(node.params.get("task") or "open_app"))
+            if not preferred:
+                continue
+            old_agent = node.agent
+            original = dict(node.params or {})
+            instruction = str(
+                original.get("instruction")
+                or original.get("query")
+                or original.get("content")
+                or node.name
+                or request
+            )
+            node.agent = "atomic_step"
+            node.params = {
+                "instruction": instruction,
+                "preferred_tool": preferred,
+                "fallback_tools": (
+                    ["python_exec"]
+                    if preferred in {"office_doc_read", "office_doc_analyze"}
+                    else []
+                ),
+                "inputs": original,
+            }
+            node.metadata = {**(node.metadata or {}), "legacy_agent": old_agent}
+
+    @staticmethod
+    def _serialize_steps(nodes) -> None:
+        """按拓扑顺序把办公计划收敛为单链，确保任意时刻只执行一个原子步骤。"""
+        if len(nodes) < 2:
+            return
+        by_id = {node.id: node for node in nodes}
+        indegree = {node.id: 0 for node in nodes}
+        children = {node.id: [] for node in nodes}
+        for node in nodes:
+            for dep in node.depends_on:
+                if dep in by_id:
+                    indegree[node.id] += 1
+                    children[dep].append(node.id)
+        ready = [node.id for node in nodes if indegree[node.id] == 0]
+        ordered = []
+        while ready:
+            node_id = ready.pop(0)
+            ordered.append(by_id[node_id])
+            for child_id in children[node_id]:
+                indegree[child_id] -= 1
+                if indegree[child_id] == 0:
+                    ready.append(child_id)
+        if len(ordered) != len(nodes):
+            return
+        for index, node in enumerate(ordered):
+            node.depends_on = [] if index == 0 else [ordered[index - 1].id]
+        nodes[:] = ordered
+
     async def _submit_temporal(self, job: Job, llm_api_key: str | None) -> None:
         """启动 Temporal Workflow：payload = Job dict + 节点执行配置."""
         from app.agents.orchestration.temporal.client import (
@@ -270,7 +489,7 @@ class AgentOrchestrator:
         payload["config"] = {
             "node_timeout_seconds": settings.AGENT_NODE_TIMEOUT_SECONDS,
             "node_max_retries": settings.AGENT_NODE_MAX_RETRIES,
-            "node_concurrency": settings.AGENT_NODE_CONCURRENCY,
+            "node_concurrency": 1,
         }
         if llm_api_key:
             await store_byok_key(job.job_id, llm_api_key)
@@ -290,8 +509,47 @@ class AgentOrchestrator:
                 self._workers,
                 self._review,
                 self._store,
+                concurrency=1,
                 llm_api_key=llm_api_key,
             )
+            job = await self._store.get_job(job_id)
+            if job and job.status == JobStatus.COMPLETED and not job.result:
+                results = []
+                for node in job.nodes:
+                    value = node.result or {}
+                    content = value.get("content") or value.get("output") or ""
+                    if content:
+                        results.append(
+                            {
+                                "agent": node.agent,
+                                "title": node.name or node.agent,
+                                "content": str(content)[:30000],
+                            }
+                        )
+                # 只有两个及以上步骤或明确没有最终回答时才需要额外汇总模型调用。
+                # 单一步骤（如脚本转换）直接采用步骤产出，省一次完整上下文的模型请求。
+                if len(results) == 1:
+                    job.result = {"final_answer": results[0]["content"]}
+                    await self._store.save_job(job)
+                elif results:
+                    try:
+                        from app.agents.orchestration.temporal.activities import (
+                            synthesize_final_answer_activity,
+                        )
+
+                        synthesized = await synthesize_final_answer_activity(
+                            {
+                                "user_id": job.user_id,
+                                "job_id": job.job_id,
+                                "request": job.request,
+                                "nodes": results,
+                            }
+                        )
+                        if synthesized.get("final_answer"):
+                            job.result = synthesized
+                            await self._store.save_job(job)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("legacy DAG 最终答案汇总失败 {}: {}", job_id, exc)
         except DagValidationError as exc:
             logger.error("任务 DAG 非法 {}: {}", job_id, exc)
             job = await self._store.get_job(job_id)

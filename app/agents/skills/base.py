@@ -60,6 +60,8 @@ class Skill(ABC):
     requires_confirmation: bool = False  # 高危操作需用户确认（client 通道）
     scenes: list[str] = []              # 可用场景白名单，空 = 全场景
     write_op: bool = False              # 是否写操作（发消息/改文件/装依赖等外部副作用；渐进开放时隐藏）
+    idempotent: bool = True              # 相同参数重复执行是否安全
+    resource_templates: list[str] = []   # 如 project:{project_id}:file:{path}
     # 参数 JSON Schema（LLM 调用时校验参数用），空 dict 表示无参数
     parameters_schema: dict = Field(default_factory=dict)
 

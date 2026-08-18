@@ -7,7 +7,13 @@ import pytest
 
 from app.agents.sandbox.local import LocalSandbox
 from app.agents.skills.base import Skill, SkillResult
-from app.agents.skills.executor import execute_tool_call, get_skills_for_scene, run_skill_loop, skills_to_tools
+from app.agents.skills.executor import (
+    execute_tool_call,
+    get_skills_for_scene,
+    get_tools_for_scene,
+    run_skill_loop,
+    skills_to_tools,
+)
 from app.agents.skills.registry import SkillRegistry
 
 
@@ -55,6 +61,27 @@ def test_tool_definition_shape():
     ws = by_name["web_search"]
     assert ws["parameters"]["required"] == ["query"]
     assert "type" in ws["parameters"]
+
+
+def test_unified_tools_include_system_and_mcp(monkeypatch):
+    import app.agents.mcp.manager as mcp_manager
+
+    async def fake_list_all_tools():
+        return [
+            {
+                "name": "mcp__desktop__open_local",
+                "server": "desktop",
+                "raw_name": "open_local",
+                "description": "打开本地资源",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ]
+
+    monkeypatch.setattr(mcp_manager, "list_all_tools", fake_list_all_tools)
+    tools = asyncio.run(get_tools_for_scene("office"))
+    names = {t["function"]["name"] for t in tools}
+    assert "get_datetime" in names
+    assert "mcp__desktop__open_local" in names
 
 
 class _EchoSkill(Skill):
@@ -119,6 +146,27 @@ class _FakeClientSkill(Skill):
 
     async def execute(self, params, context=None):
         return SkillResult(success=True, output="client-done")
+
+
+class _AdminSkill(Skill):
+    name = "admin_only_test"
+    description = "admin only"
+    permission = "admin"
+    scenes = ["office"]
+
+    async def execute(self, params, context=None):
+        return SkillResult(success=True, output="admin-done")
+
+
+def test_admin_skill_is_filtered_and_enforced(monkeypatch):
+    SkillRegistry.register(_AdminSkill())
+    assert "admin_only_test" not in {s.name for s in get_skills_for_scene("office", "user")}
+    assert "admin_only_test" in {s.name for s in get_skills_for_scene("office", "admin")}
+    tc = {"id": "a", "function": {"name": "admin_only_test", "arguments": {}}}
+    denied = asyncio.run(execute_tool_call(tc, "u1", "office", user_role="user"))
+    allowed = asyncio.run(execute_tool_call(tc, "u1", "office", user_role="admin"))
+    assert denied.error_code == "FORBIDDEN"
+    assert allowed.success is True
 
 
 def test_client_skill_confirmation_not_blocked(monkeypatch):

@@ -34,6 +34,13 @@ class JobStatus(str, Enum):
     WAITING_APPROVAL = "waiting_approval"  # 等待人工审批
 
 
+class ResourceClaim(BaseModel):
+    """节点对外部资源的访问声明；同资源 write 与任何访问互斥。"""
+
+    key: str
+    mode: str = "read"  # read / write
+
+
 class TaskNode(BaseModel):
     """DAG 中的一个任务节点."""
 
@@ -52,6 +59,9 @@ class TaskNode(BaseModel):
     started_at: float | None = None
     completed_at: float | None = None
     metadata: dict = Field(default_factory=dict)
+    resource_claims: list[ResourceClaim] = Field(default_factory=list)
+    idempotency_key: str | None = None
+    effect_status: str | None = None  # pending / committed / failed / uncertain
     # 审批门控：高风险写操作（发邮件/改系统/付款等）需人工确认后才执行
     approval: bool = False
     approval_note: str = ""
@@ -62,9 +72,11 @@ class Job(BaseModel):
 
     job_id: str
     user_id: str
+    user_role: str = "user"
     request: str                  # 用户原始请求
     scene: str = "office"
     conversation_id: str | None = None  # 关联会话（办公短期记忆：跨任务记住上一步做了什么）
+    submission_key: str | None = None  # 请求+会话+文档等输入的幂等指纹
     status: JobStatus = JobStatus.PENDING
     nodes: list[TaskNode] = Field(default_factory=list)
     result: dict | None = None    # 汇总结果（如最终回复）
@@ -72,6 +84,7 @@ class Job(BaseModel):
     error: str | None = None
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
+    revision: int = 0
 
 
 class ReviewVerdict(BaseModel):

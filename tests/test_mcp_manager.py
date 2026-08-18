@@ -17,7 +17,24 @@ class _FakeSession:
         self.calls = []
 
     async def list_tools(self):
-        return type("R", (), {"tools": [type("T", (), {"name": "a", "description": "A"})()]})()
+        return type(
+            "R",
+            (),
+            {
+                "tools": [
+                    type(
+                        "T",
+                        (),
+                        {
+                            "name": "a",
+                            "description": "A",
+                            "annotations": {"readOnlyHint": True, "idempotentHint": True},
+                            "meta": {"lumi": {"resource_templates": ["filesystem:{path}"]}},
+                        },
+                    )()
+                ]
+            },
+        )()
 
     async def call_tool(self, name, args):
         self.calls.append((name, args))
@@ -35,7 +52,20 @@ def test_list_tools_mapping(monkeypatch):
 
     monkeypatch.setattr(manager, "_call_with_session", fake_call_with_session)
     tools = asyncio.run(manager.list_tools("srv"))
-    assert tools == [{"name": "a", "description": "A"}]
+    assert tools == [
+        {
+            "name": "a",
+            "description": "A",
+            "input_schema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": True, "idempotentHint": True},
+            "permission": "user",
+            "write_op": False,
+            "requires_confirmation": False,
+            "confirmation_mode": "client",
+            "idempotent": True,
+            "resource_templates": ["filesystem:{path}"],
+        }
+    ]
 
 
 def test_call_tool_mapping(monkeypatch):
@@ -62,3 +92,9 @@ def test_call_tool_failure_returns_none(monkeypatch):
 
     monkeypatch.setattr(manager, "_call_with_session", fake_call_with_session)
     assert asyncio.run(manager.call_tool("srv", "ok", {})) is None
+
+
+def test_close_all_only_resets_failure_cooldown():
+    manager._failed_until["srv"] = 123.0
+    asyncio.run(manager.close_all())
+    assert manager._failed_until == {}

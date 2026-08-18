@@ -32,13 +32,13 @@ def _json_safe(obj):
         }
 
 
-@activity.defn
-async def execute_node_activity(payload: dict) -> dict:
+async def _execute_node_activity_inner(payload: dict) -> dict:
     """执行单个任务节点：定位 worker → 执行 → 质检 → React 重试."""
     node_data = payload.get("node") or {}
     job_id = str(payload.get("job_id") or "")
     user_id = str(payload.get("user_id") or "")
     scene = str(payload.get("scene") or "office")
+    user_role = str(payload.get("user_role") or "user")
     cfg = payload.get("config") or {}
     timeout = int(cfg.get("node_timeout_seconds") or 300)
     max_retries = int(cfg.get("node_max_retries") or 2)
@@ -54,10 +54,21 @@ async def execute_node_activity(payload: dict) -> dict:
         }
 
     node = TaskNode.model_validate(node_data)
+    node.metadata = dict(node.metadata or {})
+    from app.agents.orchestration.context import sanitize_dependency_result
+
+    node.metadata["dependency_results"] = {
+        str(dep_id): sanitize_dependency_result(value)
+        for dep_id, value in (payload.get("dependency_results") or {}).items()
+    }
     review = get_reviewer()
     llm_api_key = await load_byok_key(job_id) if job_id else None
     ctx = WorkerContext(
-        user_id=user_id, job_id=job_id, scene=scene, llm_api_key=llm_api_key
+        user_id=user_id,
+        job_id=job_id,
+        scene=scene,
+        user_role=user_role,
+        llm_api_key=llm_api_key,
     )
 
     for attempt in range(max_retries + 1):
@@ -135,6 +146,63 @@ async def execute_node_activity(payload: dict) -> dict:
             "error_code": "REVIEW_REJECTED",
             "retries": attempt,
         }
+
+
+@activity.defn
+async def execute_node_activity(payload: dict) -> dict:
+    """带资源互斥和副作用幂等保护的节点 Activity。"""
+    from app.agents.orchestration.effects import begin_effect, finish_effect
+    from app.agents.orchestration.resources import resource_coordinator
+    from app.agents.orchestration.safety import is_effectful, prepare_node_safety
+
+    node = TaskNode.model_validate(payload.get("node") or {})
+    job_id = str(payload.get("job_id") or "")
+    user_id = str(payload.get("user_id") or "")
+    cfg = payload.get("config") or {}
+    prepare_node_safety(node, user_id, job_id)
+    payload = {**payload, "node": node.model_dump()}
+    effectful = is_effectful(node)
+    if effectful:
+        # 副作用工具只执行一次；崩溃后的 Temporal 级重试由 effect journal 拦截。
+        cfg = {**cfg, "node_max_retries": 0}
+        payload = {**payload, "config": cfg}
+
+    if effectful and node.idempotency_key:
+        created, existing = await begin_effect(node.idempotency_key)
+        if not created:
+            if str((existing or {}).get("status")) == "committed":
+                return {
+                    "status": "completed",
+                    "result": (existing or {}).get("result"),
+                    "retries": 0,
+                    "effect_status": "committed",
+                }
+            return {
+                "status": "failed",
+                "result": None,
+                "error": "副作用步骤已开始但结果不确定，已停止自动重试以避免重复执行",
+                "error_code": "EFFECT_UNCERTAIN",
+                "retries": 0,
+                "effect_status": "uncertain",
+            }
+
+    timeout = int(cfg.get("node_timeout_seconds") or 300)
+    try:
+        async with resource_coordinator.claim(node.resource_claims, ttl=max(60, timeout + 60)):
+            out = await _execute_node_activity_inner(payload)
+    except BaseException:
+        if effectful and node.idempotency_key:
+            await finish_effect(node.idempotency_key, "uncertain")
+        raise
+
+    if effectful and node.idempotency_key:
+        if out.get("status") == "completed":
+            await finish_effect(node.idempotency_key, "committed", out.get("result"))
+            out["effect_status"] = "committed"
+        else:
+            await finish_effect(node.idempotency_key, "uncertain")
+            out["effect_status"] = "uncertain"
+    return out
 
 
 @activity.defn

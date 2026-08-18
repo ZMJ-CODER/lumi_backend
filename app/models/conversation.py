@@ -16,9 +16,17 @@ class SendMessageRequest(BaseModel):
         default=None, description="会话 ID（流式接口从请求体取；阻塞接口走路径参数）"
     )
     content: str = Field(..., description="消息内容")
+    display_content: str | None = Field(
+        default=None,
+        description="用户可见的原始消息；content 可额外携带文档上下文，但不得用于气泡展示",
+    )
     scene: str = Field(default="office")
     local_mode: bool = Field(default=False)
     attachments: list = Field(default_factory=list)
+    office_docs: list[dict] = Field(
+        default_factory=list,
+        description="办公模式挂载的结构化文档，仅 office 场景交给 DAG Planner",
+    )
     guest_id: str | None = Field(default=None, description="游客身份标识（未登录时由前端生成，登录后忽略）")
     retrieval_query: str | None = Field(
         default=None,

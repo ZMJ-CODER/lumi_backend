@@ -18,6 +18,39 @@ def test_detect_kind():
     assert office_docs.detect_kind("a.md") == "text"
 
 
+def test_extract_full_text_formats_csv_eml_and_ics(monkeypatch, tmp_path):
+    monkeypatch.setattr(office_docs, "OFFICE_DIR", tmp_path / "office")
+    user = "u1"
+
+    csv_meta = office_docs.create_session(
+        user, "scores.csv", "姓名,成绩\n张三,95\n李四,88".encode("gb18030")
+    )
+    csv_text = office_docs.extract_full_text(user, csv_meta["doc_id"])
+    assert "表头：姓名 | 成绩" in csv_text
+    assert "第1行：张三 | 95" in csv_text
+
+    eml = (
+        "From: sender@example.com\r\nTo: user@example.com\r\n"
+        "Subject: Test mail\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+        "邮件正文内容"
+    ).encode("utf-8")
+    eml_meta = office_docs.create_session(user, "mail.eml", eml)
+    eml_text = office_docs.extract_full_text(user, eml_meta["doc_id"])
+    assert "发件人：sender@example.com" in eml_text
+    assert "邮件正文内容" in eml_text
+
+    ics = (
+        "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:项目会议\r\n"
+        "DTSTART;TZID=Asia/Shanghai:20260820T093000\r\n"
+        "DESCRIPTION:讨论\\,预算与排期\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    ).encode("utf-8")
+    ics_meta = office_docs.create_session(user, "calendar.ics", ics)
+    ics_text = office_docs.extract_full_text(user, ics_meta["doc_id"])
+    assert "事件1：项目会议" in ics_text
+    assert "开始：2026-08-20 09:30" in ics_text
+    assert "说明：讨论,预算与排期" in ics_text
+
+
 def test_extract_doc_text_rtf_masquerade(tmp_path):
     f = tmp_path / "fake.doc"
     f.write_bytes(b"{\\rtf1\\ansi Hello \\b World\\b0 }")
@@ -117,3 +150,68 @@ def test_office_script_agent_passes_doc_ids(monkeypatch):
     assert captured["skill"] == "python_exec"
     assert captured["params"]["doc_ids"] == ["d1", "d2"]
     assert res["outputs"][0]["name"] == "out.csv"
+
+
+def test_analyze_doc_limits_direct_prompt_and_output(monkeypatch):
+    captured = {}
+
+    async def fake_ensure(*args, **kwargs):
+        return {}
+
+    async def fake_compute(fn, *args):
+        return "x" * 12_001
+
+    async def fake_index(*args, **kwargs):
+        return {}
+
+    class DummySession:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *args):
+            return False
+
+    async def fake_search(*args, **kwargs):
+        return "y" * 30_000, []
+
+    async def fake_llm(context, system, user, **kwargs):
+        captured["user"] = user
+        captured["max_tokens"] = kwargs["max_tokens"]
+        return "answer"
+
+    monkeypatch.setattr(office_docs, "ensure_session", fake_ensure)
+    monkeypatch.setattr("app.core.executors.run_in_compute", fake_compute)
+    monkeypatch.setattr(office_docs, "ensure_rag_index", fake_index)
+    monkeypatch.setattr("app.core.database.async_session_factory", lambda: DummySession())
+    monkeypatch.setattr("app.services.rag.knowledge.search_user_knowledge", fake_search)
+    monkeypatch.setattr("app.services.office_skill_utils.office_llm", fake_llm)
+
+    result = asyncio.run(office_docs.analyze_doc("u1", "d1", "总结"))
+
+    assert result["answer"] == "answer"
+    assert captured["max_tokens"] == 1800
+    assert len(captured["user"].split("文档片段：\n", 1)[1]) == 24_000
+
+
+def test_office_script_generation_uses_one_llm_call(monkeypatch):
+    from app.agents.core.base import WorkerContext
+    from app.agents.roles.office.agents import OfficeScriptAgent
+
+    calls = []
+
+    class FakeLLM:
+        async def chat(self, messages, **kwargs):
+            calls.append((messages, kwargs))
+            return "print('ok')"
+
+    monkeypatch.setattr("app.core.llm.LLMClient", FakeLLM)
+
+    code = asyncio.run(
+        OfficeScriptAgent()._generate_script(
+            "把成绩表导出为摘要 CSV", ["scores.csv"], WorkerContext(user_id="u1", job_id="j1")
+        )
+    )
+
+    assert code == "print('ok')"
+    assert len(calls) == 1
+    assert calls[0][1]["max_tokens"] == 4000

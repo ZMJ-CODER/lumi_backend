@@ -20,6 +20,16 @@ def _node(agent: str, name: str, params: dict, depends_on: list[str] | None = No
     }
 
 
+def _usable_docs(office_docs: list[dict] | None, params: dict | None = None) -> list[dict]:
+    """返回有 doc_id 的文档列表；params.doc_ids 指定时只保留指定文档."""
+    docs = [d for d in (office_docs or []) if str(d.get("doc_id") or "")]
+    doc_ids = params and params.get("doc_ids")
+    if doc_ids:
+        ids = {str(x) for x in doc_ids}
+        docs = [d for d in docs if str(d.get("doc_id")) in ids]
+    return docs
+
+
 class FlowTemplate:
     """流程模板基类."""
 
@@ -50,9 +60,10 @@ class DocumentAnalysisFlow(FlowTemplate):
     }
 
     def build(self, request, params, office_docs=None):
-        docs = office_docs or []
-        if params.get("doc_ids"):
-            docs = [d for d in docs if str(d.get("doc_id")) in params.get("doc_ids", [])]
+        docs = _usable_docs(office_docs, params)
+        if not docs:
+            # 没有可处理的文档：模板不适用，返回空让规划器走自由规划/澄清
+            return []
         task = str(params.get("task") or "qa")
         mode = str(params.get("mode") or ("summary" if task == "summary" else "qa"))
         nodes = []
@@ -95,7 +106,9 @@ class InvoiceFilterFlow(FlowTemplate):
     }
 
     def build(self, request, params, office_docs=None):
-        docs = office_docs or []
+        docs = _usable_docs(office_docs, params)
+        if not docs:
+            return []
         threshold = params.get("threshold") or 10000
         alert = params.get("alert_threshold") or 50000
         notify = str(params.get("notify") or "财务")
@@ -181,7 +194,9 @@ class DocumentCompareFlow(FlowTemplate):
     }
 
     def build(self, request, params, office_docs=None):
-        docs = office_docs or []
+        docs = _usable_docs(office_docs, params)
+        if not docs:
+            return []
         dims = str(params.get("dimensions") or "主要内容与差异")
         nodes = []
         reader_ids = []
@@ -226,7 +241,9 @@ class DocumentCombineFlow(FlowTemplate):
     }
 
     def build(self, request, params, office_docs=None):
-        docs = office_docs or []
+        docs = _usable_docs(office_docs, params)
+        if not docs:
+            return []
         output = str(params.get("output") or "summary")
         nodes = []
         reader_ids = []
@@ -270,7 +287,9 @@ class DocumentTranslateFlow(FlowTemplate):
     parameters_schema = {"target_lang": "目标语言（如 英文/中文/日文）"}
 
     def build(self, request, params, office_docs=None):
-        docs = office_docs or []
+        docs = _usable_docs(office_docs, params)
+        if not docs:
+            return []
         target = str(params.get("target_lang") or "中文")
         nodes = []
         reader_ids = []

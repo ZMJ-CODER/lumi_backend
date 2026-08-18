@@ -184,9 +184,13 @@ class AgentDagWorkflow:
         nodes = self._nodes()
         pending = set(nodes)
         completed: set[str] = set()
+        running: dict[str, asyncio.Task] = {}
 
-        while pending:
+        while pending or running:
             if self._cancel_requested:
+                for task in running.values():
+                    task.cancel()
+                await asyncio.gather(*running.values(), return_exceptions=True)
                 self._finalize_cancelled()
                 return
             if self._paused:
@@ -200,7 +204,9 @@ class AgentDagWorkflow:
                 for nid in pending
                 if all(d in completed for d in nodes[nid].get("depends_on") or [])
             ]
-            if not ready:
+            capacity = max(0, max(1, cfg["node_concurrency"]) - len(running))
+            batch = ready[:capacity]
+            if not batch and not running:
                 # 依赖链断裂：其余节点标记跳过
                 for nid in pending:
                     nodes[nid]["status"] = STATUS_SKIPPED
@@ -208,8 +214,6 @@ class AgentDagWorkflow:
                     nodes[nid]["completed_at"] = self._now()
                 self._finalize()
                 return
-
-            batch = ready[: max(1, cfg["node_concurrency"])]
 
             # 审批门控（Human-in-the-Loop）：高风险节点先暂停，等待人工审批后再执行
             runnable = []
@@ -235,26 +239,31 @@ class AgentDagWorkflow:
                     node["status"] = STATUS_SKIPPED
                     node["error"] = "用户拒绝审批"
                     node["completed_at"] = self._now()
+                    pending.discard(nid)
                 self._job["status"] = JOB_RUNNING
 
-            node_tasks = {asyncio.create_task(self._run_node(nodes[nid])) for nid in runnable}
+            for nid in runnable:
+                pending.discard(nid)
+                running[nid] = asyncio.create_task(self._run_node(nodes[nid]))
 
-            # 等待：本批全部结束 或 暂停/取消信号到达。
-            # wait_condition 是确定性原语（活动完成 / 信号到达都会唤醒并重新求值），
-            # 避免使用 asyncio.wait（沙箱会告警非确定性）。
+            if not running:
+                continue
+
+            # 等待：任一步骤结束即推进它的后继；无依赖的同批步骤继续独立运行。
+            # Workflow 使用 wait_condition 保持确定性。
             await workflow.wait_condition(
-                lambda node_tasks=node_tasks: all(t.done() for t in node_tasks)
+                lambda running=running: any(t.done() for t in running.values())
                 or self._cancel_requested
                 or self._paused
             )
 
             if self._cancel_requested:
-                for t in node_tasks:
+                for t in running.values():
                     t.cancel()
-                await asyncio.gather(*node_tasks, return_exceptions=True)
+                await asyncio.gather(*running.values(), return_exceptions=True)
                 # 兜底：批内未完成的节点统一标记为中断（_finalize_cancelled
                 # 再按 keep_completed 决定 CANCELLED / INTERRUPTED）
-                for nid in batch:
+                for nid in list(running):
                     n = nodes[nid]
                     if n.get("status") not in (STATUS_COMPLETED,):
                         n["status"] = STATUS_INTERRUPTED
@@ -263,16 +272,15 @@ class AgentDagWorkflow:
                 self._finalize_cancelled()
                 return
 
-            # 本批执行完毕（暂停时也等本批跑完，暂停只影响后续批次）
-            await asyncio.gather(*node_tasks, return_exceptions=True)
-
-            for nid in batch:
-                pending.discard(nid)
+            finished = [nid for nid, task in running.items() if task.done()]
+            for nid in finished:
+                task = running.pop(nid)
+                await asyncio.gather(task, return_exceptions=True)
                 if nodes[nid].get("status") == STATUS_COMPLETED:
                     completed.add(nid)
 
             # 审查/测试打回：不合格代码返回给上游 writer 重写（带反馈，最多 MAX_REVIEW_LOOPS 轮）
-            for nid in batch:
+            for nid in finished:
                 node = nodes[nid]
                 rejection = _review_rejection(node)
                 if not rejection:
@@ -388,8 +396,14 @@ class AgentDagWorkflow:
         payload = {
             "job_id": self._job.get("job_id", ""),
             "user_id": self._job.get("user_id", ""),
+            "user_role": self._job.get("user_role", "user"),
             "scene": self._job.get("scene", "office"),
             "node": node,
+            "dependency_results": {
+                dep_id: (self._nodes().get(dep_id) or {}).get("result")
+                for dep_id in (node.get("depends_on") or [])
+                if (self._nodes().get(dep_id) or {}).get("status") == STATUS_COMPLETED
+            },
             "config": cfg,
         }
         try:
@@ -420,6 +434,8 @@ class AgentDagWorkflow:
         node["error"] = out.get("error")
         node["error_code"] = out.get("error_code")
         node["retries"] = int(out.get("retries") or 0)
+        if out.get("effect_status"):
+            node["effect_status"] = out.get("effect_status")
         node["completed_at"] = self._now()
 
     def _finalize(self) -> None:

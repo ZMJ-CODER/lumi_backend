@@ -24,6 +24,7 @@ class WorkerContext:
     user_id: str
     job_id: str
     scene: str = "office"
+    user_role: str = "user"
     # BYOK：agent 任务提交时临时携带的 API key（内存持有，任务结束即释放，不落库）
     llm_api_key: str | None = None
 
@@ -35,7 +36,9 @@ class WorkerAgent(ABC):
     description: str = ""
     # 规划器提示词用的参数说明（新增 agent 时填写，规划器会自动展示并允许调度）
     params_help: str = ""
-    skills: list[str] = []  # 该 agent 可调用的技能名（白名单）
+    # 兼容元数据：用于描述角色的常用技能，不再作为运行时白名单。
+    # 能力边界统一由 scene / permission / confirmation / write_op 策略决定。
+    skills: list[str] = []
 
     @abstractmethod
     async def execute(self, node: "TaskNode", ctx: WorkerContext) -> dict:
@@ -47,8 +50,12 @@ class WorkerAgent(ABC):
         skill = SkillRegistry.get(skill_name)
         if skill is None:
             return {"success": False, "error": f"技能不存在: {skill_name}", "error_code": "SKILL_NOT_FOUND"}
-        if self.skills and skill_name not in self.skills:
-            return {"success": False, "error": f"agent '{self.name}' 无权调用技能 {skill_name}", "error_code": "FORBIDDEN"}
+        if not skill.supports_scene(ctx.scene):
+            return {
+                "success": False,
+                "error": f"技能 {skill_name} 不支持场景 {ctx.scene}",
+                "error_code": "FORBIDDEN",
+            }
         # 规则引擎：硬逻辑动态校验（必填字段/阈值/权限），不交给 LLM
         from app.agents.rules import check_rules
 
@@ -59,14 +66,18 @@ class WorkerAgent(ABC):
                 "error": "规则校验未通过：" + "；".join(violations[:3]),
                 "error_code": "RULE_VIOLATION",
             }
-        result = await skill.execute(
-            params,
-            SkillContext(
-                user_id=ctx.user_id,
-                scene=ctx.scene,
-                conversation_id=ctx.job_id,
-                llm_api_key=ctx.llm_api_key,
-            ),
+        from app.agents.skills.executor import execute_tool_call
+
+        result = await execute_tool_call(
+            {
+                "id": f"worker-{self.name}-{skill_name}",
+                "type": "function",
+                "function": {"name": skill_name, "arguments": params},
+            },
+            ctx.user_id,
+            ctx.scene,
+            ctx.job_id,
+            user_role=ctx.user_role,
         )
         if not result.success:
             return {"success": False, "error": result.error, "error_code": result.error_code}

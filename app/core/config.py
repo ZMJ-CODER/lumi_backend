@@ -176,7 +176,7 @@ class Settings(BaseSettings):
     AGENT_SANDBOX_TIMEOUT_SECONDS: int = 30
     AGENT_SANDBOX_MAX_OUTPUT_CHARS: int = 8000
     AGENT_SKILLS_MAX_ROUNDS: int = 5     # 技能调用循环最大轮数（防死循环）
-    AGENT_CLIENT_TOOL_TIMEOUT_SECONDS: int = 120  # 客户端工具等待用户执行/确认的最长时间
+    AGENT_CLIENT_TOOL_TIMEOUT_SECONDS: int = 45  # 客户端工具等待用户执行/确认的最长时间（过长会让任务卡在思维链）
     AGENT_REVIEW_ENABLED: bool = False   # activity 级质检开关：与 writer 自检 + reviewer 节点重复，
                                          # 默认关闭省一次 LLM 调用/节点；需要可改回 True
     SKILL_PLUGINS_DIR: str = "plugins/skills"     # 技能插件目录（Docker 挂载为 volume 支持热更新）

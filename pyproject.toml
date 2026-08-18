@@ -34,6 +34,8 @@ dependencies = [
     "torch>=2.13.0",
     "torchvision>=0.28.0",
     "docling>=2.118.0",
+    "pypdf>=5.0.0",
+    "striprtf>=0.0.20",
     "jieba>=0.42.1",
     # ── 语音（ASR + TTS 兜底）──
     "openai-whisper>=20250625",
@@ -56,6 +58,10 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "ruff>=0.5.0",
 ]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
 
 # 不强制默认索引为国内镜像：CI（GitHub Actions）访问清华源会 403。
 # 本机想用镜像时通过环境变量覆盖：UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
@@ -115,3 +121,11 @@ extend-immutable-calls = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# 禁用 pytest 缓存：Windows 上 .pytest_cache 目录权限异常会导致每次运行报
+# PytestCacheWarning（WinError 5 拒绝访问），本项目不需要 --lf/--ff 等缓存功能。
+addopts = "-p no:cacheprovider"
+# 屏蔽第三方包（jieba 等）的无效转义序列 SyntaxWarning，避免测试输出刷屏；
+# 本项目代码的转义问题已由 ruff W605 把关。
+filterwarnings = [
+  "ignore:invalid escape sequence.*:SyntaxWarning",
+]

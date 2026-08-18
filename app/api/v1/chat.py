@@ -30,6 +30,10 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.core.exceptions import UnauthorizedException
+from app.agents.orchestration.orchestrator import (
+    ActiveConversationJobError,
+    UserJobLimitError,
+)
 from app.models.conversation import SendMessageRequest
 from app.services.orchestrator import orchestrator
 
@@ -104,9 +108,11 @@ async def chat_stream(
                 local_mode=req.local_mode,
                 retrieval_query=req.retrieval_query,
                 attachments=req.attachments,
+                office_docs=req.office_docs,
                 llm_api_key=llm_api_key,
                 thinking_mode=req.thinking_mode,
                 reply_style=req.reply_style,
+                user_role=payload.get("role", "user"),
             ):
                 if evt["type"] == "delta":
                     full_text += evt["content"]
@@ -123,6 +129,7 @@ async def chat_stream(
                         "content": result.get("content", ""),
                         "segments": result.get("segments"),
                         "citations": result.get("citations") or [],
+                        "steps": result.get("steps") or [],
                         "title": result.get("title") or "",
                     }
                     await _persist_messages(db, conv, req, persist_result)
@@ -139,6 +146,10 @@ async def chat_stream(
                             )
                         )
                         _active_tts_tasks[user_id] = task
+        except (ActiveConversationJobError, UserJobLimitError) as exc:
+            status = 409 if isinstance(exc, ActiveConversationJobError) else 429
+            code = "OFFICE_JOB_CONFLICT" if status == 409 else "OFFICE_JOB_LIMIT"
+            yield _sse({"type": "error", "message": str(exc), "status": status, "code": code})
         except Exception as exc:  # noqa: BLE001
             logger.warning("流式聊天失败: {}", exc)
             # 流式中断：仍持久化用户消息 + 已生成的部分回复，避免多端同步丢失

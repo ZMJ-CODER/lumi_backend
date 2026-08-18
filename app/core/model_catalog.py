@@ -11,6 +11,25 @@
 
 from app.core.config import settings
 
+def _configured_model(
+    *, model_id: str, provider: str, description: str, supports_reasoning_effort: bool = True
+) -> dict:
+    """Build one selector item from a model actually configured on this server."""
+    return {
+        "id": model_id,
+        "name": model_id,
+        "provider": provider,
+        "context_window": 131072,
+        "multimodal": False,
+        "supports_reasoning_effort": supports_reasoning_effort,
+        "price_input_per_million": 0.0,
+        "price_output_per_million": 0.0,
+        "description": description,
+    }
+
+
+# Kept as metadata fallbacks for deployments which deliberately expose aliases.
+# get_model_catalog() always adds the concrete .env models first.
 MODEL_CATALOG: list[dict] = [
     {
         "id": "deepseek-v4-flash",
@@ -68,12 +87,32 @@ PROVIDER_BASE_URLS: dict[str, str] = {
 
 
 def get_model_catalog() -> list[dict]:
-    """返回模型目录（拷贝，避免调用方误改）."""
-    return [dict(m) for m in MODEL_CATALOG]
+    """Return models callable by this deployment, without disclosing API keys."""
+    configured: list[dict] = []
+    if settings.DEEPSEEK_API_KEY and settings.DEEPSEEK_MODEL:
+        configured.append(
+            _configured_model(
+                model_id=settings.DEEPSEEK_MODEL,
+                provider="deepseek",
+                description="服务端 .env 已配置的 DeepSeek 模型",
+            )
+        )
+    if settings.QWEN_API_KEY and settings.QWEN_MODEL:
+        configured.append(
+            _configured_model(
+                model_id=settings.QWEN_MODEL,
+                provider="qwen",
+                description="服务端 .env 已配置的通义千问模型",
+            )
+        )
+
+    # Do not show aliases that cannot be executed with the current provider
+    # settings. A BYOK user can still enter an arbitrary model in the UI.
+    return configured
 
 
 def find_model(model_id: str) -> dict | None:
-    for m in MODEL_CATALOG:
+    for m in get_model_catalog():
         if m["id"] == model_id:
             return m
     return None

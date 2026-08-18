@@ -84,6 +84,27 @@ OCR / Docling / Embedding / Whisper / TTS 全部从默认 `asyncio.to_thread` �
   收益有限且有事务语义风险（全局会话可能写），**未全局采用**；高频只读接口
   后续可按需局部使用。
 
+## 四、第四轮：Linux Docker 容器对比（2026-08-17）
+
+环境：Docker Desktop (WSL2) + RTX 4060（容器内 CUDA 可用），连宿主机
+Postgres/Redis（host.docker.internal），与 Windows 同脚本、同并发压测。
+
+| 场景 | Windows 单进程（队列日志） | Linux 1 worker | Linux 4 worker |
+| --- | --- | --- | --- |
+| health 并发 20 | ~200 RPS | **982 RPS** | **1467 RPS** |
+| health 并发 50 | ~290 RPS | **970 RPS** | **1206 RPS** |
+| health 并发 100 | — | 882 RPS | **1382 RPS** |
+| /user/me 并发 10 | 76 RPS | 76 RPS | **95 RPS** |
+| /user/me 并发 50 | 28~69 RPS | 59 RPS（p50 620ms） | **79 RPS（p50 118ms）** |
+
+结论：
+1. **Linux 解决了"队列日志仍拖慢事件循环"的 Windows 特有问题**：1 worker 下
+   health 达到 900~980 RPS（≈ Windows 关访问日志的水平，且日志完整保留）。
+2. **多 worker 在 Linux 同样线性扩展**：4 worker health 并发 100 → 1382 RPS。
+3. **DB 接口瓶颈跨平台存在**：/user/me 单进程 59~76 RPS、4 worker 79~95 RPS——
+   SQLAlchemy 异步连接池锁竞争在 Linux 依旧，不是 Windows 专属；并发大时建议多 worker。
+4. 容器到宿主机 DB 单查询约 1ms（host.docker.internal 跳转），占比不大。
+
 ## 二、发现并修复的问题
 
 ### 1. OCR / Docling 同步阻塞事件循环（最严重）

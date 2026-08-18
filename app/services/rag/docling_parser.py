@@ -28,6 +28,18 @@ os.environ.setdefault("DOCLING_INFERENCE_COMPILE_TORCH_MODELS", "false")
 # 禁用进度条（若 tqdm 尚未 import 则生效）。
 os.environ.setdefault("TQDM_DISABLE", "1")
 
+# huggingface_hub 的 HF_HUB_DISABLE_XET / HF_ENDPOINT 在 constants 模块 import 时即被冻结。
+# 应用启动时 embedding（sentence-transformers）已先导入 huggingface_hub，此时再 setdefault
+# 环境变量不生效，模型下载仍走 XET CAS（cas-server.xethub.hf.co）→ 国内网络 401 失败。
+# 这里直接改写其常量，保证无论 import 顺序都走镜像的普通 HTTP 下载。
+try:
+    import huggingface_hub.constants as _hf_const  # noqa: PLC0415
+
+    _hf_const.HF_HUB_DISABLE_XET = True
+    _hf_const.HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+except Exception:  # noqa: BLE001
+    pass
+
 _converter = None
 _lock = threading.Lock()
 

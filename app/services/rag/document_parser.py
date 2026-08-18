@@ -2,6 +2,8 @@
 
 from datetime import datetime
 from pathlib import Path
+import csv
+import io
 
 
 # 支持的纯文本扩展名
@@ -123,7 +125,8 @@ def parse_ics(file_path: str) -> str:
     in_event = False
     for line in lines:
         key, _, value = line.partition(":")
-        key = key.upper().strip()
+        # DTSTART;TZID=Asia/Shanghai 等属性不属于字段名本身。
+        key = key.split(";", 1)[0].upper().strip()
         if key == "BEGIN" and value.strip().upper() == "VEVENT":
             cur = {}
             in_event = True
@@ -138,7 +141,13 @@ def parse_ics(file_path: str) -> str:
             "SUMMARY", "DTSTART", "DTEND", "LOCATION", "DESCRIPTION", "STATUS",
         ):
             continue
-        cur[key] = value.strip()
+        cur[key] = (
+            value.strip()
+            .replace("\\n", "\n")
+            .replace("\\,", ",")
+            .replace("\\;", ";")
+            .replace("\\\\", "\\")
+        )
 
     out: list[str] = []
     for i, ev in enumerate(events, 1):
@@ -174,16 +183,39 @@ def parse_file(file_path: str, filename: str | None = None) -> str:
         )
 
     raw = Path(file_path).read_bytes()
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        # 兜底：常见中文编码
-        for encoding in ("gb18030", "utf-8-sig", "big5"):
-            try:
-                return raw.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-        raise ValueError("文件编码无法识别（支持 UTF-8 / GB18030）") from None
+    text = None
+    # utf-8-sig 放在 utf-8 前，顺便移除 CSV/文本常见 BOM。
+    for encoding in ("utf-8-sig", "utf-8", "gb18030", "big5"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        raise ValueError("文件编码无法识别（支持 UTF-8 / GB18030 / Big5）")
+    if ext in {".csv", ".tsv"}:
+        return _format_delimited_text(text, delimiter="\t" if ext == ".tsv" else None)
+    return text
+
+
+def _format_delimited_text(text: str, delimiter: str | None = None) -> str:
+    """CSV/TSV 转成带行号的稳定表格文本，保留引号、换行字段和列关系。"""
+    sample = text[:8192]
+    if delimiter is None:
+        try:
+            delimiter = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+        except csv.Error:
+            delimiter = ","
+    rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    if not rows:
+        return "（空表格）"
+    width = max(len(row) for row in rows)
+    header = rows[0] + [""] * (width - len(rows[0]))
+    lines = ["表头：" + " | ".join(str(cell).strip() for cell in header)]
+    for index, row in enumerate(rows[1:], 1):
+        padded = row + [""] * (width - len(row))
+        lines.append(f"第{index}行：" + " | ".join(str(cell).strip() for cell in padded))
+    return "\n".join(lines)
 
 
 def parse_document(file_path: str, filename: str | None = None) -> str:

@@ -658,7 +658,11 @@ def extract_full_text(user_id: str, doc_id: str) -> str:
         from app.services.rag.document_parser import parse_document
 
         return parse_document(str(path), meta["filename"])
-    return path.read_text(encoding="utf-8", errors="replace")
+    # 文本类统一走解析入口：CSV/TSV 保留表格列关系，EML 解 MIME 正文，
+    # ICS 展开事件字段，同时获得 UTF-8/GB18030/Big5 编码兜底。
+    from app.services.rag.document_parser import parse_document
+
+    return parse_document(str(path), meta["filename"])
 
 
 def _full_docx(path: Path) -> str:
@@ -1160,8 +1164,10 @@ async def analyze_doc(
         from app.core.executors import run_in_compute
 
         full_text = await run_in_compute(extract_full_text, user_id, doc_id)
-        if full_text and len(full_text) <= settings.OFFICE_DOC_FULL_TEXT_LIMIT:
-            # 小文档：全文直接注入，避免 RAG 相似度阈值漏召回
+        # 小文件全文注入虽避免了检索漏召回，但直接给模型塞到 2 万字符会明显拉高
+        # 每个原子步骤的输入 token。上限以模型输入预算为准，超过后走已存在的 RAG 分块。
+        direct_limit = min(settings.OFFICE_DOC_FULL_TEXT_LIMIT, 12_000)
+        if full_text and len(full_text) <= direct_limit:
             rag_text = full_text
             citations = []
         else:
@@ -1201,8 +1207,10 @@ async def analyze_doc(
     answer = await office_llm(
         SkillContext(user_id=user_id, scene="office", llm_api_key=api_key),
         system,
-        f"用户问题/指令：{instruction}\n\n文档片段：\n{rag_text[:60000]}",
-        max_tokens=6000,
+        f"用户问题/指令：{instruction}\n\n文档片段：\n{rag_text[:24000]}",
+        # 文档原子步骤只需提供可供下游汇总的事实，最终整合由后续步骤完成。
+        # 限制输出可避免每份文档都生成超长报告，串行 DAG 的等待与 token 成本随之下降。
+        max_tokens=1800,
     )
     return {
         "answer": answer,

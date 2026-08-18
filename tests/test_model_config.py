@@ -7,16 +7,22 @@ from app.core.llm_config import _resolve_user_cfg, get_llm_config
 from app.core.model_catalog import PROVIDER_BASE_URLS, find_model, get_model_catalog
 
 
-def test_catalog_contains_four_models():
+def test_catalog_contains_env_configured_models():
     catalog = get_model_catalog()
     ids = [m["id"] for m in catalog]
-    assert ids == ["deepseek-v4-flash", "deepseek-v4-pro", "qwen3-8-max", "qwen3-7-plus"]
+    expected = []
+    if settings.DEEPSEEK_API_KEY and settings.DEEPSEEK_MODEL:
+        expected.append(settings.DEEPSEEK_MODEL)
+    if settings.QWEN_API_KEY and settings.QWEN_MODEL:
+        expected.append(settings.QWEN_MODEL)
+    assert ids == expected
     for m in catalog:
         assert m["context_window"] > 0
         assert "multimodal" in m
         assert "supports_reasoning_effort" in m
         assert m["price_input_per_million"] >= 0
-    assert find_model("deepseek-v4-pro")["provider"] == "deepseek"
+    if settings.DEEPSEEK_API_KEY:
+        assert find_model(settings.DEEPSEEK_MODEL)["provider"] == "deepseek"
     assert find_model("not-exist") is None
 
 
@@ -38,7 +44,7 @@ def test_resolve_user_cfg_byok():
 def test_resolve_user_cfg_server_key():
     cfg = asyncio.run(
         _resolve_user_cfg(
-            {"provider": "qwen", "model": "qwen3-8-max", "byok": False},
+            {"provider": "qwen", "model": settings.QWEN_MODEL, "byok": False},
             provider=None,
         )
     )
@@ -51,12 +57,12 @@ def test_resolve_user_cfg_server_key():
 def test_get_llm_config_prefers_user_layer(monkeypatch):
     async def fake_user_cfg(user_id):
         assert user_id == "u-123"
-        return {"provider": "deepseek", "model": "deepseek-v4-flash", "byok": False}
+        return {"provider": "deepseek", "model": settings.DEEPSEEK_MODEL, "byok": False}
 
     import app.services.user_llm_config as ulc
 
     monkeypatch.setattr(ulc, "get_user_llm_config", fake_user_cfg)
     cfg = asyncio.run(get_llm_config(scene="chat", user_id="u-123"))
     assert cfg["source"] == "user"
-    assert cfg["model"] == "deepseek-v4-flash"
+    assert cfg["model"] == settings.DEEPSEEK_MODEL
     assert cfg["base_url"] == settings.DEEPSEEK_BASE_URL

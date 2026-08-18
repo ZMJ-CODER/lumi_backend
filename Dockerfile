@@ -4,7 +4,15 @@ FROM python:3.13-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    # Docling / HF 模型下载：走国内镜像的普通 HTTP（禁用 XET 协议，XET CAS 国内 401），
+    # 且必须在进程启动前设置（huggingface_hub 在 import 时冻结这些常量）
+    HF_ENDPOINT=https://hf-mirror.com \
+    HF_HUB_DISABLE_XET=1 \
+    HF_HUB_DISABLE_SYMLINKS_WARNING=1 \
+    TQDM_DISABLE=1 \
+    DOCLING_INFERENCE_COMPILE_TORCH_MODELS=false \
+    HF_HOME=/app/.cache/huggingface
 
 # 系统依赖：编译工具、时区、OpenMP（torch/sentence-transformers 需要）
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,6 +48,17 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 # 说明：此处 pip install -e . 不会再降级 torch——2.13.0+cu126 满足 torch>=2.13.0（PEP 440 忽略本地版本段）。
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -e .
+
+# ── Docling 模型预热（可选，默认关闭）──
+# 默认不预下载：构建期拉取约 1GB 模型容易卡住/失败；运行时环境变量已修好，
+# 首次解析扫描件 PDF 时会自动按需下载（HF_HOME=/app/.cache/huggingface）。
+# 需要完全离线运行时再开启：
+#   docker build --build-arg PRELOAD_DOCLING_MODELS=true ...
+ARG PRELOAD_DOCLING_MODELS=false
+RUN if [ "$PRELOAD_DOCLING_MODELS" = "true" ]; then \
+        docling-tools models download \
+        || echo "Docling 模型预热失败（构建继续，运行时按需下载）"; \
+    fi
 
 # 源码最后复制 —— 源码改动只触发本层及以下层，依赖层不受影响
 COPY app ./app

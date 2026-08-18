@@ -310,51 +310,15 @@ class OfficeScriptAgent(WorkerAgent):
             }
 
     async def _generate_script(self, task: str, doc_names: list[str], ctx: WorkerContext) -> str:
-        """两阶段生成脚本：先伪代码（逻辑层）→ 再基于伪代码写 Python 代码（实现层）.
-
-        策略：解耦"逻辑设计"与"语法实现"——
-        第一步先让模型用自然语言描述实现步骤（读取什么/怎么处理/输出什么），
-        逻辑错了可以低成本修正；逻辑通了再"翻译"成代码，避免直接写代码时
-        陷入语法细节反复试错。
-        """
+        """一次调用生成可执行脚本，避免逻辑稿与代码稿两次串行模型往返。"""
         from app.core.llm import LLMClient
         from app.services.usage import CATEGORY_PLAN
 
         llm = LLMClient()
         doc_line = "、".join(doc_names) or "（无）"
 
-        # ── 第一步：逻辑层（伪代码，禁止写代码） ──
-        logic_prompt = (
-            "你是办公脚本设计器。先不要写任何代码，用自然语言把任务的实现步骤描述清楚：\n"
-            "1. 数据来源：读取什么（文件/环境变量里的路径）；\n"
-            "2. 处理逻辑：如何转换/计算/批量处理（循环、判断、清洗）；\n"
-            "3. 输出：产物文件名与写入哪个目录。\n"
-            "要求步骤清晰、可执行，但要足够抽象（不涉及具体语法）。\n"
-            f"任务：{task}\n"
-            f"涉及文档：{doc_line}\n"
-            "只输出分步逻辑描述，不要输出任何代码。"
-        )
-        try:
-            logic = await llm.chat(
-                [{"role": "user", "content": logic_prompt}],
-                scene=ctx.scene,
-                max_tokens=1500,
-                temperature=0.2,
-                usage_user_id=ctx.user_id,
-                usage_category=CATEGORY_PLAN,
-                disable_reasoning_effort=True,
-                api_key=ctx.llm_api_key,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[Agent:office_script] 伪代码生成失败: {}", exc)
-            return ""
-        logic = (logic or "").strip()
-        if not logic:
-            return ""
-
-        # ── 第二步：实现层（基于伪代码写 Python 代码） ──
         code_prompt = (
-            "你是 Python 脚本实现器。根据下面已确认的逻辑步骤，编写完整、可直接运行的 Python 代码。\n"
+            "你是 Python 脚本实现器。先在内部规划，再只输出完整、可直接运行的 Python 代码。\n"
             "环境约定：\n"
             '- 文档通过 os.environ["LUMI_DOC_PATHS"] 读取，是 JSON（文件名→绝对路径）；\n'
             '- 产物写入 os.environ["LUMI_DOC_OUTPUT_DIRS"] 对应文件名的目录；\n'
@@ -368,15 +332,15 @@ class OfficeScriptAgent(WorkerAgent):
             "严禁写到当前工作目录或相对路径；\n"
             "- 产物文件名用文档原名（去扩展名）命名，如 销售数据.xlsx → 销售数据.csv；\n"
             "- 脚本必须是纯 Python 代码，能直接执行。\n"
-            f"逻辑步骤：\n{logic}\n"
             f"任务：{task}\n"
+            f"涉及文档：{doc_line}\n"
             "只输出 Python 代码（不要 Markdown 围栏、不要任何解释）。"
         )
         try:
             reply = await llm.chat(
                 [{"role": "user", "content": code_prompt}],
                 scene=ctx.scene,
-                max_tokens=5000,
+                max_tokens=4000,
                 temperature=0.1,
                 usage_user_id=ctx.user_id,
                 usage_category=CATEGORY_PLAN,

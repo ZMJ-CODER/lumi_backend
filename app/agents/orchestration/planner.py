@@ -95,33 +95,8 @@ class RulePlanner(Planner):
                             ],
                             plan_text=f"按脚本任务执行：{request}",
                         )
-        # 办公文档任务（规则回退）：带文档 → 直接建 office_doc 分析节点
-        if office_docs:
-            from app.agents.core.registry import AgentRegistry
-
-            if AgentRegistry.get("office_doc") is not None:
-                mem_suffix = f"\n（此前已完成的任务摘要：{prior_summaries}）" if prior_summaries else ""
-                nodes = []
-                for d in office_docs or []:
-                    doc_id = str(d.get("doc_id") or "")
-                    if not doc_id:
-                        continue
-                    nodes.append(
-                        TaskNode(
-                            id=f"od{int(time.time())}-{uuid.uuid4().hex[:6]}-{len(nodes)}",
-                            name=f"分析文档 {d.get('filename') or doc_id[:8]}",
-                            agent="office_doc",
-                            params={
-                                "doc_id": doc_id,
-                                "instruction": request + mem_suffix,
-                                "mode": "analyze",
-                                "analyze_mode": "qa",
-                            },
-                            depends_on=[],
-                        )
-                    )
-                if nodes:
-                    return TaskTree(nodes=nodes)
+        # 带文档时仍继续进入模板/模式/自由规划，允许“先读文档再写邮件、建待办”等
+        # 真正的多步骤 DAG；文档遗漏由下方确定性兜底节点补齐。
         resolved_project = (
             project_id
             or (project_ids[0] if project_ids else None)
@@ -209,6 +184,16 @@ def _build_planner_prompt() -> str:
     """构建规划器提示词（agent 清单由注册表动态生成）."""
     return (
         "你是任务规划器。把用户请求拆解为任务计划。\n"
+        "默认使用 atomic_step，把任务拆成可独立提交、可独立失败/重试的原子步骤。"
+        "每个 atomic_step 只允许一个唯一目标、最多一次 Skill/MCP 调用；需要读后再写、搜索后再总结时必须拆成多个节点。"
+        "所有步骤必须按用户叙述的顺序串行执行：除第一个步骤外，每一步都 depends_on 前一步，禁止并行。"
+        "必须覆盖用户请求中的每一个动作；上传文档只提供上下文，不能让文档分析任务吞掉打开应用、写文件、发邮件等独立指令。"
+        "atomic_step 可以调用当前 office 场景的本地 Skill、system Skill 和 MCP 工具，"
+        "但规划时必须唯一指定 preferred_tool，执行器只会向模型暴露这一个工具。"
+        "params 用 {\"instruction\":\"本步骤唯一目标\",\"preferred_tool\":\"首选工具名\",\"fallback_tools\":[\"不同原理的备用工具\"],\"inputs\":{}}。"
+        "为可能失败的读取、解析、转换步骤规划不同原理的 fallback_tools，例如结构化读取失败后可用 python_exec 脚本导出或解析；备用工具不得与首选工具重复。"
+        "涉及同一文件、文档、日历或待办的步骤必须通过 depends_on 表达逻辑顺序；"
+        "执行器还会根据输入自动声明资源读写锁。\n"
         "可用执行 agent：\n"
         + _agent_prompt_lines()
         + "\n代码任务建议按文件拆分节点，便于前端逐步展示进度：\n"
@@ -411,9 +396,14 @@ class LlmPlanner(Planner):
             if agent not in _known_agents():
                 continue
             params = dict(t.get("params") or {})
-            if agent == "retrieval":
+            if agent == "atomic_step":
+                params["instruction"] = str(params.get("instruction") or t.get("name") or request)
+                params["fallback_tools"] = [
+                    str(name) for name in (params.get("fallback_tools") or []) if str(name).strip()
+                ][:2]
+            elif agent == "retrieval":
                 params.setdefault("query", request)
-            elif agent in _known_agents()[1:]:
+            elif agent.startswith("code"):
                 pid = params.get("project_id") or project_id
                 if not pid and len(projects) == 1:
                     pid = projects[0]["id"]

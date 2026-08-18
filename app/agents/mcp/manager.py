@@ -26,7 +26,6 @@ from app.core.config import settings
 # 连接失败冷却：Electron 未启动/后端先于前端启动时，避免每次调用都重试并刷日志
 _RETRY_COOLDOWN_S = 30.0
 _failed_until: dict[str, float] = {}
-_locks: dict[str, asyncio.Lock] = {}
 
 
 def _server_cfg(name: str) -> dict | None:
@@ -46,18 +45,17 @@ async def _call_with_session(
         return None
     if name in _failed_until and time.monotonic() < _failed_until[name]:
         return None
-    lock = _locks.setdefault(name, asyncio.Lock())
     try:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
 
-        # 串行化：同一服务器的短会话逐个建立（Electron 端单会话简化）
-        async with lock:
-            async with streamable_http_client(str(cfg["url"])) as streams:
-                read_stream, write_stream = streams
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    return await fn(session)
+        # 每次调用使用独立短会话。不同 DAG 步骤之间不共享 session，也不使用
+        # 全局服务器锁，因此没有依赖关系的步骤可以真正并行执行。
+        async with streamable_http_client(str(cfg["url"])) as streams:
+            read_stream, write_stream = streams
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                return await fn(session)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[MCP] 调用服务器 {} 失败（将回退轮询）: {}", name, exc)
         _failed_until[name] = time.monotonic() + _RETRY_COOLDOWN_S
@@ -69,10 +67,80 @@ async def list_tools(name: str) -> list[dict]:
 
     async def _list(session) -> list[dict]:
         res = await session.list_tools()
-        return [{"name": t.name, "description": t.description} for t in (res.tools or [])]
+        result = []
+        for t in (res.tools or []):
+            annotations_obj = getattr(t, "annotations", None)
+            annotations = (
+                annotations_obj.model_dump(exclude_none=True)
+                if hasattr(annotations_obj, "model_dump")
+                else dict(annotations_obj or {})
+            )
+            meta_obj = getattr(t, "meta", None) or getattr(t, "_meta", None) or {}
+            meta = (
+                meta_obj.model_dump(exclude_none=True)
+                if hasattr(meta_obj, "model_dump")
+                else dict(meta_obj or {})
+            )
+            lumi = dict((meta or {}).get("lumi") or {})
+            has_lumi = bool(lumi)
+            read_only = bool(annotations.get("readOnlyHint", annotations.get("read_only_hint", False)))
+            destructive = bool(
+                annotations.get("destructiveHint", annotations.get("destructive_hint", False))
+            )
+            idempotent = bool(
+                annotations.get("idempotentHint", annotations.get("idempotent_hint", False))
+            )
+            result.append({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": getattr(t, "inputSchema", None)
+                or getattr(t, "input_schema", None)
+                or {"type": "object", "properties": {}},
+                "annotations": annotations,
+                "permission": str(lumi.get("permission") or "user"),
+                "write_op": bool(lumi.get("write_op", destructive or not read_only)),
+                "requires_confirmation": bool(
+                    lumi.get("requires_confirmation", destructive or (not read_only and not has_lumi))
+                ),
+                "confirmation_mode": str(
+                    lumi.get("confirmation_mode") or ("client" if has_lumi else "server")
+                ),
+                "idempotent": bool(lumi.get("idempotent", idempotent or read_only)),
+                "resource_templates": list(lumi.get("resource_templates") or []),
+            })
+        return result
 
     result = await _call_with_session(name, _list)
     return result if isinstance(result, list) else []
+
+
+async def list_all_tools() -> list[dict]:
+    """并发发现全部 MCP 工具，并生成不会与本地 Skill 冲突的限定名."""
+    servers = [s for s in (settings.MCP_SERVERS or []) if s.get("name")]
+    if not servers:
+        return []
+    discovered = await asyncio.gather(
+        *(list_tools(str(server["name"])) for server in servers),
+        return_exceptions=True,
+    )
+    result: list[dict] = []
+    for server, tools in zip(servers, discovered, strict=False):
+        if isinstance(tools, Exception):
+            continue
+        server_name = str(server["name"])
+        for tool in tools:
+            raw_name = str(tool.get("name") or "")
+            if not raw_name:
+                continue
+            result.append(
+                {
+                    **tool,
+                    "server": server_name,
+                    "raw_name": raw_name,
+                    "name": f"mcp__{server_name}__{raw_name}",
+                }
+            )
+    return result
 
 
 async def call_tool(name: str, tool_name: str, args: dict | None = None) -> dict | None:
@@ -105,4 +173,3 @@ async def call_tool(name: str, tool_name: str, args: dict | None = None) -> dict
 async def close_all() -> None:
     """清理（短会话无持久连接；重置失败冷却，便于下次重试）."""
     _failed_until.clear()
-    _locks.clear()

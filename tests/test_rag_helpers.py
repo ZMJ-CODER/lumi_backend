@@ -1,11 +1,14 @@
 """RAG 混合检索核心逻辑测试（不依赖数据库/模型）."""
 
+import asyncio
+
 from app.services.rag.knowledge import (
     _extract_keywords,
     _hybrid_fuse,
     _passes_similarity_gate,
     _scope_conditions,
 )
+from app.services.rag.query_rewriter import _rewrite_local
 
 
 def test_extract_keywords_chinese_phrase():
@@ -51,3 +54,10 @@ def test_scope_conditions_excludes_code():
     conds, params = _scope_conditions(None, [], need_embedding=False, exclude_categories=["code"])
     assert any("NOT IN" in c for c in conds)
     assert params["excl_cats"] == ["code"]
+
+
+def test_local_query_rewriter_rejects_vision_model(monkeypatch):
+    from app.services.rag import query_rewriter
+
+    monkeypatch.setattr(query_rewriter.settings, "RAG_QUERY_REWRITE_MODEL", "qwen2.5vl:7b")
+    assert asyncio.run(_rewrite_local("查找合同")) is None

@@ -5,7 +5,7 @@
 | 环节 | 主路径 | 降级路径 | 触发条件 |
 | --- | --- | --- | --- |
 | 任务编排 | Temporal Workflow | 自建 DAG（legacy 后台任务） | Temporal 不可用 / 提交失败 |
-| 客户端技能 | Electron MCP 直连 | Redis 轮询（客户端轮询执行） | MCP 未配置 / 连接失败 |
+| 客户端技能 | Electron MCP Streamable HTTP | Redis 轮询（客户端轮询执行） | MCP 未配置 / 连接失败 / 熔断 |
 | 聊天回复 | 主 LLM 供应商 | 备用供应商（`LLM_FALLBACK_PROVIDER`） | 连接/超时/5xx/空内容 |
 | RAG 检索 | 向量 + 关键词 RRF 融合 | 仅关键词 / 仅向量 / 空上下文 | 嵌入模型不可用 / 阈值过滤后无结果 |
 | 嵌入模型 | bge-m3 (CUDA) | CPU 推理；失败则跳过语义检索 | CUDA 不可用 / 模型加载失败 |
@@ -22,9 +22,9 @@
 ## 重试策略
 
 - Celery 任务：`max_retries=3`，指数退避（文档处理/记忆提取/会话裁剪）。
-- Temporal 节点：`AGENT_NODE_MAX_RETRIES`（默认 2），失败自动重试。
+- Temporal / legacy 节点：`AGENT_NODE_MAX_RETRIES`（默认 1），由 LangGraph 按错误类型执行有界重试或换工具；不可逆副作用不重放。
 - LLM 供应商降级：单次失败即切换备用，不再重试主供应商（避免双重延迟）。
-- 客户端工具：MCP 失败立即回退轮询，不做多次重连尝试（轮询本身每秒一次）。
+- 客户端工具：MCP 按 server 复用会话、30 秒失败冷却与熔断；不可用时回退 Redis 轮询。任务取消或 MCP deadline 到期会发送标准取消通知并停止本地等待。
 
 ## 幂等设计
 

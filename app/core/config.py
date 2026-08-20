@@ -37,6 +37,21 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_GENERAL_PER_MINUTE: int = 300   # 通用接口：每 IP 每分钟（客户端轮询 1s/次，需留余量）
     RATE_LIMIT_AUTH_PER_MINUTE: int = 20       # 登录/注册/验证码：更严
+    # 已登录用户的精细令牌桶：固定窗口仍保留作最外层 IP 防刷；以下限制按用户
+    # （游客按 IP）生效，避免一个正常的办公长任务被其他会话的请求挤占。
+    RATE_LIMIT_USER_ENABLED: bool = True
+    RATE_LIMIT_CHAT_STREAM_CAPACITY: int = 12
+    RATE_LIMIT_CHAT_STREAM_REFILL_PER_MINUTE: float = 12.0
+    RATE_LIMIT_OFFICE_SUBMIT_CAPACITY: int = 4
+    RATE_LIMIT_OFFICE_SUBMIT_REFILL_PER_MINUTE: float = 2.0
+    RATE_LIMIT_UPLOAD_CAPACITY: int = 10
+    RATE_LIMIT_UPLOAD_REFILL_PER_MINUTE: float = 10.0
+
+    # 外部服务熔断：只统计网络、超时、429 和 5xx；认证/余额/参数错误必须直接反馈
+    # 给用户，不能因单个用户的配置错误把整条服务链路熔断。
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
+    CIRCUIT_BREAKER_RECOVERY_SECONDS: float = 30.0
+    CIRCUIT_BREAKER_HALF_OPEN_PROBE_SECONDS: float = 15.0
 
     # ── CORS ──
     CORS_ORIGINS: list[str] = ["*"]  # 生产环境收敛为具体域名（通配符时不允许带凭据）
@@ -79,14 +94,15 @@ class Settings(BaseSettings):
     # ── LLM: 千问 (Qwen) ──
     QWEN_API_KEY: str = ""
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    QWEN_MODEL: str = "qwen-plus"
+    QWEN_MODEL: str = "qwen-turbo"
     QWEN_VL_MODEL: str = "qwen-vl-plus"  # 多模态模型（普通聊天场景默认）
     QWEN_TURBO_MODEL: str = "qwen-turbo"  # 对话摘要等轻量任务
 
     # ── LLM: DeepSeek ──
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
-    DEEPSEEK_MODEL: str = "deepseek-chat"
+    # 办公/通用文本默认模型。V4 Flash / Pro 使用同一 DeepSeek 兼容接口和密钥。
+    DEEPSEEK_MODEL: str = "deepseek-v4-flash"
     # ── LLM: DS Flash（普通模式"快速"档 + 语音通话回复模型；支持 1M 上下文）──
     # 云端调用，省钱省时；空值自动复用 DEEPSEEK_* 配置
     DS_FLASH_BASE_URL: str = ""
@@ -101,11 +117,12 @@ class Settings(BaseSettings):
     VL_TIMEOUT: int = 120
     # ── LLM: 普通模式"思考"档（强模型，价格适中）──
     # 默认 qwen-plus：与现有千问密钥共用，性价比高、中文对话与推理能力强
-    CHAT_THINK_MODEL: str = "qwen-plus"
+    CHAT_THINK_MODEL: str = ""  # 空则复用 QWEN_MODEL
     CHAT_THINK_BASE_URL: str = ""  # 空则复用 QWEN_BASE_URL
     CHAT_THINK_API_KEY: str = ""   # 空则复用 QWEN_API_KEY
 
     # ── LLM 默认选用 ──
+    # 纯文本默认走 DeepSeek V4 Flash；本地 Ollama 的 qwen2.5vl 仅用于图像转文字。
     LLM_PROVIDER: str = "deepseek"  # qwen / deepseek
     LLM_FALLBACK_PROVIDER: str = ""  # 主供应商失败时自动切换（deepseek/qwen；空=不降级）
 
@@ -170,11 +187,26 @@ class Settings(BaseSettings):
     RAG_QUERY_REWRITE_MODEL: str = ""          # local 插槽：模型名；配置后自动走本地
     RAG_QUERY_REWRITE_TIMEOUT_SECONDS: int = 15
 
-    # ── 智能体技能与沙箱（预留，默认关闭）──
+    # ── 智能体技能与沙箱 ──
     AGENT_SKILLS_ENABLED: bool = True    # 技能调用开关（LLM 可请求调用技能；快速/思考档模型均支持 function calling）
-    AGENT_SANDBOX_TYPE: str = "local"    # 沙箱类型：local / docker / wasm（预留）
+    # docker 是生产默认值；Docker 未部署时 python_exec 会在能力目录中被隐藏。
+    AGENT_SANDBOX_TYPE: str = "docker"   # 沙箱类型：local / docker / wasm（预留）
+    # local 仅适合受信开发环境，并非安全边界；生产必须接入容器/WASM 沙箱。
+    AGENT_ALLOW_UNSAFE_LOCAL_SANDBOX: bool = False
     AGENT_SANDBOX_TIMEOUT_SECONDS: int = 30
     AGENT_SANDBOX_MAX_OUTPUT_CHARS: int = 8000
+    AGENT_SANDBOX_MAX_CODE_CHARS: int = 24000
+    # 防止单次脚本把容器 tmpfs 当作大文件转储通道；文件仍须由技能层显式声明交付。
+    AGENT_SANDBOX_MAX_ARTIFACT_FILES: int = 128
+    AGENT_SANDBOX_MAX_ARTIFACT_BYTES: int = 32 * 1024 * 1024
+    AGENT_SANDBOX_DOCKER_BINARY: str = "docker"
+    AGENT_SANDBOX_DOCKER_IMAGE: str = "lumi-python-sandbox:latest"
+    AGENT_SANDBOX_DOCKER_MEMORY: str = "512m"
+    AGENT_SANDBOX_DOCKER_CPUS: float = 0.5
+    AGENT_SANDBOX_DOCKER_PIDS_LIMIT: int = 64
+    # 与 API 容器 appuser UID/GID 一致，确保唯一可写的输出 bind mount 不需 root。
+    AGENT_SANDBOX_DOCKER_UID: int = 1000
+    AGENT_SANDBOX_DOCKER_GID: int = 1000
     AGENT_SKILLS_MAX_ROUNDS: int = 5     # 技能调用循环最大轮数（防死循环）
     AGENT_CLIENT_TOOL_TIMEOUT_SECONDS: int = 45  # 客户端工具等待用户执行/确认的最长时间（过长会让任务卡在思维链）
     AGENT_REVIEW_ENABLED: bool = False   # activity 级质检开关：与 writer 自检 + reviewer 节点重复，
@@ -183,14 +215,27 @@ class Settings(BaseSettings):
     # ── 多智能体协作编排 ──
     AGENT_JOBS_TTL_SECONDS: int = 86400           # 任务状态保留时间（24h，Redis appendonly 持久化）
     AGENT_NODE_CONCURRENCY: int = 2               # 同时执行的 DAG 节点数（资源协调上限）
-    AGENT_NODE_MAX_RETRIES: int = 2               # 单节点失败最大重试次数（React 重试）
-    AGENT_NODE_TIMEOUT_SECONDS: int = 300         # 单节点执行超时（5 分钟，对应断网策略）
+    AGENT_NODE_MAX_RETRIES: int = 1               # 单节点失败最大重试次数（React 重试）
+    AGENT_NODE_TIMEOUT_SECONDS: int = 120         # 单节点执行超时；避免一次失败拖成数分钟
+    # 办公规划是控制面，只需产出短 JSON。收紧预算和超时，避免简单指令被模型推理占满。
+    AGENT_PLANNER_MAX_TOKENS: int = 2048
+    AGENT_PLANNER_TIMEOUT_SECONDS: int = 45
+    AGENT_FINAL_ANSWER_MAX_TOKENS: int = 2500
+    # 办公任务准入背压（Redis 原子集合，跨 API worker 共享）。它们是准入上限，
+    # 不是内存排队：达到上限立即返回 429，让 Temporal/legacy 执行器自然消化任务。
+    AGENT_GLOBAL_ACTIVE_JOB_LIMIT: int = 32
+    AGENT_USER_ACTIVE_JOB_LIMIT: int = 2
+    AGENT_SUBMISSION_MAX_INFLIGHT: int = 8
+    AGENT_ADMISSION_LEASE_SECONDS: int = 7200
     # ── Temporal 编排（多智能体任务执行引擎）──
     AGENT_ORCHESTRATION: str = "temporal"         # temporal（默认）/ legacy（自建 DAG；Temporal 不可用时自动回退）
     TEMPORAL_ADDRESS: str = "localhost:7233"      # Temporal 前端 gRPC 地址
     TEMPORAL_NAMESPACE: str = "default"           # Temporal namespace
     TEMPORAL_TASK_QUEUE: str = "lumi-agents"      # Temporal 任务队列（worker 与客户端必须一致）
     TEMPORAL_BYOK_TTL_SECONDS: int = 43200        # BYOK key 临时存放 TTL（12h；任务正常结束即删除）
+    # 自定义 BYOK endpoint 默认只允许公网 http(s) 地址，避免云端部署被用作 SSRF。
+    # 仅桌面/受信任自托管场景需要 Ollama/LM Studio 时再显式开启。
+    BYOK_ALLOW_PRIVATE_BASE_URL: bool = False
     TEMPORAL_RUN_WORKER_INPROCESS: bool = True    # 后端进程内运行 Temporal Worker（IDE 一键运行后端即含 Worker）
     TEMPORAL_AUTO_START_SERVER: bool = True       # Worker 启动前自动拉起 Temporal 开发服务器（找不到 exe 则跳过）
     # 代码生成允许的最高推理档（渐进式：起始恒为 low，空内容/自检不过时自动升级到该档）。
@@ -217,6 +262,11 @@ class Settings(BaseSettings):
     # 混合架构：客户端技能通过 MCP 调用（可插拔）。配置：
     # [{"name": "lumi_client", "transport": "streamable-http", "url": "http://127.0.0.1:8765/mcp"}]
     MCP_SERVERS: list[dict] = []
+    # MCP 客户端发现缓存；工具 schema 变化时由客户端重启或显式刷新。
+    MCP_TOOLS_CACHE_TTL_S: float = 30.0
+    MCP_SESSION_IDLE_TIMEOUT_S: float = 600.0
+    MCP_MAX_SESSIONS_PER_SERVER: int = 8
+    MCP_TOOL_TIMEOUT_S: float = 180.0
 
     # ── 文档类别与按类别半衰期（不同知识时效性不同）──
     RAG_DEFAULT_CATEGORY: str = "general"   # 默认类别

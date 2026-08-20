@@ -140,6 +140,34 @@ Postgres/Redis（host.docker.internal），与 Windows 同脚本、同并发压�
 7. 设备资源低是正常现象：本架构是"延迟受限"而非"吞吐受限"，瓶颈在事件循环等待与
    连接池锁，不在 CPU/GPU/内存。
 
+### 外部依赖与办公任务保护（2026-08-19）
+
+- **外部依赖熔断**：LLM（按 `base_url + model` 隔离）、Tavily 与 MCP 在连续 5 次
+  网络/超时/429/5xx 失败后熔断 30 秒，半开仅放行一个探测调用。401、402、模型名错误等
+  用户配置问题不计入熔断；LLM 主链路熔断时仍可走已配置的备用供应商。
+- **精细令牌桶**：保留 IP 固定窗口作为最外层防刷，并新增按用户（游客按 IP）的令牌桶：
+  聊天流、办公提交、上传分组独立；`Retry-After` 会随 429 一起返回。SSE 仅在建连时消费一次。
+- **办公背压**：规划前最多允许 `AGENT_SUBMISSION_MAX_INFLIGHT` 个请求占用短槽位，
+  校验通过后提升为全局/用户活跃槽位。超过 `AGENT_GLOBAL_ACTIVE_JOB_LIMIT` 或用户上限会立即
+  返回 429，而非堆积在 API 内存；完成、失败、取消与投递失败均释放槽位，Redis TTL 负责宕机兜底。
+
+### 容器部署前检查
+
+主镜像会执行 `pip install .` 并在构建期导入 `temporalio`、`striprtf` 和应用入口；因此依赖清单或 wheel
+不完整会在镜像构建期失败，而不是首次请求才暴露。脚本沙箱镜像也会导入 `openpyxl`、`python-docx`、
+`python-pptx`。
+
+构建并启动前执行：
+
+```bash
+export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+docker compose --profile sandbox build sandbox-image
+docker compose up -d --build
+```
+
+挂载 Docker socket 等同宿主机高权限，只适用于受信任的自托管部署。公网多租户部署应将脚本沙箱替换为独立
+服务，而不是向 API 容器授予 Docker socket。
+
 ## 四、测试方法（可复现）
 
 - 登录：取验证码 → 读 Redis 答案 → POST /api/v1/auth/login（测试账号）。

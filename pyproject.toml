@@ -25,6 +25,9 @@ dependencies = [
     "celery[redis]>=5.4.0",
     "langchain>=0.3.0",
     "langchain-openai>=0.2.0",
+    "langgraph>=1.0.0",
+    # mcp 2.x API 有破坏性变更；manager.py 基于 1.x 的 streamable_http_client 实现
+    "mcp>=1.29.0,<2.0.0",
     "pgvector>=0.3.0",
     "alembic>=1.13.0",
     "content>=0.0.1",

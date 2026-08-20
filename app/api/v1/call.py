@@ -1,7 +1,7 @@
-"""语音通话接口 —— 复用 Whisper（ASR）+ 云端 DS Flash（回复）+ 流式 TTS.
+"""语音通话接口 —— 复用 Whisper（ASR）+ 云端千问（回复）+ 流式 TTS.
 
-- /call/turn    阻塞式一轮通话：语音 → 文本 → TTS 音频（一次性返回）
-- /call/stream  流式通话：DS 边输出短句边 TTS（豆包式实时语音），SSE 逐段返回音频
+  - /call/turn    阻塞式一轮通话：语音 → 文本 → TTS 音频（一次性返回）
+  - /call/stream  流式通话：模型边输出短句边 TTS（豆包式实时语音），SSE 逐段返回音频
 视频通话当前仅前端占位，后端暂不开放。
 """
 
@@ -40,12 +40,12 @@ class CallTurnRequest(BaseModel):
 
 
 def _call_model_cfg() -> dict:
-    """通话回复模型：云端 DS Flash（支持 1M 上下文）."""
+    """通话回复模型：服务端默认千问文本模型。"""
     return {
-        "base_url": (settings.DS_FLASH_BASE_URL or settings.DEEPSEEK_BASE_URL).rstrip("/"),
-        "api_key": settings.DS_FLASH_API_KEY or settings.DEEPSEEK_API_KEY,
-        "model": settings.DS_FLASH_MODEL or settings.DEEPSEEK_MODEL,
-        "timeout": float(settings.DS_FLASH_TIMEOUT),
+        "base_url": settings.QWEN_BASE_URL.rstrip("/"),
+        "api_key": settings.QWEN_API_KEY,
+        "model": settings.QWEN_MODEL,
+        "timeout": 120.0,
     }
 
 
@@ -97,7 +97,7 @@ def _sse(obj: dict) -> str:
 
 @router.post("/turn")
 async def call_turn(req: CallTurnRequest, payload: dict = Depends(require_auth)):
-    """一轮语音通话（阻塞）：语音/文本 → DS Flash 回复 → TTS 语音一次性返回."""
+    """一轮语音通话（阻塞）：语音/文本 → 千问回复 → TTS 语音一次性返回。"""
     user_id = str(payload["sub"])
     transcript = await _resolve_input(req)
     conversation_id = req.conversation_id or f"call-{user_id}"

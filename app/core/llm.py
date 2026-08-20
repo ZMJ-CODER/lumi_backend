@@ -1,80 +1,126 @@
-"""LLM 客户端封装 —— 配置动态化（Redis 优先，.env 兜底）.
+"""统一 LLM 门面：既有调用契约 + LangChain ChatModel 运行时。
 
-配置来源优先级:
-  1. 调用时显式传入的 model
-  2. Redis 动态配置（场景级 → 全局默认，进程内缓存 5 秒）
-  3. .env 兜底配置
-
-每次调用按当前配置创建短连接，避免配置更新后旧连接仍携带旧 base_url/api_key。
+业务代码可继续调用 ``LLMClient.chat/chat_stream/chat_with_tools``，但所有
+文本模型请求都通过 LangChain ``ChatOpenAI`` 执行。Embedding 属于独立 API，
+暂保留 OpenAI-compatible HTTP 调用，避免把 ChatModel 与向量接口混为一层。
 """
 
-import json
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
-from loguru import logger
 from httpx import AsyncClient
+from langchain_core.messages import AIMessage, BaseMessage, convert_to_messages
+from loguru import logger
 
+from app.agents.langchain.models import get_chat_model
 from app.core.config import settings
 from app.core.llm_config import get_llm_config
+from app.core.resilience import get_breaker, is_transient_dependency_error
 from app.services.usage import estimate_tokens, record_usage
 
 
 class LLMClient:
-    """异步 LLM 客户端，配置每次调用时动态读取."""
+    """兼容门面；所有 Chat API 统一转发给 LangChain。"""
 
     def __init__(self, provider: str | None = None) -> None:
-        # provider 仅用于 .env 兜底时的选择（兼容旧代码），实际配置以运行时为准
         self.provider = provider or settings.LLM_PROVIDER
         self._client: AsyncClient | None = None
 
     def _fallback_cfg(self) -> dict | None:
-        """备用供应商配置（LLM_FALLBACK_PROVIDER；未配置或与主供应商相同返回 None）."""
         provider = (settings.LLM_FALLBACK_PROVIDER or "").strip().lower()
         if not provider or provider == str(self.provider or "").lower():
             return None
         if provider == "deepseek":
-            return {
-                "base_url": settings.DEEPSEEK_BASE_URL,
-                "api_key": settings.DEEPSEEK_API_KEY,
-                "model": settings.DEEPSEEK_MODEL,
-            }
+            return {"base_url": settings.DEEPSEEK_BASE_URL, "api_key": settings.DEEPSEEK_API_KEY, "model": settings.DEEPSEEK_MODEL}
         if provider == "qwen":
-            return {
-                "base_url": settings.QWEN_BASE_URL,
-                "api_key": settings.QWEN_API_KEY,
-                "model": settings.QWEN_MODEL,
-            }
+            return {"base_url": settings.QWEN_BASE_URL, "api_key": settings.QWEN_API_KEY, "model": settings.QWEN_MODEL}
         return None
 
     @staticmethod
     def _is_retryable_error(exc: Exception) -> bool:
-        """可降级错误：连接/超时/5xx/空内容（4xx 参数类错误不降级）. """
         if isinstance(exc, RuntimeError) and "空内容" in str(exc):
             return True
         if isinstance(exc, httpx.HTTPStatusError):
             return exc.response.status_code >= 500 or exc.response.status_code in (401, 429)
         if isinstance(exc, (httpx.TransportError, httpx.TimeoutException)):
             return True
-        return False
+        name, text = type(exc).__name__.lower(), str(exc).lower()
+        return is_transient_dependency_error(exc) or any(
+            token in name or token in text
+            for token in ("timeout", "connection", "rate", "servererror", "503")
+        )
 
     @staticmethod
     def _has_tool_messages(messages: list[dict]) -> bool:
-        """消息里是否含工具调用（role=tool 或 assistant.tool_calls）."""
-        for m in messages or []:
-            if not isinstance(m, dict):
-                continue
-            if m.get("role") == "tool" or m.get("tool_calls"):
-                return True
-        return False
+        return any(isinstance(m, dict) and (m.get("role") == "tool" or m.get("tool_calls")) for m in messages or [])
 
     async def start(self) -> None:
-        """兼容保留：配置已改为每次调用动态获取，无需预建连接."""
+        """兼容保留：短生命周期 LangChain 模型无需显式启动。"""
 
     async def close(self) -> None:
-        """兼容保留."""
         if self._client:
             await self._client.aclose()
             self._client = None
+
+    async def _model(
+        self,
+        *,
+        scene: str | None,
+        user_id: str | None,
+        api_key: str | None,
+        model: str | None,
+        base_url: str | None,
+        timeout: float | None,
+        temperature: float | None,
+        max_tokens: int | None,
+        reasoning_effort: str | None,
+        disable_reasoning_effort: bool,
+        messages: list[dict],
+    ):
+        cfg = await get_llm_config(scene, self.provider, user_id=user_id)
+        selected_base_url = (base_url or cfg.get("base_url") or "").rstrip("/")
+        selected_api_key = api_key or cfg.get("api_key") or ""
+        selected_model = model or cfg.get("model") or settings.DEEPSEEK_MODEL
+        selected_timeout = float(timeout or cfg.get("timeout") or 120.0)
+        effort = None if (disable_reasoning_effort or self._has_tool_messages(messages)) else (reasoning_effort or cfg.get("reasoning_effort"))
+        return await get_chat_model(
+            scene=scene,
+            user_id=user_id,
+            api_key=selected_api_key,
+            model=selected_model,
+            base_url=selected_base_url,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=selected_timeout,
+            reasoning_effort=effort,
+        ), selected_model, selected_base_url
+
+    @staticmethod
+    def _message_text(reply: BaseMessage) -> str:
+        content = reply.content
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(str(part.get("text") or "") if isinstance(part, dict) else str(part) for part in content)
+        return str(content or "")
+
+    @staticmethod
+    def _usage(reply: BaseMessage) -> tuple[int | None, int | None]:
+        usage = getattr(reply, "usage_metadata", None) or {}
+        return usage.get("input_tokens") or usage.get("prompt_tokens"), usage.get("output_tokens") or usage.get("completion_tokens")
+
+    async def _record(self, reply: BaseMessage, *, messages: list[dict], user_id: str | None, category: str | None, model: str, text: str) -> None:
+        prompt_tokens, completion_tokens = self._usage(reply)
+        await record_usage(
+            user_id,
+            category or "chat",
+            model,
+            prompt_tokens if prompt_tokens is not None else sum(estimate_tokens(str(m.get("content") or "")) for m in messages),
+            completion_tokens if completion_tokens is not None else estimate_tokens(text),
+        )
 
     async def chat(
         self,
@@ -89,73 +135,36 @@ class LLMClient:
         disable_reasoning_effort: bool = False,
         usage_user_id: str | None = None,
         usage_category: str | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> str:
-        """发送对话请求，返回模型响应文本."""
-        if base_url:
-            # 显式指定端点（如本地 Ollama VL 描述 / 语音通话专用模型）：跳过动态配置
-            cfg = {
-                "base_url": base_url.rstrip("/"),
-                "api_key": api_key or "",
-                "model": model or "",
-                "timeout": float(timeout or 180.0),
-            }
-        else:
-            cfg = await get_llm_config(scene, self.provider, user_id=usage_user_id)
-        base_url = (cfg.get("base_url") or "").rstrip("/")
-        api_key = api_key or cfg.get("api_key") or ""
-        model_name = model or cfg.get("model") or settings.DEEPSEEK_MODEL
-        timeout = float(cfg.get("timeout") or 120.0)
+        """LangChain 非流式对话；保留动态配置、BYOK 与备用供应商策略。"""
+        temperature, max_tokens = kwargs.pop("temperature", None), kwargs.pop("max_tokens", None)
+        if kwargs:
+            logger.debug("忽略 ChatModel 不支持的 legacy 参数: {}", sorted(kwargs))
 
-        effort = reasoning_effort or cfg.get("reasoning_effort")
-        if self._has_tool_messages(messages):
-            # DeepSeek 思考模式要求带工具调用的 assistant 消息回传 reasoning_content；
-            # 工具调用来自其他供应商（如 Qwen 决策），没有该字段 → 关闭思考参数避免 400
-            effort = None
-
-        async def _call(c_base: str, c_key: str, c_model: str) -> tuple[dict, str]:
-            payload = {"model": c_model, "messages": messages, **kwargs}
-            if effort and not disable_reasoning_effort:
-                payload["reasoning_effort"] = effort
-            async with AsyncClient(
-                base_url=c_base,
-                headers={"Authorization": f"Bearer {c_key}"},
-                timeout=timeout,
-            ) as client:
-                resp = await client.post("/chat/completions", json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-            if content is None or not str(content or "").strip():
-                # 推理强度过高时模型可能把输出预算全花在 reasoning 上，content 为空；
-                # 抛异常让调用方重试（禁用推理强度）或回退，避免静默"生成失败"
-                raise RuntimeError("模型返回空内容（可能推理强度过高耗尽输出预算）")
-            return data, content
+        async def invoke(call_base_url: str | None, call_api_key: str | None, call_model: str | None):
+            chat_model, used_model, used_base_url = await self._model(
+                scene=scene, user_id=usage_user_id, api_key=call_api_key, model=call_model, base_url=call_base_url,
+                timeout=timeout, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort,
+                disable_reasoning_effort=disable_reasoning_effort, messages=messages,
+            )
+            breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
+            reply = await breaker.call(lambda: chat_model.ainvoke(convert_to_messages(messages)))
+            text = self._message_text(reply)
+            if not text.strip():
+                raise RuntimeError("模型返回空内容")
+            return reply, text, used_model
 
         try:
-            data, content = await _call(base_url, api_key, model_name)
-            used_model = model_name
+            reply, text, used_model = await invoke(base_url, api_key, model)
         except Exception as exc:
-            fcfg = self._fallback_cfg()
-            if fcfg and self._is_retryable_error(exc):
-                logger.warning(
-                    "LLM 主供应商调用失败，切换 {} 重试: {}",
-                    fcfg["model"],
-                    str(exc)[:120],
-                )
-                data, content = await _call(fcfg["base_url"], fcfg["api_key"], fcfg["model"])
-                used_model = fcfg["model"]
-            else:
+            fallback = self._fallback_cfg()
+            if not (fallback and self._is_retryable_error(exc)):
                 raise
-        usage = data.get("usage") or {}
-        await record_usage(
-            usage_user_id,
-            usage_category or "chat",
-            used_model,
-            usage.get("prompt_tokens"),
-            usage.get("completion_tokens"),
-        )
-        return content
+            logger.warning("LLM 主供应商调用失败，切换 {} 重试: {}", fallback["model"], str(exc)[:120])
+            reply, text, used_model = await invoke(fallback["base_url"], fallback["api_key"], fallback["model"])
+        await self._record(reply, messages=messages, user_id=usage_user_id, category=usage_category, model=used_model, text=text)
+        return text
 
     async def chat_with_tools(
         self,
@@ -170,71 +179,37 @@ class LLMClient:
         reasoning_effort: str | None = None,
         usage_user_id: str | None = None,
         usage_category: str | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> tuple[str, list[dict]]:
-        """非流式调用并允许工具调用（tool_choice=auto）。返回 (content, tool_calls)."""
-        if base_url:
-            cfg = {
-                "base_url": base_url.rstrip("/"),
-                "api_key": api_key or "",
-                "model": model or "",
-                "timeout": float(timeout or 180.0),
-            }
-        else:
-            cfg = await get_llm_config(scene, self.provider, user_id=usage_user_id)
-        base_url = (cfg.get("base_url") or "").rstrip("/")
-        api_key = api_key or cfg.get("api_key") or ""
-        model_name = model or cfg.get("model") or settings.DEEPSEEK_MODEL
-        timeout = float(cfg.get("timeout") or 120.0)
+        """LangChain 工具绑定，返回原有 OpenAI tool-call 字典形状。"""
+        if kwargs:
+            logger.debug("忽略 ChatModel 工具调用的 legacy 参数: {}", sorted(kwargs))
 
-        effort = reasoning_effort or cfg.get("reasoning_effort")
-        if self._has_tool_messages(messages):
-            effort = None
-
-        async def _call(c_base: str, c_key: str, c_model: str) -> tuple[dict, dict]:
-            payload = {
-                "model": c_model,
-                "messages": messages,
-                "tools": tools,
-                "tool_choice": "auto",
-                **kwargs,
-            }
-            if effort:
-                payload["reasoning_effort"] = effort
-            async with AsyncClient(
-                base_url=c_base,
-                headers={"Authorization": f"Bearer {c_key}"},
-                timeout=timeout,
-            ) as client:
-                resp = await client.post("/chat/completions", json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                return data, data["choices"][0]["message"]
+        async def invoke(call_base_url: str | None, call_api_key: str | None, call_model: str | None):
+            chat_model, used_model, used_base_url = await self._model(
+                scene=scene, user_id=usage_user_id, api_key=call_api_key, model=call_model, base_url=call_base_url,
+                timeout=timeout, temperature=None, max_tokens=None, reasoning_effort=reasoning_effort,
+                disable_reasoning_effort=False, messages=messages,
+            )
+            breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
+            bound = chat_model.bind_tools(tools, parallel_tool_calls=False)
+            reply: AIMessage = await breaker.call(lambda: bound.ainvoke(convert_to_messages(messages)))
+            calls = [
+                {"id": str(call.get("id") or ""), "type": "function", "function": {"name": str(call.get("name") or ""), "arguments": call.get("args") or {}}}
+                for call in (reply.tool_calls or [])
+            ]
+            return reply, self._message_text(reply), calls, used_model
 
         try:
-            data, msg = await _call(base_url, api_key, model_name)
-            used_model = model_name
+            reply, content, tool_calls, used_model = await invoke(base_url, api_key, model)
         except Exception as exc:
-            fcfg = self._fallback_cfg()
-            if fcfg and self._is_retryable_error(exc):
-                logger.warning(
-                    "LLM 工具调用主供应商失败，切换 {} 重试: {}",
-                    fcfg["model"],
-                    str(exc)[:120],
-                )
-                data, msg = await _call(fcfg["base_url"], fcfg["api_key"], fcfg["model"])
-                used_model = fcfg["model"]
-            else:
+            fallback = self._fallback_cfg()
+            if not (fallback and self._is_retryable_error(exc)):
                 raise
-        usage = data.get("usage") or {}
-        await record_usage(
-            usage_user_id,
-            usage_category or "chat",
-            used_model,
-            usage.get("prompt_tokens"),
-            usage.get("completion_tokens"),
-        )
-        return (msg.get("content") or ""), (msg.get("tool_calls") or [])
+            logger.warning("LLM 工具调用主供应商失败，切换 {} 重试: {}", fallback["model"], str(exc)[:120])
+            reply, content, tool_calls, used_model = await invoke(fallback["base_url"], fallback["api_key"], fallback["model"])
+        await self._record(reply, messages=messages, user_id=usage_user_id, category=usage_category, model=used_model, text=content)
+        return content, tool_calls
 
     async def chat_with_tools_qwen(
         self,
@@ -244,41 +219,25 @@ class LLMClient:
         model: str | None = None,
         usage_user_id: str | None = None,
         usage_category: str | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> tuple[str, list[dict]]:
-        """用千问（DashScope）配置调用带工具接口（工具决策专用）.
+        """轻量联网决策的固定 Qwen 配置适配。
 
-        工具决策独立于场景配置：部分场景模型（如 qwen-vl-plus）不支持 tools，
-        统一用 qwen-plus 做工具决策，避免受场景 provider 影响。
+        仅供历史 ``_maybe_decide_web`` 兼容入口使用；通用技能循环已统一
+        由 LangGraph ToolNode 承担。
         """
-        base_url = settings.QWEN_BASE_URL.rstrip("/")
-        api_key = settings.QWEN_API_KEY
-        model_name = model or settings.QWEN_MODEL
-        payload = {
-            "model": model_name,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
-            **kwargs,
-        }
-        async with AsyncClient(
-            base_url=base_url,
-            headers={"Authorization": f"Bearer {api_key}"},
+        return await self.chat_with_tools(
+            messages,
+            tools,
+            scene="chat",
+            model=model or settings.QWEN_MODEL,
+            api_key=settings.QWEN_API_KEY,
+            base_url=settings.QWEN_BASE_URL,
             timeout=30,
-        ) as client:
-            resp = await client.post("/chat/completions", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-        msg = data["choices"][0]["message"]
-        usage = data.get("usage") or {}
-        await record_usage(
-            usage_user_id,
-            usage_category or "chat",
-            model_name,
-            usage.get("prompt_tokens"),
-            usage.get("completion_tokens"),
+            usage_user_id=usage_user_id,
+            usage_category=usage_category,
+            **kwargs,
         )
-        return (msg.get("content") or ""), (msg.get("tool_calls") or [])
 
     async def chat_stream(
         self,
@@ -293,129 +252,68 @@ class LLMClient:
         disable_reasoning_effort: bool = False,
         usage_user_id: str | None = None,
         usage_category: str | None = None,
-        **kwargs,
-    ):
-        """流式调用（SSE）。返回异步生成器，逐段产出文本增量."""
-        if base_url:
-            cfg = {
-                "base_url": base_url.rstrip("/"),
-                "api_key": api_key or "",
-                "model": model or "",
-                "timeout": float(timeout or 180.0),
-            }
-        else:
-            cfg = await get_llm_config(scene, self.provider, user_id=usage_user_id)
-        base_url = (cfg.get("base_url") or "").rstrip("/")
-        api_key = api_key or cfg.get("api_key") or ""
-        model_name = model or cfg.get("model") or settings.DEEPSEEK_MODEL
-        timeout = float(cfg.get("timeout") or 120.0)
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        """LangChain ``astream``；首个输出前失败才允许切备用供应商。"""
+        if kwargs:
+            logger.debug("忽略 ChatModel 流式调用的 legacy 参数: {}", sorted(kwargs))
 
-        effort = reasoning_effort or cfg.get("reasoning_effort")
-        if self._has_tool_messages(messages):
-            effort = None
+        usage: tuple[int | None, int | None] = (None, None)
 
-        async def _stream_once(
-            c_base: str, c_key: str, c_model: str
-        ) -> tuple[list[str], int | None, int | None]:
-            """单次流式请求：返回 (文本增量列表, prompt_tokens, completion_tokens)."""
-            payload = {
-                "model": c_model,
-                "messages": messages,
-                "stream": True,
-                "stream_options": {"include_usage": True},
-                **kwargs,
-            }
-            if effort and not disable_reasoning_effort:
-                payload["reasoning_effort"] = effort
-            chunks: list[str] = []
-            prompt_tokens = completion_tokens = None
-            async with AsyncClient(
-                base_url=c_base,
-                headers={"Authorization": f"Bearer {c_key}"},
-                timeout=timeout,
-            ) as client:
-                async with client.stream("POST", "/chat/completions", json=payload) as resp:
-                    resp.raise_for_status()
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        chunk = line[len("data:"):].strip()
-                        if not chunk or chunk == "[DONE]":
-                            continue
-                        try:
-                            data = json.loads(chunk)
-                        except json.JSONDecodeError:
-                            continue
-                        choices = data.get("choices") or []
-                        if choices:
-                            delta = choices[0].get("delta") or {}
-                            text = delta.get("content")
-                            if text:
-                                chunks.append(text)
-                        elif data.get("usage"):
-                            usage = data.get("usage") or {}
-                            prompt_tokens = usage.get("prompt_tokens")
-                            completion_tokens = usage.get("completion_tokens")
-            return chunks, prompt_tokens, completion_tokens
-
-        used_model = model_name
-        streamed_text = ""
-        prompt_tokens = completion_tokens = None
-        try:
-            chunks, pt, ct = await _stream_once(base_url, api_key, model_name)
-            for text in chunks:
-                streamed_text += text
-                yield text
-            prompt_tokens, completion_tokens = pt, ct
-        except Exception as exc:
-            fcfg = self._fallback_cfg()
-            if not (fcfg and self._is_retryable_error(exc)):
+        async def stream_once(call_base_url: str | None, call_api_key: str | None, call_model: str | None):
+            nonlocal usage
+            chat_model, used_model, used_base_url = await self._model(
+                scene=scene, user_id=usage_user_id, api_key=call_api_key, model=call_model, base_url=call_base_url,
+                timeout=timeout, temperature=None, max_tokens=None, reasoning_effort=reasoning_effort,
+                disable_reasoning_effort=disable_reasoning_effort, messages=messages,
+            )
+            breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
+            await breaker.before_call()
+            try:
+                async for chunk in chat_model.astream(convert_to_messages(messages)):
+                    chunk_usage = self._usage(chunk)
+                    if chunk_usage != (None, None):
+                        usage = chunk_usage
+                    delta = self._message_text(chunk)
+                    if delta:
+                        yield delta
+            except Exception as exc:
+                await breaker.record_failure(exc)
                 raise
-            logger.warning("LLM 流式主供应商失败，切换 {} 重试: {}", fcfg["model"], str(exc)[:120])
-            used_model = fcfg["model"]
-            chunks, pt, ct = await _stream_once(fcfg["base_url"], fcfg["api_key"], fcfg["model"])
-            for text in chunks:
-                streamed_text += text
-                yield text
-            prompt_tokens, completion_tokens = pt, ct
-        # 记录用量：优先取流式返回的 usage，缺失时按文本粗略估算
-        if prompt_tokens is None:
-            prompt_tokens = sum(estimate_tokens(str(m.get("content") or "")) for m in messages)
-        if completion_tokens is None:
-            completion_tokens = estimate_tokens(streamed_text)
+            else:
+                await breaker.record_success()
+
+        runtime_cfg = await get_llm_config(scene, self.provider, user_id=usage_user_id)
+        text, used_model, emitted = "", model or runtime_cfg.get("model") or settings.DEEPSEEK_MODEL, False
+        try:
+            async for delta in stream_once(base_url, api_key, model):
+                emitted = True
+                text += delta
+                yield delta
+        except Exception as exc:
+            fallback = self._fallback_cfg()
+            if emitted or not (fallback and self._is_retryable_error(exc)):
+                raise
+            logger.warning("LLM 流式主供应商失败，切换 {} 重试: {}", fallback["model"], str(exc)[:120])
+            used_model = fallback["model"]
+            async for delta in stream_once(fallback["base_url"], fallback["api_key"], fallback["model"]):
+                text += delta
+                yield delta
         await record_usage(
             usage_user_id,
             usage_category or "chat",
-            used_model,
-            prompt_tokens,
-            completion_tokens,
+            used_model or settings.DEEPSEEK_MODEL,
+            usage[0] if usage[0] is not None else sum(estimate_tokens(str(message.get("content") or "")) for message in messages),
+            usage[1] if usage[1] is not None else estimate_tokens(text),
         )
 
-    async def embed(
-        self,
-        texts: list[str],
-        *,
-        scene: str | None = None,
-        model: str | None = None,
-    ) -> list[list[float]]:
-        """生成文本嵌入向量（模型名默认取 settings.EMBEDDING_MODEL）."""
+    async def embed(self, texts: list[str], *, scene: str | None = None, model: str | None = None) -> list[list[float]]:
+        """Embedding 专用 OpenAI-compatible 调用（不属于 ChatModel 迁移范围）。"""
         cfg = await get_llm_config(scene, self.provider)
-        base_url = (cfg.get("base_url") or "").rstrip("/")
-        api_key = cfg.get("api_key") or ""
-        model_name = model or settings.EMBEDDING_MODEL
-        timeout = float(cfg.get("timeout") or 120.0)
-
-        payload = {"model": model_name, "input": texts}
         async with AsyncClient(
-            base_url=base_url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=timeout,
+            base_url=(cfg.get("base_url") or "").rstrip("/"), headers={"Authorization": f"Bearer {cfg.get('api_key') or ''}"},
+            timeout=float(cfg.get("timeout") or 120.0),
         ) as client:
-            resp = await client.post("/embeddings", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return [item["embedding"] for item in data["data"]]
-
-
-# 全局单例（默认 Provider）
-llm_client = LLMClient()
+            response = await client.post("/embeddings", json={"model": model or settings.EMBEDDING_MODEL, "input": texts})
+            response.raise_for_status()
+            return [item["embedding"] for item in response.json()["data"]]

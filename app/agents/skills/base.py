@@ -62,6 +62,19 @@ class Skill(ABC):
     write_op: bool = False              # 是否写操作（发消息/改文件/装依赖等外部副作用；渐进开放时隐藏）
     idempotent: bool = True              # 相同参数重复执行是否安全
     resource_templates: list[str] = []   # 如 project:{project_id}:file:{path}
+    # Planner/TCA 可选能力元数据；默认值保持所有已有 Skill 向后兼容。
+    cost_estimate: float = 1.0
+    success_rate: float | None = None
+    requires: list[str] = []
+    produces: list[str] = []
+    deterministic: bool = False
+    fallback_group: str = ""
+    # P1：供调度器缩小工具命名空间的语义元数据。空值保持历史插件兼容，
+    # 未迁移插件可由集中目录补齐，不把路由规则散落进每个调用点。
+    domain: str = ""
+    intent_tags: list[str] = []
+    conflicts_with: list[str] = []
+    preferred_over: list[str] = []
     # 参数 JSON Schema（LLM 调用时校验参数用），空 dict 表示无参数
     parameters_schema: dict = Field(default_factory=dict)
 
@@ -93,6 +106,27 @@ class Skill(ABC):
                 "description": desc,
                 "parameters": self.parameters_schema,
             },
+        }
+
+    def capability_metadata(self) -> dict:
+        """Return scheduler metadata without exposing implementation paths or secrets."""
+        return {
+            "name": self.name,
+            "category": self.category,
+            "environment": self.environment,
+            "permission": self.permission,
+            "write_op": self.write_op,
+            "idempotent": self.idempotent,
+            "cost_estimate": self.cost_estimate,
+            "success_rate": self.success_rate,
+            "requires": list(self.requires),
+            "produces": list(self.produces),
+            "deterministic": self.deterministic,
+            "fallback_group": self.fallback_group,
+            "domain": self.domain,
+            "intent_tags": list(self.intent_tags),
+            "conflicts_with": list(self.conflicts_with),
+            "preferred_over": list(self.preferred_over),
         }
 
     def __repr__(self) -> str:

@@ -6,7 +6,11 @@ import json
 from typing import TYPE_CHECKING
 
 from app.agents.core.base import WorkerAgent, WorkerContext
+from app.agents.core.progress import set_progress as _report_progress
+from app.agents.orchestration.presentation import attach_display_result, working_text
 from app.agents.skills.executor import execute_tool_call, get_tools_for_scene
+from app.agents.skills.recovery import classify_model_error, decide_failure
+from app.core.agent_security import UNTRUSTED_CONTENT_RULES, redact_server_text, wrap_untrusted_tool_output
 
 if TYPE_CHECKING:
     from app.agents.orchestration.models import TaskNode
@@ -36,8 +40,7 @@ class AtomicStepAgent(WorkerAgent):
                 "error_code": "INVALID_ARGS",
             }
 
-        from app.core.llm import LLMClient
-        from app.services.usage import CATEGORY_SKILL
+        await _report_progress(ctx.job_id, node.id, working_text(node))
 
         preferred = str(node.params.get("preferred_tool") or "").strip()
         if not preferred:
@@ -52,7 +55,16 @@ class AtomicStepAgent(WorkerAgent):
             if str(name).strip() and str(name).strip() != preferred
         ]
         planned_tools = [preferred, *fallback_tools]
-        selected_tool = planned_tools[min(node.retries, len(planned_tools) - 1)]
+        # ``retries`` 不等于“换工具次数”：网络超时等情况应重试原方法。
+        # 只有 DAG 引擎收到 use_next_tool 时才递增 tool_index。
+        # 兼容旧任务快照：旧引擎只保存 retries，表示第 N 个备用方法。
+        # 新引擎在首次执行前写入 tool_index=0，使暂态重试不会意外切换工具。
+        raw_tool_index = (node.metadata or {}).get("tool_index")
+        selected_index = min(
+            int(raw_tool_index) if raw_tool_index is not None else node.retries,
+            len(planned_tools) - 1,
+        )
+        selected_tool = planned_tools[selected_index]
         all_tools = await get_tools_for_scene(ctx.scene, ctx.user_role)
         tools = [
             tool
@@ -67,18 +79,24 @@ class AtomicStepAgent(WorkerAgent):
             }
         dependency_results = node.metadata.get("dependency_results") or {}
         inputs = node.params.get("inputs") or {}
-        # 文档工具的目标和参数已由 Planner 确定，直接执行可避免一次“再选工具”
-        # 和一次“复述结果”的模型调用。文档分析技能自身会完成必要的 LLM 作答。
-        if selected_tool in {"office_doc_read", "office_doc_analyze"}:
+        # 目标与参数已由 Planner 确定的读取类工具不需要模型“再选一次”。
+        # 否则模型余额/配置故障会阻断本可直接完成的知识库或文档读取。
+        if selected_tool in {"office_doc_read", "office_doc_analyze", "query_knowledge", "get_datetime"}:
             direct_args = dict(inputs)
             if selected_tool == "office_doc_read":
                 direct_args = {"doc_id": direct_args.get("doc_id")}
             else:
-                direct_args = {
-                    "doc_id": direct_args.get("doc_id"),
-                    "instruction": direct_args.get("instruction") or instruction,
-                    "mode": direct_args.get("analyze_mode") or direct_args.get("mode") or "qa",
-                }
+                if selected_tool == "office_doc_analyze":
+                    direct_args = {
+                        "doc_id": direct_args.get("doc_id"),
+                        "instruction": direct_args.get("instruction") or instruction,
+                        "mode": direct_args.get("analyze_mode") or direct_args.get("mode") or "qa",
+                    }
+                elif selected_tool == "query_knowledge":
+                    direct_args = {
+                        "query": direct_args.get("query") or instruction,
+                        "top_k": direct_args.get("top_k") or 5,
+                    }
             call = {
                 "id": f"direct-{node.id}",
                 "type": "function",
@@ -95,6 +113,12 @@ class AtomicStepAgent(WorkerAgent):
                 user_role=ctx.user_role,
             )
             if not result.success:
+                decision = decide_failure(
+                    result.error_code,
+                    result.error,
+                    retryable=result.retryable,
+                    alternatives_remaining=selected_index + 1 < len(planned_tools),
+                )
                 return {
                     "success": False,
                     "error": result.error or f"工具 {selected_tool} 执行失败",
@@ -102,8 +126,12 @@ class AtomicStepAgent(WorkerAgent):
                     "tool": selected_tool,
                     "attempt": node.retries + 1,
                     "method_chain": planned_tools,
+                    "retryable": decision.retry_same or decision.try_alternative,
+                    "use_next_tool": decision.try_alternative,
+                    "recovery_category": decision.category,
+                    "replan_required": decision.replan_required,
                 }
-            return {
+            return attach_display_result(node, {
                 "success": True,
                 "content": (result.output or "步骤已完成").strip(),
                 "output": result.output,
@@ -112,12 +140,29 @@ class AtomicStepAgent(WorkerAgent):
                 "method_chain": planned_tools,
                 "tool_metadata": result.metadata,
                 "step_title": node.name or instruction[:40],
+            })
+        from app.agents.langchain.agent import choose_single_tool
+        from app.agents.langchain.tools import make_skill_tool
+
+        langchain_tool = await make_skill_tool(
+            selected_tool,
+            user_id=ctx.user_id,
+            scene=ctx.scene,
+            conversation_id=ctx.job_id,
+            user_role=ctx.user_role,
+        )
+        if langchain_tool is None:
+            return {
+                "success": False,
+                "error": f"规划工具不可用或不允许用于当前场景: {selected_tool}",
+                "error_code": "SKILL_NOT_FOUND",
             }
         system = (
             "你正在执行 DAG 中的一个原子步骤。只完成本步骤目标，不扩展到其他步骤。"
             "本次尝试已经唯一指定一个工具；只允许调用所提供的这个工具，且最多调用一次。"
             "如果这是备用方法，请根据工具能力采用与前一次不同的实现路径。"
             "不要重复执行依赖步骤已经完成的副作用。"
+            "\n\n" + UNTRUSTED_CONTENT_RULES
         )
         user = (
             f"步骤：{instruction}\n"
@@ -128,15 +173,28 @@ class AtomicStepAgent(WorkerAgent):
             + f"当前为第 {node.retries + 1} 次尝试"
         )
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        llm = LLMClient()
-        content, tool_calls = await llm.chat_with_tools(
-            messages,
-            tools,
-            scene=ctx.scene,
-            usage_user_id=ctx.user_id,
-            usage_category=CATEGORY_SKILL,
-            api_key=ctx.llm_api_key,
-        )
+        try:
+            content, tool_calls = await choose_single_tool(
+                system=system,
+                user=user,
+                tool=langchain_tool,
+                scene=ctx.scene,
+                user_id=ctx.user_id,
+                api_key=ctx.llm_api_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 不再绕回第二套 function-calling。交由 LangGraphNodeRunner 按统一
+            # 恢复策略重试、换备用工具或要求重新规划。
+            error_code, user_error = classify_model_error(exc)
+            return {
+                "success": False,
+                "error": user_error,
+                "error_code": error_code,
+                "retryable": error_code == "MODEL_UNAVAILABLE",
+                "tool": selected_tool,
+                "attempt": node.retries + 1,
+                "method_chain": planned_tools,
+            }
         if not tool_calls:
             return {
                 "success": False,
@@ -167,6 +225,12 @@ class AtomicStepAgent(WorkerAgent):
         )
         tool_name = called_name
         if not result.success:
+            decision = decide_failure(
+                result.error_code,
+                result.error,
+                retryable=result.retryable,
+                alternatives_remaining=selected_index + 1 < len(planned_tools),
+            )
             return {
                 "success": False,
                 "error": result.error or f"工具 {tool_name} 执行失败",
@@ -174,6 +238,10 @@ class AtomicStepAgent(WorkerAgent):
                 "tool": tool_name,
                 "attempt": node.retries + 1,
                 "method_chain": planned_tools,
+                "retryable": decision.retry_same or decision.try_alternative,
+                "use_next_tool": decision.try_alternative,
+                "recovery_category": decision.category,
+                "replan_required": decision.replan_required,
             }
 
         messages.extend(
@@ -182,7 +250,7 @@ class AtomicStepAgent(WorkerAgent):
                 {
                     "role": "tool",
                     "tool_call_id": str(call.get("id") or ""),
-                    "content": result.output,
+                    "content": wrap_untrusted_tool_output(result.output),
                 },
                 {
                     "role": "user",
@@ -190,20 +258,42 @@ class AtomicStepAgent(WorkerAgent):
                 },
             ]
         )
-        final = await llm.chat(
-            messages,
-            scene=ctx.scene,
-            usage_user_id=ctx.user_id,
-            usage_category=CATEGORY_SKILL,
-            api_key=ctx.llm_api_key,
-        )
-        return {
+        from app.core.llm import LLMClient
+        from app.services.usage import CATEGORY_SKILL
+
+        llm = LLMClient()
+        try:
+            final = await llm.chat(
+                messages,
+                scene=ctx.scene,
+                usage_user_id=ctx.user_id,
+                usage_category=CATEGORY_SKILL,
+                api_key=ctx.llm_api_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 工具已经成功时保留原始工具产出，避免最终措辞模型失败把已完成工作
+            # 误报成失败；同时在审计数据中留下可解释的降级原因。
+            error_code, user_error = classify_model_error(exc)
+            return attach_display_result(node, {
+                "success": True,
+                "content": redact_server_text((result.output or "步骤已完成").strip()),
+                "output": result.output,
+                "tool": tool_name,
+                "attempt": node.retries + 1,
+                "method_chain": planned_tools,
+                "tool_metadata": result.metadata,
+                "step_title": node.name or instruction[:40],
+                "presentation_degraded": True,
+                "presentation_error": user_error,
+                "presentation_error_code": error_code,
+            })
+        return attach_display_result(node, {
             "success": True,
-            "content": (final or result.output or "步骤已完成").strip(),
+            "content": redact_server_text((final or result.output or "步骤已完成").strip()),
             "output": result.output,
             "tool": tool_name,
             "attempt": node.retries + 1,
             "method_chain": planned_tools,
             "tool_metadata": result.metadata,
             "step_title": node.name or instruction[:40],
-        }
+        })

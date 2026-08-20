@@ -3,8 +3,8 @@
 设计：
   - 改写发生在服务端，默认走云端 qwen-turbo；
   - 仅办公模式（scene=office）启用，其他场景直接原文，保证回复速度；
-  - 服务端本地小模型为预留插槽：RAG_QUERY_REWRITE_PROVIDER=local
-    并配置 BASE_URL / MODEL 后生效（OpenAI 兼容端点，如 Ollama）。
+  - 服务端本地小模型为预留插槽：RAG_QUERY_REWRITE_PROVIDER=local。
+    仅在安装了独立文本 Ollama 模型时启用；视觉模型不作为改写器使用。
 
 优先级：客户端提供的 retrieval_query > 服务端重写 > 原始 content。
 """
@@ -12,6 +12,7 @@
 from loguru import logger
 
 from app.core.config import settings
+from app.core.llm import LLMClient
 from app.services.usage import CATEGORY_REWRITE, record_usage
 
 REWRITE_SYSTEM_PROMPT = (
@@ -26,35 +27,22 @@ async def _rewrite(
 ) -> str | None:
     """调用 OpenAI 兼容端点改写查询；失败返回 None（由调用方回退原文）."""
     try:
-        import httpx
-
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        async with httpx.AsyncClient(timeout=settings.RAG_QUERY_REWRITE_TIMEOUT_SECONDS) as client:
-            resp = await client.post(
-                f"{base_url.rstrip('/')}/chat/completions",
-                headers=headers,
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
-                        {"role": "user", "content": f"用户提问：{text}"},
-                    ],
-                    "temperature": 0.2,
-                    "max_tokens": 256,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            usage = data.get("usage") or {}
-            await record_usage(
-                user_id,
-                CATEGORY_REWRITE,
-                model,
-                usage.get("prompt_tokens"),
-                usage.get("completion_tokens"),
-            )
-            rewritten = (data["choices"][0]["message"]["content"] or "").strip()
-            return rewritten or None
+        rewritten = await LLMClient().chat(
+            [
+                {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
+                {"role": "user", "content": f"用户提问：{text}"},
+            ],
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            timeout=settings.RAG_QUERY_REWRITE_TIMEOUT_SECONDS,
+            temperature=0.2,
+            max_tokens=256,
+            usage_user_id=user_id,
+            usage_category=CATEGORY_REWRITE,
+            disable_reasoning_effort=True,
+        )
+        return rewritten.strip() or None
     except Exception as e:
         logger.warning("服务端查询重写失败，使用原文: {}", e)
         return None
@@ -83,6 +71,12 @@ async def _rewrite_local(text: str, user_id: str | None = None) -> str | None:
     try:
         import httpx
 
+        # qwen2.5vl 是视觉模型，不能作为纯文本检索改写器。禁止把它当成
+        # "本地文本模型" 调用，以免慢、输出质量差且与识图负载相互争抢。
+        model_name = settings.RAG_QUERY_REWRITE_MODEL.strip()
+        if "vl" in model_name.lower() or "vision" in model_name.lower():
+            logger.warning("本地查询重写模型 {} 为视觉模型，改用原文", model_name)
+            return None
         base = settings.RAG_QUERY_REWRITE_BASE_URL.rstrip("/")
         if base.endswith("/v1"):
             base = base[: -len("/v1")]  # 兼容遗留的 /v1 后缀 → 原生根路径
@@ -90,7 +84,7 @@ async def _rewrite_local(text: str, user_id: str | None = None) -> str | None:
             resp = await client.post(
                 f"{base}/api/chat",
                 json={
-                    "model": settings.RAG_QUERY_REWRITE_MODEL.strip(),
+                    "model": model_name,
                     "messages": [
                         {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
                         {"role": "user", "content": f"用户提问：{text}"},
@@ -113,7 +107,7 @@ async def _rewrite_local(text: str, user_id: str | None = None) -> str | None:
             await record_usage(
                 user_id,
                 CATEGORY_REWRITE,
-                settings.RAG_QUERY_REWRITE_MODEL.strip(),
+                model_name,
                 data.get("prompt_eval_count"),
                 data.get("eval_count"),
             )

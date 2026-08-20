@@ -11,7 +11,7 @@ import json
 import uuid
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,10 +30,13 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.core.exceptions import UnauthorizedException
+from app.core.throttling import consume_route_limit
 from app.agents.orchestration.orchestrator import (
     ActiveConversationJobError,
+    AgentBackpressureError,
     UserJobLimitError,
 )
+from app.agents.orchestration.state import StatePersistenceError
 from app.models.conversation import SendMessageRequest
 from app.services.orchestrator import orchestrator
 
@@ -64,6 +67,17 @@ async def chat_stream(
     conversation_id = req.conversation_id or ""
     # BYOK：用户自备 API key 每次请求临时携带，用完即弃（不落库、不打印日志）
     llm_api_key = request.headers.get("x-llm-api-key") or None
+    rate = await consume_route_limit(request, payload, "chat_stream")
+    if not rate.allowed:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "code": 429,
+                "message": "对话请求过于频繁，请稍后再试",
+                "data": {"error_code": "CHAT_STREAM_RATE_LIMIT", "retry_after": rate.retry_after},
+            },
+            headers={"Retry-After": str(rate.retry_after)},
+        )
 
     async def event_gen():
         result = None
@@ -146,10 +160,22 @@ async def chat_stream(
                             )
                         )
                         _active_tts_tasks[user_id] = task
-        except (ActiveConversationJobError, UserJobLimitError) as exc:
+        except (ActiveConversationJobError, UserJobLimitError, AgentBackpressureError) as exc:
             status = 409 if isinstance(exc, ActiveConversationJobError) else 429
-            code = "OFFICE_JOB_CONFLICT" if status == 409 else "OFFICE_JOB_LIMIT"
+            code = "OFFICE_JOB_CONFLICT" if status == 409 else (
+                "OFFICE_JOB_BACKPRESSURE" if isinstance(exc, AgentBackpressureError) else "OFFICE_JOB_LIMIT"
+            )
             yield _sse({"type": "error", "message": str(exc), "status": status, "code": code})
+        except StatePersistenceError:
+            # 禁止先发 job_id 再让客户端轮询一个不存在的快照。这里明确告诉用户
+            # 状态库不可用，避免前端把它误显示为“回复中断”。
+            logger.error("办公任务状态库写后读校验失败")
+            yield _sse({
+                "type": "error",
+                "message": "办公任务未能提交：任务状态库暂不可用，请检查 Redis 后重试。",
+                "status": 503,
+                "code": "OFFICE_JOB_STATE_UNAVAILABLE",
+            })
         except Exception as exc:  # noqa: BLE001
             logger.warning("流式聊天失败: {}", exc)
             # 流式中断：仍持久化用户消息 + 已生成的部分回复，避免多端同步丢失

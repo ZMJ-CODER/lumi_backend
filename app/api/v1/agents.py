@@ -1,13 +1,17 @@
 """多智能体协作 API —— 提交任务 / 查询状态 / 终止 / 暂停 / 恢复."""
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import JSONResponse
+from loguru import logger
 
 from app.agents.orchestration import orchestrator
 from app.agents.orchestration.orchestrator import (
     ActiveConversationJobError,
+    AgentBackpressureError,
     UserJobLimitError,
 )
 from app.core.deps import require_auth
+from app.core.throttling import consume_route_limit
 from app.core.exceptions import (
     BadRequestException,
     ConflictException,
@@ -31,6 +35,17 @@ async def create_agent_job(
     仅任务执行期间保存在内存，任务结束即释放，不落库不写日志。
     """
     llm_api_key = request.headers.get("x-llm-api-key") or None
+    rate = await consume_route_limit(request, payload, "office_submit")
+    if not rate.allowed:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "code": 429,
+                "message": "办公任务提交过于频繁，请稍后重试或切换普通模式对话",
+                "data": {"error_code": "OFFICE_SUBMIT_RATE_LIMIT", "retry_after": rate.retry_after},
+            },
+            headers={"Retry-After": str(rate.retry_after)},
+        )
     try:
         job = await orchestrator.submit_job(
             payload["sub"],
@@ -48,6 +63,8 @@ async def create_agent_job(
         raise ConflictException(str(exc), error_code="OFFICE_JOB_CONFLICT") from exc
     except UserJobLimitError as exc:
         raise RateLimitException(str(exc), error_code="OFFICE_JOB_LIMIT") from exc
+    except AgentBackpressureError as exc:
+        raise RateLimitException(str(exc), error_code="OFFICE_JOB_BACKPRESSURE") from exc
     return {"code": 0, "data": job.model_dump()}
 
 
@@ -65,7 +82,13 @@ async def list_agent_jobs(
 async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     """查询任务状态与任务树（前端任务面板数据源）."""
     job = await orchestrator.get_job(job_id)
-    if not job or job.user_id != payload["sub"]:
+    if not job:
+        # 不把 Redis key、连接串或其他用户信息回传给客户端；日志只记录截断
+        # ID，便于区分“状态丢失”和“任务属于另一账号”两类 404。
+        logger.warning("查询办公任务不存在: job={} user={}", str(job_id)[:12], str(payload.get("sub", ""))[:12])
+        raise NotFoundException("任务不存在")
+    if job.user_id != payload["sub"]:
+        logger.warning("查询办公任务归属不匹配: job={} owner={} requester={}", str(job_id)[:12], str(job.user_id)[:12], str(payload.get("sub", ""))[:12])
         raise NotFoundException("任务不存在")
     return {"code": 0, "data": job.model_dump()}
 

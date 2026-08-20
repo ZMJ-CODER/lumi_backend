@@ -8,6 +8,11 @@ from pydantic import BaseModel, Field
 class ToolCapability(BaseModel):
     name: str
     description: str = ""
+    category: str = "general"
+    domain: str = ""
+    intent_tags: list[str] = Field(default_factory=list)
+    conflicts_with: list[str] = Field(default_factory=list)
+    preferred_over: list[str] = Field(default_factory=list)
     parameters: dict = Field(default_factory=lambda: {"type": "object", "properties": {}})
     source: str = "skill"  # skill / mcp
     server: str | None = None

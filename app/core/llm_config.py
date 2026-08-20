@@ -12,7 +12,6 @@ import json
 import time
 from typing import Any
 
-from httpx import AsyncClient
 from loguru import logger
 
 from app.core.config import settings
@@ -89,7 +88,19 @@ async def _resolve_user_cfg(user_cfg: dict, provider: str | None) -> dict | None
     from app.core.model_catalog import PROVIDER_BASE_URLS
 
     prov = user_cfg.get("provider") or provider
-    base_url = PROVIDER_BASE_URLS.get(prov or "") or ""
+    base_url = ""
+    if user_cfg.get("byok") and user_cfg.get("base_url"):
+        from app.core.model_catalog import normalize_byok_base_url
+
+        try:
+            base_url = normalize_byok_base_url(
+                str(user_cfg["base_url"]), allow_private=settings.BYOK_ALLOW_PRIVATE_BASE_URL
+            )
+        except ValueError:
+            logger.warning("忽略无效的用户 BYOK endpoint")
+            return None
+    else:
+        base_url = PROVIDER_BASE_URLS.get(prov or "") or ""
     if not base_url:
         return None
     env_key = ""
@@ -165,20 +176,21 @@ async def validate_llm_config(cfg: dict[str, Any]) -> tuple[bool, str]:
         return False, "base_url / api_key / model 均不能为空"
 
     try:
-        async with AsyncClient(
+        # 延迟导入，避免 ``langchain.models -> llm_config`` 的初始化环依赖。
+        from langchain_core.messages import HumanMessage
+
+        from app.agents.langchain.models import get_chat_model
+
+        chat_model = await get_chat_model(
+            scene=None,
+            user_id=None,
             base_url=base_url,
-            headers={"Authorization": f"Bearer {api_key}"},
+            api_key=api_key,
+            model=model,
             timeout=min(timeout, 15.0),
-        ) as client:
-            resp = await client.post(
-                "/chat/completions",
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": "ping"}],
-                    "max_tokens": 1,
-                },
-            )
-            resp.raise_for_status()
+            max_tokens=1,
+        )
+        await chat_model.ainvoke([HumanMessage(content="ping")])
         return True, ""
     except Exception as e:  # noqa: BLE001
         return False, f"{type(e).__name__}: {e}"

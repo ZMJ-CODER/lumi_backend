@@ -1,6 +1,6 @@
 """用户级 LLM 配置（模型选择）—— Redis 存储，按用户隔离.
 
-只存非敏感选择：provider / model / reasoning_effort / byok 标记。
+只存非敏感选择：provider / model / base_url / reasoning_effort / byok 标记。
 BYOK 的 API key 绝不落服务端：本地加密存储 + 每次请求临时携带（X-LLM-API-KEY）。
 """
 

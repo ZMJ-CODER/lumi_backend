@@ -12,19 +12,19 @@ import re
 import uuid
 from typing import Literal
 
-from httpx import AsyncClient
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.llm import LLMClient
 from app.core.crypto import encrypt_memory_text
 from app.core.redis import get_redis
 from app.models.db_models import Memory
 from app.services.content_codec import normalize_content
 from app.services.rag.embeddings import embed_texts
-from app.services.usage import CATEGORY_MEMORY_EXTRACT, CATEGORY_MEMORY_MERGE, record_usage
+from app.services.usage import CATEGORY_MEMORY_EXTRACT, CATEGORY_MEMORY_MERGE
 
 # ── L2 PII 正则兜底（命中即不落库）──
 PII_PATTERNS: dict[str, re.Pattern] = {
@@ -101,36 +101,18 @@ async def _chat_turbo(
     user_id: str | None = None,
     category: str = CATEGORY_MEMORY_EXTRACT,
 ) -> str:
-    """调用轻量模型（默认 qwen-turbo，与编排器摘要同一模式）."""
-    async with AsyncClient(
+    """调用轻量模型；实际运行时由 LangChain 门面统一管理。"""
+    return await LLMClient().chat(
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}],
         base_url=settings.QWEN_BASE_URL,
-        headers={"Authorization": f"Bearer {settings.QWEN_API_KEY}"},
-        timeout=120,
-    ) as client:
-        resp = await client.post(
-            "/chat/completions",
-            json={
-                "model": settings.MEMORY_EXTRACTION_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                "max_tokens": max_tokens,
-                "temperature": 0.2,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content = (data["choices"][0]["message"]["content"] or "").strip()
-    usage = data.get("usage") or {}
-    await record_usage(
-        user_id,
-        category,
-        settings.MEMORY_EXTRACTION_MODEL,
-        usage.get("prompt_tokens"),
-        usage.get("completion_tokens"),
+        api_key=settings.QWEN_API_KEY,
+        model=settings.MEMORY_EXTRACTION_MODEL,
+        max_tokens=max_tokens,
+        temperature=0.2,
+        usage_user_id=user_id,
+        usage_category=category,
+        disable_reasoning_effort=True,
     )
-    return content
 
 
 def _parse_facts(raw: str) -> list[ExtractedFact]:

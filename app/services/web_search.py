@@ -4,6 +4,7 @@ import httpx
 from loguru import logger
 
 from app.core.config import settings
+from app.core.resilience import CircuitOpenError, get_breaker
 
 # 联网搜索工具定义（LLM 通过 function calling 自主决定是否调用）
 WEB_SEARCH_TOOL: dict = {
@@ -31,18 +32,21 @@ async def web_search(query: str, max_results: int | None = None) -> list[dict]:
         return []
     max_results = max_results or settings.TAVILY_MAX_RESULTS
     try:
-        async with httpx.AsyncClient(timeout=settings.TAVILY_TIMEOUT_SECONDS) as client:
-            resp = await client.post(
-                "https://api.tavily.com/search",
-                json={
-                    "api_key": settings.TAVILY_API_KEY,
-                    "query": query,
-                    "max_results": max_results,
-                    "search_depth": settings.TAVILY_SEARCH_DEPTH,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        async def _search() -> dict:
+            async with httpx.AsyncClient(timeout=settings.TAVILY_TIMEOUT_SECONDS) as client:
+                resp = await client.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": settings.TAVILY_API_KEY,
+                        "query": query,
+                        "max_results": max_results,
+                        "search_depth": settings.TAVILY_SEARCH_DEPTH,
+                    },
+                )
+                resp.raise_for_status()
+                return resp.json()
+
+        data = await get_breaker("tavily:search").call(_search)
         results: list[dict] = []
         for item in data.get("results", []):
             url = (item.get("url") or "").strip()
@@ -56,6 +60,9 @@ async def web_search(query: str, max_results: int | None = None) -> list[dict]:
                 }
             )
         return results
+    except CircuitOpenError as exc:
+        logger.info("Tavily 搜索暂时熔断，跳过本次联网: {}", exc)
+        return []
     except Exception as exc:  # noqa: BLE001
         logger.warning("Tavily 搜索失败: {}", exc)
         return []

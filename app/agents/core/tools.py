@@ -5,7 +5,6 @@
 
 import asyncio
 import hashlib
-import json
 import re
 
 import httpx
@@ -766,29 +765,17 @@ async def _generate_local(instruction: str, path: str, original: str) -> str:
 async def review_code_content(ctx, instruction: str, path: str, content: str) -> dict:
     """LLM 审查代码，返回 {approved, issues, feedback}; 审查失败时放行."""
     try:
-        from app.core.llm import LLMClient
-        from app.services.usage import CATEGORY_REVIEW
+        from app.agents.langchain.planning import invoke_json_object
 
-        llm = LLMClient()
-        reply = await llm.chat(
-            [
-                {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"用户指令：{instruction}\n文件路径：{path}\n文件内容：\n{content[:12000]}"
-                    ),
-                },
-            ],
-            temperature=0.1,
-            max_tokens=4096,
-            usage_user_id=ctx.user_id,
-            usage_category=CATEGORY_REVIEW,
-            reasoning_effort="low",
-            disable_reasoning_effort=True,
+        data = await invoke_json_object(
+            (
+                f"{REVIEW_SYSTEM_PROMPT}\n\n"
+                f"用户指令：{instruction}\n文件路径：{path}\n文件内容：\n{content[:12000]}"
+            ),
+            user_id=ctx.user_id,
             api_key=ctx.llm_api_key,
+            max_tokens=4096,
         )
-        data = _extract_json(reply)
         if data:
             issues = data.get("issues") or []
             if not isinstance(issues, list):
@@ -801,20 +788,3 @@ async def review_code_content(ctx, instruction: str, path: str, content: str) ->
     except Exception as exc:  # noqa: BLE001
         logger.warning("[Agent] 代码审查失败，默认放行: {}", exc)
     return {"approved": True, "issues": [], "feedback": ""}
-
-
-def _extract_json(text: str | None) -> dict | None:
-    if not text:
-        return None
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```\w*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text)
-    start, end = text.find("{"), text.rfind("}")
-    if start >= 0 and end > start:
-        text = text[start : end + 1]
-    try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else None
-    except (ValueError, TypeError):
-        return None

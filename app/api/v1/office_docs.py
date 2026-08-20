@@ -1,11 +1,12 @@
 """办公文档编辑 API：上传 → 读取结构 → LLM 规划编辑 → 缓冲 → 取回落盘/丢弃."""
 
-from fastapi import APIRouter, Depends, File, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, NotFoundException
+from app.core.throttling import consume_route_limit
 from app.core.executors import run_in_compute
 from app.services import office_docs
 
@@ -38,10 +39,22 @@ async def _ensure_session_or_404(user_id: str, doc_id: str) -> dict:
 
 @router.post("")
 async def upload_office_doc(
+    request: Request,
     file: UploadFile = File(...),
     payload: dict = Depends(require_auth),
 ):
     """上传办公文档，建立编辑会话，返回文档结构与会话 id."""
+    rate = await consume_route_limit(request, payload, "upload")
+    if not rate.allowed:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "code": 429,
+                "message": "上传请求过于频繁，请稍后重试",
+                "data": {"error_code": "UPLOAD_RATE_LIMIT", "retry_after": rate.retry_after},
+            },
+            headers={"Retry-After": str(rate.retry_after)},
+        )
     content = await file.read()
     filename = file.filename or "document.txt"
     try:
@@ -89,6 +102,19 @@ async def get_generic_output(
     if path is None:
         raise NotFoundException("产物不存在")
     return FileResponse(str(path), filename=path.name)
+
+
+@router.get("/outputs/{name}/preview")
+async def preview_generic_output(
+    conv_id: str,
+    name: str,
+    payload: dict = Depends(require_auth),
+):
+    """预览当前用户任务生成的安全文本/表格内容。"""
+    path = office_docs.resolve_generic_output(payload["sub"], conv_id, name)
+    if path is None:
+        raise NotFoundException("产物不存在")
+    return {"code": 0, "data": office_docs.preview_generated_output(path)}
 
 
 @router.delete("/outputs/{name}")
@@ -242,6 +268,23 @@ async def download_office_output(
         media_type="application/octet-stream",
         filename=safe,
     )
+
+
+@router.get("/{doc_id}/outputs/{name}/preview")
+async def preview_office_output(
+    doc_id: str,
+    name: str,
+    payload: dict = Depends(require_auth),
+):
+    """预览当前用户办公文档任务生成的产物，不暴露服务端路径。"""
+    await _ensure_session_or_404(payload["sub"], doc_id)
+    from pathlib import Path
+
+    out_dir = office_docs.doc_output_dir(payload["sub"], doc_id)
+    target = out_dir / Path(name).name
+    if not target.is_file():
+        raise NotFoundException("产物文件不存在")
+    return {"code": 0, "data": office_docs.preview_generated_output(target)}
 
 
 @router.post("/{doc_id}/analyze")

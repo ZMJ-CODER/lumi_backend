@@ -21,7 +21,8 @@ async def rate_limit_middleware(request: Request, call_next):
     """按 IP 限流：auth 路由更严，其余通用；Redis 不可用时放行（不因限流击穿）."""
     if settings.RATE_LIMIT_ENABLED:
         path = request.url.path
-        if path != "/metrics":
+        # 健康检查/指标采集不应消耗用户的通用 IP 配额，否则高频探活会误伤业务。
+        if path not in {"/metrics", "/api/v1/health", "/health"}:
             is_auth = path.startswith("/api/v1/auth")
             limit = (
                 settings.RATE_LIMIT_AUTH_PER_MINUTE
@@ -52,6 +53,7 @@ async def _rate_limited_response(request: Request):
     return JSONResponse(
         status_code=429,
         content={"code": 429, "message": "请求过于频繁，请稍后再试", "data": None},
+        headers={"Retry-After": "60"},
     )
 
 

@@ -8,15 +8,15 @@ import json
 import re
 import uuid
 
-from httpx import AsyncClient
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.crypto import decrypt_memory_text, hash_memory_text
+from app.core.llm import LLMClient
 from app.models.db_models import ControlLog, Memory
-from app.services.usage import CATEGORY_PRIVACY_CONFIRM, record_usage
+from app.services.usage import CATEGORY_PRIVACY_CONFIRM
 
 # 可被用户显式请求解密的 L1 话题（健康类白名单外，永不自动解密）
 DECRYPT_WHITELIST_TOPICS = {"财务", "家庭", "社交", "出行", "习惯"}
@@ -55,34 +55,20 @@ async def _llm_confirm(
     """LLM 二次确认：避免把闲聊误判为隐私索取."""
     items = "\n".join(f"- {m.fact} (id={m.id})" for m in candidates)
     try:
-        async with AsyncClient(
+        raw = await LLMClient().chat(
+            [
+                {"role": "system", "content": DECRYPT_CONFIRM_PROMPT.format(items=items, message=message)},
+                {"role": "user", "content": "请审核。"},
+            ],
             base_url=settings.QWEN_BASE_URL,
-            headers={"Authorization": f"Bearer {settings.QWEN_API_KEY}"},
-            timeout=60,
-        ) as client:
-            resp = await client.post(
-                "/chat/completions",
-                json={
-                    "model": settings.MEMORY_EXTRACTION_MODEL,
-                    "messages": [
-                        {"role": "system", "content": DECRYPT_CONFIRM_PROMPT.format(items=items, message=message)},
-                        {"role": "user", "content": "请审核。"},
-                    ],
-                    "max_tokens": 256,
-                    "temperature": 0,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            raw = (data["choices"][0]["message"]["content"] or "").strip()
-            usage = data.get("usage") or {}
-            await record_usage(
-                user_id,
-                CATEGORY_PRIVACY_CONFIRM,
-                settings.MEMORY_EXTRACTION_MODEL,
-                usage.get("prompt_tokens"),
-                usage.get("completion_tokens"),
-            )
+            api_key=settings.QWEN_API_KEY,
+            model=settings.MEMORY_EXTRACTION_MODEL,
+            max_tokens=256,
+            temperature=0,
+            usage_user_id=user_id,
+            usage_category=CATEGORY_PRIVACY_CONFIRM,
+            disable_reasoning_effort=True,
+        )
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
         data = json.loads(raw)
         if not data.get("allow"):

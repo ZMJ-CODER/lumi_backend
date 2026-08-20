@@ -63,6 +63,9 @@ def prepare_node_safety(node: TaskNode, user_id: str, job_id: str) -> None:
     inputs = inputs or {}
     tool = str(params.get("preferred_tool") or "")
     claims = list(node.resource_claims or [])
+    if node.agent == "react_step":
+        # 动态工具在运行时才确定，先用用户级写锁隔离整个循环。
+        claims.append(ResourceClaim(key=f"react:user:{user_id}", mode="write"))
     if tool:
         try:
             from app.agents.skills.registry import SkillRegistry

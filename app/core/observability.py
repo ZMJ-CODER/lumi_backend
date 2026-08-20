@@ -49,11 +49,17 @@ _http_duration = None
 _agent_jobs = None
 _skill_calls = None
 _rag_searches = None
+_agent_routes = None
+_agent_replans = None
+_plan_cache = None
+_agent_route_duration = None
+_agent_node_duration = None
 
 
 def _ensure_metrics():
     """懒加载 prometheus-client 指标（避免未安装/未启用时阻塞启动）."""
     global _prometheus, _http_requests, _http_duration, _agent_jobs, _skill_calls, _rag_searches
+    global _agent_routes, _agent_replans, _plan_cache, _agent_route_duration, _agent_node_duration
     if _prometheus is not None:
         return True
     if not settings.METRICS_ENABLED:
@@ -74,6 +80,27 @@ def _ensure_metrics():
         _skill_calls = Counter("lumi_skill_calls_total", "技能调用次数", ["skill", "success"])
         _rag_searches = Counter(
             "lumi_rag_searches_total", "RAG 检索次数", ["hits"]
+        )
+        _agent_routes = Counter(
+            "lumi_agent_routes_total", "办公任务路由结果", ["level", "mode", "cache_hit"]
+        )
+        _agent_replans = Counter(
+            "lumi_agent_replans_total", "办公任务升级或重规划", ["from_level", "to_level", "reason"]
+        )
+        _plan_cache = Counter(
+            "lumi_agent_plan_cache_total", "办公计划缓存事件", ["result"]
+        )
+        _agent_route_duration = Histogram(
+            "lumi_agent_route_duration_seconds",
+            "办公任务评估与规划耗时",
+            ["level", "mode"],
+            buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 30, 60),
+        )
+        _agent_node_duration = Histogram(
+            "lumi_agent_node_duration_seconds",
+            "办公原子节点执行耗时",
+            ["agent", "success"],
+            buckets=(0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 15, 30, 60, 180, 300),
         )
         _prometheus = True
         return True
@@ -104,6 +131,40 @@ def inc_skill_call(skill: str, success: bool) -> None:
 def inc_rag_search(hits: int) -> None:
     if _ensure_metrics():
         _rag_searches.labels(hits="hit" if hits else "miss").inc()
+
+
+def inc_agent_route(level: str, mode: str, cache_hit: bool, duration: float | None = None) -> None:
+    if _ensure_metrics():
+        _agent_routes.labels(
+            level=level or "unknown",
+            mode=mode or "unknown",
+            cache_hit=str(bool(cache_hit)).lower(),
+        ).inc()
+        if duration is not None:
+            _agent_route_duration.labels(
+                level=level or "unknown", mode=mode or "unknown"
+            ).observe(max(0.0, duration))
+
+
+def inc_agent_replan(from_level: str, to_level: str, reason: str) -> None:
+    if _ensure_metrics():
+        _agent_replans.labels(
+            from_level=from_level or "unknown",
+            to_level=to_level or "unknown",
+            reason=reason or "unknown",
+        ).inc()
+
+
+def inc_plan_cache(result: str) -> None:
+    if _ensure_metrics():
+        _plan_cache.labels(result=result or "unknown").inc()
+
+
+def observe_agent_node_duration(agent: str, success: bool, duration: float) -> None:
+    if _ensure_metrics():
+        _agent_node_duration.labels(
+            agent=(agent or "unknown")[:80], success=str(bool(success)).lower()
+        ).observe(max(0.0, duration))
 
 
 def metrics_text() -> str:

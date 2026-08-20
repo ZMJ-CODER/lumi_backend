@@ -6,6 +6,8 @@
   - game:   游戏模式，实时陪伴，个人游戏空间 + 公共攻略库（优先本地加速）
 """
 
+from app.services.response_format import OFFICE_RESPONSE_FORMAT
+
 SCENE_CONFIGS: dict[str, dict] = {
     "chat": {
         "name": "闲聊",
@@ -29,6 +31,7 @@ SCENE_CONFIGS: dict[str, dict] = {
             "回答时请引用相关文档来源（📁 个人资料 / 🌐 公共知识库）。\n"
             "事实红线：不确定的信息直接说不确定，绝不编造数据/来源/引用；"
             "涉及实时信息时说明依据；问题模糊先澄清。"
+            + OFFICE_RESPONSE_FORMAT
         ),
         "knowledge_tags": ["office", "productivity"],
         "local_acceleration": False,

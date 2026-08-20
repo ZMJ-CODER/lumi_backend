@@ -33,9 +33,19 @@ class Sandbox(ABC):
         code: str,
         language: str = "python",
         timeout: int = 30,
+        env_extra: dict[str, str] | None = None,
+        mounts: list[dict[str, str]] | None = None,
     ) -> SandboxResult:
         """在隔离环境执行一段脚本."""
         ...
+
+    def is_available(self) -> tuple[bool, str]:
+        """返回运行时是否可用及不可用原因。
+
+        默认实现仅表示实例已创建；需要外部运行时的实现（Docker、远程
+        沙箱等）应覆写它。能力目录会用此方法提前隐藏不可执行工具。
+        """
+        return True, ""
 
     @abstractmethod
     async def run_command(

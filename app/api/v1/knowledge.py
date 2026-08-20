@@ -1,11 +1,13 @@
 """知识库模块 API —— 知识空间 / 文档上传 / 列表 / 删除."""
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
+from app.core.throttling import consume_route_limit
 from app.models.knowledge import CreateSpaceRequest, UpdateSpaceRequest
 from app.services.rag import knowledge as kb
 
@@ -24,6 +26,7 @@ def _is_admin(payload: dict) -> bool:
 
 @router.post("/documents")
 async def upload_document(
+    request: Request,
     files: list[UploadFile] = File(default=[]),
     file: UploadFile | None = File(default=None),
     space_id: str = Form(...),
@@ -33,6 +36,17 @@ async def upload_document(
     payload: dict = Depends(require_auth),
 ):
     """批量上传文档到知识库（支持多文件），异步处理分块与向量化."""
+    rate = await consume_route_limit(request, payload, "upload")
+    if not rate.allowed:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "code": 429,
+                "message": "上传请求过于频繁，请稍后重试",
+                "data": {"error_code": "UPLOAD_RATE_LIMIT", "retry_after": rate.retry_after},
+            },
+            headers={"Retry-After": str(rate.retry_after)},
+        )
     user_id = payload["sub"]
     from celery_app.tasks import process_document
 

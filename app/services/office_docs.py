@@ -9,6 +9,7 @@
 会话布局：data/office/{user_id}/{doc_id}/original.ext + buffered.ext + meta.json
 """
 
+import csv
 import json
 import shutil
 import time
@@ -63,6 +64,51 @@ def delete_generic_output(user_id: str, conv_id: str, name: str) -> bool:
     target = resolve_generic_output(user_id, conv_id, name)
     if target is None:
         return False
+
+
+def preview_generated_output(path: Path) -> dict:
+    """生成可安全内嵌展示的产物摘要，绝不返回磁盘路径或原始二进制。"""
+    suffix = path.suffix.lower()
+    result: dict = {"name": path.name, "size": path.stat().st_size, "kind": suffix.lstrip(".")}
+    max_chars = 60_000
+    max_rows, max_cols = 50, 30
+    if suffix in {".csv", ".tsv"}:
+        delimiter = "\t" if suffix == ".tsv" else ","
+        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
+            rows = []
+            for index, row in enumerate(csv.reader(fh, delimiter=delimiter)):
+                if index >= max_rows:
+                    result["truncated"] = True
+                    break
+                rows.append([str(cell)[:200] for cell in row[:max_cols]])
+        return {**result, "preview_type": "table", "rows": rows}
+    if suffix in {".xlsx", ".xlsm"}:
+        try:
+            from openpyxl import load_workbook
+
+            wb = load_workbook(path, read_only=True, data_only=False)
+            sheet = wb[wb.sheetnames[0]] if wb.sheetnames else None
+            rows = []
+            if sheet is not None:
+                for index, row in enumerate(sheet.iter_rows(values_only=True)):
+                    if index >= max_rows:
+                        result["truncated"] = True
+                        break
+                    rows.append(["" if cell is None else str(cell)[:200] for cell in row[:max_cols]])
+            result["sheets"] = wb.sheetnames[:20]
+            return {**result, "preview_type": "table", "rows": rows}
+        except Exception:
+            return {**result, "preview_type": "unavailable", "message": "此表格暂无法预览，请下载后查看。"}
+    if suffix in {".txt", ".md", ".log", ".json", ".xml", ".yaml", ".yml", ".html", ".htm"}:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read(max_chars + 1)
+        return {
+            **result,
+            "preview_type": "text",
+            "text": text[:max_chars],
+            "truncated": len(text) > max_chars,
+        }
+    return {**result, "preview_type": "unavailable", "message": "该文件格式不提供内嵌预览，请下载后查看。"}
     try:
         target.unlink(missing_ok=True)
         return True
@@ -148,6 +194,9 @@ async def plan_edits(
         + "\n约束：索引从 0 开始；只输出 JSON 数组（不要 Markdown 围栏、不要解释）；"
         "无法满足的指令输出空数组 []。"
     )
+    from app.core.agent_security import UNTRUSTED_CONTENT_RULES
+
+    system += "\n\n" + UNTRUSTED_CONTENT_RULES
     reply = await llm.chat(
         [
             {"role": "system", "content": system},

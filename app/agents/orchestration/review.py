@@ -5,14 +5,13 @@ execute_dag 的重试机制兜底）；检索等其余任务默认放行。
 LLM 审查失败时放行（质检不能阻塞主流程）。
 """
 
-import json
-import re
 from abc import ABC, abstractmethod
 
 from loguru import logger
 
 from app.agents.orchestration.models import ReviewVerdict, TaskNode
 from app.agents.orchestration.workers import WorkerContext
+from app.agents.langchain.planning import invoke_json_object
 from app.core.config import settings
 
 
@@ -57,24 +56,12 @@ class LlmReviewHook(ReviewHook):
             f"生成的文件内容：\n{new_content[:12000]}"
         )
         try:
-            from app.core.llm import LLMClient
-            from app.services.usage import CATEGORY_REVIEW
-
-            llm = LLMClient()
-            reply = await llm.chat(
-                [
-                    {"role": "system", "content": self._SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.1,
-                max_tokens=4096,
-                usage_user_id=ctx.user_id,
-                usage_category=CATEGORY_REVIEW,
-                reasoning_effort="low",
-                disable_reasoning_effort=True,
+            data = await invoke_json_object(
+                f"{self._SYSTEM_PROMPT}\n\n{prompt}",
+                user_id=ctx.user_id,
                 api_key=ctx.llm_api_key,
+                max_tokens=4096,
             )
-            data = _extract_json(reply)
             if data:
                 return ReviewVerdict(
                     approved=bool(data.get("approved")),
@@ -83,25 +70,6 @@ class LlmReviewHook(ReviewHook):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[Review] LLM 质检失败，默认放行: {}", exc)
         return ReviewVerdict(approved=True)
-
-
-def _extract_json(text: str) -> dict | None:
-    if not text:
-        return None
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```\w*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text)
-    start, end = text.find("{"), text.rfind("}")
-    if start >= 0 and end > start:
-        text = text[start : end + 1]
-    try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else None
-    except (ValueError, TypeError):
-        return None
-
-
 REVIEWER: ReviewHook = LlmReviewHook()
 
 

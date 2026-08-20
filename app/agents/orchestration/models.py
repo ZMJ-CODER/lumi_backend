@@ -32,6 +32,7 @@ class JobStatus(str, Enum):
     INTERRUPTED = "interrupted"  # 用户终止 / 断网超时
     CANCELLED = "cancelled"
     WAITING_APPROVAL = "waiting_approval"  # 等待人工审批
+    CONTINUING = "continuing"  # 长清单已完成当前批次，正在物化下一批
 
 
 class ResourceClaim(BaseModel):
@@ -81,6 +82,9 @@ class Job(BaseModel):
     nodes: list[TaskNode] = Field(default_factory=list)
     result: dict | None = None    # 汇总结果（如最终回复）
     plan_text: str | None = None  # 规划器产出的执行计划文本（供展示/审计）
+    # 办公任务路由与恢复审计信息。使用开放 dict 保持 API 向后兼容，旧任务
+    # 快照缺少该字段时会自动使用空对象。
+    routing: dict = Field(default_factory=dict)
     error: str | None = None
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)

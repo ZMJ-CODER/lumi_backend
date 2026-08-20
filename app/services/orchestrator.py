@@ -11,15 +11,16 @@ import asyncio
 import base64
 import json
 import mimetypes
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from httpx import AsyncClient
 from loguru import logger
 
 from app.agents.base import AgentContext
 from app.agents.registry import AgentRegistry
+from app.agents.skills.executor import run_skill_loop
 from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.llm import LLMClient
@@ -36,10 +37,8 @@ from app.services.prompts import get_base_system_prompt, get_prompt_content
 from app.services.usage import (
     CATEGORY_CHAT,
     CATEGORY_SKILL,
-    CATEGORY_SUMMARY,
     CATEGORY_TITLE,
     CATEGORY_TOOL_DECISION,
-    record_usage,
 )
 from app.services.web_search import WEB_SEARCH_TOOL, web_search
 
@@ -78,6 +77,14 @@ _WEB_INTENT_KEYWORDS = (
     "是什么", "怎么回事", "哪里", "什么时候", "谁的", "多少钱", "怎么样",
 )
 
+# 仅这些意图才需要在普通聊天中先进入受控 ToolNode。避免让一般闲聊、文档
+# 问答、识图或语音转写失去原有逐字流式体验；文档问答已由 RAG 预处理完成。
+_CHAT_TOOL_GRAPH_KEYWORDS = (
+    "搜索", "搜一下", "查一下", "查查", "最新", "新闻", "天气", "股票", "价格",
+    "汇率", "行情", "实时", "动态", "报道", "热点", "今天", "昨天", "明天",
+    "现在几点", "当前时间", "当前日期", "几号", "星期几",
+)
+
 
 def _looks_like_chitchat(question: str) -> bool:
     """简单闲聊/寒暄判断：很短且不含搜索意图关键词 → 跳过联网决策（省一次 LLM 调用）."""
@@ -89,16 +96,22 @@ def _looks_like_chitchat(question: str) -> bool:
     return not any(k in q for k in _WEB_INTENT_KEYWORDS)
 
 
+def _needs_chat_tool_graph(content: str) -> bool:
+    """普通聊天何时需要非流式 ToolNode 决策。"""
+    text = (content or "").strip().lower()
+    return bool(text and any(keyword in text for keyword in _CHAT_TOOL_GRAPH_KEYWORDS))
+
+
 def _chat_reasoning_effort(thinking_mode: str) -> str | None:
     """聊天推理强度：fast=low（快速回复），think=None（沿用用户全局设置，通常是 high）."""
     return None if thinking_mode == "think" else "low"
 
 
 def _chat_model_override(scene: str, thinking_mode: str, llm_api_key: str | None) -> dict | None:
-    """普通模式快速/思考档模型切换：
-    - fast  → 云端 DS Flash（支持 1M 上下文，省钱省时）
-    - think → 强模型（默认 qwen-plus，价格适中，与现有千问密钥共用）
-    用户自备 API Key（BYOK）或非普通模式时不覆盖，尊重用户选择的模型。
+    """普通模式快速/思考档模型切换：默认均使用服务端千问。
+
+    用户 BYOK 或非普通模式不覆盖。保留 ``CHAT_THINK_*`` 作为可选的
+    千问强模型覆盖；已下架 DeepSeek 默认模型不再进入服务端链路。
     """
     if scene != "chat" or llm_api_key:
         return None
@@ -106,14 +119,14 @@ def _chat_model_override(scene: str, thinking_mode: str, llm_api_key: str | None
         return {
             "base_url": (settings.CHAT_THINK_BASE_URL or settings.QWEN_BASE_URL).rstrip("/"),
             "api_key": settings.CHAT_THINK_API_KEY or settings.QWEN_API_KEY,
-            "model": settings.CHAT_THINK_MODEL,
+            "model": settings.CHAT_THINK_MODEL or settings.QWEN_MODEL,
             "timeout": 120.0,
         }
     return {
-        "base_url": (settings.DS_FLASH_BASE_URL or settings.DEEPSEEK_BASE_URL).rstrip("/"),
-        "api_key": settings.DS_FLASH_API_KEY or settings.DEEPSEEK_API_KEY,
-        "model": settings.DS_FLASH_MODEL or settings.DEEPSEEK_MODEL,
-        "timeout": float(settings.DS_FLASH_TIMEOUT),
+        "base_url": settings.QWEN_BASE_URL.rstrip("/"),
+        "api_key": settings.QWEN_API_KEY,
+        "model": settings.QWEN_MODEL,
+        "timeout": 120.0,
     }
 
 
@@ -217,35 +230,22 @@ class Orchestrator:
             "只输出梗概本身，不要任何解释或前缀。"
         )
         try:
-            async with AsyncClient(
+            summary = await LLMClient().chat(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"对话内容：\n\n{dialog}"},
+                ],
+                model=settings.QWEN_TURBO_MODEL,
                 base_url=settings.QWEN_BASE_URL,
-                headers={"Authorization": f"Bearer {settings.QWEN_API_KEY}"},
+                api_key=settings.QWEN_API_KEY,
                 timeout=120,
-            ) as client:
-                resp = await client.post(
-                    "/chat/completions",
-                    json={
-                        "model": settings.QWEN_TURBO_MODEL,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"对话内容：\n\n{dialog}"},
-                        ],
-                        "max_tokens": 8192,
-                        "temperature": 0.3,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                usage = data.get("usage") or {}
-                await record_usage(
-                    user_id,
-                    CATEGORY_SUMMARY,
-                    settings.QWEN_TURBO_MODEL,
-                    usage.get("prompt_tokens"),
-                    usage.get("completion_tokens"),
-                )
-                summary = (data["choices"][0]["message"]["content"] or "").strip()
-                return summary[: settings.CONVERSATION_SUMMARY_MAX_CHARS]
+                temperature=0.3,
+                max_tokens=8192,
+                usage_user_id=user_id,
+                usage_category="summary",
+                disable_reasoning_effort=True,
+            )
+            return summary[: settings.CONVERSATION_SUMMARY_MAX_CHARS]
         except Exception as e:
             # 摘要失败不阻塞对话：保留旧摘要，下次触发再试
             logger.warning("对话摘要生成失败: {}", e)
@@ -505,8 +505,18 @@ class Orchestrator:
                 "transcript": transcript,
             }
 
+        # 办公模式的知识来源只能来自 DAG 节点（office_doc / retrieval 等）。
+        # 在这里预检索会造成两个问题：无关上下文可能干扰任务规划，且即便
+        # 最终走的是 get_datetime 之类系统工具，也会向前端泄露无关引用。
         prep = await self._prepare_chat(
-            user_id, conversation_id, content, scene, retrieval_query, attachments, reply_style
+            user_id,
+            conversation_id,
+            content,
+            scene,
+            retrieval_query,
+            attachments,
+            reply_style,
+            retrieve_knowledge=scene != "office",
         )
         image_uris = await self._load_image_data_uris(user_id, attachments)
 
@@ -618,7 +628,14 @@ class Orchestrator:
             return
 
         prep = await self._prepare_chat(
-            user_id, conversation_id, content, scene, retrieval_query, attachments, reply_style
+            user_id,
+            conversation_id,
+            content,
+            scene,
+            retrieval_query,
+            attachments,
+            reply_style,
+            retrieve_knowledge=scene != "office",
         )
         image_uris = await self._load_image_data_uris(user_id, attachments)
         message_id = str(uuid.uuid4())
@@ -734,6 +751,8 @@ class Orchestrator:
             return answer
         if result.get("type") == "clarification":
             return str(result.get("question") or "请补充任务信息。")
+        if result.get("type") == "planning_error":
+            return str(result.get("message") or job.error or "办公任务规划失败，请稍后重试。")
         blocks = []
         for node in job.nodes:
             node_result = node.result or {}
@@ -742,6 +761,9 @@ class Orchestrator:
                 blocks.append(content)
         if blocks:
             return "\n\n".join(blocks)
+        failed = next((node for node in job.nodes if node.error), None)
+        if failed and failed.error:
+            return str(failed.error)
         return str(job.error or "办公任务未能完成，请检查失败步骤后重试。")
 
     async def _run_office_job(
@@ -805,14 +827,44 @@ class Orchestrator:
             "created_at": job.created_at,
         }
         last: dict[str, tuple] = {}
+        last_plan_revision = 0
         terminal = {
             JobStatus.COMPLETED,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
             JobStatus.INTERRUPTED,
         }
+        missing_snapshots = 0
         try:
             while True:
+                routing = getattr(job, "routing", None) or {}
+                plan_revision = int(routing.get("plan_revision") or 1)
+                if plan_revision > last_plan_revision:
+                    if last_plan_revision:
+                        reason = str(
+                            routing.get("plan_change_reason")
+                            or "我根据刚才的执行结果调整了后续方法。"
+                        )
+                        yield {
+                            "type": "step",
+                            "job_id": job.job_id,
+                            "step": {
+                                "id": f"plan-revision-{plan_revision}",
+                                "title": "调整执行计划",
+                                "status": "completed",
+                                "runtime_status": "completed",
+                                "tool": "planner",
+                                "output": reason[:500],
+                                "error": None,
+                                "depends_on": [],
+                                "resource_claims": [],
+                                "effect_status": None,
+                                "started_at": None,
+                                "completed_at": None,
+                                "duration_ms": None,
+                            },
+                        }
+                    last_plan_revision = plan_revision
                 for node in job.nodes:
                     step = self._job_step(node)
                     signature = (step["status"], step["error"], step["output"], step["effect_status"])
@@ -822,7 +874,56 @@ class Orchestrator:
                 if job.status in terminal:
                     break
                 await asyncio.sleep(0.15)
-                job = await agent_orchestrator.get_job(job.job_id) or job
+                current = await agent_orchestrator.get_job(job.job_id)
+                if current is None:
+                    missing_snapshots += 1
+                    # 短暂 Redis 抖动可以恢复；连续缺失说明任务状态已丢失。
+                    # 不能继续用陈旧 running 快照无限 SSE，占住会话和用户额度。
+                    if missing_snapshots >= 3:
+                        # 流式请求不能只抛异常：前端已经收到 job 事件，抛异常会
+                        # 被 Electron 转成“回复中断”，掩盖真正原因。构造一个本地
+                        # 失败终态并收敛 SSE；下次 GET 仍会返回 404，提示状态库需
+                        # 检查，但当前气泡至少能显示可行动的原因。
+                        job.status = JobStatus.FAILED
+                        job.error = "办公任务状态已丢失，请检查 Redis/后端实例是否使用同一状态库后重新提交。"
+                        job.updated_at = time.time()
+                        for node in job.nodes:
+                            if node.status not in terminal:
+                                node.status = getattr(type(node.status), "FAILED", "failed")
+                                node.error = "任务状态已丢失"
+                        state_step = (
+                            self._job_step(job.nodes[0])
+                            if job.nodes
+                            else {
+                                "id": "state",
+                                "title": "任务状态",
+                                "status": "failed",
+                                "runtime_status": "failed",
+                                "tool": "state_store",
+                                "output": "",
+                                "error": job.error,
+                                "depends_on": [],
+                                "resource_claims": [],
+                                "effect_status": None,
+                                "started_at": None,
+                                "completed_at": None,
+                                "duration_ms": None,
+                            }
+                        )
+                        state_step.update(
+                            status="failed",
+                            runtime_status="failed",
+                            error=job.error,
+                        )
+                        yield {
+                            "type": "step",
+                            "job_id": job.job_id,
+                            "step": state_step,
+                        }
+                        break
+                    continue
+                missing_snapshots = 0
+                job = current
         except asyncio.CancelledError:
             # SSE 连接属于客户端展示生命周期。切换会话、关闭窗口或网络抖动
             # 都不代表用户明确终止任务；真实终止只能走 /jobs/{id}/cancel。
@@ -859,6 +960,7 @@ class Orchestrator:
         retrieval_query: str | None,
         attachments: list | None,
         reply_style: str | None = None,
+        retrieve_knowledge: bool = True,
     ) -> dict:
         """LLM 调用前的公共准备：上下文、长期记忆、消息构建、RAG 检索、隐私解密门."""
         # 1. 保存用户消息到上下文
@@ -894,12 +996,15 @@ class Orchestrator:
             scene, profile, memory_facts, history, content, summary, system_prompt=system_prompt
         )
 
-        # 4. RAG 知识库检索（按场景过滤空间标签）
-        knowledge_tags = get_scene_knowledge_tags(scene)
-        search_query = await get_retrieval_query(content, retrieval_query, scene, user_id)
-        rag_context, citations = await self._retrieve_knowledge(user_id, search_query, knowledge_tags)
-        if rag_context:
-            messages[-1]["content"] = f"参考以下知识库内容回答用户问题：\n\n{rag_context}\n\n用户问题：{content}"
+        # 4. RAG 知识库检索（按场景过滤空间标签）。办公模式由 DAG
+        # 的显式检索节点决定是否查询，不能在进入规划前隐式检索。
+        citations: list[dict] = []
+        if retrieve_knowledge:
+            knowledge_tags = get_scene_knowledge_tags(scene)
+            search_query = await get_retrieval_query(content, retrieval_query, scene, user_id)
+            rag_context, citations = await self._retrieve_knowledge(user_id, search_query, knowledge_tags)
+            if rag_context:
+                messages[-1]["content"] = f"参考以下知识库内容回答用户问题：\n\n{rag_context}\n\n用户问题：{content}"
 
         # L1 隐私解密门：用户明确要求时解密注入并审计（仅白名单话题）
         if memory_facts and content.strip():
@@ -1051,6 +1156,29 @@ class Orchestrator:
             else:
                 messages = await self._describe_images_to_text(messages, image_uris, user_id)
 
+        # 普通聊天的可选实时/知识库查询走受控 LangGraph ToolNode；办公自动化
+        # 始终由办公 DAG 负责，不能从这里旁路进入。图片、语音和 RAG 已在上方
+        # 预处理完成，图只看 chat 场景白名单（web_search/query_knowledge/get_datetime）。
+        if scene == "chat" and settings.AGENT_SKILLS_ENABLED and _needs_chat_tool_graph(user_content):
+            try:
+                reply, tool_records, tool_citations = await run_skill_loop(
+                    self._llm,
+                    user_id,
+                    messages,
+                    scene="chat",
+                    conversation_id=conversation_id,
+                    llm_api_key=llm_api_key,
+                    llm_base_url=override["base_url"] if override else None,
+                    llm_model=override["model"] if override else None,
+                )
+                citations.extend(tool_citations)
+                if reply:
+                    return reply
+                if tool_records:
+                    logger.warning("普通聊天技能图未产生正文，回退常规聊天")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("普通聊天技能图失败，回退常规聊天: {}", str(exc)[:240])
+
         # 普通模式快速/思考档：显式切换模型（fast=DS Flash / think=强模型）
         if override:
             try:
@@ -1101,6 +1229,28 @@ class Orchestrator:
                 messages = self._attach_images(messages, image_uris)
             else:
                 messages = await self._describe_images_to_text(messages, image_uris, user_id)
+
+        # LangGraph 的工具调用需要先获得完整模型消息才能安全执行，避免把中间
+        # tool_calls 混入 SSE。完成后按原 SSE 协议一次性投递正文；普通闲聊模型
+        # 不调用工具时仍会在第一轮直接返回，且不会接触办公能力。
+        if scene == "chat" and settings.AGENT_SKILLS_ENABLED and _needs_chat_tool_graph(user_content):
+            try:
+                reply, _tool_records, tool_citations = await run_skill_loop(
+                    self._llm,
+                    user_id,
+                    messages,
+                    scene="chat",
+                    conversation_id=conversation_id,
+                    llm_api_key=llm_api_key,
+                    llm_base_url=override["base_url"] if override else None,
+                    llm_model=override["model"] if override else None,
+                )
+                citations.extend(tool_citations)
+                if reply:
+                    yield {"type": "delta", "content": reply}
+                    return
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("普通聊天技能图流式路径失败，回退常规流: {}", str(exc)[:240])
 
         # 普通模式快速/思考档：显式切换模型（fast=DS Flash / think=强模型）
         if override:

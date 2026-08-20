@@ -4,25 +4,27 @@ import asyncio
 
 from app.core.config import settings
 from app.core.llm_config import _resolve_user_cfg, get_llm_config
-from app.core.model_catalog import PROVIDER_BASE_URLS, find_model, get_model_catalog
+from app.core.model_catalog import (
+    PROVIDER_BASE_URLS,
+    find_model,
+    get_model_catalog,
+    normalize_byok_base_url,
+)
+from app.services.orchestrator import _chat_model_override
 
 
 def test_catalog_contains_env_configured_models():
     catalog = get_model_catalog()
     ids = [m["id"] for m in catalog]
-    expected = []
-    if settings.DEEPSEEK_API_KEY and settings.DEEPSEEK_MODEL:
-        expected.append(settings.DEEPSEEK_MODEL)
-    if settings.QWEN_API_KEY and settings.QWEN_MODEL:
-        expected.append(settings.QWEN_MODEL)
-    assert ids == expected
+    assert ids == ["deepseek-v4-flash", "deepseek-v4-pro", "qwen-turbo"]
     for m in catalog:
         assert m["context_window"] > 0
         assert "multimodal" in m
         assert "supports_reasoning_effort" in m
         assert m["price_input_per_million"] >= 0
-    if settings.DEEPSEEK_API_KEY:
-        assert find_model(settings.DEEPSEEK_MODEL)["provider"] == "deepseek"
+    assert find_model("deepseek-v4-flash")["provider"] == "deepseek"
+    assert find_model("deepseek-v4-pro")["provider"] == "deepseek"
+    assert find_model("qwen-turbo")["provider"] == "qwen"
     assert find_model("not-exist") is None
 
 
@@ -39,6 +41,34 @@ def test_resolve_user_cfg_byok():
     assert cfg["base_url"] == PROVIDER_BASE_URLS["deepseek"]
     assert cfg["model"] == "my-model"
     assert cfg["reasoning_effort"] == "high"
+
+
+def test_resolve_user_cfg_custom_byok_endpoint():
+    cfg = asyncio.run(
+        _resolve_user_cfg(
+            {
+                "provider": "custom",
+                "model": "vendor/chat-model",
+                "base_url": "https://gateway.example.com/v1/",
+                "byok": True,
+            },
+            provider=None,
+        )
+    )
+    assert cfg is not None
+    assert cfg["base_url"] == "https://gateway.example.com/v1"
+    assert cfg["api_key"] == ""
+
+
+def test_byok_endpoint_validation_rejects_private_or_credentials():
+    assert normalize_byok_base_url("https://api.example.com/v1/") == "https://api.example.com/v1"
+    for value in ("http://127.0.0.1:11434/v1", "https://user:pass@example.com/v1"):
+        try:
+            normalize_byok_base_url(value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid endpoint: {value}")
 
 
 def test_resolve_user_cfg_server_key():
@@ -66,3 +96,18 @@ def test_get_llm_config_prefers_user_layer(monkeypatch):
     assert cfg["source"] == "user"
     assert cfg["model"] == settings.DEEPSEEK_MODEL
     assert cfg["base_url"] == settings.DEEPSEEK_BASE_URL
+
+
+def test_server_chat_override_uses_qwen_without_byok(monkeypatch):
+    monkeypatch.setattr(settings, "QWEN_MODEL", "qwen-turbo")
+    monkeypatch.setattr(settings, "QWEN_BASE_URL", "https://qwen.example/v1")
+    monkeypatch.setattr(settings, "QWEN_API_KEY", "qwen-key")
+    monkeypatch.setattr(settings, "DEEPSEEK_MODEL", "deepseek-chat")
+
+    fast = _chat_model_override("chat", "fast", None)
+    think = _chat_model_override("chat", "think", None)
+
+    assert fast and fast["model"] == "qwen-turbo"
+    assert fast["base_url"] == "https://qwen.example/v1"
+    assert think and think["model"] == "qwen-turbo"
+    assert _chat_model_override("chat", "fast", "byok-key") is None

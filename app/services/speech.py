@@ -84,27 +84,22 @@ _CORRECT_SYSTEM_PROMPT = (
 
 
 async def _qwen_chat(system_prompt: str, user_text: str, model: str, max_tokens: int = 512) -> str:
-    """调用千问 OpenAI 兼容接口（复用 .env 的 QWEN_BASE_URL / API_KEY）."""
-    async with httpx.AsyncClient(
+    """调用千问 ChatModel（复用 .env 的 QWEN_BASE_URL / API_KEY）."""
+    from app.core.llm import LLMClient
+
+    return await LLMClient(provider="qwen").chat(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ],
+        model=model,
         base_url=settings.QWEN_BASE_URL,
-        headers={"Authorization": f"Bearer {settings.QWEN_API_KEY}"},
+        api_key=settings.QWEN_API_KEY,
         timeout=120,
-    ) as client:
-        resp = await client.post(
-            "/chat/completions",
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text},
-                ],
-                "max_tokens": max_tokens,
-                "temperature": 0.2,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return (data["choices"][0]["message"]["content"] or "").strip()
+        temperature=0.2,
+        max_tokens=max_tokens,
+        disable_reasoning_effort=True,
+    )
 
 
 async def correct_transcript(text: str) -> str:

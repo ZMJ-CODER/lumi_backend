@@ -54,6 +54,7 @@ def validate_dag(nodes: list[TaskNode]) -> None:
 # 各 agent 的必选参数（校验规划结果用）
 _REQUIRED_PARAMS: dict[str, list[str]] = {
     "atomic_step": ["instruction", "preferred_tool"],
+    "react_step": ["instruction"],
     "office_doc": ["doc_id", "instruction", "mode"],
     "office_text": ["instruction"],
     "office_research": ["instruction", "mode"],
@@ -145,6 +146,7 @@ async def execute_dag(
         # 只把显式依赖节点的结果注入本步骤。无依赖的并行步骤没有共享可变上下文，
         # 除各自外部工具副作用外不会读写彼此的执行结果。
         node.metadata = dict(node.metadata or {})
+        node.metadata.setdefault("tool_index", 0)
         from app.agents.orchestration.context import build_dependency_context
 
         node.metadata["dependency_results"] = build_dependency_context(node, node_by_id)
@@ -172,83 +174,63 @@ async def execute_dag(
                 await store.save_job(job)
                 return
 
-        attempts = 1 if effectful else node.max_retries + 1
-        for attempt in range(attempts):
-            if attempt:
-                node.retries = attempt
-                node.status = TaskStatus.RETRYING
-                await store.save_job(job)
+        from app.agents.orchestration.langgraph_runner import LangGraphNodeRunner
+
+        async def on_running(_attempt: int) -> None:
             node.status = TaskStatus.RUNNING
-            node.started_at = time.time()
+            node.started_at = node.started_at or time.time()
             node.error = None
+            node.error_code = None
             await store.save_job(job)
-            try:
-                result = await asyncio.wait_for(
-                    worker.execute(node, _ctx()),
-                    timeout=settings.AGENT_NODE_TIMEOUT_SECONDS,
-                )
-                # worker 显式返回失败（如技能未命中/参数错误）→ 按节点失败处理
-                if isinstance(result, dict) and result.get("success") is False:
-                    node.error = str(result.get("error") or "执行失败")
-                    node.error_code = str(result.get("error_code") or "EXEC_ERROR")
-                    logger.warning(
-                        "节点 {} 执行失败: {} | {} | {}",
-                        node.id,
-                        node.name,
-                        node.error_code,
-                        str(node.error)[:300],
-                    )
-            except asyncio.CancelledError:
-                node.status = TaskStatus.INTERRUPTED
-                node.completed_at = time.time()
-                node.error = "任务被中断"
-                if effectful and node.idempotency_key:
-                    node.effect_status = "uncertain"
-                    await finish_effect(node.idempotency_key, "uncertain")
-                await store.save_job(job)
-                raise
-            except asyncio.TimeoutError:
-                node.error = f"执行超时（>{settings.AGENT_NODE_TIMEOUT_SECONDS}s）"
-                node.error_code = "TIMEOUT"
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("节点 {} 执行异常: {}", node.id, exc)
-                node.error = str(exc)
-                node.error_code = "EXEC_ERROR"
 
-            if node.error:
-                if effectful and node.idempotency_key:
-                    node.effect_status = "uncertain"
-                    await finish_effect(node.idempotency_key, "uncertain")
-                # React 重试：瞬时/超时类错误可重试
-                if attempt + 1 < attempts:
-                    continue
-                node.status = TaskStatus.FAILED
-                node.completed_at = time.time()
-                await store.save_job(job)
-                return
+        async def on_retry(attempt: int) -> None:
+            node.retries = attempt
+            node.status = TaskStatus.RETRYING
+            await store.save_job(job)
 
-            # 质检
-            verdict = await review.review(node, result, _ctx())
-            if verdict.approved:
-                node.status = TaskStatus.COMPLETED
-                node.result = result
-                if effectful and node.idempotency_key:
-                    node.effect_status = "committed"
-                    await finish_effect(node.idempotency_key, "committed", result)
-                node.completed_at = time.time()
-                await store.save_job(job)
-                return
-            node.error = f"质检未通过: {verdict.feedback}"
-            node.error_code = "REVIEW_REJECTED"
-            if attempt + 1 < attempts:
-                continue
+        try:
+            outcome = await LangGraphNodeRunner(
+                worker=worker,
+                node=node,
+                ctx=_ctx(),
+                review=review,
+                timeout_seconds=settings.AGENT_NODE_TIMEOUT_SECONDS,
+                max_retries=0 if effectful else node.max_retries,
+                effectful=effectful,
+                on_running=on_running,
+                on_retry=on_retry,
+            ).run()
+        except asyncio.CancelledError:
+            node.status = TaskStatus.INTERRUPTED
+            node.completed_at = time.time()
+            node.error = "任务被中断"
             if effectful and node.idempotency_key:
                 node.effect_status = "uncertain"
                 await finish_effect(node.idempotency_key, "uncertain")
-            node.status = TaskStatus.FAILED
-            node.completed_at = time.time()
             await store.save_job(job)
-            return
+            raise
+
+        node.retries = outcome.retries
+        if outcome.success:
+            from app.agents.orchestration.presentation import attach_display_result
+
+            node.status = TaskStatus.COMPLETED
+            node.result = attach_display_result(node, outcome.result or {})
+            if effectful and node.idempotency_key:
+                node.effect_status = "committed"
+                await finish_effect(node.idempotency_key, "committed", outcome.result)
+        else:
+            node.status = TaskStatus.FAILED
+            node.error = outcome.error or "执行失败"
+            node.error_code = outcome.error_code or "EXEC_ERROR"
+            if outcome.recovery:
+                node.metadata["recovery"] = outcome.recovery
+            if effectful and node.idempotency_key:
+                node.effect_status = "uncertain"
+                await finish_effect(node.idempotency_key, "uncertain")
+        node.completed_at = time.time()
+        await store.save_job(job)
+        return
 
     def _ctx():
         from app.agents.orchestration.workers import WorkerContext
@@ -263,8 +245,20 @@ async def execute_dag(
 
     # ── 依赖驱动的事件调度循环 ──
     # 任一节点结束即重新计算可运行节点，不再等待同一 ready 批次全部结束。
-    pending = {n.id for n in job.nodes}
-    completed: set[str] = set()
+    terminal_statuses = {
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.SKIPPED,
+        TaskStatus.CANCELLED,
+        TaskStatus.INTERRUPTED,
+    }
+    # A resumed DAG may already contain terminal nodes.  Keep successful
+    # dependencies distinct from merely settled dependencies: normal DAG nodes
+    # still require success, while explicit task-manifest entries may continue
+    # after an independently failed prior checklist item.
+    pending = {n.id for n in job.nodes if n.status not in terminal_statuses}
+    completed = {n.id for n in job.nodes if n.status == TaskStatus.COMPLETED}
+    settled = {n.id for n in job.nodes if n.status in terminal_statuses}
     running_by_id: dict[str, asyncio.Task] = {}
 
     async def _with_sem(node: TaskNode) -> None:
@@ -317,9 +311,14 @@ async def execute_dag(
         changed = False
         for nid in list(pending):
             node = node_by_id[nid]
-            if any(
+            if not node.metadata.get("continue_on_dependency_failure") and any(
                 node_by_id[d].status
-                in (TaskStatus.FAILED, TaskStatus.SKIPPED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED)
+                in (
+                    TaskStatus.FAILED,
+                    TaskStatus.SKIPPED,
+                    TaskStatus.CANCELLED,
+                    TaskStatus.INTERRUPTED,
+                )
                 for d in node.depends_on
             ):
                 node.status = TaskStatus.SKIPPED
@@ -331,9 +330,15 @@ async def execute_dag(
             await store.save_job(job)
 
         # 调度所有依赖已完成的步骤；它们只受 semaphore 限流，不形成批次屏障。
+        # 清单节点显式声明失败可继续，因此以终态而非成功态解除其串行依赖。
         for nid in list(pending):
             node = node_by_id[nid]
-            if all(d in completed for d in node.depends_on):
+            dependency_state = (
+                settled
+                if node.metadata.get("continue_on_dependency_failure")
+                else completed
+            )
+            if all(d in dependency_state for d in node.depends_on):
                 node.status = TaskStatus.READY
                 await store.save_job(job)
                 running_by_id[nid] = asyncio.create_task(_with_sem(node))
@@ -362,6 +367,8 @@ async def execute_dag(
                 pass
             if node_by_id[nid].status == TaskStatus.COMPLETED:
                 completed.add(nid)
+            if node_by_id[nid].status in terminal_statuses:
+                settled.add(nid)
 
     # ── 汇总任务状态 ──
     job = await store.get_job(job.job_id) or job
@@ -371,6 +378,13 @@ async def execute_dag(
             job.status = JobStatus.COMPLETED
         elif any(s in (TaskStatus.FAILED, TaskStatus.SKIPPED) for s in statuses):
             job.status = JobStatus.FAILED
+            if not job.error:
+                failed = next(
+                    (node for node in job.nodes if node.status == TaskStatus.FAILED and node.error),
+                    None,
+                )
+                if failed:
+                    job.error = failed.error
         else:
             job.status = JobStatus.RUNNING
     job.updated_at = time.time()

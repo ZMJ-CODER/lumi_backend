@@ -1,7 +1,7 @@
 """沙箱注册中心 —— 按类型获取沙箱实例.
 
 类型通过配置 AGENT_SANDBOX_TYPE 选择，后期扩展：
-  - local: 本地子进程 + 资源限制（当前为占位，未启用）
+  - local: 本地子进程 + 资源限制（仅受信开发环境）
   - docker: 容器隔离
   - wasm: WASM 运行时
 """
@@ -24,9 +24,11 @@ def register_sandbox(name: str, cls: type[Sandbox]) -> None:
 def _ensure_builtins() -> None:
     """懒加载内置沙箱（避免循环导入）."""
     if not SANDBOXES:
+        from app.agents.sandbox.docker import DockerSandbox
         from app.agents.sandbox.local import LocalSandbox
 
         SANDBOXES["local"] = LocalSandbox
+        SANDBOXES["docker"] = DockerSandbox
 
 
 def get_sandbox(name: str | None = None) -> Sandbox:

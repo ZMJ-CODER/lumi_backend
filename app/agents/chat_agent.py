@@ -1,42 +1,75 @@
-"""简单对话智能体 —— 支持短期记忆的基础聊天 Agent."""
+"""兼容聊天智能体 —— Redis 短期记忆 + LangChain LLM 门面。"""
+
+import json
 
 from loguru import logger
 
 from app.agents.base import AgentBase, AgentContext
 from app.agents.registry import AgentRegistry
 from app.core.llm import LLMClient
+from app.core.redis import get_redis
 from app.services.prompts import get_base_system_prompt
 from app.services.scene_manager import get_scene_system_prompt
+
+
+_HISTORY_KEY = "agent:chat:history:{user_id}:{session_id}"
+_HISTORY_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 class ChatAgent(AgentBase):
     """简单对话智能体.
 
-    功能:
-      - 基础多轮对话
-      - 短期记忆（基于 session_id 的内存历史消息，保留最近 N 轮）
-      - 调用 DeepSeek 模型（deepseek-v4-flash）
-
-    注意:
-      - 短期记忆存储在进程内存中，服务重启后会丢失
-      - 并发请求同一 session 时未加锁，简单场景下可接受
+    这是 ``Orchestrator.route_and_execute`` 的兼容入口。短期记忆存 Redis，
+    以用户和会话联合隔离；主对话链路仍由 ``services.orchestrator`` 维护。
     """
 
     name = "chat_agent"
     description = "简单对话智能体，支持短期记忆与多轮对话"
     supported_scenes = ["chat"]
 
-    # 用户指定的模型名称
-    MODEL_NAME = "deepseek-v4-flash"
-
     # 短期记忆：每个 session 保留的最大轮数（1 轮 = user + assistant）
     MAX_HISTORY_ROUNDS = 10
 
     def __init__(self) -> None:
-        self._llm = LLMClient(provider="deepseek")
+        self._llm = LLMClient()
         self._llm_started = False
-        # 短期记忆：session_id -> [{"role": ..., "content": ...}, ...]
-        self._history: dict[str, list[dict]] = {}
+
+    @staticmethod
+    def _history_key(context: AgentContext) -> str:
+        return _HISTORY_KEY.format(
+            user_id=context.user_id or "anonymous",
+            session_id=context.session_id or "default",
+        )
+
+    async def _load_history(self, key: str) -> list[dict]:
+        try:
+            rows = await get_redis().lrange(key, 0, -1)
+            history: list[dict] = []
+            for row in rows:
+                if isinstance(row, bytes):
+                    row = row.decode("utf-8", errors="replace")
+                value = json.loads(row)
+                if isinstance(value, dict) and value.get("role") in {"user", "assistant"}:
+                    history.append(value)
+            return history
+        except Exception as exc:  # noqa: BLE001 - compatibility path remains stateless on Redis failure
+            logger.warning("ChatAgent 读取 Redis 短期记忆失败，本轮按无历史处理: {}", exc)
+            return []
+
+    async def _append_turn(self, key: str, message: str, reply: str) -> None:
+        try:
+            redis = get_redis()
+            async with redis.pipeline(transaction=True) as pipe:
+                pipe.rpush(
+                    key,
+                    json.dumps({"role": "user", "content": message}, ensure_ascii=False),
+                    json.dumps({"role": "assistant", "content": reply}, ensure_ascii=False),
+                )
+                pipe.ltrim(key, -(self.MAX_HISTORY_ROUNDS * 2), -1)
+                pipe.expire(key, _HISTORY_TTL_SECONDS)
+                await pipe.execute()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ChatAgent 保存 Redis 短期记忆失败（不影响回复）: {}", exc)
 
     async def execute(self, message: str, context: AgentContext) -> str:
         """执行对话，返回模型回复文本.
@@ -53,14 +86,9 @@ class ChatAgent(AgentBase):
             await self._llm.start()
             self._llm_started = True
 
-        # 2. 获取会话标识（优先 session_id，其次 user_id，最后默认）
-        session_key = context.session_id or context.user_id or "default"
-
-        # 3. 加载短期记忆
-        history = self._history.setdefault(session_key, [])
-
-        # 4. 追加当前用户消息到记忆
-        history.append({"role": "user", "content": message})
+        # 2. 读取按 ``user_id + session_id`` 隔离的 Redis 短期记忆。
+        session_key = self._history_key(context)
+        history = await self._load_history(session_key)
 
         # 5. 构建消息列表（一级安全规范 + 二级场景角色 + 历史上下文）
         system_prompt = (
@@ -68,29 +96,32 @@ class ChatAgent(AgentBase):
         )
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
+        messages.append({"role": "user", "content": message})
 
-        # 6. 调用 LLM（指定 deepseek-v4-flash 模型）
+        # 6. 调用当前用户/服务端生效的模型配置。
         try:
-            reply = await self._llm.chat(messages, model=self.MODEL_NAME)
+            reply = await self._llm.chat(
+                messages,
+                scene=context.scene,
+                usage_user_id=context.user_id,
+            )
         except Exception as e:
             logger.error(f"ChatAgent LLM 调用失败: {e}")
-            # 调用失败时回滚用户消息，避免污染上下文
-            history.pop()
             return f"抱歉，我暂时无法回复：{e}"
 
-        # 7. 保存助手回复到短期记忆
-        history.append({"role": "assistant", "content": reply})
-
-        # 8. 裁剪历史（保留最近 N 轮 = 2*N 条消息）
-        max_len = self.MAX_HISTORY_ROUNDS * 2
-        if len(history) > max_len:
-            self._history[session_key] = history[-max_len:]
+        # 7. 在成功后原子追加本轮；失败不会污染下一轮上下文。
+        await self._append_turn(session_key, message, reply)
 
         return reply
 
-    def clear_memory(self, session_id: str) -> None:
-        """清除指定会话的短期记忆."""
-        self._history.pop(session_id, None)
+    async def clear_memory(self, session_id: str, user_id: str = "") -> None:
+        """清除指定用户会话的 Redis 短期记忆。"""
+        try:
+            await get_redis().delete(
+                _HISTORY_KEY.format(user_id=user_id or "anonymous", session_id=session_id or "default")
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ChatAgent 清除 Redis 短期记忆失败: {}", exc)
 
 
 # 模块加载时自动注册到注册中心

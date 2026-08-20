@@ -12,12 +12,13 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 
 from app.core.config import settings
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, NotFoundException
+from app.core.throttling import consume_route_limit
 
 router = APIRouter()
 
@@ -76,10 +77,22 @@ async def get_upload_file(
 
 @router.post("")
 async def upload_chat_attachment(
+    request: Request,
     file: UploadFile = File(...),
     payload: dict = Depends(require_auth),
 ):
     """上传聊天附件，返回可访问的 URL."""
+    rate = await consume_route_limit(request, payload, "upload")
+    if not rate.allowed:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "code": 429,
+                "message": "上传请求过于频繁，请稍后重试",
+                "data": {"error_code": "UPLOAD_RATE_LIMIT", "retry_after": rate.retry_after},
+            },
+            headers={"Retry-After": str(rate.retry_after)},
+        )
     user_id = payload["sub"]
     filename = file.filename or "attachment"
     ext = Path(filename).suffix.lower() or ".bin"

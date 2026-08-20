@@ -6,15 +6,26 @@ agent 包装，规划器按任务类型创建对应节点。
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from app.agents.core.base import WorkerAgent, WorkerContext
 from app.agents.core.progress import set_progress as _report_progress
+from app.agents.skills.recovery import classify_model_error, decide_failure
 
 if TYPE_CHECKING:
     from app.agents.orchestration.models import TaskNode
+
+
+class ScriptGenerationError(RuntimeError):
+    """脚本生成失败，携带统一的可恢复性错误码。"""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 class OfficeTextAgent(WorkerAgent):
@@ -71,7 +82,7 @@ class OfficeTextAgent(WorkerAgent):
         return result
 
 
-_STEP_TITLES = {
+    _STEP_TITLES = {
     "email": "撰写邮件",
     "doc": "撰写公文",
     "rewrite": "多风格改写",
@@ -270,10 +281,41 @@ class OfficeScriptAgent(WorkerAgent):
                 "error": "办公脚本任务缺少 task",
                 "error_code": "INVALID_ARGS",
             }
+        # 先检查执行能力，避免模型花费 token 生成代码后才发现当前部署没有安全沙箱。
+        from app.agents.skills.executor import skill_runtime_unavailable
+        from app.agents.skills.registry import SkillRegistry
+
+        python_skill = SkillRegistry.get("python_exec")
+        # 单元测试/插件尚未加载的启动边界交由 run_skill 的统一校验处理；
+        # 正常运行时已注册则提前检查运行时可用性，节省一次模型调用。
+        unavailable = skill_runtime_unavailable(python_skill) if python_skill else None
+        if unavailable:
+            code, error = unavailable
+            decision = decide_failure(code, error, alternatives_remaining=False)
+            return {
+                "success": False,
+                "error": error,
+                "error_code": code,
+                "retryable": decision.retry_same,
+                "recovery_category": decision.category,
+                "replan_required": True,
+            }
         await _report_progress(ctx.job_id, node.id, "正在编写并执行脚本…")
         try:
             from app.services import office_docs
+            from app.agents.orchestration.intent import extract_output_contract
 
+            conversion = node.params.get("conversion")
+            output_contract = node.params.get("output_contract")
+            if not isinstance(output_contract, dict):
+                output_contract = extract_output_contract(
+                    task, conversion if isinstance(conversion, dict) else None
+                )
+            if isinstance(conversion, dict):
+                code = self._direct_text_conversion_script(conversion)
+                await _report_progress(ctx.job_id, node.id, "正在安全地转换指定文件…")
+            else:
+                code = ""
             doc_names = []
             for doc_id in doc_ids:
                 try:
@@ -282,24 +324,52 @@ class OfficeScriptAgent(WorkerAgent):
                     doc_names.append(meta.get("filename") or doc_id)
                 except Exception:  # noqa: BLE001
                     doc_names.append(doc_id)
-            code = await self._generate_script(task, doc_names, ctx)
             if not code:
-                return {
-                    "success": False,
-                    "error": "脚本生成失败（模型未返回有效代码）",
-                    "error_code": "EXEC_ERROR",
-                }
+                code = await self._generate_script(task, doc_names, ctx, output_contract)
+            expected_output_names = [
+                Path(str(name)).name
+                for name in (output_contract.get("expected_output_names") or [])
+                if Path(str(name)).name
+            ]
             result = await self.run_skill(
                 "python_exec",
-                {"code": code, "doc_ids": doc_ids, "timeout": 60},
+                {
+                    "code": code,
+                    "doc_ids": doc_ids,
+                    "timeout": 60,
+                    "expected_output_names": expected_output_names,
+                    "output_contract": output_contract,
+                },
                 ctx,
             )
             if not result.get("success"):
+                decision = decide_failure(
+                    result.get("error_code"),
+                    result.get("error"),
+                    retryable=bool(result.get("retryable")),
+                )
+                result.update(
+                    {
+                        "retryable": decision.retry_same,
+                        "recovery_category": decision.category,
+                        "replan_required": decision.replan_required,
+                    }
+                )
                 return result
             return {
                 **result,
                 "script": code[:8000],
                 "step_title": "脚本执行",
+            }
+        except ScriptGenerationError as exc:
+            decision = decide_failure(exc.code, str(exc), retryable=exc.code == "MODEL_EMPTY_RESPONSE")
+            logger.warning("[Agent:office_script] 脚本生成失败: {}", exc)
+            return {
+                "success": False,
+                "error": str(exc),
+                "error_code": exc.code,
+                "retryable": decision.retry_same,
+                "recovery_category": decision.category,
             }
         except Exception as exc:  # noqa: BLE001
             logger.warning("[Agent:office_script] 执行失败: {}", exc)
@@ -309,13 +379,87 @@ class OfficeScriptAgent(WorkerAgent):
                 "error_code": "EXEC_ERROR",
             }
 
-    async def _generate_script(self, task: str, doc_names: list[str], ctx: WorkerContext) -> str:
+    @staticmethod
+    def _direct_text_conversion_script(conversion: dict) -> str:
+        """构造已知文本格式的固定转换脚本，避免为简单复制请求调用模型。
+
+        输入名和输出后缀来自规划器的受限解析；脚本仍只能通过沙箱授予的环境变量
+        访问单一文档及其输出目录。CSV -> TXT 默认保留原始文本；只有请求中
+        明确指定受支持的分隔符时才结构化重写，避免悄悄改变原始数据格式。
+        """
+        import json
+        from pathlib import Path
+
+        # ``resolve_direct_text_conversion`` 使用 filename，而 TaskNode 的
+        # conversion 参数使用 source_filename；两者都是规划器产生的受限值。
+        source_filename = Path(
+            str(conversion.get("source_filename") or conversion.get("filename") or "")
+        ).name
+        output_filename = Path(str(conversion.get("output_filename") or "")).name
+        target_extension = str(conversion.get("target_extension") or "").casefold()
+        text_delimiter = conversion.get("text_delimiter")
+        output_encoding = conversion.get("encoding") or "utf-8"
+        if (
+            not source_filename
+            or not output_filename
+            or target_extension != ".txt"
+            or text_delimiter not in (None, "\t", ",")
+            or output_encoding not in ("utf-8", "utf-8-sig", "gb18030")
+        ):
+            raise ValueError("不支持的直接文本转换参数")
+        source_literal = json.dumps(source_filename, ensure_ascii=False)
+        output_literal = json.dumps(output_filename, ensure_ascii=False)
+        delimiter_literal = json.dumps(text_delimiter, ensure_ascii=False) if text_delimiter else "None"
+        encoding_literal = json.dumps(output_encoding, ensure_ascii=False)
+        return f'''import json
+import os
+import csv
+import io
+from pathlib import Path
+
+source_name = {source_literal}
+output_name = {output_literal}
+target_delimiter = {delimiter_literal}
+output_encoding = {encoding_literal}
+doc_paths = json.loads(os.environ["LUMI_DOC_PATHS"])
+output_dirs = json.loads(os.environ["LUMI_DOC_OUTPUT_DIRS"])
+source = Path(doc_paths[source_name])
+target_dir = Path(output_dirs[source_name])
+target_dir.mkdir(parents=True, exist_ok=True)
+raw = source.read_bytes()
+for encoding in ("utf-8-sig", "utf-8", "gb18030", "big5", "latin-1"):
+    try:
+        text = raw.decode(encoding)
+        break
+    except UnicodeDecodeError:
+        continue
+else:
+    raise ValueError("无法识别源文件编码")
+if target_delimiter:
+    parsed = csv.reader(io.StringIO(text, newline=""))
+    rendered = io.StringIO(newline="")
+    csv.writer(rendered, delimiter=target_delimiter, lineterminator="\\n").writerows(parsed)
+    text = rendered.getvalue()
+target = target_dir / output_name
+target.write_text(text, encoding=output_encoding, newline="")
+print(f"已生成文件：{{target.name}}")
+'''
+
+    async def _generate_script(
+        self,
+        task: str,
+        doc_names: list[str],
+        ctx: WorkerContext,
+        output_contract: dict | None = None,
+    ) -> str:
         """一次调用生成可执行脚本，避免逻辑稿与代码稿两次串行模型往返。"""
         from app.core.llm import LLMClient
         from app.services.usage import CATEGORY_PLAN
 
         llm = LLMClient()
         doc_line = "、".join(doc_names) or "（无）"
+        contract = output_contract if isinstance(output_contract, dict) else {}
+        contract_json = json.dumps(contract, ensure_ascii=False, sort_keys=True)
 
         code_prompt = (
             "你是 Python 脚本实现器。先在内部规划，再只输出完整、可直接运行的 Python 代码。\n"
@@ -331,9 +475,14 @@ class OfficeScriptAgent(WorkerAgent):
             "（脚本开头用 os.makedirs(..., exist_ok=True) 确保目录存在），"
             "严禁写到当前工作目录或相对路径；\n"
             "- 产物文件名用文档原名（去扩展名）命名，如 销售数据.xlsx → 销售数据.csv；\n"
+            "- 输出契约是不可协商的交付条件：必须生成契约 expected_output_names 中的每个文件，"
+            "严格使用其 target_extension / encoding / text_delimiter；不满足时抛出异常，绝不能打印或声称成功；\n"
+            "- 有源文档时，预期交付文件应写到该文档对应的 LUMI_DOC_OUTPUT_DIRS[文件名]；"
+            "无源文档时才写到 LUMI_OUTPUT_DIR。日志仅可输出文件基名，禁止输出任何服务端绝对路径、环境变量值或凭据；\n"
             "- 脚本必须是纯 Python 代码，能直接执行。\n"
             f"任务：{task}\n"
             f"涉及文档：{doc_line}\n"
+            f"输出契约（JSON，空数组表示未要求文件交付）：{contract_json}\n"
             "只输出 Python 代码（不要 Markdown 围栏、不要任何解释）。"
         )
         try:
@@ -348,8 +497,38 @@ class OfficeScriptAgent(WorkerAgent):
                 api_key=ctx.llm_api_key,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[Agent:office_script] 脚本生成调用失败: {}", exc)
-            return ""
+            # 上游偶发会返回 HTTP 200 但 choices.content 为空。脚本没有副作用，
+            # 因而可以安全地用更短、更直接的提示再试一次，避免一次空响应终止任务。
+            logger.warning("[Agent:office_script] 首次脚本生成失败: {}", exc)
+            error_code, user_error = classify_model_error(exc)
+            if error_code != "MODEL_UNAVAILABLE":
+                raise ScriptGenerationError(error_code, user_error) from exc
+            try:
+                retry_prompt = (
+                    "只输出可执行 Python 代码，不要解释、不要 Markdown。\n"
+                    "从 LUMI_DOC_PATHS(JSON)读取输入；所有输出写入 LUMI_OUTPUT_DIR。\n"
+                    "必须生成输出契约 expected_output_names 中的真实文件，且不得输出服务端路径。\n"
+                    f"任务：{task}\n文档：{doc_line}\n输出契约：{contract_json}"
+                )
+                reply = await llm.chat(
+                    [{"role": "user", "content": retry_prompt}],
+                    scene=ctx.scene,
+                    max_tokens=2500,
+                    temperature=0,
+                    usage_user_id=ctx.user_id,
+                    usage_category=CATEGORY_PLAN,
+                    disable_reasoning_effort=True,
+                    api_key=ctx.llm_api_key,
+                )
+            except Exception as retry_exc:  # noqa: BLE001
+                logger.warning("[Agent:office_script] 重试脚本生成仍失败: {}", retry_exc)
+                if "空内容" in str(retry_exc):
+                    raise ScriptGenerationError(
+                        "MODEL_EMPTY_RESPONSE",
+                        "脚本生成模型未返回可用代码，请稍后重试或切换模型后再试。",
+                    ) from retry_exc
+                error_code, user_error = classify_model_error(retry_exc)
+                raise ScriptGenerationError(error_code, user_error) from retry_exc
         text = (reply or "").strip()
         if text.startswith("```"):
             text = text.strip("`")
@@ -357,7 +536,14 @@ class OfficeScriptAgent(WorkerAgent):
                 text = text[6:]
             elif text.startswith("py"):
                 text = text[2:]
-        return text.strip()
+        text = text.strip()
+        # 防止模型把解释性文字当作代码交给沙箱；不执行无 import/语句的空或 Markdown 回复。
+        if not text or ("\n" not in text and not any(x in text for x in ("print(", "import ", "from ", "="))):
+            raise ScriptGenerationError(
+                "MODEL_EMPTY_RESPONSE",
+                "脚本生成模型未返回可执行代码，请稍后重试或改用其他处理方法。",
+            )
+        return text
 
 
 class OfficeSystemAgent(WorkerAgent):

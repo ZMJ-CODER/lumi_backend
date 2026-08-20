@@ -146,20 +146,20 @@ def test_code_agent_passes_byok_key_to_llm(monkeypatch):
 def test_llm_planner_builds_task_tree(monkeypatch):
     _register_code_stub(monkeypatch)
     planner = LlmPlanner()
-    plan = (
-        '{"tasks": ['
-        '{"id": "t1", "name": "定位", "agent": "retrieval", "params": {"query": "订单"}},'
-        '{"id": "t2", "name": "修改", "agent": "code", "params": {"instruction": "加导出功能"}}'
-        '], "clarification": ""}'
-    )
 
-    async def fake_call(user_id, request, context, llm_api_key):
-        return plan
+    async def fake_structured(user_id, request, context, llm_api_key):
+        return {
+            "tasks": [
+                {"id": "t1", "name": "定位", "agent": "retrieval", "params": {"query": "订单"}},
+                {"id": "t2", "name": "修改", "agent": "code", "params": {"instruction": "加导出功能"}},
+            ],
+            "clarification": "",
+        }
 
     async def fake_list(user_id):
         return [{"id": "p1", "name": "订单系统"}]
 
-    monkeypatch.setattr(planner, "_call_planner", fake_call)
+    monkeypatch.setattr(planner, "_call_structured_planner", fake_structured)
     monkeypatch.setattr(planner, "_list_projects", fake_list)
     tree = asyncio.run(planner.plan("u1", "在订单系统里加导出"))
     assert [n.agent for n in tree.nodes] == ["retrieval", "code"]
@@ -170,13 +170,13 @@ def test_llm_planner_builds_task_tree(monkeypatch):
 def test_llm_planner_clarification(monkeypatch):
     planner = LlmPlanner()
 
-    async def fake_call(user_id, request, context, llm_api_key):
-        return '{"tasks": [], "clarification": "你想在哪个项目里修改？"}'
+    async def fake_structured(user_id, request, context, llm_api_key):
+        return {"tasks": [], "clarification": "你想在哪个项目里修改？"}
 
     async def fake_list(user_id):
         return []
 
-    monkeypatch.setattr(planner, "_call_planner", fake_call)
+    monkeypatch.setattr(planner, "_call_structured_planner", fake_structured)
     monkeypatch.setattr(planner, "_list_projects", fake_list)
     tree = asyncio.run(planner.plan("u1", "帮我改代码"))
     assert tree.nodes == []
@@ -187,10 +187,10 @@ def test_llm_planner_falls_back_on_failure(monkeypatch):
     _register_code_stub(monkeypatch)
     planner = LlmPlanner()
 
-    async def fake_call(user_id, request, context, llm_api_key):
+    async def no_structured(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(planner, "_call_planner", fake_call)
+    monkeypatch.setattr(planner, "_call_structured_planner", no_structured)
 
     # 回退到 RulePlanner：请求含项目名 → code 节点
     import app.services.project_index as pi
@@ -213,11 +213,11 @@ def test_llm_planner_uses_clarification_answer(monkeypatch):
     planner = LlmPlanner()
     captured = {}
 
-    async def fake_call(user_id, request, context, llm_api_key):
+    async def fake_structured(user_id, request, context, llm_api_key):
         captured["context"] = context
-        return '{"tasks": [], "clarification": ""}'
+        return {"tasks": [], "clarification": ""}
 
-    monkeypatch.setattr(planner, "_call_planner", fake_call)
+    monkeypatch.setattr(planner, "_call_structured_planner", fake_structured)
     asyncio.run(planner.plan("u1", "帮我改代码", clarification_answer="订单系统"))
     assert "用户补充说明：订单系统" in captured["context"]
 
@@ -272,12 +272,12 @@ def test_review_llm_rejects_bad_code(monkeypatch):
         "path": "a.py",
     }
 
-    async def fake_chat(self, messages, **kwargs):
-        return '{"approved": false, "feedback": "语法错误"}'
+    async def fake_structured(*args, **kwargs):
+        return {"approved": False, "feedback": "语法错误"}
 
-    import app.core.llm as llm_mod
+    import app.agents.orchestration.review as review_mod
 
-    monkeypatch.setattr(llm_mod.LLMClient, "chat", fake_chat)
+    monkeypatch.setattr(review_mod, "invoke_json_object", fake_structured)
     verdict = asyncio.run(hook.review(code_node, result, _ctx()))
     assert verdict.approved is False
     assert "语法错误" in verdict.feedback
@@ -291,11 +291,11 @@ def test_review_llm_failure_approves(monkeypatch):
     code_node = TaskNode(id="t2", name="code", agent="code", params={})
     result = {"success": True, "new_content": "def ok(): pass", "instruction": "x", "path": "a.py"}
 
-    async def fake_chat(self, messages, **kwargs):
+    async def fake_structured(*args, **kwargs):
         raise RuntimeError("网络错误")
 
-    import app.core.llm as llm_mod
+    import app.agents.orchestration.review as review_mod
 
-    monkeypatch.setattr(llm_mod.LLMClient, "chat", fake_chat)
+    monkeypatch.setattr(review_mod, "invoke_json_object", fake_structured)
     verdict = asyncio.run(hook.review(code_node, result, _ctx()))
     assert verdict.approved is True  # 质检失败不阻塞主流程

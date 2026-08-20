@@ -36,7 +36,7 @@ class _FakeSession:
             },
         )()
 
-    async def call_tool(self, name, args):
+    async def call_tool(self, name, args, **kwargs):
         self.calls.append((name, args))
         if name == "fail":
             return _FakeCallResult([], is_error=True)
@@ -47,6 +47,7 @@ class _FakeSession:
 
 
 def test_list_tools_mapping(monkeypatch):
+    asyncio.run(manager.close_all())
     async def fake_call_with_session(name, fn):
         return await fn(_FakeSession())
 
@@ -66,6 +67,22 @@ def test_list_tools_mapping(monkeypatch):
             "resource_templates": ["filesystem:{path}"],
         }
     ]
+
+
+def test_list_tools_uses_short_ttl_cache(monkeypatch):
+    asyncio.run(manager.close_all())
+    calls = 0
+
+    async def fake_call_with_session(name, fn):
+        nonlocal calls
+        calls += 1
+        return await fn(_FakeSession())
+
+    monkeypatch.setattr(manager, "_call_with_session", fake_call_with_session)
+    first = asyncio.run(manager.list_tools("cached"))
+    second = asyncio.run(manager.list_tools("cached"))
+    assert first == second
+    assert calls == 1
 
 
 def test_call_tool_mapping(monkeypatch):
@@ -98,3 +115,40 @@ def test_close_all_only_resets_failure_cooldown():
     manager._failed_until["srv"] = 123.0
     asyncio.run(manager.close_all())
     assert manager._failed_until == {}
+
+
+def test_call_tool_passes_task_id_and_timeout_metadata(monkeypatch):
+    session = _FakeSession()
+
+    async def fake_call_with_session(name, fn):
+        return await fn(session)
+
+    monkeypatch.setattr(manager, "_call_with_session", fake_call_with_session)
+    res = asyncio.run(manager.call_tool("srv", "ok", {}, task_id="job-1", timeout_s=2))
+    assert res["task_id"] == "job-1"
+
+
+def test_cancel_task_cancels_active_request(monkeypatch):
+    started = asyncio.Event()
+
+    async def slow_call_with_session(name, fn):
+        class SlowSession:
+            async def call_tool(self, *args, **kwargs):
+                started.set()
+                await asyncio.sleep(30)
+        return await fn(SlowSession())
+
+    monkeypatch.setattr(manager, "_call_with_session", slow_call_with_session)
+
+    async def scenario():
+        task = asyncio.create_task(manager.call_tool("srv", "slow", task_id="cancel-me"))
+        await started.wait()
+        assert await manager.cancel_task("cancel-me") is True
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("MCP call should be cancelled")
+
+    asyncio.run(scenario())

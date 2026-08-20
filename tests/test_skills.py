@@ -6,14 +6,18 @@ import uuid
 import pytest
 
 from app.agents.sandbox.local import LocalSandbox
+from app.agents.sandbox.registry import available_sandboxes
 from app.agents.skills.base import Skill, SkillResult
 from app.agents.skills.executor import (
     execute_tool_call,
     get_skills_for_scene,
+    get_office_react_capabilities_for_request,
     get_tools_for_scene,
     run_skill_loop,
+    select_capabilities_for_request,
     skills_to_tools,
 )
+from app.agents.skills.capability import ToolCapability
 from app.agents.skills.registry import SkillRegistry
 
 
@@ -63,31 +67,101 @@ def test_tool_definition_shape():
     assert "type" in ws["parameters"]
 
 
-def test_unified_tools_include_system_and_mcp(monkeypatch):
-    import app.agents.mcp.manager as mcp_manager
-
-    async def fake_list_all_tools():
-        return [
-            {
-                "name": "mcp__desktop__open_local",
-                "server": "desktop",
-                "raw_name": "open_local",
-                "description": "打开本地资源",
-                "input_schema": {"type": "object", "properties": {}},
-            }
-        ]
-
-    monkeypatch.setattr(mcp_manager, "list_all_tools", fake_list_all_tools)
+def test_unified_tools_include_system_skills_but_not_global_desktop_mcp():
+    """桌面能力通过当前用户专属请求队列，不暴露为全局 MCP 工具。"""
     tools = asyncio.run(get_tools_for_scene("office"))
     names = {t["function"]["name"] for t in tools}
     assert "get_datetime" in names
-    assert "mcp__desktop__open_local" in names
+    assert "open_app" in names
+    assert not any(name.startswith("mcp__") for name in names)
+
+
+def test_unavailable_script_sandbox_is_hidden_from_runtime_tools(monkeypatch):
+    """未部署隔离沙箱时，规划器不应选择 python_exec 后才失败。"""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "AGENT_ALLOW_UNSAFE_LOCAL_SANDBOX", False)
+    tools = asyncio.run(get_tools_for_scene("office"))
+    assert "python_exec" not in {tool["function"]["name"] for tool in tools}
+
+
+def test_docker_sandbox_is_registered():
+    assert "docker" in available_sandboxes()
+
+
+def test_file_conversion_prefers_coarse_script_capability(monkeypatch):
+    import app.agents.skills.executor as exec_mod
+
+    capabilities = [
+        ToolCapability(name="python_exec", description="运行脚本并生成真实文件"),
+        ToolCapability(name="read_file", description="读取文件"),
+        ToolCapability(name="write_file", description="写入文件"),
+        ToolCapability(name="office_doc_read", description="读取办公文档"),
+        ToolCapability(name="query_knowledge", description="查询知识库"),
+    ]
+
+    async def fake_capabilities(*args, **kwargs):
+        return capabilities
+
+    monkeypatch.setattr(exec_mod, "get_capabilities_for_scene", fake_capabilities)
+    selected = asyncio.run(
+        select_capabilities_for_request("把 scores.csv 转为 txt 并生成文件", "office", limit=2)
+    )
+    names = {item.name for item in selected}
+    assert "python_exec" in names
+    assert names.isdisjoint({"read_file", "write_file", "office_doc_read"})
+
+
+def test_office_react_capabilities_exclude_development_and_generic_shell_tools():
+    names = {
+        item.name
+        for item in asyncio.run(get_office_react_capabilities_for_request("分析上传文档并打开 WPS"))
+    }
+    assert {"office_doc_read", "open_app", "query_knowledge"} <= names
+    assert names.isdisjoint({
+        "git", "apply_patch", "install_new_dependencies", "run_tests",
+        "write_project_file", "read_project_file", "read_file", "bash",
+        "run_project_command", "curl", "env",
+    })
+
+
+def test_office_react_metadata_routes_conversion_to_script_before_document_read(monkeypatch):
+    import app.agents.skills.executor as exec_mod
+
+    capabilities = [
+        ToolCapability(
+            name="python_exec", description="脚本", category="shell", domain="data",
+            intent_tags=["转换", "导出", "生成文件"], preferred_over=["office_doc_read"],
+        ),
+        ToolCapability(
+            name="office_doc_read", description="读取", category="office", domain="document",
+            intent_tags=["文档", "读取"],
+        ),
+        ToolCapability(
+            name="compose_email", description="邮件", category="office", domain="writing",
+            intent_tags=["邮件", "撰写"],
+        ),
+    ]
+
+    async def fake_capabilities(*args, **kwargs):
+        return capabilities
+
+    monkeypatch.setattr(exec_mod, "get_capabilities_for_scene", fake_capabilities)
+    selected = asyncio.run(
+        select_capabilities_for_request("把 scores.csv 转为 txt 并生成文件", "office", limit=2)
+    )
+    assert [item.name for item in selected] == ["python_exec", "compose_email"]
+
+
+def test_office_react_candidate_limit_is_eight_or_less():
+    selected = asyncio.run(get_office_react_capabilities_for_request("分析一个复杂办公任务"))
+    assert 1 <= len(selected) <= 8
 
 
 class _EchoSkill(Skill):
     name = "echo_test"
     description = "test"
-    scenes = ["chat"]
+    scenes = ["chat", "office"]
     parameters_schema = {
         "type": "object",
         "properties": {"text": {"type": "string"}},
@@ -117,7 +191,7 @@ def test_skill_loop_feeds_results():
     tc = {"id": "c1", "type": "function", "function": {"name": "echo_test", "arguments": '{"text": "hi"}'}}
     llm = _FakeLLM([("working", [tc]), ("final answer", None)])
     final, records, _ = asyncio.run(
-        run_skill_loop(llm, str(uuid.uuid4()), [{"role": "user", "content": "hi"}], scene="chat")
+        run_skill_loop(llm, str(uuid.uuid4()), [{"role": "user", "content": "hi"}], scene="office")
     )
     assert final == "final answer"
     assert records[0]["skill"] == "echo_test"

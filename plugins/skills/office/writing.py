@@ -42,6 +42,7 @@ class ComposeEmailSkill(Skill):
             context,
             "你是一名资深职场商务写作助手。只输出邮件内容本身：先写标题（用『』包裹），再写正文。",
             f"收件人：{recipient}\n目的：{purpose}\n语气：{tone}\n要点：\n{points}",
+            format_response=False,
         )
         return _ok(text)
 
@@ -76,6 +77,7 @@ class ComposeOfficialDocSkill(Skill):
             "标题居中、主送机关、正文（分条列项）、落款（单位+日期留空）。只输出公文正文。",
             f"文种：{doc_type}\n标题：{title or '（自动拟）'}\n内容要求：\n{req}",
             max_tokens=6000,
+            format_response=False,
         )
         return _ok(text)
 
@@ -108,6 +110,7 @@ class RewriteTextSkill(Skill):
             context,
             "你是一名文字改写专家。忠实保留原意，只改变表达风格，输出改写后的文字本身。",
             f"目标风格：{style}\n长度：{length}\n原文：\n{text}",
+            format_response=False,
         )
         return _ok(out)
 

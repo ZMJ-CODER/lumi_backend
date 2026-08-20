@@ -4,7 +4,9 @@
 """
 
 from app.agents.skills.base import SkillContext
+from app.core.agent_security import UNTRUSTED_CONTENT_RULES
 from app.core.llm import LLMClient
+from app.services.response_format import OFFICE_RESPONSE_FORMAT_COMPACT
 from app.services.usage import CATEGORY_SKILL
 
 
@@ -15,9 +17,17 @@ async def office_llm(
     *,
     max_tokens: int = 4000,
     temperature: float = 0.4,
+    format_response: bool = True,
 ) -> str:
-    """调用用户配置的办公模型生成文本（技能用途）."""
+    """调用用户配置的办公模型生成文本（技能用途）.
+
+    默认约束为桌面气泡友好的 Markdown，使单步骤任务不经最终汇总时也具备可读结构。
+    需要严格原文/JSON 的 Skill 可显式关闭。
+    """
     llm = LLMClient()
+    if format_response:
+        system = f"{system}\n\n{OFFICE_RESPONSE_FORMAT_COMPACT}"
+    system = f"{system}\n\n{UNTRUSTED_CONTENT_RULES}"
     return await llm.chat(
         [
             {"role": "system", "content": system},

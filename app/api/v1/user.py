@@ -38,7 +38,13 @@ from app.models.user import (
     SetPromptRequest,
     UserProfileUpdateRequest,
 )
-from app.core.model_catalog import PROVIDER_BASE_URLS, find_model, get_model_catalog
+from app.core.model_catalog import (
+    PROVIDER_BASE_URLS,
+    find_model,
+    get_model_catalog,
+    normalize_byok_base_url,
+)
+from app.core.config import settings
 from app.models.user import UserLlmConfigRequest
 from app.services import user_llm_config
 from app.services.prompts import get_prompt
@@ -190,11 +196,12 @@ async def set_llm_config_view(
 ):
     """保存模型选择：内置模型 或 自备 API（byok）.
 
-    BYOK 只存 provider/model/reasoning_effort；API key 由前端本地加密保存，
+    BYOK 只存 provider/model/base_url/reasoning_effort；API key 由前端本地加密保存，
     每次请求临时携带 X-LLM-API-KEY 头，后端用完即弃、绝不落库。
     """
-    if req.provider not in PROVIDER_BASE_URLS:
-        raise BadRequestException(f"不支持的 API 提供商: {req.provider}，可选: {list(PROVIDER_BASE_URLS)}")
+    provider = (req.provider or "").strip().lower()
+    if provider not in PROVIDER_BASE_URLS and provider != "custom":
+        raise BadRequestException(f"不支持的 API 提供商: {provider}，可选: {[*PROVIDER_BASE_URLS, 'custom']}")
     model_id = (req.model or "").strip()
     if not model_id:
         raise BadRequestException("模型名称不能为空")
@@ -203,9 +210,22 @@ async def set_llm_config_view(
     if req.reasoning_effort and req.reasoning_effort not in ("low", "medium", "high"):
         raise BadRequestException("推理强度仅支持 low / medium / high")
 
+    base_url = None
+    if req.byok:
+        candidate = req.base_url or (PROVIDER_BASE_URLS.get(provider) if provider != "custom" else "")
+        try:
+            base_url = normalize_byok_base_url(
+                candidate or "", allow_private=settings.BYOK_ALLOW_PRIVATE_BASE_URL
+            )
+        except ValueError as exc:
+            raise BadRequestException(str(exc)) from exc
+    elif provider == "custom":
+        raise BadRequestException("自定义兼容接口只能使用自备 API")
+
     cfg = {
-        "provider": req.provider,
+        "provider": provider,
         "model": model_id,
+        "base_url": base_url,
         "reasoning_effort": req.reasoning_effort,
         "byok": bool(req.byok),
     }

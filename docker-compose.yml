@@ -53,8 +53,19 @@ services:
       RAG_QUERY_REWRITE_BASE_URL: http://host.docker.internal:11434/v1
       # 本地 TTS 走 compose 内的 tts 服务
       TTS_LOCAL_URL: http://tts:8765/tts
+      # 当前 Compose 未部署 Temporal server。默认使用本地 DAG，避免容器尝试运行
+      # Windows temporal.exe 并为每个办公任务做无效连接探测。实际部署 Temporal
+      # 服务时可在 .env 显式设为 temporal / true / false 覆盖这些默认值。
+      AGENT_ORCHESTRATION: "${AGENT_ORCHESTRATION:-legacy}"
+      TEMPORAL_RUN_WORKER_INPROCESS: "${TEMPORAL_RUN_WORKER_INPROCESS:-false}"
+      TEMPORAL_AUTO_START_SERVER: "${TEMPORAL_AUTO_START_SERVER:-false}"
     ports:
       - "8000:8000"
+    # appuser 通过宿主 Docker socket 的组 GID 访问 daemon。Linux 部署前执行
+    # ``export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)``；Docker Desktop
+    # 常见为 0。未匹配时 python_exec 会安全隐藏，不会回退为本地执行。
+    group_add:
+      - "${DOCKER_GID:-0}"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health"]
       interval: 15s
@@ -65,6 +76,9 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./plugins:/app/plugins
+      # 脚本沙箱需经 Docker CLI 创建一次性受限容器。Docker socket 等同宿主机高权限：
+      # 仅用于受信任的自托管部署；公网多租户应改为独立 sandbox service。
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy
@@ -87,9 +101,13 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       # 本地推理依赖的模型缓存目录
       EMBEDDING_CACHE_DIR: /app/data/models
+    group_add:
+      - "${DOCKER_GID:-0}"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      # Temporal/legacy worker 也可能执行 python_exec，必须有同一受限沙箱通道。
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy
@@ -118,6 +136,18 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+
+  # 仅构建目标：生成 python_exec 使用的一次性隔离沙箱镜像，不常驻运行。
+  # 执行 docker compose --profile sandbox build sandbox-image 后，API/worker 才会
+  # 把 python_exec 暴露给模型。
+  sandbox-image:
+    profiles: ["sandbox"]
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    image: lumi-python-sandbox:latest
+    command: ["python", "-c", "print('sandbox image ready')"]
+    restart: "no"
 
   # ── 本地 TTS 服务 (qwen3-tts / MLX CUDA，可选) ──
   tts:
@@ -151,6 +181,7 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+
 
 volumes:
   postgres_data:

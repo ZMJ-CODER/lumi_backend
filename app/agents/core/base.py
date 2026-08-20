@@ -80,7 +80,13 @@ class WorkerAgent(ABC):
             user_role=ctx.user_role,
         )
         if not result.success:
-            return {"success": False, "error": result.error, "error_code": result.error_code}
+            return {
+                "success": False,
+                "error": result.error,
+                "error_code": result.error_code,
+                "retryable": result.retryable,
+                "tool_metadata": result.metadata,
+            }
         return {"success": True, "content": result.output, **result.metadata}
 
     def __repr__(self) -> str:

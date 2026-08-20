@@ -28,8 +28,13 @@ class SetPromptRequest(BaseModel):
 class UserLlmConfigRequest(BaseModel):
     """用户模型选择（办公模式）."""
 
-    provider: str = Field(..., description="API 提供商: deepseek / qwen / openai")
+    provider: str = Field(..., description="OpenAI 兼容 API 提供商；custom 表示自定义地址")
     model: str = Field(..., description="模型名称（内置目录 id 或 BYOK 自填模型名）")
+    base_url: str | None = Field(
+        default=None,
+        max_length=500,
+        description="BYOK 的 OpenAI-compatible API 地址（不含 API key）",
+    )
     reasoning_effort: str | None = Field(
         default=None,
         description="推理强度: low / medium / high（模型支持时生效）",

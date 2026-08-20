@@ -1,6 +1,6 @@
 # Lumi 系统架构与技术选型
 
-> 版本：v1.0（2026-08-17）
+> 版本：v2.0（2026-08-19）
 > 配套文档：`ENGINEERING_PRACTICE.md`（落地策略）、`PRODUCT_DESIGN.md`（个性化设计）、
 > `INTERVIEW_PREP.md`（面试准备）、`RAG_DESIGN.md` / `MEMORY_DESIGN.md` / `CONCURRENCY_PERF.md`
 
@@ -21,7 +21,7 @@ flowchart TB
 
     subgraph Backend["FastAPI 后端"]
         API[API 层<br/>auth / chat / office / rag / admin]
-        ORCH[编排层<br/>意图分类 → 模板/模式/自由规划<br/>DAG 校验 → Temporal / legacy]
+        ORCH[编排层<br/>TCA → M0/M1/M2/M3<br/>DAG/资源锁 → Temporal / legacy]
         AGENTS[Agent 角色<br/>office_doc / office_text / office_script<br/>office_calendar / code(可禁用)]
         SKILLS[技能层<br/>plugins/skills 服务端技能]
         RAG[RAG 服务<br/>bge-m3 + pgvector + 混合检索]
@@ -68,7 +68,7 @@ flowchart TB
 | ORM/迁移 | SQLAlchemy 2.0 async + Alembic | 成熟异步 ORM；迁移可版本化（0001 baseline / 0002 email_client） |
 | 数据库 | PostgreSQL 18 + pgvector | 向量检索与业务数据同库，省一套运维；ivfflat 适合中等规模 |
 | 缓存/队列 | Redis（限流/任务态/轮询）+ Celery | 限流滑动窗口、任务摘要、消息裁剪；Celery 做异步清洗与抽取 |
-| 编排 | Temporal（回退自建 DAG） | 长任务持久化、重试、超时、幂等；不可用时降级 legacy 引擎 |
+| 编排 | TCA + Temporal（回退自建 DAG）+ LangGraph | 复杂度分层、长任务持久化、节点恢复；不可用时降级 legacy DAG |
 | 向量模型 | BAAI/bge-m3（1024 维） | 中英文混合效果好，本地推理，隐私可控 |
 | LLM | DeepSeek（1M 上下文快速档）/ Qwen（思考档）/ Ollama VL/TTS | 快速档省钱省时，思考档保质量；多模态图片走本地 VL 描述 |
 | 语音 | openai-whisper（ASR）+ dashscope/edge-tts（TTS） | 本地转写可控，云端 TTS 音色丰富 |
@@ -81,10 +81,10 @@ flowchart TB
 app/
   api/v1/            # 路由层：auth / chat / office_docs / rag / admin / health
   agents/
-    orchestration/   # 意图分类、模板库、模式库、自由规划、DAG 校验、Temporal 封装
+    orchestration/   # TCA、模板/模式/自由规划、DAG/资源锁、LangGraph 节点、Temporal 封装
     roles/           # 角色 Agent：office_doc / office_text / office_script / code*
     skills/          # 技能注册/加载/执行器（原生函数 + MCP 混合）
-    mcp/             # MCP 客户端管理器（短会话 + 失败冷却 + 降级）
+    mcp/             # MCP 客户端管理器（会话复用、缓存、取消、熔断与降级）
     memory/          # 任务级记忆（Redis 摘要）
     sandbox/         # 本地沙箱（脚本执行隔离）
   core/              # config / database / logging / executors / security
@@ -120,14 +120,14 @@ sequenceDiagram
     B->>M: 异步抽取长期记忆（攒满 N 条触发）
 ```
 
-### 4.2 办公任务链路（多智能体 DAG）
+### 4.2 办公任务链路（TCA 分层 + 原子 DAG / ReAct）
 
 ```mermaid
 sequenceDiagram
     participant U as 用户
     participant F as 前端
     participant B as FastAPI
-    participant P as 规划器
+    participant C as TCA/规划器
     participant T as Temporal
     participant A as Agent 节点
     participant S as 技能/沙箱
@@ -135,11 +135,11 @@ sequenceDiagram
     U->>F: 上传文档 + 指令（文档挂载，随消息携带）
     F->>B: 上传 → 解析（Docling/OCR，异步）→ 建 office 会话
     F->>B: 发送任务
-    B->>P: 意图分类：模板 / 半结构 / 脚本 / 自由
-    P->>P: 模板优先：选择模板 + 抽参数；自由任务才 LLM 规划
-    P->>P: DAG 静态校验（无环/节点唯一/工具已注册/参数必填）
-    P->>T: 提交工作流（不可用则回退自建 DAG）
-    T->>A: 按依赖调度执行节点（并发 ≤ AGENT_NODE_CONCURRENCY）
+    B->>C: TCA：M0 确定性 / M1 规则 DAG / M2 计划执行 / M3 ReAct
+    C->>C: 模板优先；M2 才 LLM 规划，M3 按观察逐轮决策
+    C->>C: DAG 静态校验 + 资源声明 + 准入限流
+    C->>T: 提交工作流（不可用则回退自建 DAG）
+    T->>A: 按依赖与资源锁调度原子节点（办公任务序列化）
     A->>S: 调用服务端技能 / 客户端 MCP / 脚本沙箱
     S-->>A: 结构化结果
     A-->>T: 节点结果回写（任务级摘要）
@@ -150,24 +150,26 @@ sequenceDiagram
 
 ## 5. 关键模块设计
 
-### 5.1 多智能体编排（模板优先，规划兜底）
+### 5.1 多智能体编排（TCA 分层，模板优先）
 
-- **三级路由**：模板任务（高频，规则+参数抽取）→ 半结构任务（模式库 ETL/Router）→
-  自由任务（LLM Plan-then-Execute + Few-Shot 历史案例）。
+- **四级调度**：M0 确定性路径 → M1 规则 DAG → M2 Plan-and-Execute → M3 受控 ReAct；
+  按引用实体、参数显式度、依赖、模糊度与历史依赖评估，而不是按业务名称硬分流。
 - **模板库**：document_analysis / invoice_filter / daily_brief / document_compare /
   document_combine / document_translate，见 `app/agents/orchestration/templates.py`。
 - **DAG 校验**：`review.py` 静态校验无环、节点唯一、工具注册、必选参数；失败降级或生成澄清。
 - **文档兜底**：规划结果未覆盖已上传文档时强制补 `office_doc` 分析节点，不依赖 LLM 自觉。
+- **节点恢复**：两条执行引擎均使用 LangGraph `execute → assess → retry/finish`；失败分类后有界换工具或升级重规划。
 - **执行引擎**：Temporal（持久化/重试/超时/审批信号），Temporal 不可用时自动回退自建 DAG
   （`AGENT_ORCHESTRATION=temporal|legacy`）。
+- **经验闭环**：仅成功的 M1/M2 计划以用户隔离、文档占位符化的方式写入 Redis 计划缓存。
 
 ### 5.2 混合技能架构（原生函数 + MCP）
 
 - **服务端技能**：`plugins/skills/*`，原生 Python 函数注册，适合文档处理/LLM 调用等后端能力。
-- **客户端技能**：Electron 主进程暴露 MCP server（`http://127.0.0.1:8765/mcp`），
-  负责打开软件、读写本地文件、唤起邮件客户端等"必须在本机"的操作；可插拔、可热更新。
-- **降级通道**：MCP 连接失败冷却 30s 后重试，并回退 Redis 轮询通道；
-  调用方感知不到底层通道切换。
+- **客户端技能**：Electron 主进程通过官方 MCP SDK 暴露 Streamable HTTP server（`http://127.0.0.1:8765/mcp`），
+  负责打开软件、读写本地文件、唤起邮件客户端等"必须在本机"的操作；会话工具快照隔离，热更新只影响新会话。
+- **会话与降级**：后端每 server 复用初始化会话、缓存工具清单、熔断/失败冷却；不可用时回退 Redis 轮询。
+- **安全与控制**：loopback + `/mcp` + Host/Origin/DNS rebinding 防护；任务可携带 deadline/进度，取消时发送 MCP 标准取消通知。
 - **工具治理**：技能按场景白名单暴露（`scenes`），写操作分级（高危需人工确认），
   全部写操作留审计日志（control_logs）。
 
@@ -227,8 +229,10 @@ flowchart LR
 | `COMPUTE_THREADS` | 4 | OCR/Embedding/TTS 专用线程池，每进程一份 |
 | `LLM_HISTORY_MAX_TOKENS` | 250000 | 普通模式超大短期窗口 |
 | `LLM_HISTORY_MAX_TOKENS_WORK` | 60000 | 办公模式短期窗口 |
-| `AGENT_NODE_CONCURRENCY` | 2 | DAG 并行节点上限 |
-| `AGENT_NODE_MAX_RETRIES` | 2 | 单节点失败重试 |
+| `AGENT_NODE_CONCURRENCY` | 2 | 运行时 DAG 并发上限；办公任务当前强制串行原子步骤 |
+| `AGENT_NODE_MAX_RETRIES` | 1 | 单节点有界恢复次数 |
+| `AGENT_USER_ACTIVE_JOB_LIMIT` | 2 | 单用户并发办公任务上限 |
+| `MCP_TOOL_TIMEOUT_S` | 180 | MCP 工具 deadline |
 | `GENERATED_FILES_TTL_DAYS` | 7 | 脚本产物自动清理 |
 | `SANDBOX_TEMP_TTL_HOURS` | 6 | 沙箱临时目录兜底清理 |
 
@@ -246,6 +250,8 @@ flowchart LR
 | A8 | 普通模式超大短期窗口 + 摘要归档 | 适配 1M 上下文模型，兼顾速度/成本 |
 | A9 | 检索阈值硬性 0.7 + 小文档全文直注入 | 防止"问四个字查不到"的低召回问题 |
 | A10 | Temporal 不可用时回退自建 DAG | 单机部署无外部依赖也能跑通 |
+| A11 | 普通聊天与办公执行能力隔离 | 避免聊天模型获得本地写入、Shell 和项目开发权限 |
+| A12 | MCP 使用官方 Streamable HTTP SDK 与会话工具快照 | 保证生态兼容，并防止多会话热更新串线 |
 
 ## 8. 演进路线图
 
@@ -254,3 +260,5 @@ flowchart LR
 3. **PDF 结构化编辑**：Docling 结构回写，补 OP_SCHEMAS 的表格/样式操作。
 4. **多端同步**：设置偏好已同步；会话/知识库跨端迁移。
 5. **分布式扩展**：读写分离、Kafka 削峰、分片检索（当前单机已满足单人/小团队）。
+
+详见 [AGENT_ORCHESTRATION_MCP.md](AGENT_ORCHESTRATION_MCP.md)。

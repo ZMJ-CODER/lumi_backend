@@ -7,6 +7,8 @@ import pytest
 
 from app.core.config import settings
 from app.services.orchestrator import Orchestrator
+from app.services.scene_manager import get_scene_system_prompt
+from app.services.response_format import OFFICE_RESPONSE_FORMAT_COMPACT
 from app.agents.orchestration.intent import classify
 from app.agents.orchestration.models import JobStatus
 
@@ -65,6 +67,54 @@ def test_office_uses_short_history_budget(monkeypatch):
     assert seen == [1000, 100]
 
 
+def test_office_prepare_does_not_prequery_knowledge(monkeypatch):
+    """办公模式是否检索必须由 DAG 节点决定，不能在规划前隐式执行。"""
+    orch = Orchestrator.__new__(Orchestrator)
+    calls = []
+
+    async def context(*args):
+        return []
+
+    async def summary(*args):
+        return None
+
+    async def prompt(*args):
+        return "office"
+
+    async def query(*args):
+        calls.append(args)
+        return "不应出现", [{"title": "无关来源"}]
+
+    async def append(*args):
+        return None
+
+    monkeypatch.setattr(orch, "get_context", context)
+    monkeypatch.setattr(orch, "get_conversation_summary", summary)
+    monkeypatch.setattr(orch, "_get_system_prompt", prompt)
+    monkeypatch.setattr(orch, "_retrieve_knowledge", query)
+    monkeypatch.setattr(orch, "append_context", append)
+
+    prepared = asyncio.run(
+        orch._prepare_chat("u1", "c1", "查询当前时间", "office", None, [], retrieve_knowledge=False)
+    )
+    assert calls == []
+    assert prepared["citations"] == []
+
+
+def test_office_prompt_requires_structured_markdown_delivery():
+    prompt = get_scene_system_prompt("office")
+
+    assert "回复排版" in prompt
+    assert "## 核心结论" in prompt
+    assert "Markdown" in prompt
+
+
+def test_compact_office_format_covers_single_step_delivery():
+    assert "Markdown" in OFFICE_RESPONSE_FORMAT_COMPACT
+    assert "## 注意事项" in OFFICE_RESPONSE_FORMAT_COMPACT
+    assert "- [ ]" in OFFICE_RESPONSE_FORMAT_COMPACT
+
+
 def test_office_document_request_with_open_app_uses_free_planning():
     result = classify(
         "分析这些文档，完成后打开 Excel 应用",
@@ -112,3 +162,95 @@ def test_office_stream_disconnect_does_not_cancel_job(monkeypatch):
 
     asyncio.run(scenario())
     assert cancelled == []
+
+
+def test_office_stream_emits_plan_revision_step(monkeypatch):
+    from app.agents.orchestration import orchestrator as agent_orchestrator
+
+    orch = Orchestrator.__new__(Orchestrator)
+    initial = SimpleNamespace(
+        job_id="job-plan",
+        status=JobStatus.RUNNING,
+        nodes=[],
+        routing={"plan_revision": 1},
+        created_at=1.0,
+    )
+    revised = SimpleNamespace(
+        job_id="job-plan",
+        status=JobStatus.COMPLETED,
+        nodes=[],
+        routing={
+            "plan_revision": 2,
+            "plan_change_reason": "读取方法失败，改用脚本导出。",
+        },
+        result={"final_answer": "已完成"},
+        error=None,
+        created_at=1.0,
+    )
+
+    async def submit(*args, **kwargs):
+        return initial
+
+    async def get_job(*args, **kwargs):
+        return revised
+
+    monkeypatch.setattr(agent_orchestrator, "submit_job", submit)
+    monkeypatch.setattr(agent_orchestrator, "get_job", get_job)
+
+    async def scenario():
+        stream = orch._stream_office_job("u1", "c1", "task", [], None, [])
+        assert (await anext(stream))["type"] == "job"
+        event = await anext(stream)
+        await stream.aclose()
+        return event
+
+    event = asyncio.run(scenario())
+    assert event["type"] == "step"
+    assert event["step"]["id"] == "plan-revision-2"
+    assert event["step"]["output"] == "读取方法失败，改用脚本导出。"
+
+
+def test_office_stream_finishes_with_explicit_error_when_job_snapshot_disappears(monkeypatch):
+    """SSE 已交付 job_id 后 Redis 丢快照时，不能无限等待再让前端显示中断。"""
+    from app.agents.orchestration import orchestrator as agent_orchestrator
+
+    orch = Orchestrator.__new__(Orchestrator)
+    initial = SimpleNamespace(
+        job_id="missing-job",
+        status=JobStatus.RUNNING,
+        nodes=[],
+        routing={},
+        result=None,
+        error=None,
+        created_at=1.0,
+        updated_at=1.0,
+    )
+
+    async def submit(*args, **kwargs):
+        return initial
+
+    async def get_job(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent_orchestrator, "submit_job", submit)
+    monkeypatch.setattr(agent_orchestrator, "get_job", get_job)
+
+    async def scenario():
+        stream = orch._stream_office_job("u1", "c1", "task", [], None, [])
+        assert (await anext(stream))["type"] == "job"
+        # sleep is implementation detail; make the three guarded retries immediate.
+        import app.services.orchestrator as service_orchestrator
+
+        async def no_sleep(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(service_orchestrator.asyncio, "sleep", no_sleep)
+        events = [await anext(stream), await anext(stream)]
+        await stream.aclose()
+        return events
+
+    events = asyncio.run(scenario())
+    assert events[0]["type"] == "step"
+    assert events[0]["step"]["status"] == "failed"
+    assert events[1]["type"] == "delta"
+    assert "任务状态已丢失" in events[1]["content"]

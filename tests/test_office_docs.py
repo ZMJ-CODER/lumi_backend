@@ -127,7 +127,8 @@ def test_office_script_agent_passes_doc_ids(monkeypatch):
     agent = OfficeScriptAgent()
     captured = {}
 
-    async def fake_generate(task, names, ctx):
+    async def fake_generate(task, names, ctx, output_contract=None):
+        captured["contract"] = output_contract
         return "print('ok')"
 
     async def fake_run_skill(skill, params, ctx):
@@ -149,7 +150,210 @@ def test_office_script_agent_passes_doc_ids(monkeypatch):
     assert res["success"] is True
     assert captured["skill"] == "python_exec"
     assert captured["params"]["doc_ids"] == ["d1", "d2"]
+    assert captured["contract"] == {"version": 1, "requires_artifact": False, "expected_output_names": []}
     assert res["outputs"][0]["name"] == "out.csv"
+
+
+def test_direct_text_conversion_uses_one_selected_document_without_llm(monkeypatch):
+    from app.agents.core.base import WorkerContext
+    from app.agents.orchestration.models import TaskNode
+    from app.agents.roles.office.agents import OfficeScriptAgent
+
+    agent = OfficeScriptAgent()
+    captured = {}
+
+    async def forbidden_generate(*args, **kwargs):
+        raise AssertionError("简单 CSV 转 TXT 不应调用模型生成脚本")
+
+    async def fake_run_skill(skill, params, ctx):
+        captured["skill"] = skill
+        captured["params"] = params
+        return {
+            "success": True,
+            "content": "已生成文件：scores.txt",
+            "outputs": [{"name": "scores.txt", "size": 42, "doc_id": "scores-doc"}],
+        }
+
+    async def fake_ensure(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(agent, "_generate_script", forbidden_generate)
+    monkeypatch.setattr(agent, "run_skill", fake_run_skill)
+    monkeypatch.setattr(office_docs, "ensure_session", fake_ensure)
+    monkeypatch.setattr(office_docs, "load_session", lambda *_: {"filename": "scores.csv"})
+    node = TaskNode(
+        id="convert", name="转换", agent="office_script",
+        params={
+            "task": "将score.csv转为txt",
+            "doc_ids": ["scores-doc"],
+            "conversion": {
+                "source_filename": "scores.csv",
+                "target_extension": ".txt",
+                "output_filename": "scores.txt",
+            },
+        },
+    )
+
+    result = asyncio.run(agent.execute(node, WorkerContext(user_id="u1", job_id="j1")))
+
+    assert result["success"] is True
+    assert result["outputs"] == [{"name": "scores.txt", "size": 42, "doc_id": "scores-doc"}]
+    assert captured["skill"] == "python_exec"
+    assert captured["params"]["doc_ids"] == ["scores-doc"]
+    assert captured["params"]["expected_output_names"] == ["scores.txt"]
+    assert "source_name = \"scores.csv\"" in captured["params"]["code"]
+    assert "output_name = \"scores.txt\"" in captured["params"]["code"]
+
+
+def test_direct_text_conversion_script_writes_utf8_output(tmp_path):
+    from app.agents.roles.office.agents import OfficeScriptAgent
+
+    source = tmp_path / "scores.csv"
+    source.write_bytes("姓名,成绩\n张伟,92\n".encode("gb18030"))
+    output_dir = tmp_path / "outputs"
+    namespace = {"__name__": "__main__"}
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("LUMI_DOC_PATHS", '{"scores.csv": "' + str(source).replace("\\", "\\\\") + '"}')
+    monkeypatch.setenv("LUMI_DOC_OUTPUT_DIRS", '{"scores.csv": "' + str(output_dir).replace("\\", "\\\\") + '"}')
+    try:
+        exec(
+            OfficeScriptAgent._direct_text_conversion_script(
+                {"source_filename": "scores.csv", "target_extension": ".txt", "output_filename": "scores.txt"}
+            ),
+            namespace,
+        )
+    finally:
+        monkeypatch.undo()
+    assert (output_dir / "scores.txt").read_text(encoding="utf-8") == "姓名,成绩\n张伟,92\n"
+
+
+def test_direct_text_conversion_honors_explicit_tab_delimiter(tmp_path):
+    from app.agents.roles.office.agents import OfficeScriptAgent
+
+    source = tmp_path / "scores.csv"
+    source.write_text('姓名,备注\n张伟,"语文,补考"\n', encoding="utf-8", newline="")
+    output_dir = tmp_path / "outputs"
+    namespace = {"__name__": "__main__"}
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("LUMI_DOC_PATHS", '{"scores.csv": "' + str(source).replace("\\", "\\\\") + '"}')
+    monkeypatch.setenv("LUMI_DOC_OUTPUT_DIRS", '{"scores.csv": "' + str(output_dir).replace("\\", "\\\\") + '"}')
+    try:
+        exec(
+            OfficeScriptAgent._direct_text_conversion_script(
+                {
+                    "source_filename": "scores.csv",
+                    "target_extension": ".txt",
+                    "output_filename": "scores.txt",
+                    "text_delimiter": "\t",
+                }
+            ),
+            namespace,
+        )
+    finally:
+        monkeypatch.undo()
+    assert (output_dir / "scores.txt").read_text(encoding="utf-8") == '姓名\t备注\n张伟\t语文,补考\n'
+
+
+def test_direct_text_conversion_honors_named_output_and_encoding(tmp_path):
+    from app.agents.orchestration.intent import resolve_direct_text_conversion
+    from app.agents.roles.office.agents import OfficeScriptAgent
+
+    conversion = resolve_direct_text_conversion(
+        "将 scores.csv 转为 report.txt，使用 UTF-8-SIG 编码并用逗号分隔",
+        [{"doc_id": "scores-doc", "filename": "scores.csv"}],
+    )
+    assert conversion is not None
+    assert conversion["output_filename"] == "report.txt"
+    assert conversion["encoding"] == "utf-8-sig"
+    assert conversion["text_delimiter"] == ","
+
+    source = tmp_path / "scores.csv"
+    source.write_text("姓名,成绩\n张伟,92\n", encoding="utf-8")
+    output_dir = tmp_path / "outputs"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("LUMI_DOC_PATHS", '{"scores.csv": "' + str(source).replace("\\", "\\\\") + '"}')
+    monkeypatch.setenv("LUMI_DOC_OUTPUT_DIRS", '{"scores.csv": "' + str(output_dir).replace("\\", "\\\\") + '"}')
+    try:
+        exec(OfficeScriptAgent._direct_text_conversion_script(conversion), {"__name__": "__main__"})
+    finally:
+        monkeypatch.undo()
+    assert (output_dir / "report.txt").read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+def test_python_exec_output_contract_validates_real_text_artifact(tmp_path):
+    from plugins.skills.shell.python_exec import _validate_output_contract
+
+    output = tmp_path / "scores.txt"
+    output.write_bytes(b"\xef\xbb\xbfname\tscore\nAlice\t92\n")
+    contract = {
+        "expected_output_names": ["scores.txt"],
+        "target_extension": ".txt",
+        "encoding": "utf-8-sig",
+        "text_delimiter": "\t",
+    }
+    assert _validate_output_contract(contract, {"scores.txt": [output]}) is None
+
+    output.write_text("name,score\nAlice,92\n", encoding="utf-8")
+    assert "UTF-8 BOM" in (_validate_output_contract(contract, {"scores.txt": [output]}) or "")
+
+
+def test_direct_text_conversion_rejects_success_without_expected_artifact(monkeypatch):
+    """脚本 stdout 不能替代真实产物：避免前端展示不存在的下载文件。"""
+    from app.agents.core.base import WorkerContext
+    from app.agents.orchestration.models import TaskNode
+    from app.agents.roles.office.agents import OfficeScriptAgent
+
+    agent = OfficeScriptAgent()
+
+    async def fake_run_skill(*args, **kwargs):
+        return {
+            "success": False,
+            "error": "脚本已结束，但未生成预期文件：scores.txt",
+            "error_code": "OUTPUT_MISSING",
+            "outputs": [],
+        }
+
+    async def fake_ensure(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(agent, "run_skill", fake_run_skill)
+    monkeypatch.setattr(office_docs, "ensure_session", fake_ensure)
+    monkeypatch.setattr(office_docs, "load_session", lambda *_: {"filename": "scores.csv"})
+    result = asyncio.run(
+        agent.execute(
+            TaskNode(
+                id="convert", agent="office_script",
+                params={
+                    "task": "将 scores.csv 转为 txt",
+                    "doc_ids": ["scores-doc"],
+                    "conversion": {"source_filename": "scores.csv", "target_extension": ".txt", "output_filename": "scores.txt"},
+                },
+            ),
+            WorkerContext(user_id="u1", job_id="j1"),
+        )
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "OUTPUT_MISSING"
+
+
+def test_python_exec_marks_sandbox_output_transfer_failure(monkeypatch, tmp_path):
+    """回传错误不能退化为通用 EXEC_ERROR，否则 M0 会被错误升级为 M2。"""
+    from app.agents.sandbox.base import SandboxResult
+    from app.core.config import settings
+    from plugins.skills.shell.python_exec import PythonExecSkill
+
+    class FakeSandbox:
+        name = "docker"
+
+        async def run_script(self, *args, **kwargs):
+            return SandboxResult(status="error", error="沙箱产物回传失败：读取沙箱产物失败")
+
+    monkeypatch.setattr("plugins.skills.shell.python_exec.get_sandbox", lambda: FakeSandbox())
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
+    result = asyncio.run(PythonExecSkill().execute({"code": "print(1)"}))
+    assert result.success is False
+    assert result.error_code == "SANDBOX_OUTPUT_TRANSFER_FAILED"
 
 
 def test_analyze_doc_limits_direct_prompt_and_output(monkeypatch):
@@ -215,3 +419,26 @@ def test_office_script_generation_uses_one_llm_call(monkeypatch):
     assert code == "print('ok')"
     assert len(calls) == 1
     assert calls[0][1]["max_tokens"] == 4000
+    assert "输出契约" in calls[0][0][0]["content"]
+
+
+def test_office_script_generation_retries_once_after_empty_model_reply(monkeypatch):
+    from app.agents.core.base import WorkerContext
+    from app.agents.roles.office.agents import OfficeScriptAgent
+
+    calls = 0
+
+    class FakeLLM:
+        async def chat(self, messages, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("模型返回空内容")
+            return "print('ok')"
+
+    monkeypatch.setattr("app.core.llm.LLMClient", FakeLLM)
+    code = asyncio.run(
+        OfficeScriptAgent()._generate_script("导出 CSV", ["scores.csv"], WorkerContext(user_id="u1", job_id="j1"))
+    )
+    assert code == "print('ok')"
+    assert calls == 2

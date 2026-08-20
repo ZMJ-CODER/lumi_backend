@@ -49,9 +49,21 @@ docker compose up -d
 详见 [docs/OPERATIONS.md](docs/OPERATIONS.md)（部署/定时任务/迁移/密钥/备份/排障）与
 [docs/DEGRADATION.md](docs/DEGRADATION.md)（降级与容错矩阵）。
 
+### 办公模式 Python 脚本沙箱
+
+`python_exec` 默认只在 Docker 隔离沙箱中运行；Docker 或镜像不可用时，该工具会从办公模式能力列表中隐藏，绝不会回退为后端本地执行。
+
+```bash
+# 在运行 API 的服务器上构建一次；镜像不包含项目源码、密钥或用户文件
+docker build -f Dockerfile.sandbox -t lumi-python-sandbox:latest .
+```
+
+生产环境应让 API 通过受限的 Docker context 或独立 sandbox runner 调用 Docker，不应把宿主 Docker socket 直接挂给 API 容器。每次脚本执行都会创建并销毁容器，禁网、只读根目录、非 root、去除 Linux capabilities，并限制 CPU、内存、PID、文件描述符和运行时间。任务输入使用复制方式进入容器，产物仅复制回已授权的用户输出目录。
+
 ## 架构文档
 
 - [docs/RAG_DESIGN.md](docs/RAG_DESIGN.md) — 知识库检索
 - [docs/MEMORY_DESIGN.md](docs/MEMORY_DESIGN.md) — 长期记忆与隐私
 - [docs/OFFICE_SKILLS.md](docs/OFFICE_SKILLS.md) — 办公模式
+- [docs/AGENT_ORCHESTRATION_MCP.md](docs/AGENT_ORCHESTRATION_MCP.md) — 办公 DAG、TCA/ReAct 与 MCP 运行手册
 - [docs/API_AUTH.md](docs/API_AUTH.md) / [docs/API_INTEGRATION.md](docs/API_INTEGRATION.md) — API 与鉴权

@@ -434,6 +434,10 @@ class AgentDagWorkflow:
         node["error"] = out.get("error")
         node["error_code"] = out.get("error_code")
         node["retries"] = int(out.get("retries") or 0)
+        if isinstance(out.get("recovery"), dict):
+            metadata = dict(node.get("metadata") or {})
+            metadata["recovery"] = out["recovery"]
+            node["metadata"] = metadata
         if out.get("effect_status"):
             node["effect_status"] = out.get("effect_status")
         node["completed_at"] = self._now()
@@ -452,6 +456,16 @@ class AgentDagWorkflow:
                 )
             else:
                 self._job["status"] = JOB_RUNNING
+        if self._job.get("status") == JOB_FAILED and not self._job.get("error"):
+            failed = next(
+                (
+                    n for n in (self._job.get("nodes") or [])
+                    if n.get("status") == STATUS_FAILED and n.get("error")
+                ),
+                None,
+            )
+            if failed:
+                self._job["error"] = str(failed.get("error"))
         self._job["updated_at"] = self._now()
 
     def _finalize_cancelled(self) -> None:

@@ -32,6 +32,7 @@ class ExtractInfoSkill(Skill):
             context,
             "你是信息抽取助手。只输出 JSON（不要 Markdown 围栏），字段缺失时值为 null，不要编造。",
             f"需要抽取的字段：{fields}\n源文本：\n{text[:80000]}",
+            format_response=False,
         )
         return SkillResult(success=True, output=out, metadata={"format": "json"})
 
@@ -59,6 +60,7 @@ class InvoiceParseSkill(Skill):
             "你是发票信息提取专家。输出 JSON：发票号码、发票代码、开票日期、购买方名称、"
             "销售方名称、项目/货物名称、金额（不含税）、税率、税额、价税合计。缺失为 null，不要编造。",
             f"发票文字：\n{text[:40000]}",
+            format_response=False,
         )
         return SkillResult(success=True, output=out, metadata={"format": "json"})
 

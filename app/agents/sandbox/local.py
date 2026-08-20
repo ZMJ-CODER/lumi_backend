@@ -45,6 +45,7 @@ class LocalSandbox(Sandbox):
         language: str = "python",
         timeout: int = 30,
         env_extra: dict | None = None,
+        mounts: list[dict[str, str]] | None = None,
     ) -> SandboxResult:
         if language != "python":
             return SandboxResult(

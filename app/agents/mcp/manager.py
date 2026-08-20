@@ -18,14 +18,67 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
+from typing import Any
 
 from loguru import logger
 
 from app.core.config import settings
+from app.core.resilience import CircuitOpenError, get_breaker
 
 # 连接失败冷却：Electron 未启动/后端先于前端启动时，避免每次调用都重试并刷日志
 _RETRY_COOLDOWN_S = 30.0
 _failed_until: dict[str, float] = {}
+_tools_cache: dict[str, tuple[float, list[dict]]] = {}
+_session_workers: dict[str, "_McpSessionWorker"] = {}
+_active_calls: dict[str, asyncio.Task] = {}
+_active_requests: dict[str, tuple[object, int | str]] = {}
+
+
+class _McpSessionWorker:
+    """Keep one MCP session in one asyncio task; calls are serialized per server."""
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.queue: asyncio.Queue[tuple[Callable[[object], Awaitable[object]], asyncio.Future]] = asyncio.Queue()
+        self.task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        async with streamable_http_client(str(self.cfg["url"])) as streams:
+            read_stream, write_stream = streams
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                while True:
+                    fn, future = await self.queue.get()
+                    if future.cancelled():
+                        continue
+                    try:
+                        result = await fn(session)
+                    except Exception as exc:  # noqa: BLE001
+                        if not future.done():
+                            future.set_exception(exc)
+                    else:
+                        if not future.done():
+                            future.set_result(result)
+
+    async def call(self, fn: Callable[[object], Awaitable[object]]) -> object:
+        if self.task.done():
+            await self.task
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        await self.queue.put((fn, future))
+        return await future
+
+    async def close(self) -> None:
+        if not self.task.done():
+            self.task.cancel()
+        try:
+            await self.task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 def _server_cfg(name: str) -> dict | None:
@@ -46,16 +99,23 @@ async def _call_with_session(
     if name in _failed_until and time.monotonic() < _failed_until[name]:
         return None
     try:
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamable_http_client
+        async def _invoke() -> object:
+            worker = _session_workers.get(name)
+            if worker is None or worker.task.done():
+                worker = _McpSessionWorker(cfg)
+                _session_workers[name] = worker
+            try:
+                return await worker.call(fn)
+            except Exception:
+                if _session_workers.get(name) is worker:
+                    _session_workers.pop(name, None)
+                await worker.close()
+                raise
 
-        # 每次调用使用独立短会话。不同 DAG 步骤之间不共享 session，也不使用
-        # 全局服务器锁，因此没有依赖关系的步骤可以真正并行执行。
-        async with streamable_http_client(str(cfg["url"])) as streams:
-            read_stream, write_stream = streams
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                return await fn(session)
+        return await get_breaker(f"mcp:{name}:{cfg.get('url', '')}").call(_invoke)
+    except CircuitOpenError as exc:
+        logger.info("[MCP] 服务器 {} 暂时熔断，跳过调用: {}", name, exc)
+        return None
     except Exception as exc:  # noqa: BLE001
         logger.warning("[MCP] 调用服务器 {} 失败（将回退轮询）: {}", name, exc)
         _failed_until[name] = time.monotonic() + _RETRY_COOLDOWN_S
@@ -64,6 +124,11 @@ async def _call_with_session(
 
 async def list_tools(name: str) -> list[dict]:
     """列出 MCP 服务器暴露的工具."""
+
+    cached = _tools_cache.get(name)
+    ttl = max(0.0, float(getattr(settings, "MCP_TOOLS_CACHE_TTL_S", 30.0)))
+    if cached and (ttl <= 0 or time.monotonic() - cached[0] < ttl):
+        return [dict(item) for item in cached[1]]
 
     async def _list(session) -> list[dict]:
         res = await session.list_tools()
@@ -111,7 +176,10 @@ async def list_tools(name: str) -> list[dict]:
         return result
 
     result = await _call_with_session(name, _list)
-    return result if isinstance(result, list) else []
+    tools = result if isinstance(result, list) else []
+    if tools:
+        _tools_cache[name] = (time.monotonic(), [dict(item) for item in tools])
+    return tools
 
 
 async def list_all_tools() -> list[dict]:
@@ -143,11 +211,61 @@ async def list_all_tools() -> list[dict]:
     return result
 
 
-async def call_tool(name: str, tool_name: str, args: dict | None = None) -> dict | None:
-    """调用 MCP 工具；失败返回 None（调用方回退）."""
+async def call_tool(
+    name: str,
+    tool_name: str,
+    args: dict | None = None,
+    *,
+    task_id: str | None = None,
+    timeout_s: float | None = None,
+    on_progress: Callable[[dict], Any] | None = None,
+) -> dict | None:
+    """调用 MCP 工具。
+
+    ``task_id`` 作为标准 MCP ``_meta`` 扩展传递，进度使用 SDK 的
+    ``progress_callback``。业务层仍可通过返回的 metadata 关联审计记录。
+    """
 
     async def _call(session) -> dict:
-        res = await session.call_tool(tool_name, args or {})
+        call_kwargs: dict[str, Any] = {}
+        effective_timeout = timeout_s if timeout_s is not None else float(
+            getattr(settings, "MCP_TOOL_TIMEOUT_S", 180.0)
+        )
+        if effective_timeout > 0:
+            call_kwargs["read_timeout_seconds"] = timedelta(seconds=effective_timeout)
+        if on_progress:
+            async def _progress(progress: float, total: float | None = None, message: str | None = None):
+                event = {
+                    "type": "mcp_progress", "task_id": task_id, "progress": progress,
+                    "total": total, "message": message or "",
+                }
+                value = on_progress(event)
+                if hasattr(value, "__await__"):
+                    await value
+            call_kwargs["progress_callback"] = _progress
+        if task_id:
+            # MCP 标准字段用于请求关联；``lumi.task_id`` 仅供当前 Electron
+            # 服务端将进度/审计映射回本应用任务。
+            call_kwargs["meta"] = {
+                "progressToken": task_id,
+                "io.modelcontextprotocol/related-task": {"taskId": task_id},
+                "lumi": {"task_id": task_id},
+            }
+            # Python MCP 1.x 尚未公开暴露 call_tool 的 JSON-RPC request id。
+            # 同一 server worker 内调用串行，故在发起请求前读取 SDK 的递增 id
+            # 可安全用于发送标准 notifications/cancelled；若 SDK 将来提供公开
+            # request handle，可在此替换，不改变上层 cancel_task 接口。
+            request_id = getattr(session, "_request_id", None)
+            if isinstance(request_id, (int, str)):
+                _active_requests[task_id] = (session, request_id)
+        try:
+            res = await session.call_tool(tool_name, args or {}, **call_kwargs)
+        except TypeError:
+            # 兼容旧版/测试客户端不接受新增 MCP 参数时的安全降级。
+            res = await session.call_tool(tool_name, args or {})
+        finally:
+            if task_id:
+                _active_requests.pop(task_id, None)
         content = getattr(res, "content", None) or []
         text = "".join(
             str(c.text)
@@ -165,11 +283,67 @@ async def call_tool(name: str, tool_name: str, args: dict | None = None) -> dict
                 getattr(res, "is_error", None) is True
                 or getattr(res, "isError", False)
             ),
+            "task_id": task_id,
         }
 
-    return await _call_with_session(name, _call)
+    current = asyncio.current_task()
+    if task_id and current:
+        _active_calls[task_id] = current
+    try:
+        operation = _call_with_session(name, _call)
+        effective_timeout = timeout_s if timeout_s is not None else float(
+            getattr(settings, "MCP_TOOL_TIMEOUT_S", 180.0)
+        )
+        if effective_timeout > 0:
+            return await asyncio.wait_for(operation, timeout=effective_timeout + 5)
+        return await operation
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError:
+        if task_id:
+            await _notify_remote_cancel(task_id, "MCP tool deadline exceeded")
+        return {
+            "success": False, "content": "MCP 工具执行超时", "metadata": {"task_id": task_id},
+            "is_error": True, "error_code": "MCP_TIMEOUT", "task_id": task_id,
+        }
+    finally:
+        if task_id and _active_calls.get(task_id) is current:
+            _active_calls.pop(task_id, None)
+
+
+async def _notify_remote_cancel(task_id: str, reason: str) -> None:
+    """Best-effort standard MCP cancellation notification for one in-flight call."""
+    active_request = _active_requests.get(str(task_id))
+    if not active_request:
+        return
+    session, request_id = active_request
+    try:
+        from mcp.types import CancelledNotification, CancelledNotificationParams
+
+        await session.send_notification(CancelledNotification(
+            params=CancelledNotificationParams(requestId=request_id, reason=reason)
+        ))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("发送 MCP 取消通知失败，继续本地取消: {}", exc)
+
+
+async def cancel_task(task_id: str) -> bool:
+    """取消正在执行的 MCP 调用，并向兼容服务器发送标准取消通知。"""
+    key = str(task_id)
+    task = _active_calls.get(key)
+    if not task or task.done():
+        return False
+    await _notify_remote_cancel(key, "Cancelled by Lumi user")
+    task.cancel()
+    return True
 
 
 async def close_all() -> None:
-    """清理（短会话无持久连接；重置失败冷却，便于下次重试）."""
+    """清理客户端状态，便于应用退出或 MCP 配置刷新后重新发现。"""
     _failed_until.clear()
+    _tools_cache.clear()
+    _active_calls.clear()
+    _active_requests.clear()
+    workers = list(_session_workers.values())
+    _session_workers.clear()
+    await asyncio.gather(*(worker.close() for worker in workers), return_exceptions=True)

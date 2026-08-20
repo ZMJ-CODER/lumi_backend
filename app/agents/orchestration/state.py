@@ -6,8 +6,10 @@ Redis 部署已开启 appendonly，容器重启后任务状态仍在。
 
 from abc import ABC, abstractmethod
 import asyncio
+import json
 
 from loguru import logger
+from redis.exceptions import WatchError
 
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus
 from app.core.config import settings
@@ -20,6 +22,10 @@ def _key(job_id: str) -> str:
 
 class StateConflictError(RuntimeError):
     """保存的 revision 已落后于存储中的版本。"""
+
+
+class StatePersistenceError(RuntimeError):
+    """任务创建后无法从共享状态库读回，禁止把无效 job_id 发给前端。"""
 
 
 def _merge_conflict(current: Job, incoming: Job) -> Job:
@@ -68,6 +74,41 @@ def _update_job_in_place(target: Job, source: Job) -> None:
     target.nodes = merged_nodes
 
 
+def _repair_legacy_empty_arrays(value):
+    """兼容 Redis Lua cjson 把空 Python list 编为 {} 的历史快照。
+
+    Lua 的 cjson 无法区分空数组和空对象；任务状态中这些字段固定是数组，
+    因此可安全地在读取时恢复。新保存路径不再经过 Lua 的 cjson 重编码。
+    """
+    if isinstance(value, list):
+        return [_repair_legacy_empty_arrays(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    repaired = {key: _repair_legacy_empty_arrays(item) for key, item in value.items()}
+    for node in repaired.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        for field in ("depends_on", "resource_claims"):
+            if node.get(field) == {}:
+                node[field] = []
+    return repaired
+
+
+def _decode_job(raw: str, job_id: str) -> Job | None:
+    """先走正常快速路径，失败后兼容修复旧任务 JSON。"""
+    try:
+        return Job.model_validate_json(raw)
+    except Exception as original_exc:  # noqa: BLE001
+        try:
+            repaired = _repair_legacy_empty_arrays(json.loads(raw))
+            job = Job.model_validate(repaired)
+            logger.warning("任务状态已兼容修复空数组编码: {}", job_id)
+            return job
+        except Exception as repair_exc:  # noqa: BLE001
+            logger.warning("任务状态反序列化失败 {}: {} | 修复失败: {}", job_id, original_exc, repair_exc)
+            return None
+
+
 class StateStore(ABC):
     """任务状态存取接口（Redis / InMemory 两种实现可互换）."""
 
@@ -100,6 +141,11 @@ class RedisStateStore(StateStore):
     async def create_job(self, job: Job) -> None:
         r = get_redis()
         await r.set(_key(job.job_id), job.model_dump_json(), ex=self._ttl)
+        # 提交接口和 SSE 会立即把 job_id 交给另一条 HTTP 请求轮询。这里必须
+        # 确认共享 Redis 已可读；否则不能让前端拿到一个必然 404 的任务 ID。
+        raw = await r.get(_key(job.job_id))
+        if not raw or _decode_job(raw, job.job_id) is None:
+            raise StatePersistenceError(f"任务状态未能持久化: {job.job_id}")
         # 用户任务索引：幂等写入（同一 job 不重复），供 list_jobs 倒序分页
         index_key = f"multiagent:user_jobs:{job.user_id}"
         await r.lrem(index_key, 0, job.job_id)
@@ -118,53 +164,40 @@ class RedisStateStore(StateStore):
         raw = await r.get(_key(job_id))
         if not raw:
             return None
-        try:
-            return Job.model_validate_json(raw)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("任务状态反序列化失败 {}: {}", job_id, exc)
-            return None
+        return _decode_job(raw, job_id)
 
     async def save_job(self, job: Job) -> None:
         lock = self._save_locks.setdefault(job.job_id, asyncio.Lock())
         async with lock:
             r = get_redis()
             key = _key(job.job_id)
-            script = """
-local key = KEYS[1]
-local expected = tonumber(ARGV[1])
-local value = ARGV[2]
-local ttl = tonumber(ARGV[3])
-local raw = redis.call('GET', key)
-if not raw then return -1 end
-local current = cjson.decode(raw)
-if tonumber(current['revision'] or 0) ~= expected then return 0 end
-local updated = cjson.decode(value)
-updated['revision'] = expected + 1
-redis.call('SET', key, cjson.encode(updated), 'EX', ttl)
-return expected + 1
-"""
+            # 不用 Lua cjson decode/encode：它会把空数组 [] 写成 {}，导致下一次
+            # Pydantic 读取 depends_on/resource_claims 失败，SSE 因而无法收敛。
+            # 本进程锁覆盖正常 worker/API 写入；跨进程冲突通过 revision 检测后重试。
             candidate = job
             for _ in range(3):
-                new_revision = int(
-                    await r.eval(
-                        script,
-                        1,
-                        key,
-                        int(candidate.revision),
-                        candidate.model_dump_json(),
-                        self._ttl,
-                    )
-                )
-                if new_revision < 0:
-                    raise StateConflictError(f"任务不存在: {job.job_id}")
-                if new_revision > 0:
-                    candidate.revision = new_revision
-                    _update_job_in_place(job, candidate)
-                    return
-                current = await self.get_job(job.job_id)
-                if current is None:
-                    raise StateConflictError(f"任务不存在: {job.job_id}")
-                candidate = _merge_conflict(current, candidate)
+                # WATCH/MULTI 在不经过 Lua cjson 的前提下保持跨进程 CAS。
+                async with r.pipeline(transaction=True) as pipe:
+                    try:
+                        await pipe.watch(key)
+                        raw = await pipe.get(key)
+                        current = _decode_job(raw, job.job_id) if raw else None
+                        if current is None:
+                            raise StateConflictError(f"任务不存在: {job.job_id}")
+                        if current.revision != candidate.revision:
+                            candidate = _merge_conflict(current, candidate)
+                            continue
+                        candidate.revision = current.revision + 1
+                        pipe.multi()
+                        pipe.set(key, candidate.model_dump_json(), ex=self._ttl)
+                        await pipe.execute()
+                        _update_job_in_place(job, candidate)
+                        return
+                    except WatchError:
+                        # 其他进程刚好写入，重读后按 revision 合并再试。
+                        continue
+                    finally:
+                        await pipe.reset()
             raise StateConflictError(f"任务状态版本冲突: {job.job_id}")
 
     async def list_jobs(self, user_id: str, limit: int = 20) -> list[Job]:

@@ -16,6 +16,7 @@ from app.agents.orchestration.models import TaskNode, TaskStatus
 from app.agents.orchestration.review import get_reviewer
 from app.agents.orchestration.workers import WORKERS, WorkerContext
 from app.agents.orchestration.temporal.client import load_byok_key
+from app.core.config import settings
 
 
 def _json_safe(obj):
@@ -55,6 +56,7 @@ async def _execute_node_activity_inner(payload: dict) -> dict:
 
     node = TaskNode.model_validate(node_data)
     node.metadata = dict(node.metadata or {})
+    node.metadata.setdefault("tool_index", 0)
     from app.agents.orchestration.context import sanitize_dependency_result
 
     node.metadata["dependency_results"] = {
@@ -71,81 +73,52 @@ async def _execute_node_activity_inner(payload: dict) -> dict:
         llm_api_key=llm_api_key,
     )
 
-    for attempt in range(max_retries + 1):
-        if attempt:
-            node.retries = attempt
-            node.status = TaskStatus.RETRYING
-        node.status = TaskStatus.RUNNING
-        node.error = None
-        node.error_code = None
-        error = None
-        error_code = None
-        result = None
-        try:
-            result = await asyncio.wait_for(worker.execute(node, ctx), timeout=timeout)
-            if isinstance(result, dict) and result.get("success") is False:
-                error = str(result.get("error") or "执行失败")
-                error_code = str(result.get("error_code") or "EXEC_ERROR")
-        except asyncio.CancelledError:
-            return {
-                "status": "interrupted",
-                "result": None,
-                "error": "任务被用户终止",
-                "error_code": "INTERRUPTED",
-                "retries": attempt,
-            }
-        except temporalio.exceptions.CancelledError:
-            return {
-                "status": "interrupted",
-                "result": None,
-                "error": "任务被用户终止",
-                "error_code": "INTERRUPTED",
-                "retries": attempt,
-            }
-        except asyncio.TimeoutError:
-            error = f"执行超时（>{timeout}s）"
-            error_code = "TIMEOUT"
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("节点 {} 执行异常: {}", node.id, exc)
-            error = str(exc)
-            error_code = "EXEC_ERROR"
+    from app.agents.orchestration.langgraph_runner import LangGraphNodeRunner
 
-        if error:
-            if attempt < max_retries:
-                continue
-            return {
-                "status": "failed",
-                "result": None,
-                "error": error,
-                "error_code": error_code,
-                "retries": attempt,
-            }
+    try:
+        outcome = await LangGraphNodeRunner(
+            worker=worker,
+            node=node,
+            ctx=ctx,
+            review=review,
+            timeout_seconds=timeout,
+            max_retries=max_retries,
+        ).run()
+    except (asyncio.CancelledError, temporalio.exceptions.CancelledError):
+        return {
+            "status": "interrupted",
+            "result": None,
+            "error": "任务被用户终止",
+            "error_code": "INTERRUPTED",
+            "retries": node.retries,
+        }
 
-        # 质检（不通过则重做，最多 max_retries 次）
-        verdict = await review.review(node, result, ctx)
-        if verdict.approved:
-            # 自动沉淀任务记忆（后续节点/汇总可回顾）
-            try:
-                from app.agents.memory.task_memory import remember
-
-                content = (result or {}).get("content") or (result or {}).get("output") or ""
-                await remember(
-                    job_id,
-                    f"节点:{node.agent}",
-                    f"{node.name or node.agent}：{str(content)[:300]}",
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            return _json_safe({"status": "completed", "result": result, "retries": attempt})
-        if attempt < max_retries:
-            continue
+    if not outcome.success:
         return {
             "status": "failed",
             "result": None,
-            "error": f"质检未通过: {verdict.feedback}",
-            "error_code": "REVIEW_REJECTED",
-            "retries": attempt,
+            "error": outcome.error,
+            "error_code": outcome.error_code,
+            "retries": outcome.retries,
+            "recovery": outcome.recovery,
         }
+    # 自动沉淀任务记忆（后续节点/汇总可回顾）
+    try:
+        from app.agents.memory.task_memory import remember
+
+        content = (outcome.result or {}).get("content") or (outcome.result or {}).get("output") or ""
+        await remember(job_id, f"节点:{node.agent}", f"{node.name or node.agent}：{str(content)[:300]}")
+    except Exception:  # noqa: BLE001
+        pass
+    from app.agents.orchestration.presentation import attach_display_result
+
+    return _json_safe(
+        {
+            "status": "completed",
+            "result": attach_display_result(node, outcome.result or {}),
+            "retries": outcome.retries,
+        }
+    )
 
 
 @activity.defn
@@ -210,6 +183,9 @@ async def synthesize_final_answer_activity(payload: dict) -> dict:
     """任务收尾：把用户请求 + 各节点产出合成为最终交付答案（纯干活不交付的问题）."""
     user_id = str(payload.get("user_id") or "")
     job_id = str(payload.get("job_id") or "")
+    # Workflow 输入不能携带密钥（会被 Temporal history 持久化）；从短 TTL
+    # Redis 桥接读取，和节点执行保持同一 BYOK 模型。
+    llm_api_key = await load_byok_key(job_id) if job_id else None
     request = str(payload.get("request") or "")
     nodes = payload.get("nodes") or []
     # 保存成功案例（Few-Shot 规划参考；失败静默）
@@ -236,6 +212,7 @@ async def synthesize_final_answer_activity(payload: dict) -> dict:
         pass
     try:
         from app.core.llm import LLMClient
+        from app.services.response_format import FINAL_DELIVERY_FORMAT_PROMPT
         from app.services.usage import CATEGORY_SKILL
 
         llm = LLMClient()
@@ -247,7 +224,8 @@ async def synthesize_final_answer_activity(payload: dict) -> dict:
                         "你是办公助手。根据用户请求和下面各步骤的结果，直接输出最终交付内容"
                         "（如总结、邮件正文、分析结论、待办清单等）。"
                         "不要提及'步骤/agent'，不要重复过程，直接给出对用户有用的最终答案；"
-                        "如果用户请求无法从结果中得到答案，如实说明。"
+                        "如果用户请求无法从结果中得到答案，如实说明。\n\n"
+                        + FINAL_DELIVERY_FORMAT_PROMPT
                     ),
                 },
                 {
@@ -256,11 +234,12 @@ async def synthesize_final_answer_activity(payload: dict) -> dict:
                 },
             ],
             scene="office",
-            max_tokens=6000,
+            max_tokens=settings.AGENT_FINAL_ANSWER_MAX_TOKENS,
             temperature=0.3,
             usage_user_id=user_id or None,
             usage_category=CATEGORY_SKILL,
             disable_reasoning_effort=True,
+            api_key=llm_api_key,
         )
         return {"final_answer": (reply or "").strip()}
     except Exception:  # noqa: BLE001

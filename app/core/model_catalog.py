@@ -11,25 +11,9 @@
 
 from app.core.config import settings
 
-def _configured_model(
-    *, model_id: str, provider: str, description: str, supports_reasoning_effort: bool = True
-) -> dict:
-    """Build one selector item from a model actually configured on this server."""
-    return {
-        "id": model_id,
-        "name": model_id,
-        "provider": provider,
-        "context_window": 131072,
-        "multimodal": False,
-        "supports_reasoning_effort": supports_reasoning_effort,
-        "price_input_per_million": 0.0,
-        "price_output_per_million": 0.0,
-        "description": description,
-    }
 
-
-# Kept as metadata fallbacks for deployments which deliberately expose aliases.
-# get_model_catalog() always adds the concrete .env models first.
+# 办公模式固定内置三种服务端模型。用户仍可通过 BYOK 选择任意兼容模型。
+# 不按 .env 的 MODEL 字段动态构建，避免默认模型为空时前端列表消失。
 MODEL_CATALOG: list[dict] = [
     {
         "id": "deepseek-v4-flash",
@@ -54,61 +38,76 @@ MODEL_CATALOG: list[dict] = [
         "description": "深度推理，适合复杂任务与代码",
     },
     {
-        "id": "qwen3-8-max",
-        "name": "Qwen3 8B Max",
-        "provider": "qwen",
-        "context_window": 131072,
-        "multimodal": False,
-        "supports_reasoning_effort": True,
-        "price_input_per_million": 2.0,
-        "price_output_per_million": 8.0,
-        "description": "千问大杯模型，综合能力强",
-    },
-    {
-        "id": "qwen3-7-plus",
-        "name": "Qwen3 7B Plus",
+        "id": "qwen-turbo",
+        "name": "通义千问 Turbo",
         "provider": "qwen",
         "context_window": 131072,
         "multimodal": False,
         "supports_reasoning_effort": False,
-        "price_input_per_million": 1.0,
-        "price_output_per_million": 4.0,
-        "description": "千问标准模型，性价比之选",
+        "price_input_per_million": 0.0,
+        "price_output_per_million": 0.0,
+        "description": "快速稳定，适合常规办公和轻量任务",
     },
 ]
 
 
-# provider → 默认 OpenAI 兼容 base_url（BYOK 弹窗里 provider 下拉的依据）
+# provider → 默认 OpenAI Chat Completions 兼容 base_url。
+#
+# 清单仅代表接口形状兼容 ``/chat/completions``，并不意味着每个模型支持
+# 函数调用、JSON mode 或图片输入；自定义服务使用 ``custom``。
 PROVIDER_BASE_URLS: dict[str, str] = {
+    "openai": "https://api.openai.com/v1",
     "deepseek": settings.DEEPSEEK_BASE_URL,
     "qwen": settings.QWEN_BASE_URL,
-    "openai": "https://api.openai.com/v1",
+    "moonshot": "https://api.moonshot.cn/v1",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+    "baichuan": "https://api.baichuan-ai.com/v1",
+    "siliconflow": "https://api.siliconflow.cn/v1",
+    "together": "https://api.together.xyz/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "fireworks": "https://api.fireworks.ai/inference/v1",
+    "perplexity": "https://api.perplexity.ai",
+    "mistral": "https://api.mistral.ai/v1",
+    "xai": "https://api.x.ai/v1",
+    "cerebras": "https://api.cerebras.ai/v1",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
 }
 
 
-def get_model_catalog() -> list[dict]:
-    """Return models callable by this deployment, without disclosing API keys."""
-    configured: list[dict] = []
-    if settings.DEEPSEEK_API_KEY and settings.DEEPSEEK_MODEL:
-        configured.append(
-            _configured_model(
-                model_id=settings.DEEPSEEK_MODEL,
-                provider="deepseek",
-                description="服务端 .env 已配置的 DeepSeek 模型",
-            )
-        )
-    if settings.QWEN_API_KEY and settings.QWEN_MODEL:
-        configured.append(
-            _configured_model(
-                model_id=settings.QWEN_MODEL,
-                provider="qwen",
-                description="服务端 .env 已配置的通义千问模型",
-            )
-        )
+def normalize_byok_base_url(value: str, *, allow_private: bool = False) -> str:
+    """校验并规范化 BYOK OpenAI-compatible 地址，避免自定义端点造成 SSRF。"""
+    import ipaddress
+    from urllib.parse import urlparse
 
-    # Do not show aliases that cannot be executed with the current provider
-    # settings. A BYOK user can still enter an arbitrary model in the UI.
-    return configured
+    raw = (value or "").strip().rstrip("/")
+    if not raw:
+        raise ValueError("兼容 API 地址不能为空")
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("兼容 API 地址必须是完整的 http(s) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("兼容 API 地址不能包含用户名或密码")
+    if parsed.query or parsed.fragment:
+        raise ValueError("兼容 API 地址不能包含查询参数或片段")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise ValueError("兼容 API 地址缺少主机名")
+    if not allow_private:
+        if host == "localhost" or host.endswith(".localhost"):
+            raise ValueError("不允许使用 localhost；如为受信任自托管服务，请由管理员开启私网 BYOK")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address and (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved):
+            raise ValueError("不允许使用内网或回环地址；如为受信任自托管服务，请由管理员开启私网 BYOK")
+    return raw
+
+
+def get_model_catalog() -> list[dict]:
+    """返回固定内置模型目录；不暴露 API key。"""
+    return [dict(item) for item in MODEL_CATALOG]
 
 
 def find_model(model_id: str) -> dict | None:

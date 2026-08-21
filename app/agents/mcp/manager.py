@@ -25,6 +25,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.resilience import CircuitOpenError, get_breaker
+from app.agents.skills.base import Skill, SkillContext, SkillResult
 
 # 连接失败冷却：Electron 未启动/后端先于前端启动时，避免每次调用都重试并刷日志
 _RETRY_COOLDOWN_S = 30.0
@@ -33,6 +34,14 @@ _tools_cache: dict[str, tuple[float, list[dict]]] = {}
 _session_workers: dict[str, "_McpSessionWorker"] = {}
 _active_calls: dict[str, asyncio.Task] = {}
 _active_requests: dict[str, tuple[object, int | str]] = {}
+
+# Registered Skills use this gateway as their single execution boundary.  A
+# client Skill is sent to the Electron MCP server when the server exposes the
+# same tool; server/sandbox Skills are executed in-process behind the same
+# result contract.  This keeps scheduling, timeout and audit callers agnostic
+# to where a capability lives while retaining the Redis fallback for clients
+# that have not upgraded their Electron runtime yet.
+LOCAL_SKILL_SERVER = "lumi_skill"
 
 
 class _McpSessionWorker:
@@ -48,7 +57,11 @@ class _McpSessionWorker:
         from mcp.client.streamable_http import streamable_http_client
 
         async with streamable_http_client(str(self.cfg["url"])) as streams:
-            read_stream, write_stream = streams
+            # MCP Python SDK 1.x 返回 (read_stream, write_stream)，较新的
+            # streamable-http 实现会额外返回 session-id getter。只取前两个
+            # 传输流，兼容两个版本，避免工具发现阶段因“too many values to
+            # unpack”卡住，进而让 agent 误判所有 MCP 工具不可用。
+            read_stream, write_stream = streams[0], streams[1]
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 while True:
@@ -309,6 +322,123 @@ async def call_tool(
     finally:
         if task_id and _active_calls.get(task_id) is current:
             _active_calls.pop(task_id, None)
+
+
+async def call_skill(
+    skill: Skill,
+    args: dict | None = None,
+    *,
+    context: SkillContext | None = None,
+    task_id: str | None = None,
+    timeout_s: float | None = None,
+    on_progress: Callable[[dict], Any] | None = None,
+    execution_policy: dict | None = None,
+) -> dict:
+    """Execute any registered Skill through the unified MCP gateway.
+
+    Client skills prefer the real Electron MCP endpoint when it advertises the
+    skill name.  If the desktop is not connected, the legacy per-user request
+    queue remains a safe compatibility fallback.  Backend and sandbox skills
+    run locally because their resources (DB, uploads and Docker sandbox) live
+    inside the API worker; they still return the same MCP-shaped envelope to
+    the executor.
+    """
+    # Tool arguments are model-controlled.  A policy is accepted only from the
+    # executor after it has inspected the current user message, then injected
+    # immediately before the trusted Electron MCP hop.
+    args = dict(args or {})
+    args.pop("_lumi_execution_policy", None)
+    if execution_policy:
+        args["_lumi_execution_policy"] = {
+            "explicit_user_delete": bool(execution_policy.get("explicit_user_delete")),
+        }
+    if skill.environment == "client":
+        for cfg in settings.MCP_SERVERS or []:
+            server_name = str(cfg.get("name") or "")
+            if not server_name:
+                continue
+            advertised = await list_tools(server_name)
+            if any(str(item.get("name")) == skill.name for item in advertised):
+                raw = await call_tool(
+                    server_name,
+                    skill.name,
+                    args,
+                    task_id=task_id,
+                    timeout_s=timeout_s,
+                    on_progress=on_progress,
+                )
+                if raw is not None:
+                    # Keep the transport visible to the scheduler/audit layer.
+                    # An MCP tool error is still an MCP execution result and
+                    # must not be silently retried through the legacy queue.
+                    is_error = bool(raw.get("is_error")) or not bool(raw.get("success", True))
+                    return {
+                        **raw,
+                        "error_code": raw.get("error_code") or (
+                            "MCP_EXEC_ERROR" if is_error else None
+                        ),
+                        "retryable": bool(raw.get("retryable", False)),
+                        "metadata": {
+                            "skill": skill.name,
+                            "transport": "mcp",
+                            "server": server_name,
+                            **(raw.get("metadata") or {}),
+                        },
+                    }
+                break
+
+    try:
+        effective_timeout = timeout_s if timeout_s is not None else float(
+            getattr(settings, "MCP_TOOL_TIMEOUT_S", 180.0)
+        )
+        operation = skill.execute(args, context)
+        result: SkillResult = await asyncio.wait_for(operation, effective_timeout) if effective_timeout > 0 else await operation
+    except asyncio.TimeoutError:
+        return {
+            "success": False,
+            "content": "技能执行超时",
+            "metadata": {
+                "skill": skill.name,
+                "task_id": task_id,
+                "transport": "in_process_adapter",
+                "server": LOCAL_SKILL_SERVER,
+            },
+            "is_error": True,
+            "error_code": "MCP_TIMEOUT",
+            "retryable": True,
+            "task_id": task_id,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "success": False,
+            "content": str(exc) or "技能执行失败",
+            "metadata": {
+                "skill": skill.name,
+                "task_id": task_id,
+                "transport": "in_process_adapter",
+                "server": LOCAL_SKILL_SERVER,
+            },
+            "is_error": True,
+            "error_code": "MCP_EXEC_ERROR",
+            "retryable": True,
+            "task_id": task_id,
+        }
+    if not isinstance(result, SkillResult):
+        result = SkillResult(success=False, error="技能返回结果无效", error_code="EXEC_ERROR")
+    return {
+        "success": bool(result.success),
+        "content": result.output if result.success else (result.error or "技能执行失败"),
+        "metadata": {
+            "skill": skill.name,
+            "task_id": task_id,
+            "transport": "in_process_adapter",
+            "server": LOCAL_SKILL_SERVER,
+            **(result.metadata or {}),
+        },
+        "is_error": not bool(result.success),
+        "error_code": result.error_code,
+        "task_id": task_id,
+    }
 
 
 async def _notify_remote_cancel(task_id: str, reason: str) -> None:

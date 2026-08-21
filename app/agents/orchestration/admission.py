@@ -34,6 +34,17 @@ redis.call('ZADD', KEYS[2], until, job_id)
 for i=1,3 do redis.call('EXPIRE', KEYS[i], tonumber(ARGV[7])) end
 return 1
 """
+    _RENEW_LUA = """
+local now = tonumber(ARGV[1]); local until = tonumber(ARGV[2]); local job_id = ARGV[3]; local ttl = tonumber(ARGV[4])
+for i=1,2 do redis.call('ZREMRANGEBYSCORE', KEYS[i], '-inf', now) end
+if redis.call('ZSCORE', KEYS[1], job_id) == false then return 0 end
+if redis.call('ZSCORE', KEYS[2], job_id) == false then return 0 end
+redis.call('ZADD', KEYS[1], 'XX', until, job_id)
+redis.call('ZADD', KEYS[2], 'XX', until, job_id)
+redis.call('EXPIRE', KEYS[1], ttl)
+redis.call('EXPIRE', KEYS[2], ttl)
+return 1
+"""
 
     def __init__(self) -> None:
         self._inflight: dict[str, float] = {}
@@ -108,6 +119,36 @@ return 1
                     raise AdmissionBackpressureError("当前有任务正在进行中，请切换到普通模式对话")
                 self._global[job_id] = now + lease
                 users[job_id] = now + lease
+
+    async def renew(self, job_id: str, user_id: str) -> bool:
+        """Extend an existing active slot without creating a missing lease."""
+        now = time.time()
+        lease = max(60, settings.AGENT_ADMISSION_LEASE_SECONDS)
+        global_key, user_key, _ = self._keys(user_id)
+        try:
+            from app.core.redis import get_redis
+
+            result = await get_redis().eval(
+                self._RENEW_LUA,
+                2,
+                global_key,
+                user_key,
+                now,
+                now + lease,
+                job_id,
+                lease,
+            )
+            return int(result or 0) == 1
+        except Exception:
+            async with self._lock:
+                self._purge(self._global, now)
+                users = self._users.setdefault(user_id, {})
+                self._purge(users, now)
+                if job_id not in self._global or job_id not in users:
+                    return False
+                self._global[job_id] = now + lease
+                users[job_id] = now + lease
+                return True
 
     async def release(self, *, token: str | None = None, job_id: str | None = None, user_id: str | None = None) -> None:
         if not token and not job_id:

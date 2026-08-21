@@ -64,6 +64,11 @@ def delete_generic_output(user_id: str, conv_id: str, name: str) -> bool:
     target = resolve_generic_output(user_id, conv_id, name)
     if target is None:
         return False
+    try:
+        target.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 def preview_generated_output(path: Path) -> dict:
@@ -99,6 +104,33 @@ def preview_generated_output(path: Path) -> dict:
             return {**result, "preview_type": "table", "rows": rows}
         except Exception:
             return {**result, "preview_type": "unavailable", "message": "此表格暂无法预览，请下载后查看。"}
+    if suffix == ".docx":
+        try:
+            from docx import Document
+
+            document = Document(str(path))
+            lines = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+            for table in document.tables[:8]:
+                for row in table.rows[:20]:
+                    lines.append(" | ".join(cell.text.strip() for cell in row.cells))
+            text = "\n".join(lines)
+            return {**result, "preview_type": "text", "text": text[:max_chars], "truncated": len(text) > max_chars}
+        except Exception:
+            return {**result, "preview_type": "unavailable", "message": "此 Word 文件暂无法预览，请下载后查看。"}
+    if suffix == ".pptx":
+        try:
+            from pptx import Presentation
+
+            presentation = Presentation(str(path))
+            lines = []
+            for index, slide in enumerate(presentation.slides[:30], start=1):
+                values = [shape.text.strip() for shape in slide.shapes if shape.has_text_frame and shape.text.strip()]
+                if values:
+                    lines.append(f"第 {index} 页\n" + "\n".join(values))
+            text = "\n\n".join(lines)
+            return {**result, "preview_type": "text", "text": text[:max_chars], "truncated": len(text) > max_chars}
+        except Exception:
+            return {**result, "preview_type": "unavailable", "message": "此 PowerPoint 文件暂无法预览，请下载后查看。"}
     if suffix in {".txt", ".md", ".log", ".json", ".xml", ".yaml", ".yml", ".html", ".htm"}:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             text = fh.read(max_chars + 1)
@@ -109,11 +141,6 @@ def preview_generated_output(path: Path) -> dict:
             "truncated": len(text) > max_chars,
         }
     return {**result, "preview_type": "unavailable", "message": "该文件格式不提供内嵌预览，请下载后查看。"}
-    try:
-        target.unlink(missing_ok=True)
-        return True
-    except OSError:
-        return False
 
 
 def cleanup_generic_outputs(ttl_days: int = 7) -> int:
@@ -1166,15 +1193,26 @@ async def ensure_rag_index(user_id: str, doc_id: str) -> dict:
             "办公文档分析索引（随会话丢弃）",
             _space_tag(doc_id),
         )
+        # Preserve CSV/TSV so the table chunker repeats headers.  Other office
+        # formats are already extracted to text/Markdown, so indexing them as
+        # Markdown gives the structured chunker headings and tables to work
+        # with instead of falling back to a blind .txt split.
+        original = Path(str(meta["filename"]))
+        index_ext = original.suffix.lower() if original.suffix.lower() in {".csv", ".tsv"} else ".md"
+        index_filename = f"{original.stem or 'document'}{index_ext}"
         doc, path, _ = await upload_document_file(
             session,
             user_id,
             str(space.id),
-            f"{meta['filename']}.txt",
+            index_filename,
             text.encode("utf-8"),
         )
         await session.commit()
         await process_document_pipeline(session, str(doc.id), path)
+        # The index filename is an implementation detail.  Citations must show
+        # the name the user uploaded, not the transient Markdown surrogate.
+        doc.filename = str(meta["filename"])
+        await session.commit()
     meta["space_id"] = str(space.id)
     meta["rag_doc_id"] = str(doc.id)
     meta["content_hash"] = content_hash

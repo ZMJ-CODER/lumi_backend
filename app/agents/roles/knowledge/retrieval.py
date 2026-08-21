@@ -31,6 +31,21 @@ class RetrievalAgent(WorkerAgent):
         result = await self.run_skill(
             "query_knowledge", {"query": query, "top_k": top_k}, ctx
         )
+        if not result.get("success"):
+            # A search miss is not automatically an Agent problem: Agent must
+            # not invent private/system access.  Only a capability signal from
+            # the narrow retrieval path asks the scheduler to broaden the
+            # read-only atom, and it remains bounded by the manifest upgrade
+            # policy.
+            code = str(result.get("error_code") or "").upper()
+            if code in {"CAPABILITY_UNAVAILABLE", "MCP_UNAVAILABLE", "SKILL_NOT_FOUND"}:
+                return {
+                    **result,
+                    "error_code": "ROUTE_UPGRADE_AGENT",
+                    "error": "检索通道不可用，正在改由动态执行通道处理",
+                    "retryable": False,
+                }
+            return result
         if result.get("success"):
             result["step_title"] = "检索知识库"
         return result

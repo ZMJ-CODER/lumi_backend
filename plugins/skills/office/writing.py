@@ -18,6 +18,8 @@ class ComposeEmailSkill(Skill):
     category = "office"
     environment = "server"
     scenes = ["office", "chat"]
+    direct_instruction_field = "instruction"
+    direct_required_fields = ["instruction"]
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -43,6 +45,7 @@ class ComposeEmailSkill(Skill):
             "你是一名资深职场商务写作助手。只输出邮件内容本身：先写标题（用『』包裹），再写正文。",
             f"收件人：{recipient}\n目的：{purpose}\n语气：{tone}\n要点：\n{points}",
             format_response=False,
+            stream=True,
         )
         return _ok(text)
 
@@ -53,6 +56,8 @@ class ComposeOfficialDocSkill(Skill):
     category = "office"
     environment = "server"
     scenes = ["office", "chat"]
+    direct_instruction_field = "instruction"
+    direct_required_fields = ["instruction"]
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -78,6 +83,7 @@ class ComposeOfficialDocSkill(Skill):
             f"文种：{doc_type}\n标题：{title or '（自动拟）'}\n内容要求：\n{req}",
             max_tokens=6000,
             format_response=False,
+            stream=True,
         )
         return _ok(text)
 
@@ -88,6 +94,8 @@ class RewriteTextSkill(Skill):
     category = "office"
     environment = "server"
     scenes = ["office", "chat"]
+    direct_instruction_field = "instruction"
+    direct_required_fields = ["instruction"]
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -111,6 +119,7 @@ class RewriteTextSkill(Skill):
             "你是一名文字改写专家。忠实保留原意，只改变表达风格，输出改写后的文字本身。",
             f"目标风格：{style}\n长度：{length}\n原文：\n{text}",
             format_response=False,
+            stream=True,
         )
         return _ok(out)
 
@@ -121,6 +130,8 @@ class SummarizeTextSkill(Skill):
     category = "office"
     environment = "server"
     scenes = ["office", "chat"]
+    direct_instruction_field = "instruction"
+    direct_required_fields = ["instruction"]
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -144,6 +155,7 @@ class SummarizeTextSkill(Skill):
             "你是一名信息摘要助手，忠实提取关键信息，不编造内容。",
             f"输出格式：{fmt}\n要点条数上限：{max_points}\n正文：\n{text[:80000]}",
             max_tokens=6000,
+            stream=True,
         )
         return _ok(out)
 
@@ -154,6 +166,8 @@ class MeetingMinutesSkill(Skill):
     category = "office"
     environment = "server"
     scenes = ["office", "chat"]
+    direct_instruction_field = "instruction"
+    direct_required_fields = ["instruction"]
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -176,5 +190,6 @@ class MeetingMinutesSkill(Skill):
             "议题与讨论摘要、决议事项、待办（含负责人与截止时间，如原文有）。不要编造。",
             f"参会人：{participants or '（原文提取）'}\n原始记录：\n{raw[:100000]}",
             max_tokens=6000,
+            stream=True,
         )
         return _ok(out)

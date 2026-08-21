@@ -62,8 +62,9 @@ docker build -f Dockerfile.sandbox -t lumi-python-sandbox:latest .
 
 ## 架构文档
 
-- [docs/RAG_DESIGN.md](docs/RAG_DESIGN.md) — 知识库检索
+- [docs/RAG_DESIGN.md](docs/RAG_DESIGN.md) — RAG、知识库、办公附件与记忆的分域检索
 - [docs/MEMORY_DESIGN.md](docs/MEMORY_DESIGN.md) — 长期记忆与隐私
 - [docs/OFFICE_SKILLS.md](docs/OFFICE_SKILLS.md) — 办公模式
 - [docs/AGENT_ORCHESTRATION_MCP.md](docs/AGENT_ORCHESTRATION_MCP.md) — 办公 DAG、TCA/ReAct 与 MCP 运行手册
+- [docs/DAG_MCP_PITFALLS.md](docs/DAG_MCP_PITFALLS.md) — 办公 DAG/MCP 的故障复盘与排障路线
 - [docs/API_AUTH.md](docs/API_AUTH.md) / [docs/API_INTEGRATION.md](docs/API_INTEGRATION.md) — API 与鉴权

@@ -74,3 +74,63 @@ def build_dependency_context(node, node_by_id: dict, max_total_chars: int = 2400
         out[dep_id] = cleaned
         used += size
     return out
+
+
+async def build_dependency_context_from_refs(
+    node,
+    node_by_id: dict,
+    *,
+    user_id: str,
+    max_total_chars: int = 24000,
+) -> dict:
+    """Build dependency context while resolving replay prefixes by reference.
+
+    Ordinary nodes use their in-memory result. A forked prefix deliberately
+    has no result body in the new Job snapshot, so only this execution-time
+    resolver reads its sanitized body from the owner-scoped result store.
+    """
+    out = {}
+    used = 0
+    # A rolling logical plan materializes only the ready frontier.  Direct
+    # dependencies are therefore external result references rather than nodes
+    # in this transient execution DAG.
+    external_refs = (getattr(node, "metadata", {}) or {}).get("logical_dependency_refs") or {}
+    for dep_id, result_ref in external_refs.items():
+        result = await _resolve_dependency_ref(user_id, result_ref)
+        if result:
+            cleaned = sanitize_dependency_result(result)
+            size = len(json.dumps(cleaned, ensure_ascii=False, default=str))
+            if used + size > max_total_chars:
+                out[str(dep_id)] = {"summary": "[依赖结果总量达到上限，已省略]"}
+                return out
+            out[str(dep_id)] = cleaned
+            used += size
+        else:
+            out[str(dep_id)] = {"summary": "[前序结果引用不可用，需重新执行该前序步骤]"}
+    for dep_id in node.depends_on:
+        dep = node_by_id.get(dep_id)
+        if dep is None:
+            continue
+        status = dep.status.value if hasattr(dep.status, "value") else str(dep.status)
+        if status != "completed":
+            continue
+        result = dep.result
+        if not result:
+            result = await _resolve_dependency_ref(user_id, (dep.metadata or {}).get("result_ref"))
+        if not result:
+            out[dep_id] = {"summary": "[前序结果引用不可用，需重新执行该前序步骤]"}
+            continue
+        cleaned = sanitize_dependency_result(result)
+        size = len(json.dumps(cleaned, ensure_ascii=False, default=str))
+        if used + size > max_total_chars:
+            out[dep_id] = {"summary": "[依赖结果总量达到上限，已省略]"}
+            break
+        out[dep_id] = cleaned
+        used += size
+    return out
+
+
+async def _resolve_dependency_ref(user_id: str, result_ref: dict | None) -> dict | None:
+    from app.agents.orchestration.execution_lineage import resolve_result_ref
+
+    return await resolve_result_ref(user_id, result_ref)

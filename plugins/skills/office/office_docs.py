@@ -123,6 +123,9 @@ class OfficeDocAnalyzeSkill(Skill):
     category = "office"
     environment = "server"
     scenes = ["office"]
+    direct_instruction_field = "instruction"
+    direct_required_fields = ["doc_id", "instruction"]
+    direct_input_aliases = {"analyze_mode": "mode"}
     parameters_schema = {
         "type": "object",
         "properties": {

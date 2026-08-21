@@ -43,6 +43,7 @@ from app.core.model_catalog import (
     find_model,
     get_model_catalog,
     normalize_byok_base_url,
+    normalize_model_id,
 )
 from app.core.config import settings
 from app.models.user import UserLlmConfigRequest
@@ -202,7 +203,7 @@ async def set_llm_config_view(
     provider = (req.provider or "").strip().lower()
     if provider not in PROVIDER_BASE_URLS and provider != "custom":
         raise BadRequestException(f"不支持的 API 提供商: {provider}，可选: {[*PROVIDER_BASE_URLS, 'custom']}")
-    model_id = (req.model or "").strip()
+    model_id = normalize_model_id(req.model)
     if not model_id:
         raise BadRequestException("模型名称不能为空")
     if not req.byok and find_model(model_id) is None:

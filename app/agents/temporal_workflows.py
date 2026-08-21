@@ -33,6 +33,7 @@ STATUS_RETRYING = "retrying"
 STATUS_INTERRUPTED = "interrupted"
 STATUS_CANCELLED = "cancelled"
 STATUS_SKIPPED = "skipped"
+STATUS_ESCALATED = "escalated"
 
 JOB_RUNNING = "running"
 JOB_PAUSED = "paused"
@@ -136,6 +137,20 @@ class AgentDagWorkflow:
         except CancelledError:
             self._finalize_cancelled()
             raise
+        except Exception as exc:
+            # A Workflow-level defect must still converge to a queryable
+            # terminal snapshot.  Without this, the API falls back to the
+            # initial Redis RUNNING record and the desktop UI remains on the
+            # stop button forever after an internal Activity/workflow error.
+            message = str(exc) or "办公任务执行异常"
+            for node in self._job.get("nodes") or []:
+                if node.get("status") in (STATUS_PENDING, STATUS_READY, STATUS_RUNNING, STATUS_RETRYING):
+                    node["status"] = STATUS_FAILED
+                    node["error"] = "任务因执行异常自动停止"
+                    node["completed_at"] = self._now()
+            self._job["status"] = JOB_FAILED
+            self._job["error"] = message[:500]
+            self._job["updated_at"] = self._now()
         return self._job
 
     # ── 外部控制：暂停 / 恢复 / 取消 ──────────────────────────
@@ -365,6 +380,14 @@ class AgentDagWorkflow:
                 )
         if not results:
             return
+        # A single text-producing node is already the final delivery.  Asking
+        # another model to "summarize" it doubles latency and can make an
+        # otherwise streamed office answer appear to hang after it is written.
+        # Artifact nodes keep their own delivery contract too; the API renders
+        # the returned file metadata rather than forcing a prose synthesis.
+        if len(results) == 1:
+            self._job["result"] = {"final_answer": str(results[0]["content"])}
+            return
         try:
             out = await workflow.execute_activity(
                 "synthesize_final_answer_activity",
@@ -398,6 +421,7 @@ class AgentDagWorkflow:
             "user_id": self._job.get("user_id", ""),
             "user_role": self._job.get("user_role", "user"),
             "scene": self._job.get("scene", "office"),
+            "user_request": self._job.get("request", ""),
             "node": node,
             "dependency_results": {
                 dep_id: (self._nodes().get(dep_id) or {}).get("result")
@@ -447,7 +471,7 @@ class AgentDagWorkflow:
         if self._job.get("status") not in (JOB_CANCELLED, JOB_INTERRUPTED, JOB_PAUSED):
             if statuses and all(s == STATUS_COMPLETED for s in statuses):
                 self._job["status"] = JOB_COMPLETED
-            elif any(s in (STATUS_FAILED, STATUS_SKIPPED) for s in statuses):
+            elif any(s in (STATUS_FAILED, STATUS_SKIPPED, STATUS_ESCALATED) for s in statuses):
                 self._job["status"] = JOB_FAILED
             elif not statuses:
                 # 空任务树（防御性兜底）：有结果视为完成，无结果视为失败

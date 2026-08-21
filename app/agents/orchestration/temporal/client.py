@@ -48,6 +48,30 @@ async def start_agent_workflow(payload: dict, job_id: str) -> None:
     )
 
 
+async def start_manifest_workflow(payload: dict, job_id: str) -> None:
+    """Start the rolling manifest workflow on its dedicated task queue."""
+    from app.agents.temporal_manifest_workflows import ManifestWorkflow
+
+    client = await get_temporal_client()
+    await client.start_workflow(
+        ManifestWorkflow,
+        payload,
+        id=job_id,
+        task_queue=settings.TEMPORAL_MANIFEST_TASK_QUEUE,
+        id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+    )
+
+
+async def signal_manifest_workflow(job_id: str, signal: str, arg=None) -> None:
+    """Signal the dedicated manifest workflow without using static DAG APIs."""
+    client = await get_temporal_client()
+    handle = client.get_workflow_handle(job_id)
+    if arg is None:
+        await handle.signal(signal)
+    else:
+        await handle.signal(signal, arg)
+
+
 async def query_agent_job(job_id: str) -> dict | None:
     """查询 workflow 当前 Job 快照；不存在/查询被拒返回 None（调用方回退 Redis）."""
     try:

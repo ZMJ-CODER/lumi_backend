@@ -70,6 +70,44 @@ _OUTPUT_FILENAME_RE = re.compile(
     r"(?:文件\s*)?([a-z0-9_\-\u4e00-\u9fff][a-z0-9_.\-\u4e00-\u9fff]*\.[a-z0-9]{1,10})\b"
 )
 
+_NEW_DOCUMENT_ACTIONS = ("生成", "创建", "制作", "做一份", "写一份", "新建")
+_NEW_DOCUMENT_FORMATS = {
+    "pptx": (".pptx", "ppt", "演示文稿", "幻灯片"),
+    # “报告/文档”本身仍可以只是用户要模型写出的正文。只有明确要求
+    # Word、扩展名或可下载文件，才把它升级为真实 Office 产物。
+    "docx": (".docx", "word", "word文档", "word 文件", "wordfile"),
+    "xlsx": (".xlsx", "excel", "工作簿", "电子表格"),
+}
+
+
+def infer_new_office_document(request: str) -> dict[str, str] | None:
+    """Recognize an explicit request to create a new office artifact.
+
+    Conversion requests deliberately stay on the file-processing path.  This
+    detector is for a document that originates from the user's description,
+    not for an existing attachment whose bytes need transforming.
+    """
+    text = (request or "").strip()
+    lower = text.casefold()
+    if not text or not any(action in text for action in _NEW_DOCUMENT_ACTIONS):
+        return None
+    if _CONVERSION_RE.search(text) or _NAMED_CONVERSION_RE.search(text):
+        return None
+    output = _explicit_output_filename(text)
+    extension = Path(output).suffix.casefold() if output else ""
+    document_format = next((fmt for fmt in _NEW_DOCUMENT_FORMATS if extension == f".{fmt}"), "")
+    if not document_format:
+        for fmt, markers in _NEW_DOCUMENT_FORMATS.items():
+            if any(marker in lower for marker in markers):
+                document_format = fmt
+                break
+    if not document_format:
+        return None
+    filename = Path(output).name if output else f"新建文档.{document_format}"
+    if Path(filename).suffix.casefold() != f".{document_format}":
+        filename = f"{Path(filename).stem or '新建文档'}.{document_format}"
+    return {"format": document_format, "filename": filename}
+
 
 def _requested_txt_delimiter(request: str) -> str | None:
     """Return a supported explicit TXT delimiter, never a free-form value."""
@@ -198,7 +236,17 @@ def select_named_office_documents(request: str, office_docs: list[dict] | None) 
     output_names = _output_filenames_in_request(request)
     requested_names: list[str] = []
     for raw in _FILENAME_RE.findall(request or ""):
-        name = Path(raw.strip()).name
+        # At the beginning of a Chinese sentence the permissive filename regex
+        # can include an adjacent command verb, e.g. ``生成文件名为发布会.pptx``.
+        # Remove only well-known command prefixes before deciding whether this
+        # is an input document.  Otherwise a deliverable is mistaken for a
+        # missing upload and the planner asks an unnecessary clarification.
+        name = re.sub(
+            r"^(?:生成(?:文件)?(?:名为)?|导出为|保存为|另存为|命名为|将|把)",
+            "",
+            Path(raw.strip()).name,
+            flags=re.IGNORECASE,
+        )
         if _normalise_filename(name) in output_names:
             continue
         if name and name not in requested_names:
@@ -294,6 +342,44 @@ EXTERNAL_ACTION_TARGETS = [
     "应用", "软件", "程序", "浏览器", "文件", "网址", "网页", "邮件", "进程",
     "excel", "word", "wps", "powerpoint", "微信", "钉钉", "飞书",
 ]
+
+# 只有请求需要读取或改变外部状态时，才值得进入办公 DAG。这里刻意不列举
+# “作文/演讲稿/文案/欢迎词”等文本体裁：它们都是模型原生的生成能力，不能因
+# 为办公模式而被套进某一种 Skill 模板。判断的是执行边界，不是写作类型。
+_STATEFUL_OFFICE_ACTION_RE = re.compile(
+    r"(?iu)(?:打开|启动|运行|发送|发出|删除|移除|修改|编辑|保存|下载|上传|"
+    r"检索|查找|读取|解析|提取|转换|转为|导出|批量处理|运行脚本|执行脚本)"
+    r".{0,24}(?:应用|软件|程序|浏览器|网页|网址|文件|附件|文档|表格|邮件|"
+    r"日程|日历|待办|数据库|\.csv\b|\.tsv\b|\.xlsx\b|\.docx\b|\.pptx\b|\.pdf\b|\.txt\b)"
+)
+_SCHEDULE_OR_TODO_ACTION_RE = re.compile(
+    r"(?iu)(?:新建|创建|添加|删除|取消|修改|安排|设置).{0,20}(?:日程|日历|会议|待办|提醒)"
+)
+
+
+def requires_office_execution(request: str, office_docs: list[dict] | None = None) -> bool:
+    """Return whether an office request needs the execution runtime.
+
+    Office mode is a capability boundary, not a requirement to plan every
+    utterance.  Pure text generation should retain the same intent fidelity as
+    a consumer chat product: the model receives the original request directly.
+    We enter DAG/MCP only for attached sources, a requested downloadable
+    artifact, or an operation on an external resource.
+    """
+    text = (request or "").strip()
+    if not text:
+        return False
+    # An attachment is an explicit external source.  Its contents must be read
+    # through the document capability rather than guessed from message text.
+    if office_docs:
+        return True
+    if infer_new_office_document(text) is not None:
+        return True
+    if extract_output_contract(text).get("requires_artifact"):
+        return True
+    if _STATEFUL_OFFICE_ACTION_RE.search(text):
+        return True
+    return bool(_SCHEDULE_OR_TODO_ACTION_RE.search(text))
 
 # 需要先上传文档/上下文才能执行的模板：无 office_docs 时不命中，避免生成空跑节点
 DOC_REQUIRED_TEMPLATE_KEYWORDS: dict[str, list[str]] = {

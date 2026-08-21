@@ -21,7 +21,7 @@ MODEL_CATALOG: list[dict] = [
         "provider": "deepseek",
         "context_window": 131072,
         "multimodal": False,
-        "supports_reasoning_effort": True,
+        "supports_reasoning_effort": False,
         "price_input_per_million": 0.5,
         "price_output_per_million": 2.0,
         "description": "轻量快速，适合日常对话与办公任务",
@@ -32,7 +32,7 @@ MODEL_CATALOG: list[dict] = [
         "provider": "deepseek",
         "context_window": 131072,
         "multimodal": False,
-        "supports_reasoning_effort": True,
+        "supports_reasoning_effort": False,
         "price_input_per_million": 4.0,
         "price_output_per_million": 16.0,
         "description": "深度推理，适合复杂任务与代码",
@@ -115,3 +115,18 @@ def find_model(model_id: str) -> dict | None:
         if m["id"] == model_id:
             return m
     return None
+
+
+def normalize_model_id(model_id: str | None) -> str:
+    """将历史 UI 显示名规范为服务商实际接收的模型 ID。
+
+    正常前端始终保存 ``id``，但早期版本可能将 ``name`` 写进用户配置。
+    只转换内置目录的精确显示名，其他 BYOK 模型名保持原样。
+    """
+    value = str(model_id or "").strip()
+    if not value:
+        return ""
+    for item in MODEL_CATALOG:
+        if value.casefold() in {str(item["id"]).casefold(), str(item["name"]).casefold()}:
+            return str(item["id"])
+    return value

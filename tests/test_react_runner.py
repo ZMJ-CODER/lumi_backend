@@ -70,6 +70,33 @@ def test_office_react_runs_one_tool_per_round(monkeypatch):
     assert [r["skill"] for r in result.records] == ["react_echo"]
 
 
+def test_office_react_preserves_reasoning_payload_after_tool_call(monkeypatch):
+    """Thinking-mode providers require reasoning_content on the tool-result turn."""
+    SkillRegistry.register(_Echo())
+    first = AIMessage(
+        content="",
+        tool_calls=[{"name": "react_echo", "args": {"text": "one"}, "id": "r1"}],
+        additional_kwargs={"reasoning_content": "tool selection reasoning"},
+    )
+    model = _Model([first, AIMessage(content="完成")])
+    monkeypatch.setattr(
+        "app.agents.orchestration.react_runner.get_chat_model",
+        lambda **kwargs: asyncio.sleep(0, result=model),
+    )
+
+    async def capabilities(*_args, **_kwargs):
+        return [ToolCapability(name="react_echo", description="react test echo", category="office")]
+
+    monkeypatch.setattr(
+        "app.agents.orchestration.react_runner.get_office_react_capabilities_for_request",
+        capabilities,
+    )
+    result = asyncio.run(OfficeReactRunner(user_id="u1", job_id="j1").run("完成动态任务"))
+    assert result.success is True
+    replayed = next(message for message in model.calls[1] if isinstance(message, AIMessage))
+    assert replayed.additional_kwargs["reasoning_content"] == "tool selection reasoning"
+
+
 def test_m3_planner_creates_react_step():
     from app.agents.orchestration.planner import LlmPlanner
     from app.agents.orchestration.tca import ComplexityLevel
@@ -87,6 +114,37 @@ def test_react_worker_requires_instruction():
         TaskNode(id="r1", agent="react_step"), WorkerContext(user_id="u1", job_id="j1")
     ))
     assert result["error_code"] == "INVALID_ARGS"
+
+
+def test_react_worker_injects_manifest_predecessor_results(monkeypatch):
+    received = {}
+
+    class FakeRunner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, instruction, office_docs=None):
+            received["instruction"] = instruction
+            received["office_docs"] = office_docs
+            from app.agents.orchestration.react_runner import ReactRunResult
+            return ReactRunResult(True, content="完成")
+
+    monkeypatch.setattr("app.agents.roles.react.OfficeReactRunner", FakeRunner)
+    result = asyncio.run(ReactStepAgent().execute(
+        TaskNode(
+            id="r1",
+            agent="react_step",
+            params={
+                "instruction": "检查第1项结果",
+                "manifest_context": {"item-1": {"instruction": "生成摘要", "result": "摘要内容"}},
+                "office_docs": [{"doc_id": "d1", "filename": "tasks.txt"}],
+            },
+        ),
+        WorkerContext(user_id="u1", job_id="j1"),
+    ))
+    assert result["success"] is True
+    assert "摘要内容" in received["instruction"]
+    assert received["office_docs"] == [{"doc_id": "d1", "filename": "tasks.txt"}]
 
 
 def test_office_react_recomputes_tools_and_excludes_failed_method(monkeypatch):

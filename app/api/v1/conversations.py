@@ -226,19 +226,32 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
         await db.rollback()
         return
 
-    # 聊天记录生命周期：超过硬上限 → 异步裁剪（物理删除最旧消息 + 附件文件）
-    over = (
-        await db.execute(
-            select(func.count()).select_from(Message).where(Message.conversation_id == conv.id)
-        )
-    ).scalar_one()
-    if over > settings.CONVERSATION_MESSAGE_HARD_CAP:
+    # 旧版本会按 UI 列表长度物理删除原文。分层记忆需要原文作为回捞证据，
+    # 默认禁用；仅部署方显式配置正数 hard cap 时保留兼容行为。
+    over = 0
+    if settings.CONVERSATION_MESSAGE_HARD_CAP > 0:
+        over = (
+            await db.execute(
+                select(func.count()).select_from(Message).where(Message.conversation_id == conv.id)
+            )
+        ).scalar_one()
+    if settings.CONVERSATION_MESSAGE_HARD_CAP > 0 and over > settings.CONVERSATION_MESSAGE_HARD_CAP:
         try:
             from celery_app.tasks import trim_conversation_messages as trim_task
 
             trim_task.delay(str(conv.id))
         except Exception as exc:  # noqa: BLE001
             logger.warning("消息裁剪入队失败: {}", exc)
+
+    # 消息已提交后再维护会话记忆。任务只读取数据库原文，worker 重试也不会
+    # 影响用户已收到的 SSE done 事件。
+    if conv.scene == "chat":
+        try:
+            from celery_app.tasks import maintain_conversation_memory_task
+
+            maintain_conversation_memory_task.delay(str(conv.user_id), str(conv.id))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("会话分层记忆入队失败: {}", exc)
 
     # 实时同步：向订阅端（桌面/网页/移动端）推送新消息事件
     user_attachments = [

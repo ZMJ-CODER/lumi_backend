@@ -51,6 +51,8 @@ async def trim_conversation_messages(session: AsyncSession, conversation_id: str
         return 0
 
     keep = settings.CONVERSATION_MESSAGE_KEEP
+    if keep <= 0:
+        return 0
     total = (
         await session.execute(
             select(func.count()).select_from(Message).where(Message.conversation_id == cid)
@@ -87,6 +89,8 @@ async def trim_conversation_messages(session: AsyncSession, conversation_id: str
 async def cleanup_all_conversations(session: AsyncSession) -> int:
     """每日兜底：扫描所有超过硬上限的会话并逐个裁剪。返回裁剪条数."""
     cap = settings.CONVERSATION_MESSAGE_HARD_CAP
+    if cap <= 0:
+        return 0
     rows = (
         await session.execute(
             select(Conversation.id)

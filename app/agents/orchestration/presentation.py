@@ -18,6 +18,7 @@ _ACTIONS = {
     "query_knowledge": "检索相关资料",
     "web_search": "查询公开资料",
     "python_exec": "运行脚本处理数据",
+    "create_office_document": "生成办公文档",
     "open_app": "打开所需应用",
     "open_file": "打开所需文件",
     "open_url": "打开相关网页",

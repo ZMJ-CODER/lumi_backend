@@ -66,10 +66,11 @@ async def upload_document(
             await db.commit()
             # 命中去重的已有文档不再重复入队（任务已在队列或已完成）
             if is_new:
-                process_document.delay(
+                task = process_document.apply_async(args=(
                     str(doc.id), str(file_path), str(doc.user_id), str(doc.space_id),
                     doc.category,
-                )
+                ))
+                await kb.record_document_enqueue(db, str(doc.id), task.id)
             results.append(
                 {
                     "filename": filename,

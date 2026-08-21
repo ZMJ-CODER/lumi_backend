@@ -1,7 +1,7 @@
-"""长期记忆检索：向量 + 关键词 + RRF 融合（镜像 RAG 混合检索）.
+"""长期记忆检索：默认纯向量，关键词仅作为受控兜底.
 
-见 docs/MEMORY_DESIGN.md §6.1：范围限定当前用户活跃记忆，
-排序 = RRF * (1 + importance*0.5) * 时效因子（按类型半衰期）。
+记忆条目短、结构稳定，且错误注入的代价高于漏召回。它与文档知识库
+共享 pgvector/embedding 基础设施，但不共享关键词 RRF 策略。
 """
 
 import math
@@ -133,9 +133,9 @@ async def search_user_memories(
         ).mappings().all()
         fused = [dict(r) for r in rows]
 
-    # ── 第二路：关键词检索 top-N ──
+    # ── 可选关键词兜底（默认关闭，需先由评测集验证）──
     keywords = _extract_keywords(query)
-    if keywords:
+    if settings.MEMORY_FACT_KEYWORD_FALLBACK_ENABLED and keywords:
         search_expr = "(COALESCE(m.fact, '') || COALESCE(m.fact_indexable, ''))"
         kw_conds = "(" + " OR ".join(f"{search_expr} ILIKE :kw{i}" for i in range(len(keywords))) + ")"
         match_expr = " + ".join(

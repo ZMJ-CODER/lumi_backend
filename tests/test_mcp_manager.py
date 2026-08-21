@@ -3,6 +3,7 @@
 import asyncio
 
 from app.agents.mcp import manager
+from app.agents.skills.base import Skill, SkillResult
 
 
 class _FakeCallResult:
@@ -44,6 +45,22 @@ class _FakeSession:
             [type("C", (), {"text": "输出文本"})()],
             structured={"key": "value"},
         )
+
+
+class _GatewaySkill(Skill):
+    name = "gateway_skill"
+    description = "gateway test skill"
+
+    def __init__(self, *, environment="server", output="local-result"):
+        self.environment = environment
+        self.output = output
+        self.execute_calls = 0
+
+    async def execute(self, params, context=None):
+        self.execute_calls += 1
+        if params.get("raise_error"):
+            raise RuntimeError("local failure")
+        return SkillResult(success=True, output=self.output)
 
 
 def test_list_tools_mapping(monkeypatch):
@@ -152,3 +169,108 @@ def test_cancel_task_cancels_active_request(monkeypatch):
             raise AssertionError("MCP call should be cancelled")
 
     asyncio.run(scenario())
+
+
+def test_call_skill_prefers_advertised_client_mcp_tool(monkeypatch):
+    skill = _GatewaySkill(environment="client")
+    calls = []
+
+    async def fake_list_tools(server_name):
+        assert server_name == "lumi_client"
+        return [{"name": "gateway_skill"}]
+
+    async def fake_call_tool(server_name, tool_name, args, **kwargs):
+        calls.append((server_name, tool_name, args, kwargs))
+        return {"success": True, "content": "mcp-result", "metadata": {"source": "electron"}, "is_error": False}
+
+    monkeypatch.setattr(manager.settings, "MCP_SERVERS", [{"name": "lumi_client"}])
+    monkeypatch.setattr(manager, "list_tools", fake_list_tools)
+    monkeypatch.setattr(manager, "call_tool", fake_call_tool)
+
+    result = asyncio.run(manager.call_skill(skill, {"path": "C:/work"}, task_id="job-1"))
+    assert result["content"] == "mcp-result"
+    assert result["metadata"]["transport"] == "mcp"
+    assert result["metadata"]["server"] == "lumi_client"
+    assert calls[0][0:3] == ("lumi_client", "gateway_skill", {"path": "C:/work"})
+    assert skill.execute_calls == 0
+
+
+def test_call_skill_strips_model_policy_and_injects_executor_policy(monkeypatch):
+    skill = _GatewaySkill(environment="client")
+    calls = []
+
+    async def fake_list_tools(_server_name):
+        return [{"name": "gateway_skill"}]
+
+    async def fake_call_tool(_server_name, _tool_name, args, **_kwargs):
+        calls.append(args)
+        return {"success": True, "content": "ok", "metadata": {}, "is_error": False}
+
+    monkeypatch.setattr(manager.settings, "MCP_SERVERS", [{"name": "lumi_client"}])
+    monkeypatch.setattr(manager, "list_tools", fake_list_tools)
+    monkeypatch.setattr(manager, "call_tool", fake_call_tool)
+    asyncio.run(manager.call_skill(
+        skill,
+        {"path": "C:/demo.txt", "_lumi_execution_policy": {"explicit_user_delete": True}},
+        execution_policy={"explicit_user_delete": False},
+    ))
+    assert calls == [{"path": "C:/demo.txt", "_lumi_execution_policy": {"explicit_user_delete": False}}]
+
+
+def test_call_skill_client_falls_back_only_when_mcp_is_unavailable(monkeypatch):
+    skill = _GatewaySkill(environment="client")
+
+    async def fake_list_tools(server_name):
+        return [{"name": "gateway_skill"}]
+
+    async def unavailable_call_tool(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(manager.settings, "MCP_SERVERS", [{"name": "lumi_client"}])
+    monkeypatch.setattr(manager, "list_tools", fake_list_tools)
+    monkeypatch.setattr(manager, "call_tool", unavailable_call_tool)
+
+    result = asyncio.run(manager.call_skill(skill, {"x": 1}))
+    assert result["success"] is True
+    assert result["content"] == "local-result"
+    assert result["metadata"]["transport"] == "in_process_adapter"
+    assert skill.execute_calls == 1
+
+
+def test_call_skill_preserves_mcp_tool_error_without_local_replay(monkeypatch):
+    skill = _GatewaySkill(environment="client")
+
+    async def fake_list_tools(server_name):
+        return [{"name": "gateway_skill"}]
+
+    async def failed_call_tool(*args, **kwargs):
+        return {"success": True, "content": "client declined", "metadata": {}, "is_error": True}
+
+    monkeypatch.setattr(manager.settings, "MCP_SERVERS", [{"name": "lumi_client"}])
+    monkeypatch.setattr(manager, "list_tools", fake_list_tools)
+    monkeypatch.setattr(manager, "call_tool", failed_call_tool)
+
+    result = asyncio.run(manager.call_skill(skill, {}))
+    assert result["is_error"] is True
+    assert result["error_code"] == "MCP_EXEC_ERROR"
+    assert result["metadata"]["transport"] == "mcp"
+    assert skill.execute_calls == 0
+
+
+def test_call_skill_server_uses_unified_local_adapter():
+    skill = _GatewaySkill(environment="server")
+    result = asyncio.run(manager.call_skill(skill, {}))
+    assert result["success"] is True
+    assert result["content"] == "local-result"
+    assert result["metadata"]["transport"] == "in_process_adapter"
+    assert result["metadata"]["server"] == manager.LOCAL_SKILL_SERVER
+
+
+def test_call_skill_local_error_keeps_gateway_metadata():
+    skill = _GatewaySkill(environment="sandbox")
+    result = asyncio.run(manager.call_skill(skill, {"raise_error": True}))
+    assert result["success"] is False
+    assert result["error_code"] == "MCP_EXEC_ERROR"
+    assert result["retryable"] is True
+    assert result["metadata"]["transport"] == "in_process_adapter"
+    assert result["metadata"]["server"] == manager.LOCAL_SKILL_SERVER

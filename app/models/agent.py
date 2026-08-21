@@ -40,3 +40,11 @@ class ApproveAgentJobRequest(BaseModel):
 
     node_id: str = Field(..., description="待审批的节点 id")
     approved: bool = Field(default=True, description="true=批准执行，false=拒绝跳过")
+
+
+class ForkAgentJobRequest(BaseModel):
+    """Create a new execution branch from one historical node."""
+
+    node_id: str = Field(..., min_length=1, max_length=200, description="新分支开始执行的节点 id")
+    params: dict | None = Field(default=None, description="合并到该节点的受控参数覆盖")
+    instruction: str | None = Field(default=None, max_length=4000, description="替换该节点的原子指令")

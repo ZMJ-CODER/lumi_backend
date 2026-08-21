@@ -53,9 +53,9 @@ services:
       RAG_QUERY_REWRITE_BASE_URL: http://host.docker.internal:11434/v1
       # 本地 TTS 走 compose 内的 tts 服务
       TTS_LOCAL_URL: http://tts:8765/tts
-      # 当前 Compose 未部署 Temporal server。默认使用本地 DAG，避免容器尝试运行
-      # Windows temporal.exe 并为每个办公任务做无效连接探测。实际部署 Temporal
-      # 服务时可在 .env 显式设为 temporal / true / false 覆盖这些默认值。
+      # 当前 Compose 未部署 Temporal server。默认使用本地 DAG；本地验证
+      # 清单 Temporal 运行时请使用 docker-compose.temporal.yml 并显式设置
+      # AGENT_ORCHESTRATION=manifest_temporal。
       AGENT_ORCHESTRATION: "${AGENT_ORCHESTRATION:-legacy}"
       TEMPORAL_RUN_WORKER_INPROCESS: "${TEMPORAL_RUN_WORKER_INPROCESS:-false}"
       TEMPORAL_AUTO_START_SERVER: "${TEMPORAL_AUTO_START_SERVER:-false}"
@@ -86,11 +86,11 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ── Celery Worker (异步任务：文档处理、记忆提取等) ──
+  # ── Celery durable worker（文档解析/入库等不能丢的工作） ──
   worker:
     build: .
     container_name: lumi-worker
-    command: celery -A celery_app.celery_app worker --loglevel=info
+    command: celery -A celery_app.celery_app worker --loglevel=info -Q durable --hostname=durable@%h
     env_file:
       - .env
     environment:
@@ -108,6 +108,56 @@ services:
       - ./logs:/app/logs
       # Temporal/legacy worker 也可能执行 python_exec，必须有同一受限沙箱通道。
       - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # LLM 辅助记忆与摘要可延后补偿，不能挤占文档入库 worker。
+  worker-best-effort:
+    build: .
+    container_name: lumi-worker-best-effort
+    command: celery -A celery_app.celery_app worker --loglevel=info -Q best_effort --hostname=best-effort@%h
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/lumi_db
+      DATABASE_ADMIN_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # 低优先级扫描、清理和聚合独立运行，避免高峰期反向拖慢用户上传。
+  worker-maintenance:
+    build: .
+    container_name: lumi-worker-maintenance
+    command: celery -A celery_app.celery_app worker --loglevel=info -Q maintenance --hostname=maintenance@%h
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/lumi_db
+      DATABASE_ADMIN_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy

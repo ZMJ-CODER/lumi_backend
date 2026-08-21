@@ -16,10 +16,13 @@ from loguru import logger
 from app.agents.roles.knowledge.retrieval import RetrievalAgent
 from app.agents.roles.knowledge.web_research import WebResearchAgent
 from app.agents.roles.atomic import AtomicStepAgent
+from app.agents.roles.direct_llm import DirectLlmAgent
+from app.agents.roles.collect_results import CollectResultsAgent
 from app.agents.roles.react import ReactStepAgent
 from app.agents.roles.office.agents import (
     OfficeCalendarAgent,
     OfficeDocAgent,
+    OfficeDocumentAgent,
     OfficeResearchAgent,
     OfficeScriptAgent,
     OfficeSystemAgent,
@@ -37,6 +40,8 @@ def register_all_agents() -> list[WorkerAgent]:
     """注册内置执行 agent（按 AGENT_DISABLED 过滤；幂等：同名覆盖）."""
     instances = [
         AtomicStepAgent(),
+        DirectLlmAgent(),
+        CollectResultsAgent(),
         ReactStepAgent(),
         RetrievalAgent(),
         WebResearchAgent(),
@@ -45,6 +50,7 @@ def register_all_agents() -> list[WorkerAgent]:
         OfficeTodoAgent(),
         OfficeCalendarAgent(),
         OfficeDocAgent(),
+        OfficeDocumentAgent(),
         OfficeScriptAgent(),
         OfficeSystemAgent(),
         CodeAgent(),
@@ -73,6 +79,7 @@ __all__ = [
     "OfficeResearchAgent",
     "OfficeTodoAgent",
     "OfficeDocAgent",
+    "OfficeDocumentAgent",
     "OfficeScriptAgent",
     "CodeAgent",
     "CodeReaderAgent",

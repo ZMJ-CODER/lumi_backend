@@ -22,7 +22,12 @@ from app.api.router import api_router
 from app.core.config import settings
 from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import setup_logging
-from app.core.observability import init_sentry, metrics_middleware, metrics_text
+from app.core.observability import (
+    init_sentry,
+    metrics_middleware,
+    metrics_text,
+    refresh_async_dispatch_metrics,
+)
 from app.core.redis import close_redis, init_redis
 from app.core.security_hardening import rate_limit_middleware, security_headers_middleware
 
@@ -69,7 +74,7 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001 - 列已存在/无权限时静默
         logger.debug("增量字段补齐跳过: {}", exc)
     # 多智能体编排：Temporal Worker 随后端进程启动（未开则需独立进程跑 worker）
-    if settings.AGENT_ORCHESTRATION == "temporal" and settings.TEMPORAL_RUN_WORKER_INPROCESS:
+    if settings.AGENT_ORCHESTRATION == "manifest_temporal" and settings.TEMPORAL_RUN_WORKER_INPROCESS:
         from app.agents.orchestration.temporal.runtime import start_inprocess_worker
 
         await start_inprocess_worker()
@@ -121,6 +126,7 @@ def create_app() -> FastAPI:
         """Prometheus 指标（可观测性；配合 Grafana 告警）."""
         from fastapi.responses import PlainTextResponse
 
+        await refresh_async_dispatch_metrics()
         return PlainTextResponse(metrics_text())
 
     app.include_router(api_router, prefix="/api/v1")

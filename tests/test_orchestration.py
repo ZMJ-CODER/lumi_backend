@@ -50,6 +50,64 @@ def _make_store_job(nodes):
     return store, job
 
 
+def test_resource_lock_renews_redis_lease_while_held(monkeypatch):
+    from app.agents.orchestration import resources
+
+    calls = []
+
+    class FakeRedis:
+        async def eval(self, script, _keys, *_args):
+            calls.append(script)
+            return 1
+
+    coordinator = resources.ResourceCoordinator()
+
+    async def fake_redis():
+        return FakeRedis()
+
+    monkeypatch.setattr(coordinator, "_redis", fake_redis)
+
+    async def scenario():
+        async with coordinator.claim([ResourceClaim(key="doc:1", mode="write")], ttl=3):
+            await asyncio.sleep(1.1)
+
+    asyncio.run(scenario())
+    assert resources._ACQUIRE_SCRIPT in calls
+    assert resources._RENEW_SCRIPT in calls
+    assert resources._RELEASE_SCRIPT in calls
+
+
+def test_admission_local_lease_can_only_renew_existing_job(monkeypatch):
+    from app.agents.orchestration.admission import JobAdmission
+    import app.core.redis as redis_module
+
+    admission_control = JobAdmission()
+    now = __import__("time").time()
+    admission_control._global["job-1"] = now + 60
+    admission_control._users["u1"] = {"job-1": now + 60}
+
+    def unavailable_redis():
+        raise RuntimeError("redis unavailable")
+
+    monkeypatch.setattr(redis_module, "get_redis", unavailable_redis)
+    assert asyncio.run(admission_control.renew("job-1", "u1")) is True
+    assert asyncio.run(admission_control.renew("missing", "u1")) is False
+
+
+def test_job_control_ownership_is_checked_before_mutation(monkeypatch):
+    from app.api.v1 import agents as agents_api
+    from app.core.exceptions import NotFoundException
+
+    async def get_job(_job_id):
+        return Job(job_id="owned", user_id="owner", request="test")
+
+    monkeypatch.setattr(agents_api.orchestrator, "get_job", get_job)
+    owned = asyncio.run(agents_api._get_owned_job("owned", "owner"))
+    assert owned.user_id == "owner"
+    with pytest.raises(NotFoundException):
+        asyncio.run(agents_api._get_owned_job("owned", "other-user"))
+
+
 def test_validate_dag_rejects_cycle_and_missing_dep():
     with pytest.raises(DagValidationError):
         validate_dag([_node("a", deps=["b"]), _node("b", deps=["a"])])
@@ -329,8 +387,12 @@ def test_atomic_step_switches_to_fallback_tool_on_retry(monkeypatch):
 
     async def fake_tools(scene, user_role):
         return [
-            {"type": "function", "function": {"name": "office_doc_read", "parameters": {}}},
-            {"type": "function", "function": {"name": "python_exec", "parameters": {}}},
+            {"type": "function", "function": {"name": "office_doc_read", "parameters": {
+                "type": "object", "properties": {"doc_id": {"type": "string"}}, "required": ["doc_id"],
+            }}},
+            {"type": "function", "function": {"name": "python_exec", "parameters": {
+                "type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"],
+            }}},
         ]
 
     async def fake_execute(call, *args, **kwargs):
@@ -338,20 +400,11 @@ def test_atomic_step_switches_to_fallback_tool_on_retry(monkeypatch):
 
         return SkillResult(success=True, output="fallback result")
 
-    async def fake_choose_single_tool(**kwargs):
-        tool = kwargs["tool"]
-        selected["tool"] = tool.name
-        return "", [{"id": "call-1", "function": {"name": tool.name, "arguments": {}}}]
+    async def fake_extract(**kwargs):
+        selected["tool"] = kwargs["tool_definition"]["function"]["name"]
+        return {"code": "print('fallback')"}
 
-    async def fake_make_tool(name, **kwargs):
-        class Tool:
-            pass
-        tool = Tool()
-        tool.name = name
-        return tool
-
-    monkeypatch.setattr("app.agents.langchain.agent.choose_single_tool", fake_choose_single_tool)
-    monkeypatch.setattr("app.agents.langchain.tools.make_skill_tool", fake_make_tool)
+    monkeypatch.setattr("app.agents.langchain.agent.extract_tool_arguments", fake_extract)
     monkeypatch.setattr("app.core.llm.LLMClient", FakeLLM)
     monkeypatch.setattr(atomic_mod, "get_tools_for_scene", fake_tools)
     monkeypatch.setattr(atomic_mod, "execute_tool_call", fake_execute)
@@ -380,26 +433,20 @@ def test_atomic_step_marks_capability_failure_for_alternative(monkeypatch):
     import app.agents.roles.atomic as atomic_mod
 
     async def fake_tools(scene, user_role):
-        return [{"type": "function", "function": {"name": "office_doc_read", "parameters": {}}}]
+        return [{"type": "function", "function": {"name": "office_doc_read", "parameters": {
+            "type": "object", "properties": {"doc_id": {"type": "string"}}, "required": ["doc_id"],
+        }}}]
 
     async def fake_execute(call, *args, **kwargs):
         from app.agents.skills.base import SkillResult
 
         return SkillResult(success=False, error="需要隔离沙箱", error_code="SANDBOX_REQUIRED")
 
-    async def fake_make_tool(name, **kwargs):
-        class Tool:
-            pass
-        tool = Tool()
-        tool.name = name
-        return tool
-
     monkeypatch.setattr(atomic_mod, "get_tools_for_scene", fake_tools)
-    monkeypatch.setattr("app.agents.langchain.tools.make_skill_tool", fake_make_tool)
     monkeypatch.setattr(atomic_mod, "execute_tool_call", fake_execute)
     node = TaskNode(
         id="atomic", name="处理文档", agent="atomic_step",
-        params={"instruction": "处理文档", "preferred_tool": "office_doc_read", "fallback_tools": ["python_exec"]},
+        params={"instruction": "处理文档", "preferred_tool": "office_doc_read", "fallback_tools": ["python_exec"], "inputs": {"doc_id": "d1"}},
     )
     result = asyncio.run(AtomicStepAgent().execute(node, WorkerContext(user_id="u1", job_id="j1")))
     assert result["success"] is False
@@ -417,7 +464,9 @@ def test_atomic_document_step_executes_planned_tool_without_extra_llm(monkeypatc
             raise AssertionError("确定性文档步骤不应实例化额外 LLM")
 
     async def fake_tools(scene, user_role):
-        return [{"type": "function", "function": {"name": "office_doc_read", "parameters": {}}}]
+        return [{"type": "function", "function": {"name": "office_doc_read", "parameters": {
+            "type": "object", "properties": {"doc_id": {"type": "string"}}, "required": ["doc_id"],
+        }}}]
 
     async def fake_execute(call, *args, **kwargs):
         from app.agents.skills.base import SkillResult
@@ -444,6 +493,99 @@ def test_atomic_document_step_executes_planned_tool_without_extra_llm(monkeypatc
     assert result["success"] is True
     assert result["content"] == "CSV 表格正文"
     assert '"doc_id": "d1"' in calls[0]["function"]["arguments"]
+
+
+def test_atomic_instruction_tool_executes_without_function_calling(monkeypatch):
+    """Writing skills expose ``instruction`` as their compact direct contract."""
+    import app.agents.roles.atomic as atomic_mod
+
+    calls = []
+
+    async def fake_tools(scene, user_role):
+        return [{
+            "type": "function",
+            "function": {
+                "name": "compose_official_doc",
+                "parameters": {"type": "object", "properties": {"instruction": {"type": "string"}}},
+            },
+        }]
+
+    async def fake_execute(call, *args, **kwargs):
+        from app.agents.skills.base import SkillResult
+
+        calls.append(call)
+        return SkillResult(success=True, output="演讲稿正文")
+
+    async def forbidden_tool_choice(**kwargs):
+        raise AssertionError("完整 instruction 的写作步骤不应强制 Function Calling")
+
+    class DirectWritingContract:
+        direct_instruction_field = "instruction"
+        direct_required_fields = ["instruction"]
+        direct_input_aliases = {}
+
+    monkeypatch.setattr(atomic_mod, "get_tools_for_scene", fake_tools)
+    monkeypatch.setattr(atomic_mod, "execute_tool_call", fake_execute)
+    monkeypatch.setattr("app.agents.langchain.agent.choose_single_tool", forbidden_tool_choice)
+    monkeypatch.setattr(
+        "app.agents.skills.registry.SkillRegistry.get",
+        lambda name: DirectWritingContract() if name == "compose_official_doc" else None,
+    )
+    node = TaskNode(
+        id="write",
+        name="起草演讲稿",
+        agent="atomic_step",
+        params={"instruction": "帮我写一份普通的演讲稿", "preferred_tool": "compose_official_doc"},
+    )
+
+    result = asyncio.run(AtomicStepAgent().execute(node, WorkerContext(user_id="u1", job_id="j1")))
+
+    assert result["success"] is True
+    assert result["content"] == "演讲稿正文"
+    assert '"instruction": "帮我写一份普通的演讲稿"' in calls[0]["function"]["arguments"]
+
+
+def test_atomic_step_extracts_missing_parameters_without_function_calling(monkeypatch):
+    import app.agents.roles.atomic as atomic_mod
+
+    calls = []
+
+    async def fake_tools(scene, user_role):
+        return [{
+            "type": "function",
+            "function": {
+                "name": "open_app",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}, "args": {"type": "array"}},
+                    "required": ["name"],
+                },
+            },
+        }]
+
+    async def fake_extract(**kwargs):
+        assert kwargs["tool_definition"]["function"]["name"] == "open_app"
+        return {"name": "记事本", "args": []}
+
+    async def fake_execute(call, *args, **kwargs):
+        from app.agents.skills.base import SkillResult
+
+        calls.append(call)
+        return SkillResult(success=True, output="已请求打开应用")
+
+    monkeypatch.setattr(atomic_mod, "get_tools_for_scene", fake_tools)
+    monkeypatch.setattr(atomic_mod, "execute_tool_call", fake_execute)
+    monkeypatch.setattr("app.agents.langchain.agent.extract_tool_arguments", fake_extract)
+    node = TaskNode(
+        id="open",
+        agent="atomic_step",
+        params={"instruction": "请打开记事本", "preferred_tool": "open_app"},
+    )
+
+    result = asyncio.run(AtomicStepAgent().execute(node, WorkerContext(user_id="u1", job_id="j1")))
+
+    assert result["success"] is True
+    assert '"name": "记事本"' in calls[0]["function"]["arguments"]
 
 
 def test_csv_to_txt_planning_selects_named_document_without_llm(monkeypatch):
@@ -941,6 +1083,7 @@ def test_long_explicit_task_list_rolls_batches_without_planner():
         "total": 12, "completed": 12, "failed": 0, "cancelled": 0, "cursor": 12,
     }
     assert [item["status"] for item in manifest["items"]] == ["completed"] * 12
+    assert [item["result"] for item in manifest["items"]] == [f"完成 item-{index}" for index in range(1, 13)]
     assert calls == [f"item-{index}" for index in range(1, 13)]
     # The active graph holds only the last materialized window; the manifest is
     # the durable audit of all 12 items.
@@ -985,6 +1128,330 @@ def test_long_task_list_records_item_failure_and_continues_next_batch():
     assert failed["status"] == "failed"
     assert failed["error_code"] == "TEST_FAILURE"
     assert seen == [f"item-{i}" for i in range(1, 12)]
+
+
+def test_manifest_next_batch_receives_bounded_prior_results():
+    """A rolling window retains prior item evidence for cross-batch dependencies."""
+    from app.agents.orchestration.task_manifest import apply_manifest_batch_results, materialize_manifest_batch, new_manifest
+
+    manifest = new_manifest([f"事项 {i}" for i in range(1, 12)])
+    first = materialize_manifest_batch(manifest)
+    for node in first:
+        node.status = TaskStatus.COMPLETED
+        node.result = {"content": f"结果 {node.metadata['manifest_item_id']}"}
+    apply_manifest_batch_results(manifest, first)
+
+    second = materialize_manifest_batch(manifest, revision=2)
+    context = second[0].params["manifest_context"]
+    assert context["item-1"]["result"] == "结果 item-1"
+    assert context["item-10"]["instruction"] == "事项 10"
+
+
+def test_manifest_routes_each_atomic_item_and_preserves_explicit_dependencies():
+    """清单必须先原子化，再逐项进入四通道路由，而非全部 ReAct。"""
+    from app.agents.orchestration.task_manifest import materialize_manifest_batch, new_manifest
+
+    manifest = new_manifest([
+        {"instruction": "写一段项目欢迎词", "dependencies": []},
+        {"instruction": "从知识库查询项目上线日期", "dependencies": []},
+        {"instruction": "将 scores.csv 转为 txt 文件", "dependencies": [1]},
+        {"instruction": "打开浏览器并核对发布状态", "dependencies": [2]},
+    ])
+    nodes = materialize_manifest_batch(manifest)
+
+    assert [node.metadata["route_channel"] for node in nodes] == [
+        "direct_llm", "rag", "deterministic_script", "agent",
+    ]
+    assert [node.agent for node in nodes] == [
+        "direct_llm", "retrieval", "office_script", "react_step",
+    ]
+    assert nodes[0].depends_on == []
+    assert nodes[1].depends_on == []
+    assert nodes[2].depends_on == [nodes[0].id]
+    assert nodes[3].depends_on == [nodes[1].id]
+
+
+def test_manifest_expands_mixed_item_into_local_envelope_dag():
+    """混合条目应生成局部子图，而不是塞给一个总控 Agent。"""
+    from app.agents.orchestration.task_manifest import materialize_manifest_batch, new_manifest
+
+    manifest = new_manifest([{
+        "instruction": "读取合同并提取条款后核对合规性",
+        "subtasks": [
+            {"instruction": "从知识库查询合同条款", "dependencies": []},
+            {"instruction": "核对每条条款是否合规并给出结论", "dependencies": [1]},
+        ],
+    }])
+    nodes = materialize_manifest_batch(manifest)
+
+    assert len(nodes) == 2
+    assert nodes[0].agent == "retrieval"
+    assert nodes[1].agent == "react_step"
+    assert nodes[1].depends_on == [nodes[0].id]
+    assert nodes[1].metadata["manifest_terminal"] is True
+
+
+def test_two_item_explicit_manifest_uses_atomic_routing():
+    """小型任务清单也不能再绕过路由层。"""
+    from app.agents.orchestration.task_manifest import parse_task_manifest
+
+    items = parse_task_manifest("1. 写一句欢迎词\n2. 从知识库查询上线日期")
+    assert items == ["写一句欢迎词", "从知识库查询上线日期"]
+
+
+def test_manifest_cleaner_cannot_drop_an_explicit_numbered_item():
+    """清单清洗器可补依赖，但 JSON 漏项时必须回退原始编号条目。"""
+    from app.agents.orchestration.task_manifest import reconcile_structured_manifest
+
+    explicit = ["写一句欢迎词", "从知识库查询上线日期", "将 scores.csv 转为 txt"]
+    cleaned, reason = reconcile_structured_manifest(explicit, [
+        {"instruction": "写一句欢迎词"},
+        {"instruction": "从知识库查询上线日期"},
+    ])
+    assert cleaned == explicit
+    assert reason == "count_mismatch"
+
+
+def test_manifest_cleaner_accepts_only_ordered_covered_items():
+    from app.agents.orchestration.task_manifest import reconcile_structured_manifest
+
+    explicit = ["写一句欢迎词", "从知识库查询上线日期"]
+    cleaned, reason = reconcile_structured_manifest(explicit, [
+        {"instruction": "写一句项目欢迎词", "dependencies": []},
+        {"instruction": "从知识库中查询项目上线日期", "dependencies": [1]},
+    ])
+    assert isinstance(cleaned[0], dict)
+    assert reason == "structured_covered"
+
+
+def test_manifest_failed_readonly_atom_is_replaced_by_a_routed_node():
+    """direct 缺少资料时仅替换该原子项，不重放整个清单。"""
+    from app.agents.orchestration.task_manifest import (
+        apply_manifest_batch_results,
+        materialize_manifest_batch,
+        new_manifest,
+        schedule_manifest_route_upgrades,
+    )
+
+    manifest = new_manifest([
+        {"instruction": "回答项目上线日期", "dependencies": []},
+        {"instruction": "写一句欢迎词", "dependencies": []},
+    ])
+    nodes = materialize_manifest_batch(manifest)
+    assert nodes[0].agent == "direct_llm"
+    nodes[0].status = TaskStatus.FAILED
+    nodes[0].error = "需要已授权资料"
+    nodes[0].error_code = "ROUTE_UPGRADE_RAG"
+    nodes[1].status = TaskStatus.COMPLETED
+    nodes[1].result = {"content": "欢迎使用"}
+
+    upgrades = schedule_manifest_route_upgrades(manifest, nodes)
+    assert upgrades[0]["from"] == "direct_llm"
+    assert upgrades[0]["to"] == "rag"
+    retry_nodes = materialize_manifest_batch(manifest, revision=2)
+    assert len(retry_nodes) == 1
+    assert retry_nodes[0].agent == "retrieval"
+    retry_nodes[0].status = TaskStatus.COMPLETED
+    retry_nodes[0].result = {"content": "上线日期是 8 月 20 日"}
+    apply_manifest_batch_results(manifest, retry_nodes)
+    assert manifest["items"][0]["status"] == "completed"
+    assert manifest["items"][1]["status"] == "pending"
+
+
+def test_manifest_escalated_readonly_atom_is_replaced_by_a_routed_node():
+    """恢复协议标记的 escalated 节点也必须进入清单通道升级。"""
+    from app.agents.orchestration.task_manifest import (
+        materialize_manifest_batch,
+        new_manifest,
+        schedule_manifest_route_upgrades,
+    )
+
+    manifest = new_manifest([{"instruction": "查询内部项目上线日期", "dependencies": []}])
+    node = materialize_manifest_batch(manifest)[0]
+    node.status = TaskStatus.ESCALATED
+    node.error = "需要检索已授权资料"
+    node.error_code = "ROUTE_UPGRADE_RAG"
+
+    upgrades = schedule_manifest_route_upgrades(manifest, [node])
+
+    assert upgrades[0]["from"] == "direct_llm"
+    assert upgrades[0]["to"] == "rag"
+    assert manifest["items"][0]["status"] == "rerouting"
+
+
+def test_manifest_final_answer_lists_each_item_status_and_result():
+    from app.agents.orchestration.task_manifest import manifest_final_answer
+
+    answer = manifest_final_answer({
+        "cursor": 2,
+        "items": [
+            {"instruction": "整理资料", "status": "completed", "result": "资料已归档"},
+            {"instruction": "生成摘要", "status": "failed", "error": "缺少源内容"},
+        ],
+    })
+    assert "## 清单执行结果" in answer
+    assert "| 1. 整理资料 | 已完成 | 资料已归档 |" in answer
+    assert "| 2. 生成摘要 | 失败 | 缺少源内容 |" in answer
+
+
+def test_manifest_terminal_result_does_not_enter_generic_replan():
+    """Per-item ReAct failures are audited by the manifest, not sent to TCA."""
+    orch = AgentOrchestrator(
+        store=InMemoryStateStore(),
+        workers={},
+        review=NoopReviewer(),
+        temporal_enabled=False,
+    )
+    job = Job(
+        job_id="manifest-terminal",
+        user_id="u1",
+        request="任务清单",
+        scene="office",
+        status=JobStatus.COMPLETED,
+        routing={"level": "manifest", "manifest": {"items": []}},
+        result={"type": "task_manifest", "final_answer": "任务清单已处理完成"},
+    )
+    assert asyncio.run(orch._maybe_replan_failed_job(job, None)) is False
+    assert job.status == JobStatus.COMPLETED
+
+
+def test_l2_missing_prerequisite_escalation_becomes_clarification():
+    """节点只上报 L2，编排器将其收敛为澄清而非盲目重试。"""
+    class NeedInputWorker:
+        async def execute(self, _node, _ctx):
+            return {
+                "success": False,
+                "error": "缺少要处理的合同文件",
+                "error_code": "MISSING_PARAMETER",
+                "retryable": False,
+            }
+
+    store = InMemoryStateStore()
+    orch = AgentOrchestrator(
+        store=store, workers={"worker": NeedInputWorker()},
+        review=NoopReviewer(), temporal_enabled=False,
+    )
+    job = Job(
+        job_id="l2-input", user_id="u1", request="核对合同", scene="office",
+        status=JobStatus.RUNNING,
+        routing={"level": "m2"},
+        nodes=[TaskNode(id="need-file", agent="worker")],
+    )
+
+    async def scenario():
+        await store.create_job(job)
+        await orch._run_job(job.job_id)
+        return await store.get_job(job.job_id)
+
+    final = asyncio.run(scenario())
+    assert final.status == JobStatus.COMPLETED
+    assert final.result["type"] == "clarification"
+    assert final.nodes[0].status == TaskStatus.ESCALATED
+    assert final.routing["escalations"][0]["reason"] == "missing_prerequisite"
+
+
+def test_l2_approval_resumes_only_the_approved_node():
+    """审批门只重放同一节点，并绑定工具的规范化参数。"""
+    from app.agents.skills.executor import tool_call_fingerprint
+
+    seen_confirmations = []
+    args = {"path": "report.txt"}
+    fingerprint = tool_call_fingerprint("delete_file", args)
+
+    class ApprovalWorker:
+        async def execute(self, _node, ctx):
+            seen_confirmations.append(set(ctx.confirmed_tool_calls))
+            if fingerprint not in ctx.confirmed_tool_calls:
+                return {
+                    "success": False,
+                    "error": "删除文件需要用户确认",
+                    "error_code": "NEEDS_CONFIRMATION",
+                    "tool": "delete_file",
+                    "approval_fingerprint": fingerprint,
+                }
+            return {"success": True, "content": "文件已删除"}
+
+    store = InMemoryStateStore()
+    orch = AgentOrchestrator(
+        store=store, workers={"worker": ApprovalWorker()},
+        review=NoopReviewer(), temporal_enabled=False,
+    )
+    job = Job(
+        job_id="l2-approval", user_id="u1", request="删除该文件", scene="office",
+        status=JobStatus.RUNNING, routing={"level": "m2"},
+        nodes=[TaskNode(id="delete", agent="worker", params={"preferred_tool": "delete_file"})],
+    )
+
+    async def scenario():
+        await store.create_job(job)
+        await orch._run_job(job.job_id)
+        waiting = await store.get_job(job.job_id)
+        await orch.approve_job(job.job_id, "delete", True)
+        await orch._tasks[job.job_id]
+        return waiting, await store.get_job(job.job_id)
+
+    waiting, final = asyncio.run(scenario())
+    assert waiting.status == JobStatus.WAITING_APPROVAL
+    assert waiting.nodes[0].metadata["approval_tool"] == "delete_file"
+    assert waiting.nodes[0].metadata["approval_fingerprint"] == fingerprint
+    assert final.status == JobStatus.COMPLETED
+    assert seen_confirmations == [set(), {fingerprint}]
+
+
+def test_tool_confirmation_is_bound_to_exact_arguments():
+    from app.agents.skills.executor import is_tool_call_confirmed, tool_call_fingerprint
+
+    approved = {tool_call_fingerprint("delete_file", {"path": "a.txt", "force": False})}
+    assert is_tool_call_confirmed("delete_file", {"force": False, "path": "a.txt"}, approved)
+    assert not is_tool_call_confirmed("delete_file", {"path": "b.txt", "force": False}, approved)
+    assert not is_tool_call_confirmed("send_email", {"path": "a.txt", "force": False}, approved)
+
+
+def test_l3_replan_mounts_subgraph_and_preserves_completed_nodes():
+    """L3 不可由 worker 改图：编排器保留成果并挂载规划器子图。"""
+    class SubgraphPlanner(Planner):
+        async def plan(self, *args, **kwargs):
+            return TaskTree(nodes=[])
+
+        async def plan_for_level(self, *_args, **_kwargs):
+            return TaskTree(nodes=[TaskNode(id="replacement", agent="worker")], plan_text="替代子图")
+
+    store = InMemoryStateStore()
+    orch = AgentOrchestrator(
+        store=store, planner=SubgraphPlanner(), workers={"worker": FakeWorker("worker")},
+        review=NoopReviewer(), temporal_enabled=False,
+    )
+    job = Job(
+        job_id="l3-subgraph", user_id="u1", request="处理资料并核对", scene="office",
+        status=JobStatus.FAILED,
+        routing={"level": "m2", "upgrade_count": 0, "replan_count": 0},
+        nodes=[
+            TaskNode(id="done", agent="worker", status=TaskStatus.COMPLETED, result={"content": "已定位资料"}),
+            TaskNode(
+                id="failed", agent="worker", status=TaskStatus.ESCALATED,
+                error="当前方法不足", error_code="CAPABILITY_UNAVAILABLE",
+                metadata={"escalation": {"level": "plan", "reason": "capability_gap"}},
+            ),
+        ],
+    )
+    orch._job_plan_context[job.job_id] = {
+        "user_id": "u1", "request": job.request, "scene": "office", "project_id": None,
+        "project_ids": None, "llm_api_key": None, "clarification_answer": None,
+        "office_docs": None, "prior_summaries": "",
+    }
+
+    async def scenario():
+        await store.create_job(job)
+        changed = await orch._maybe_replan_failed_job(job, None)
+        return changed, await store.get_job(job.job_id)
+
+    changed, saved = asyncio.run(scenario())
+    assert changed is True
+    assert [node.id for node in saved.nodes] == ["done", "replacement"]
+    assert saved.nodes[1].depends_on == ["done"]
+    mounted = saved.routing["mounted_subgraphs"][-1]
+    assert mounted["anchor_nodes"] == ["done"]
+    assert mounted["retired_nodes"] == ["failed"]
 
 
 def test_orchestrator_threads_byok_key_to_worker():

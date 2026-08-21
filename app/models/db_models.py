@@ -105,6 +105,63 @@ class Message(Base, UUIDMixin):
     )
 
 
+# ── 普通对话分层记忆 ────────────────────────────────────
+
+class ConversationMemoryState(Base):
+    """一段普通会话的紧凑状态。
+
+    原始消息始终以 ``messages`` 为准；本表只保存可稳定注入的总摘要和
+    已完成段摘要的游标，因此不会把长对话正文重复写进工作状态。
+    """
+
+    __tablename__ = "conversation_memory_states"
+
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True
+    )
+    processed_message_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    global_summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    open_loops: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    mood: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class ConversationSegment(Base, UUIDMixin):
+    """固定轮次的会话摘要，供历史话题检索和原文回捞使用。"""
+
+    __tablename__ = "conversation_segments"
+
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    message_ids: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    entities: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    open_loops: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    mood: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(settings.EMBEDDING_DIMENSION))
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_version: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    access_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_accessed: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("uq_conversation_segments_sequence", "conversation_id", "sequence", unique=True),
+        Index(
+            "idx_conversation_segments_embedding",
+            "embedding",
+            postgresql_using="ivfflat",
+            postgresql_with={"lists": 100},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+
+
 # ── 消息附件表 ───────────────────────────────────────
 
 class Attachment(Base, UUIDMixin):
@@ -160,6 +217,11 @@ class Document(Base, UUIDMixin):
     file_hash: Mapped[str | None] = mapped_column(String(64))
     file_size: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending / processing / ready / error
+    # Celery 是至少一次投递，领取状态必须持久化，不能只依赖 worker 内存。
+    celery_task_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     category: Mapped[str | None] = mapped_column(String(50), default="general")  # news / general / history / other（时效档次）
     tags: Mapped[str | None] = mapped_column(Text)  # 开放主题标签（逗号分隔，如 "科技, 发布会"）
@@ -186,6 +248,7 @@ class DocumentChunk(Base, UUIDMixin):
 
     __table_args__ = (
         Index("idx_chunks_user_space", "user_id", "space_id"),
+        UniqueConstraint("document_id", "chunk_index", name="uq_document_chunks_document_index"),
         Index("idx_chunks_embedding", "embedding", postgresql_using="ivfflat", postgresql_with={"lists": 100}, postgresql_ops={"embedding": "vector_cosine_ops"}),
     )
 
@@ -217,6 +280,36 @@ class OfficeSession(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
+
+
+# ── 办公任务近期索引 ─────────────────────────────────────
+
+class OfficeTaskIndex(Base):
+    """办公任务跨请求定位索引，不保存任务正文或工具执行转录。"""
+
+    __tablename__ = "office_task_indices"
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    conversation_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    request_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    result_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    input_refs: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    artifact_refs: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    result_refs: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_office_task_indices_user_conv_completed", "user_id", "conversation_id", text("completed_at DESC")),
+        Index("idx_office_task_indices_user_status_completed", "user_id", "status", text("completed_at DESC")),
+    )
 
 
 # ── 长期记忆表 ─────────────────────────────────────────

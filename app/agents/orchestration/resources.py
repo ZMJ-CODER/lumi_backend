@@ -16,12 +16,26 @@ local key = KEYS[1]
 local mode = ARGV[1]
 local owner = ARGV[2]
 local ttl = tonumber(ARGV[3])
+local now = tonumber(redis.call('TIME')[1])
+local writer = redis.call('HGET', key, 'writer')
+local writer_until = tonumber(redis.call('HGET', key, 'writer_until') or '0')
+if writer and writer_until > 0 and writer_until <= now then
+  redis.call('HDEL', key, 'writer', 'writer_until')
+end
+local entries = redis.call('HGETALL', key)
+for i = 1, #entries, 2 do
+  local field = entries[i]
+  local expires = tonumber(entries[i + 1] or '0')
+  if string.sub(field, 1, 7) == 'reader:' and expires > 0 and expires <= now then
+    redis.call('HDEL', key, field)
+  end
+end
 if mode == 'read' then
   if redis.call('HEXISTS', key, 'writer') == 1 then return 0 end
-  redis.call('HSET', key, 'reader:' .. owner, '1')
+  redis.call('HSET', key, 'reader:' .. owner, now + ttl)
 else
   if redis.call('HLEN', key) ~= 0 then return 0 end
-  redis.call('HSET', key, 'writer', owner)
+  redis.call('HSET', key, 'writer', owner, 'writer_until', now + ttl)
 end
 redis.call('EXPIRE', key, ttl)
 return 1
@@ -34,9 +48,27 @@ local owner = ARGV[2]
 if mode == 'read' then
   redis.call('HDEL', key, 'reader:' .. owner)
 elseif redis.call('HGET', key, 'writer') == owner then
-  redis.call('HDEL', key, 'writer')
+  redis.call('HDEL', key, 'writer', 'writer_until')
 end
 if redis.call('HLEN', key) == 0 then redis.call('DEL', key) end
+return 1
+"""
+
+_RENEW_SCRIPT = """
+local key = KEYS[1]
+local mode = ARGV[1]
+local owner = ARGV[2]
+local ttl = tonumber(ARGV[3])
+local now = tonumber(redis.call('TIME')[1])
+if mode == 'read' then
+  if redis.call('HEXISTS', key, 'reader:' .. owner) ~= 1 then return 0 end
+  redis.call('HSET', key, 'reader:' .. owner, now + ttl)
+elseif redis.call('HGET', key, 'writer') ~= owner then
+  return 0
+else
+  redis.call('HSET', key, 'writer_until', now + ttl)
+end
+redis.call('EXPIRE', key, ttl)
 return 1
 """
 
@@ -68,13 +100,13 @@ class ResourceCoordinator:
         except Exception:  # noqa: BLE001
             return None
 
-    async def _acquire_one(self, claim: ResourceClaim, owner: str, ttl: int) -> None:
+    async def _acquire_one(self, claim: ResourceClaim, owner: str, ttl: int) -> bool:
         redis = await self._redis()
         if redis is not None:
             key = self._redis_key(claim.key)
             while not await redis.eval(_ACQUIRE_SCRIPT, 1, key, claim.mode, owner, ttl):
                 await asyncio.sleep(0.05)
-            return
+            return True
         condition, local = self._local_state()
         async with condition:
             while True:
@@ -85,8 +117,22 @@ class ResourceCoordinator:
                         state["readers"] = int(state["readers"]) + 1
                     else:
                         state["writer"] = True
-                    return
+                    return False
                 await condition.wait()
+
+    async def _renew_one(self, claim: ResourceClaim, owner: str, ttl: int) -> bool:
+        redis = await self._redis()
+        if redis is None:
+            return False
+        result = await redis.eval(
+            _RENEW_SCRIPT,
+            1,
+            self._redis_key(claim.key),
+            claim.mode,
+            owner,
+            ttl,
+        )
+        return int(result or 0) == 1
 
     async def _release_one(self, claim: ResourceClaim, owner: str) -> None:
         redis = await self._redis()
@@ -108,14 +154,37 @@ class ResourceCoordinator:
     @asynccontextmanager
     async def claim(self, claims: list[ResourceClaim], ttl: int = 360) -> None:
         owner = uuid.uuid4().hex
-        acquired: list[ResourceClaim] = []
+        ttl = max(3, int(ttl))
+        acquired: list[tuple[ResourceClaim, bool]] = []
+        renew_task: asyncio.Task | None = None
+        holder = asyncio.current_task()
+
+        async def renew_loop(redis_claims: list[ResourceClaim]) -> None:
+            interval = max(1.0, min(30.0, ttl / 3))
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    renewed = [await self._renew_one(claim, owner, ttl) for claim in redis_claims]
+                except Exception:  # Redis failure means ownership can no longer be proven.
+                    renewed = [False]
+                if not all(renewed):
+                    if holder is not None and not holder.done():
+                        holder.cancel()
+                    return
+
         try:
             for claim in sorted(claims, key=lambda c: c.key):
-                await self._acquire_one(claim, owner, ttl)
-                acquired.append(claim)
+                uses_redis = await self._acquire_one(claim, owner, ttl)
+                acquired.append((claim, uses_redis))
+            redis_claims = [claim for claim, uses_redis in acquired if uses_redis]
+            if redis_claims:
+                renew_task = asyncio.create_task(renew_loop(redis_claims))
             yield
         finally:
-            for claim in reversed(acquired):
+            if renew_task is not None:
+                renew_task.cancel()
+                await asyncio.gather(renew_task, return_exceptions=True)
+            for claim, _uses_redis in reversed(acquired):
                 await self._release_one(claim, owner)
 
 

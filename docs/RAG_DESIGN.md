@@ -1,266 +1,204 @@
-# Lumi RAG 知识库设计文档
+# Lumi RAG 与分域检索设计
 
-> 版本：v1.0 ｜ 更新：2026-08-09
-> 对应代码：`app/services/rag/`、`app/api/v1/knowledge.py`、`app/api/v1/public_kb.py`、`celery_app/tasks.py`
+> 版本：v2.0 ｜ 更新：2026-08-21
+> 对应代码：`app/services/rag/`、`app/services/memory/`、`app/services/office_docs.py`、`app/services/orchestrator.py`
 
-## 1. 概述
+## 1. 目标与边界
 
-RAG（Retrieval-Augmented Generation）为对话智能体提供"基于自有知识库回答"的能力。
-本设计围绕四个目标：
+项目复用 PostgreSQL、pgvector 与本地 embedding 服务，但不将所有用户相关文本混成一个语料库。系统按来源和授权边界分为长期知识、办公附件、长期记忆与公共知识四个 scope；前三者均归属于当前用户，公共知识必须显式调用。
 
-1. **多格式支持**：文本 / PDF / Office / 图片等文档均可入库
-2. **质量可控**：清洗 + 质量门，防止"垃圾进垃圾出"
-3. **召回准确**：混合检索 + 时效性加权，提升命中率
-4. **可插拔**：嵌入模型、分块策略、查询重写均可替换扩展
+核心原则：
 
-## 2. 总体架构
+1. **存储一体，策略分治**：共用向量基础设施，不共用检索策略或可见范围。
+2. **先路由，后检索**：普通聊天一次默认只读一个主 scope，禁止静默三库混搜。
+3. **办公不预检索**：办公任务进入 DAG 前不扫描任何资料；Planner 生成 `retrieval` / `office_doc` 节点后才按节点授权访问。
+4. **低相关宁缺毋滥**：纯向量结果过阈值才注入；文档精确关键词命中可作为强证据保留。
+5. **引用必须可验证**：只保存解析器实际产出的定位信息，不能伪造 PDF 页码或表格行号。
 
+## 2. 四个检索 Scope
+
+| Scope | 内容与存储 | 生命周期 | 默认检索策略 | 入口 |
+| --- | --- | --- | --- | --- |
+| `personal_knowledge` | 用户主动上传的 `documents` / `document_chunks` | 长期保留 | dense 向量 + 关键词 + RRF + 时效重排 | 普通聊天的明确资料引用、`query_knowledge` |
+| `office_attachment` | `office_sessions`，大文件另建临时 `knowledge_spaces` 索引 | 会话 TTL，默认 24 小时 | 小文件全文注入；大文件只检索本会话临时空间 | 办公 DAG 的显式文档/检索节点 |
+| `memory` | `memories`、`memory_profile` | 长期、衰减与用户删除 | 高阈值 dense 向量；关键词兜底默认关闭 | 普通聊天的明确历史/偏好引用 |
+| `public_knowledge` | `is_public=true` 的 `knowledge_spaces` | 管理员维护 | 独立公共检索 API / 显式工作流 | `/public-kb/search` |
+
+长期记忆不是上传文档 RAG 的替代品：它保存的是短事实、偏好、经历与目标，包含置信度、隐私等级、失效时间和覆盖关系。办公附件也不会自动晋升为长期知识库，用户必须主动上传或确认转存。
+
+## 3. 路由与调用约束
+
+普通聊天的路由规则在 `app/services/rag/scope.py`，完全基于规则，不新增一次 LLM 分类调用：
+
+```text
+显式 retrieval_query / 附件 / "文档里、资料里、知识库"
+  -> personal_knowledge
+明确 "上次、之前、还记得、按我的偏好"
+  -> memory
+普通问答、创作、闲聊
+  -> none
 ```
-┌─────────────────────────── 文档入库链路（异步） ───────────────────────────┐
-│ 上传 → 落盘 → documents(pending) → Celery process_document                 │
-│   → 解析(Docling/内置) → 清洗 → 质量门 → 分类 → 结构化分块 → 嵌入 → 入库(ready)│
-└────────────────────────────────────────────────────────────────────────────┘
-┌─────────────────────────── 对话检索链路（同步） ────────────────────────────┐
-│ 用户提问 → 查询重写(可插拔) → 混合检索(向量+关键词+RRF) → 时效加权            │
-│   → 上下文+引用 → LLM → 回答                                                 │
-└────────────────────────────────────────────────────────────────────────────┘
+
+资料引用优先于历史引用。例如“按我上次的格式总结这份文档”默认进入 `personal_knowledge`，防止旧记忆篡改文档事实。需要“读取合同后按用户偏好排版”一类跨 scope 任务时，必须由办公 DAG 以多个节点显式读取，不能在聊天预处理阶段拼接多个语料库。
+
+公共知识默认不混入个人资料检索。返回的 citation 会通过 `type=personal/public` 标识来源，前端应展示来源库而非把公共语料误称为用户资料。
+
+## 4. 长期知识库入库
+
+```text
+POST /knowledge/documents
+  -> 文件落盘 data/uploads/{user_id}/{document_id}{ext}
+  -> SHA-256 + space_id 去重，documents.status=pending
+  -> Celery process_document
+  -> 解析 -> 清洗 -> 质量门 -> 分类 -> 类型分块 -> bge-m3 embedding
+  -> document_chunks 写入 pgvector，documents.status=ready
 ```
 
-## 3. 数据模型
+- 单文件上限 20 MB；同空间的 `pending`、`processing`、`ready` 重复文件不重复投递。
+- 解析失败或质量门失败将文档标为 `error`，并记录可展示的错误原因；不写入向量。
+- 纯文本、CSV、JSON、邮件、日历由内置解析器处理；PDF、Office、图片等走 Docling/OCR 路线。
+- 非代码文档由分类器生成 `category` 和 `tags`；源码直接归为 `code`，默认不进入聊天和办公资料检索。
 
-### knowledge_spaces（知识空间）
+### 4.1 数据模型
 
-| 字段 | 说明 |
-|---|---|
-| `id` | UUID 主键 |
-| `user_id` | 归属用户 |
-| `name` / `description` | 空间名称与描述 |
-| `scene_tag` | 场景标签：chat / office / game（检索时按场景过滤） |
-| `is_public` | 是否公共空间（仅管理员可设 true） |
+| 表 | 作用 |
+| --- | --- |
+| `knowledge_spaces` | 用户空间、场景标签和公共空间标记 |
+| `documents` | 原文件元数据、哈希、状态、分类、标签 |
+| `document_chunks` | chunk 正文、1024 维向量、来源和定位 metadata |
+| `office_sessions` | 聊天框办公附件的原文件、全文、TTL 和会话边界 |
+| `memories` / `memory_profile` | 长期事实向量与常驻画像，不与文档表混用 |
 
-### documents（文档）
+`document_chunks.embedding` 为 `vector(1024)`，采用 pgvector `ivfflat` 余弦索引。`metadata` 为 JSON 文本，当前写入：`source`、`file_extension`、`chunk_index`、可用的 `heading_path` 与 CSV/TSV 的 `table_rows_in_chunk`。已有历史 chunk 无 metadata 时仍可检索，只是 citation 不带定位信息；重处理文档即可补齐。
 
-| 字段 | 说明 |
-|---|---|
-| `id` / `space_id` / `user_id` | 主键与归属 |
-| `filename` / `file_hash` / `file_size` | 文件信息（sha256 去重） |
-| `status` | pending / ready / error |
-| `chunk_count` | 分块数 |
-| `category` | 时效档次：news / general / history / other |
-| `tags` | 开放主题标签（逗号分隔） |
-| `created_at` / `updated_at` | 创建 / 更新时间（更新触发重处理时刷新） |
+### 4.2 清洗与质量门
 
-### document_chunks（分块 + 向量）
+清洗器去除不可见字符、重复空白、乱码与明显重复结构。质量评分低于 `RAG_MIN_QUALITY_SCORE`（默认 `0.5`）或命中不可解析、恶意载荷、严重损坏、极端噪声等硬拦截条件时，处理终止，文档不进入召回库。
 
-| 字段 | 说明 |
-|---|---|
-| `document_id` / `space_id` / `user_id` | 归属 |
-| `chunk_index` / `chunk_text` | 分块序号与文本 |
-| `embedding` | `vector(512)`，ivfflat 余弦索引 |
-| `metadata` | 预留（结构化分块元数据，如标题路径） |
+### 4.3 类型感知分块
 
-## 4. 文档入库管线
+| 类型 | 当前策略 |
+| --- | --- |
+| 代码 | 按顶层语句和缩进边界分块，保留少量行重叠 |
+| JSON/YAML/XML | 按顶层结构边界分块 |
+| CSV/TSV | 表头在每块重复，按行组切分 |
+| Markdown/Docling 文本 | 识别标题、表格、代码块与段落；标题作为上下文前缀 |
+| txt/log | 递归字符切分，默认 500 字符、50 重叠 |
 
-### 4.1 解析（`document_parser.py` + `docling_parser.py`）
+办公附件建立临时索引时，CSV/TSV 保留原扩展名以走表格分块；其它已提取的 Office/PDF 文本以 Markdown 方式索引，获取结构化分块效果。临时索引的文件名仅是内部实现，citation 始终显示用户上传的原始文件名。
 
-- 18 种纯文本格式（txt/md/json/csv/代码等）：内置 UTF-8 / GB18030 解码
-- 其余格式（PDF/Word/PPT/Excel/图片）：Docling 解析为 Markdown，
-  支持布局分析、表格结构、OCR（RapidOCR，配置 `DOCLING_ENABLE_OCR`）
-- 解析失败归类为 `unparsable`，终止处理不重试
+### 4.4 嵌入与分类
 
-### 4.2 清洗（`cleaner.py`）
+- 嵌入模型：本地 `BAAI/bge-m3`，1024 维，`sentence-transformers` 懒加载单例。
+- 文档与查询均 L2 归一化；查询可配置 bge 检索指令前缀。
+- 模型优先从本地 cache 加载，缺失才下载；CUDA 不可用会自动降级 CPU。
+- 分类是异步入库阶段工作，不阻塞上传 API；分类失败会降级，而不是让文档不可用。
 
-字符级：去控制符 / 零宽字符 / 替换符；全角→半角；mojibake 乱码尽力修复。
-空白级：压缩连续空行、去行尾空格。
-结构级：去重复页眉页脚；代码单行恢复。
-
-### 4.3 质量门（`cleaner.assess_document`）
-
-输出 0~1 质量分 + 分类问题清单，8 类：
-
-| code | 检测 | 是否硬拦截 |
-|---|---|---|
-| unparsable | 解析失败 / 内容为空 | ✅ |
-| encoding_errors | mojibake 标记 > 5% | 计分 |
-| corrupted_data | 控制符/乱码 > 20% | ✅ |
-| incomplete_parsing | 文件 >50KB 但文本 <200 字 | 计分 |
-| security_vulnerabilities | 代码命中危险模式（eval/exec/shell 注入等） | ✅ |
-| malicious_content | 恶意载荷模式（powershell -enc/certutil 等） | ✅ |
-| extreme_noise | 可读字符占比 < 阈值（代码 0.2 / 其他 0.5） | ✅ |
-| unintelligible_text | 单字符重复占比 > 60% | ✅ |
-
-低于 `RAG_MIN_QUALITY_SCORE`（0.5）或命中硬拦截 → `status=error` 并记录原因。
-同时前端待传区持久化提示上传失败。
-
-### 4.4 分类（`classifier.py`）
-
-**时效档次 + 开放标签**双字段，大模型抽样判断（≤6000 字符，token 成本与文档大小无关）：
-
-- `category`：news / general / history / other（固定，决定半衰期）
-- `tags`：1~3 个开放主题标签（展示/过滤用）
-
-兜底链：LLM 判断 → 用户上传选择的档次 → 本地嵌入零样本 → 默认档次。
-
-### 4.5 结构化分块（`chunker.py`）
-
-注册表按扩展名路由分块策略：
-
-| 类型 | 策略 |
-|---|---|
-| 代码（py/js/ts/c/java…） | 行级分块，语句/缩进边界，2 行重叠 |
-| 配置（json/yaml/xml） | 按顶层结构边界切 |
-| 表格（csv/tsv） | 表头 + 每 50 行一组 |
-| Markdown / Docling 输出 | 识别代码块/表格/标题/段落，按块选策略，标题作为前缀 |
-| 纯文本（txt/log） | 递归字符切分（500/50） |
-
-### 4.6 嵌入（`embeddings.py`）
-
-- 本地模型 `BAAI/bge-small-zh-v1.5`（512 维），sentence-transformers 推理
-- L2 归一化（余弦相似度 = 1 - 余弦距离）
-- 懒加载单例 + 本地优先加载（离线可用），HF 国内镜像兜底
-- 查询向量可选检索指令前缀（实测默认关闭区分度更好）
-
-### 4.7 入库
-
-分块文本 + 向量写入 `document_chunks`，`documents.status=ready`。
-失败（质量门/异常）→ `status=error`，质量类问题不重试。
+当前适配器只输出 dense 向量。BGE-M3 sparse/ColBERT 不是配置开关，接入需要更换推理接口、增加存储列和实现新的召回 SQL；在有评测收益前不引入。
 
 ## 5. 检索链路
 
-### 5.1 查询重写（可插拔槽位，`query_rewriter.py`）
+### 5.1 查询重写
 
-```
-优先级：客户端 retrieval_query（本地小模型精炼）> 服务端重写 > 原文
-```
+优先级：
 
-- 客户端：Electron 可插拔本地模型，配置后自动精炼提问
-- 服务端：`RAG_QUERY_REWRITE_*` 配置（默认关闭），手机端等无本地模型场景兜底
-
-### 5.2 混合检索（`knowledge.py`）
-
-双路召回 + RRF 融合：
-
-```
-第一路：向量相似度 top-10（pgvector <=> 余弦距离，不做阈值过滤）
-第二路：jieba 关键词 top-10（chunk_text ILIKE 命中数）
-→ Reciprocal Rank Fusion（k=60）合并 → 取 top_k
+```text
+前端明确 retrieval_query > 服务端 rewrite > 用户原问题
 ```
 
-关键词路能召回向量 top-10 之外但精确命中术语的片段；
-去阈值使相似度略低于 0.45 的弱相关片段也能进入候选（基准证实这是主要召回增益来源）。
+服务端重写默认只用于办公场景，通过 `RAG_QUERY_REWRITE_*` 配置选择云端文本模型或本地文本模型。视觉模型（如 `qwen2.5vl`）会被拒绝用于纯文本重写；重写失败直接回退原问题，不阻断回答。
 
-### 5.3 时效性加权
+### 5.2 长期知识混合召回
 
+```text
+query
+  -> bge-m3 query embedding -> pgvector cosine Top 10
+  + 关键词提取 -> ILIKE Top 10
+  -> RRF (k=60) 融合 -> 时效重排 -> 相似度门槛
+  -> Top K context + citations
 ```
-final = (1 - w) × 相关性归一 + w × recency
-recency = exp(-age / 文档时效档次的半衰期)
+
+- 默认最终 `Top K=5`，向量和关键词候选各为 10。
+- 纯向量候选低于 `RAG_SIMILARITY_THRESHOLD` 会被丢弃；关键词精确命中是强证据，即使向量分低也可保留。
+- 时效重排默认权重 `0.3`；问题含“最新、最近、今年”等时间意图时为 `0.6`。默认半衰期为 90 天，可按文档 category 覆盖。
+- 当前关键词召回为 `ILIKE`，适合文件名、编号和工号等精确字符串，但规模扩大后会成为瓶颈。先由评测集确认瓶颈，再选择 PostgreSQL FTS/BM25 或 BGE-M3 sparse 方案。
+
+### 5.3 办公附件检索
+
+办公附件只有在 `office_doc` 或 `retrieval` 节点明确调用时访问：
+
+- 全文不超过 `OFFICE_DOC_FULL_TEXT_LIMIT` 时直接作为该节点上下文，不经过阈值过滤。
+- 超过阈值时，按附件专属 `scene_tag=officedoc_{doc_id}` 建临时知识空间，只从该空间取候选，禁止扫用户长期资料。
+- 附件使用、分析或编辑时刷新 TTL；丢弃或过期时，DB 记录、磁盘缓存和临时 RAG 空间一起清理。
+
+### 5.4 长期记忆检索
+
+记忆是短事实而非长文档，默认只在显式历史引用时召回：快速档 Top 3，思考档 Top 5。纯向量结果必须达到 `MEMORY_FACT_MIN_VECTOR_SIMILARITY=0.75` 才能注入；关键词 fallback 默认关闭，只有评测证明其必要性后才可开启 `MEMORY_FACT_KEYWORD_FALLBACK_ENABLED=true`。
+
+注入到模型的记忆带类型、来源时间和隐私处理标记。私密记忆先是占位符，只有用户明确请求且后端隐私门授权后才能解密。详情见 `MEMORY_DESIGN.md`。
+
+### 5.5 上下文与引用
+
+长期知识命中会以如下形式加入当前用户消息：
+
+```text
+[1] 合同.pdf | 付款条款
+<chunk text>
 ```
 
-| 时效档次 | 半衰期 |
-|---|---|
-| news | 14 天 |
-| general | 180 天 |
-| history | 3650 天（10 年） |
-| other | 365 天 |
+`done` SSE 事件和办公节点结果均携带 citations。每条 citation 包含 `type`、`title`、`document_id`、`similarity`、`recency`、`score` 与 `locator`。`locator` 只使用实际入库的标题路径/块索引等信息；PDF 页码、表格原始行号和点击跳页属于下一阶段解析元数据增强，当前不可假定存在。
 
-查询含时间意图（"最新/最近/今年"等）时权重 0.6，否则 0.3。
-可选硬过滤 `RAG_TIME_FILTER_DAYS`（默认不过滤）。
+## 6. 权限、降级与安全
 
-### 5.4 上下文与引用
+- 所有检索 SQL 强制按当前 `user_id` 限定；公共空间需显式满足 `is_public=true`。
+- 个人空间默认不混入公共空间，`RAG_INCLUDE_PUBLIC_IN_PERSONAL=false`。
+- 聊天与办公 RAG 默认排除 `category=code`；代码检索应走独立授权路径。
+- embedding 加载、查询重写、向量检索或关键词检索失败时返回空上下文或可用单路结果，不阻塞正常 LLM 回答。
+- 文档片段、网页、附件和检索结果均为不可信数据，不能提升权限、注入系统指令或授权工具调用。
 
-命中的 chunk 按 `[序号] 内容` 拼接进 System/上下文，返回引用列表
-（type/title/content/source/document_id/similarity/score/recency/category）。
+## 7. 配置
 
-## 6. 接口
+| 配置 | 当前默认 | 说明 |
+| --- | --- | --- |
+| `EMBEDDING_MODEL` / `EMBEDDING_DIMENSION` | `BAAI/bge-m3` / `1024` | 本地 dense embedding |
+| `RAG_TOP_K` | `5` | 最终资料引用数量 |
+| `RAG_SIMILARITY_THRESHOLD` | `0.5` | 纯向量硬门槛，生产值由评测定 |
+| `RAG_HYBRID_VECTOR_TOP_K` / `KEYWORD_TOP_K` | `10` / `10` | 长期知识候选数 |
+| `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` | `500` / `50` | 纯文本默认切分参数 |
+| `RAG_MIN_QUALITY_SCORE` | `0.5` | 入库质量门 |
+| `RAG_RECENCY_WEIGHT` / `QUERY_WEIGHT` | `0.3` / `0.6` | 常规/时间意图时效权重 |
+| `OFFICE_SESSION_TTL_HOURS` | `24` | 临时办公附件生命周期 |
+| `OFFICE_DOC_FULL_TEXT_LIMIT` | `20000` | 小附件全文注入阈值，实际分析路径上限为 12000 字符 |
+| `MEMORY_FACT_MIN_VECTOR_SIMILARITY` | `0.75` | 长期记忆注入门槛 |
+| `MEMORY_FACT_KEYWORD_FALLBACK_ENABLED` | `false` | 记忆关键词兜底开关 |
 
-### 知识空间
+`.env.example` 与代码默认值一致，但它不是质量调优的依据。部署配置应由评测数据确定，并通过 Redis 动态 RAG 配置的覆盖机制审慎灰度。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/knowledge/spaces` | 创建空间（管理员可设 is_public） |
-| GET | `/knowledge/spaces` | 我的空间（含公共） |
-| PATCH | `/knowledge/spaces/{id}` | 更新（公共标记仅管理员） |
-| DELETE | `/knowledge/spaces/{id}` | 删除（级联清向量） |
+## 8. 评测与调参
 
-### 文档
+阈值、分块器、reranker 或 embedding 变更前，必须先维护 50-100 条标注用例，包括应命中、必须零命中、文件名/编号、表格、歧义问题和记忆回忆。模板位于 `tests/fixtures/rag_eval_cases.json`。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/knowledge/documents` | 批量上传（files 多文件 + category 时效档次参考） |
-| GET | `/knowledge/documents?space_id=` | 文档列表（含 category/tags/updated_at） |
-| DELETE | `/knowledge/documents/{id}` | 删除文档及向量 |
+```powershell
+uv run python scripts/evaluate_rag.py --user-id <uuid> --cases <labelled-cases.json> --thresholds 0.5,0.55,0.6,0.65
+```
 
-### 公共检索
+脚本输出逐条命中与 aggregate precision/recall。选择能满足业务精度的最低延迟配置，而不是凭经验将阈值设为某个固定值。评测集必须使用隔离测试账号，不能将真实用户资料或私密记忆提交到仓库。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/public-kb/search` | 公共库检索；带 query 文本走混合检索，否则纯向量 |
+## 9. 接口与异步任务
 
-## 7. 配置项
+| 类别 | 接口/任务 | 说明 |
+| --- | --- | --- |
+| 知识空间 | `POST/GET/PATCH/DELETE /knowledge/spaces` | 创建、管理、删除长期空间 |
+| 文档 | `POST /knowledge/documents` | 批量上传，异步入库 |
+| 文档 | `GET/DELETE /knowledge/documents` | 查询状态或删除文档及向量 |
+| 公共库 | `POST /public-kb/search` | 显式公共知识检索 |
+| 入库任务 | `celery_app.tasks.process_document` | 解析、清洗、分类、嵌入 |
+| 清理任务 | 办公会话清理 | 删除过期附件及其临时 RAG 空间 |
 
-| 配置 | 默认 | 说明 |
-|---|---|---|
-| `RAG_TOP_K` | 5 | 最终返回条数 |
-| `RAG_SIMILARITY_THRESHOLD` | 0.45 | 纯向量路径阈值（混合路径仅作参考） |
-| `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` | 500 / 50 | 文本分块参数 |
-| `RAG_MIN_QUALITY_SCORE` | 0.5 | 质量门阈值 |
-| `RAG_HYBRID_VECTOR_TOP_K` / `KEYWORD_TOP_K` | 10 / 10 | 双路召回数 |
-| `RAG_RECENCY_WEIGHT` / `QUERY_WEIGHT` | 0.3 / 0.6 | 时效权重 |
-| `RAG_RECENCY_HALF_LIFE_DAYS` | 90 | 默认半衰期 |
-| `RAG_CATEGORY_HALF_LIFE_DAYS` | 见上表 | 按档次半衰期 |
-| `RAG_QUERY_REWRITE_*` | 关闭 | 服务端查询重写 |
-| `EMBEDDING_MODEL` / `DIMENSION` | bge-small-zh-v1.5 / 512 | 嵌入模型 |
-| `DOCLING_ENABLE_OCR` | true | Docling OCR（RapidOCR） |
+## 10. 后续路线
 
-## 8. 异步任务（Celery）
-
-| 任务 | 说明 |
-|---|---|
-| `process_document` | 入库管线；质量类失败不重试 |
-| `rebuild_index` | 重建 ivfflat 向量索引 |
-| `cleanup_vectors` | 清理孤儿向量 |
-| `delete_user_data` | 物理清理用户数据 |
-
-## 9. 基准测试（2026-08-09）
-
-语料 10 篇 / 查询 20 条（精确术语、同义改写、模糊、标识符、表格、代码），top-5：
-
-| 指标 | 纯向量 | 混合检索 |
-|---|---|---|
-| recall@1 | 90% | 90% |
-| recall@3 | 95% | 100% |
-| recall@5 | 95% | 100% |
-| 漏检 | 1 | 0 |
-
-主要结论：
-- 混合检索的召回增益主要来自"取消向量阈值"（模糊查询弱相似片段得以进入候选）
-- 真正的难点是**无实体重叠的模糊查询**（如"服务器经常挂怎么办"）——
-  本地小模型查询重写是首要优化方向
-- 基准脚本：`scripts/benchmark_rag.py`，可重复执行对比
-
-## 10. 关键决策与权衡
-
-1. **本地嵌入而非 API**：bge-small-zh-v1.5 本地推理，隐私与成本可控，512 维与 pgvector 匹配
-2. **Docling 负责解析、内置负责文本**：文档格式多样性由 Docling 承接，纯文本走轻量内置路径
-3. **时效档次 + 开放标签分离**：半衰期只与"知识多变程度"有关，主题多样性交给标签
-4. **质量门宁可误拦**：垃圾不入库优于漏掉，误拦可在管理后台看到原因并重传
-5. **启发式规则为主**：清洗/分块/安全检测均为可扩展规则表，不为完美解析引入重型依赖
-
-## 11. 可扩展点
-
-| 方向 | 位置 | 说明 |
-|---|---|---|
-| 图片 RAG | 管线"解析"环节 | VLM 生成描述 → 复用现有入库/检索 |
-| 多模态嵌入 | `embeddings.py` | 引入 CLIP 类模型做图像/文本联合检索 |
-| 重排（rerank） | 融合后 | 引入 LLM/交叉编码器重排 top-k |
-| 检索缓存 | 检索前 | Redis 缓存向量与结果，支撑高并发 |
-| 查询重写 | `query_rewriter.py` | 已预留客户端/服务端双槽位 |
-| 新格式分块 | `chunker.py` 注册表 | 注册一个函数即接入 |
-| 分类标签扩展 | `classifier.py` | 增删类别与半衰期映射 |
-
-## 12. 已知局限与后续
-
-- 照片/无文字图片无法检索（需多模态嵌入 + VLM 描述，见扩展点）
-- 模糊口语查询召回仍依赖查询重写（本地小模型未接入时效果有限）
-- 混合路径无阈值，弱相关片段可能占位（可加"软下限"）
-- 长文档大表格分块后检索上下文截断（chunk 级元数据/标题路径可进一步优化）
+1. 用真实标注集确定不同 scope 的阈值，并将评测纳入 CI。
+2. 将 Docling 的页码、标题树、表格坐标写入 chunk metadata，前端支持 citation 定位跳转。
+3. 在思考档和复杂办公检索中，对混合 Top20 做 cross-encoder rerank；快速档不增加这一步。
+4. 基于压测结果替换大规模场景下的 `ILIKE`，保留文件名/编号精确匹配能力。
+5. 在附件 TTL 到期前提供用户驱动的“转存长期知识库”操作，并按 SHA-256 复用可复用解析结果。

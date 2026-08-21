@@ -12,6 +12,15 @@ docker compose -f docker-compose.yml -f docker-compose.secrets.yml up -d
 
 `api` 容器启动时会先执行 `alembic upgrade head`（幂等），再启动 uvicorn。
 
+异步任务已按 `durable`、`best_effort`、`maintenance` 三个 worker 隔离；本地 Compose
+应整体启动，避免记忆/维护队列无人消费：
+
+```powershell
+docker compose up -d --build
+```
+
+分派契约、Celery 恢复语义和 `/metrics` 指标见 [ASYNC_TASK_DISPATCH.md](ASYNC_TASK_DISPATCH.md)。
+
 ## 2. 定时任务（Celery Beat）
 
 `beat` 服务负责定时调度，已配置：

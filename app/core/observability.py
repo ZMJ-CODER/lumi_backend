@@ -54,18 +54,25 @@ _agent_replans = None
 _plan_cache = None
 _agent_route_duration = None
 _agent_node_duration = None
+_agent_channel_wait = None
+_manifest_route_upgrades = None
+_celery_queue_ready = None
+_document_pipeline_state = None
+_document_pipeline_oldest_age = None
 
 
 def _ensure_metrics():
     """懒加载 prometheus-client 指标（避免未安装/未启用时阻塞启动）."""
     global _prometheus, _http_requests, _http_duration, _agent_jobs, _skill_calls, _rag_searches
     global _agent_routes, _agent_replans, _plan_cache, _agent_route_duration, _agent_node_duration
+    global _agent_channel_wait, _manifest_route_upgrades
+    global _celery_queue_ready, _document_pipeline_state, _document_pipeline_oldest_age
     if _prometheus is not None:
         return True
     if not settings.METRICS_ENABLED:
         return False
     try:
-        from prometheus_client import Counter, Histogram
+        from prometheus_client import Counter, Gauge, Histogram
 
         _http_requests = Counter(
             "lumi_http_requests_total", "HTTP 请求总数", ["method", "path", "status"]
@@ -101,6 +108,32 @@ def _ensure_metrics():
             "办公原子节点执行耗时",
             ["agent", "success"],
             buckets=(0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 15, 30, 60, 180, 300),
+        )
+        _agent_channel_wait = Histogram(
+            "lumi_agent_channel_wait_seconds",
+            "办公四层路由通道限流等待时间",
+            ["channel"],
+            buckets=(0.001, 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 30, 60, 300),
+        )
+        _manifest_route_upgrades = Counter(
+            "lumi_manifest_route_upgrades_total",
+            "任务清单原子项通道升级次数",
+            ["from_channel", "to_channel", "reason"],
+        )
+        _celery_queue_ready = Gauge(
+            "lumi_celery_queue_ready_tasks",
+            "Celery Redis broker ready-task depth (does not include in-flight tasks)",
+            ["queue"],
+        )
+        _document_pipeline_state = Gauge(
+            "lumi_document_pipeline_documents",
+            "Knowledge documents grouped by durable processing state",
+            ["status"],
+        )
+        _document_pipeline_oldest_age = Gauge(
+            "lumi_document_pipeline_oldest_age_seconds",
+            "Age of the oldest queued or processing document",
+            ["status"],
         )
         _prometheus = True
         return True
@@ -165,6 +198,69 @@ def observe_agent_node_duration(agent: str, success: bool, duration: float) -> N
         _agent_node_duration.labels(
             agent=(agent or "unknown")[:80], success=str(bool(success)).lower()
         ).observe(max(0.0, duration))
+
+
+def observe_agent_channel_wait(channel: str, duration: float) -> None:
+    if _ensure_metrics():
+        _agent_channel_wait.labels(channel=(channel or "unknown")[:80]).observe(max(0.0, duration))
+
+
+def inc_manifest_route_upgrade(from_channel: str, to_channel: str, reason: str) -> None:
+    if _ensure_metrics():
+        _manifest_route_upgrades.labels(
+            from_channel=(from_channel or "unknown")[:80],
+            to_channel=(to_channel or "unknown")[:80],
+            reason=(reason or "unknown")[:80],
+        ).inc()
+
+
+async def refresh_async_dispatch_metrics() -> None:
+    """Refresh cross-process Celery/document gauges just before /metrics.
+
+    Redis LLEN represents only ready messages.  The document-state gauges and
+    oldest-age gauges make in-flight and worker-lost work visible alongside it.
+    Failures are intentionally isolated: observability must never break the
+    scrape endpoint or the API request path.
+    """
+    if not _ensure_metrics():
+        return
+    try:
+        import redis.asyncio as aioredis
+        from sqlalchemy import func, select
+
+        from app.core.database import async_session_factory
+        from app.models.db_models import Document
+
+        broker = aioredis.from_url(settings.CELERY_BROKER_URL, decode_responses=True)
+        try:
+            for queue in ("durable", "best_effort", "maintenance"):
+                _celery_queue_ready.labels(queue=queue).set(await broker.llen(queue))
+        finally:
+            await broker.aclose()
+
+        now = time.time()
+        async with async_session_factory() as session:
+            for status in ("pending", "processing", "ready", "error"):
+                count = (
+                    await session.execute(
+                        select(func.count()).select_from(Document).where(Document.status == status)
+                    )
+                ).scalar_one()
+                _document_pipeline_state.labels(status=status).set(count)
+
+            for status, time_column in (
+                ("pending", Document.queued_at),
+                ("processing", Document.processing_started_at),
+            ):
+                oldest = (
+                    await session.execute(
+                        select(func.min(time_column)).where(Document.status == status)
+                    )
+                ).scalar_one()
+                age = 0.0 if oldest is None else max(0.0, now - oldest.timestamp())
+                _document_pipeline_oldest_age.labels(status=status).set(age)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("异步任务指标刷新失败: {}", exc)
 
 
 def metrics_text() -> str:

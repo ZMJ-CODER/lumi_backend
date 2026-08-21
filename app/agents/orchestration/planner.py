@@ -9,6 +9,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
+import re
 
 from loguru import logger
 
@@ -16,6 +17,7 @@ from app.agents.orchestration.models import TaskNode
 from app.agents.orchestration.intent import (
     classify,
     extract_output_contract,
+    infer_new_office_document,
     resolve_direct_text_conversion,
     select_named_office_documents,
 )
@@ -107,6 +109,36 @@ def _direct_conversion_tree(request: str, conversion: dict) -> TaskTree:
     )
 
 
+def _new_office_document_tree(request: str, document: dict, office_docs: list[dict] | None = None) -> TaskTree:
+    """Create one specialized node for a newly authored Office file."""
+    filename = Path(str(document["filename"])).name
+    document_format = str(document["format"])
+    doc_ids = [str(item.get("doc_id")) for item in office_docs or [] if item.get("doc_id")]
+    return TaskTree(
+        nodes=[
+            TaskNode(
+                id=f"d{int(time.time())}-{uuid.uuid4().hex[:6]}",
+                name=f"生成 {document_format.upper()} 文件 {filename}",
+                agent="office_document",
+                params={
+                    "task": request,
+                    "format": document_format,
+                    "filename": filename,
+                    "doc_ids": doc_ids,
+                    "output_contract": {
+                        "version": 1,
+                        "requires_artifact": True,
+                        "expected_output_names": [filename],
+                        "target_extension": f".{document_format}",
+                    },
+                },
+                depends_on=[],
+            )
+        ],
+        plan_text=f"根据要求生成并校验《{filename}》。",
+    )
+
+
 def _apply_output_contract(nodes: list[TaskNode], request: str) -> None:
     """Attach the same compiler-produced contract to every file-producing node.
 
@@ -115,7 +147,11 @@ def _apply_output_contract(nodes: list[TaskNode], request: str) -> None:
     that do not produce files untouched.
     """
     for node in nodes:
-        if node.agent != "office_script":
+        if node.agent not in {"office_script", "office_document"}:
+            continue
+        if node.agent == "office_document" and node.params.get("output_contract"):
+            # The new-document route has already compiled a filename even when
+            # the user did not spell one out.  Do not erase that contract.
             continue
         conversion = node.params.get("conversion")
         node.params["output_contract"] = extract_output_contract(
@@ -197,6 +233,12 @@ class RulePlanner(Planner):
             )
         if has_named_docs:
             office_docs = selected_docs
+        new_document = infer_new_office_document(request)
+        if new_document:
+            from app.agents.core.registry import AgentRegistry
+
+            if AgentRegistry.get("office_document") is not None:
+                return _new_office_document_tree(request, new_document, office_docs if has_named_docs else [])
         output_contract = extract_output_contract(request)
         # An explicit output filename turns this into an artifact-delivery task,
         # not a conversational answer. Route it through the sandbox even when
@@ -654,6 +696,12 @@ class LlmPlanner(Planner):
             )
         )
         output_contract = extract_output_contract(request)
+        new_document = infer_new_office_document(request)
+        if new_document:
+            from app.agents.core.registry import AgentRegistry
+
+            if AgentRegistry.get("office_document") is not None:
+                return _new_office_document_tree(request, new_document, office_docs if has_named_docs else [])
         if output_contract.get("requires_artifact"):
             return TaskTree(
                 nodes=[TaskNode(

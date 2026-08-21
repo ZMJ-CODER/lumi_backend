@@ -83,6 +83,7 @@ async def chat_stream(
         result = None
         lock = None
         started = False
+        done_emitted = False
         full_text = ""
         try:
             lock = await _acquire_conv_lock(conversation_id)
@@ -133,6 +134,12 @@ async def chat_stream(
                 if evt["type"] == "done":
                     result = evt
                 yield _sse(evt)
+                if evt["type"] == "done":
+                    # Anything after a terminal SSE event is best-effort
+                    # persistence/notification work.  It must never append an
+                    # ``error`` event that makes the client label a successful
+                    # office response as "回复中断".
+                    done_emitted = True
 
             # 服务端持久化（仅登录用户；游客保持 Redis-only）
             if not is_guest and result:
@@ -146,7 +153,10 @@ async def chat_stream(
                         "steps": result.get("steps") or [],
                         "title": result.get("title") or "",
                     }
-                    await _persist_messages(db, conv, req, persist_result)
+                    try:
+                        await _persist_messages(db, conv, req, persist_result)
+                    except Exception as persist_exc:  # noqa: BLE001
+                        logger.warning("流式回复已完成，但消息持久化失败: {}", persist_exc)
                     # 异步 TTS（完成后推 audio_ready；新消息到达会被中断）
                     reply_text = (result.get("content") or "").strip()
                     if settings.TTS_ENABLED and reply_text and result.get("message_id"):
@@ -178,6 +188,11 @@ async def chat_stream(
             })
         except Exception as exc:  # noqa: BLE001
             logger.warning("流式聊天失败: {}", exc)
+            if done_emitted:
+                # The reply has already been delivered with a terminal event.
+                # Do not corrupt the settled client state because a following
+                # database/TTS housekeeping operation failed.
+                return
             # 流式中断：仍持久化用户消息 + 已生成的部分回复，避免多端同步丢失
             if started and not is_guest:
                 try:

@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     # ── Celery ──
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
+    # Redis broker 至少一次投递：必须长于 Celery 硬超时，避免仍在执行的
+    # 文档任务因 visibility timeout 被第二个 worker 重复领取。
+    CELERY_TASK_TIME_LIMIT_SECONDS: int = 30 * 60
+    CELERY_TASK_SOFT_TIME_LIMIT_SECONDS: int = 25 * 60
+    CELERY_REDIS_VISIBILITY_TIMEOUT_SECONDS: int = 45 * 60
+    CELERY_DOCUMENT_STALE_AFTER_SECONDS: int = 50 * 60
 
     # ── LLM: 千问 (Qwen) ──
     QWEN_API_KEY: str = ""
@@ -125,6 +131,9 @@ class Settings(BaseSettings):
     # 纯文本默认走 DeepSeek V4 Flash；本地 Ollama 的 qwen2.5vl 仅用于图像转文字。
     LLM_PROVIDER: str = "deepseek"  # qwen / deepseek
     LLM_FALLBACK_PROVIDER: str = ""  # 主供应商失败时自动切换（deepseek/qwen；空=不降级）
+    # 仅向明确验证过的 OpenAI-compatible 模型透传 reasoning_effort。
+    # 多数兼容网关会拒绝未知字段；默认留空，格式为逗号分隔的模型 ID。
+    LLM_REASONING_EFFORT_MODELS: str = ""
 
     # ── 嵌入模型（本地推理，sentence-transformers）──
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
@@ -221,6 +230,26 @@ class Settings(BaseSettings):
     AGENT_PLANNER_MAX_TOKENS: int = 2048
     AGENT_PLANNER_TIMEOUT_SECONDS: int = 45
     AGENT_FINAL_ANSWER_MAX_TOKENS: int = 2500
+    AGENT_MANIFEST_SUMMARY_MAX_TOKENS: int = 1200
+    # 清单在执行前的保守 token 预算。超过时不启动，要求用户确认/拆分，
+    # 防止一次上千项任务把模型与沙箱队列拖入雪崩。
+    AGENT_MANIFEST_TOKEN_BUDGET: int = 80000
+    # A complex ordinary task uses an external logical plan and materializes
+    # only its ready frontier.  Small tasks keep the lower-overhead full DAG.
+    AGENT_LOGICAL_PLAN_ENABLED: bool = True
+    AGENT_LOGICAL_PLAN_MIN_NODES: int = 3
+    AGENT_LOGICAL_PLAN_FRONTIER_SIZE: int = 4
+    AGENT_LOGICAL_PLAN_TOKEN_BUDGET: int = 80000
+    # L3 needs a stateful graph that can mount a validated replacement
+    # subgraph. The default remains the persisted DAG runtime until the
+    # Temporal manifest workflow has completed its local rollout.
+    AGENT_DYNAMIC_SUBGRAPH_ENABLED: bool = True
+    AGENT_SUBGRAPH_MAX_REPLANS: int = 2
+    # 通道级全局并发上限：真正的外部执行由 B/D 受控；A 通常在服务层直出。
+    AGENT_CHANNEL_DIRECT_LLM_CONCURRENCY: int = 32
+    AGENT_CHANNEL_SCRIPT_CONCURRENCY: int = 20
+    AGENT_CHANNEL_RAG_CONCURRENCY: int = 12
+    AGENT_CHANNEL_AGENT_CONCURRENCY: int = 2
     # 办公任务准入背压（Redis 原子集合，跨 API worker 共享）。它们是准入上限，
     # 不是内存排队：达到上限立即返回 429，让 Temporal/legacy 执行器自然消化任务。
     AGENT_GLOBAL_ACTIVE_JOB_LIMIT: int = 32
@@ -228,10 +257,16 @@ class Settings(BaseSettings):
     AGENT_SUBMISSION_MAX_INFLIGHT: int = 8
     AGENT_ADMISSION_LEASE_SECONDS: int = 7200
     # ── Temporal 编排（多智能体任务执行引擎）──
-    AGENT_ORCHESTRATION: str = "temporal"         # temporal（默认）/ legacy（自建 DAG；Temporal 不可用时自动回退）
+    # legacy is the current default. ``manifest_temporal`` is an explicit,
+    # local-rollout-only runtime for rolling task manifests. The former static
+    # ``temporal`` path is frozen: no new job is submitted to it.
+    AGENT_ORCHESTRATION: str = "legacy"           # legacy / manifest_temporal
     TEMPORAL_ADDRESS: str = "localhost:7233"      # Temporal 前端 gRPC 地址
     TEMPORAL_NAMESPACE: str = "default"           # Temporal namespace
     TEMPORAL_TASK_QUEUE: str = "lumi-agents"      # Temporal 任务队列（worker 与客户端必须一致）
+    TEMPORAL_MANIFEST_TASK_QUEUE: str = "lumi-office-manifest"
+    TEMPORAL_MANIFEST_CONTINUE_AS_NEW_BATCHES: int = 40
+    TEMPORAL_ACTIVITY_HEARTBEAT_SECONDS: int = 15
     TEMPORAL_BYOK_TTL_SECONDS: int = 43200        # BYOK key 临时存放 TTL（12h；任务正常结束即删除）
     # 自定义 BYOK endpoint 默认只允许公网 http(s) 地址，避免云端部署被用作 SSRF。
     # 仅桌面/受信任自托管场景需要 Ollama/LM Studio 时再显式开启。
@@ -280,19 +315,25 @@ class Settings(BaseSettings):
     # ── 会话 ──
     # Redis 上下文保留条数上限（安全兜底；真正的窗口按 token 预算裁剪）
     CONVERSATION_CONTEXT_ROUNDS: int = 2000
-    # 普通模式短期记忆窗口：超大滑动窗口（20-30 万 token，适配 1M 上下文模型）。
-    # 历史超出该预算时按"最新优先"裁剪；如当前模型上下文不足请在 .env 调低。
-    LLM_HISTORY_MAX_TOKENS: int = 250000
+    # 普通模式只注入注意力质量窗口；更早原文由段摘要和按需回捞提供。
+    LLM_HISTORY_MAX_TOKENS: int = 12000
     # 办公模式短期记忆：只保证当次任务连贯，不需要长窗口
     LLM_HISTORY_MAX_TOKENS_WORK: int = 60000
-    # 对话摘要（qwen-turbo）：上下文总 token 超过触发阈值后，
-    # 把最早超出"保留预算"的原始对话压缩成"剧情梗概"（约 10:1），
-    # 上下文里始终保留最新 15 万 token 原始记录 + 历史摘要链。
+    # 已保留给未迁移的语音 Redis 会话兼容路径；普通聊天不再在响应尾部同步摘要。
     CONVERSATION_SUMMARY_TRIGGER_TOKENS: int = 250000
     CONVERSATION_SUMMARY_KEEP_TOKENS: int = 150000
-    CONVERSATION_SUMMARY_KEEP_ROUNDS: int = 1000   # 保留条数兜底上限
-    CONVERSATION_SUMMARY_CHUNK_TOKENS: int = 30000 # 单次摘要输入预算（分批接力）
-    CONVERSATION_SUMMARY_MAX_CHARS: int = 20000    # 梗概 ≈5000 token / 2 万字符
+    CONVERSATION_SUMMARY_KEEP_ROUNDS: int = 1000
+    CONVERSATION_SUMMARY_CHUNK_TOKENS: int = 30000
+    CONVERSATION_SUMMARY_MAX_CHARS: int = 20000
+    CONVERSATION_SEGMENT_ROUNDS: int = 8
+    CONVERSATION_GLOBAL_SUMMARY_MAX_CHARS: int = 1200
+    CONVERSATION_SEGMENT_SUMMARY_MAX_CHARS: int = 600
+    CONVERSATION_RECENT_ROUNDS_FAST: int = 12
+    CONVERSATION_RECENT_ROUNDS_THINK: int = 16
+    CONVERSATION_RECALL_SEGMENTS_FAST: int = 2
+    CONVERSATION_RECALL_SEGMENTS_THINK: int = 4
+    CONVERSATION_RECALL_RAW_MESSAGES_FAST: int = 0
+    CONVERSATION_RECALL_RAW_MESSAGES_THINK: int = 4
     # ── 后端生成文件清理 ──
     GENERATED_FILES_TTL_DAYS: int = 7    # 通用脚本产物（office_outputs）保留天数，到期定时删除
     SANDBOX_TEMP_TTL_HOURS: int = 6      # 沙箱残留临时目录（lumi_sandbox_*）兜底清理时长
@@ -320,8 +361,11 @@ class Settings(BaseSettings):
     MEMORY_EXTRACTION_MODEL: str = "qwen-turbo"  # 记忆抽取/合并/画像聚合用轻量模型
     MEMORY_EXTRACTION_MIN_CONFIDENCE: float = 0.6  # 低于该置信度的事实不落库
     MEMORY_FACT_TOP_K: int = 5               # 每轮对话注入的记忆事实上限
-    MEMORY_HYBRID_VECTOR_TOP_K: int = 10     # 记忆混合检索：向量路召回数
-    MEMORY_HYBRID_KEYWORD_TOP_K: int = 10    # 记忆混合检索：关键词路召回数
+    MEMORY_FACT_MIN_VECTOR_SIMILARITY: float = 0.75  # 独立记忆库的高精度注入门槛
+    MEMORY_HYBRID_VECTOR_TOP_K: int = 10     # 记忆向量路召回数
+    # 记忆默认只走向量检索，避免短词/人名 ILIKE 误命中。仅在完成评测后才可开启。
+    MEMORY_FACT_KEYWORD_FALLBACK_ENABLED: bool = False
+    MEMORY_HYBRID_KEYWORD_TOP_K: int = 10    # 启用关键词兜底时的候选数
     MEMORY_SIMILARITY_THRESHOLD: float = 0.72  # 去重/矛盾判定阈值
     MEMORY_CLEANUP_THRESHOLD: float = 0.3    # 过期且重要度低于该值 → 物理删除
     MEMORY_HALF_LIFE_DAYS: dict[str, int | None] = {
@@ -339,8 +383,10 @@ class Settings(BaseSettings):
     MEMORY_DECRYPT_LLM_CONFIRM_ENABLED: bool = True  # 关键词预筛后 LLM 二次确认
 
     # ── 聊天记录生命周期（消息上限裁剪，物理删除）──
-    CONVERSATION_MESSAGE_KEEP: int = 50      # 每会话保留最近 N 条
-    CONVERSATION_MESSAGE_HARD_CAP: int = 70  # 超过该条数触发异步裁剪（回到 KEEP）
+    # 0 表示不按条数物理删除。长对话原文是回捞的证据来源，生命周期由用户
+    # 删除会话/账号及后续归档策略管理，不能再以 UI 列表长度为准裁剪。
+    CONVERSATION_MESSAGE_KEEP: int = 0
+    CONVERSATION_MESSAGE_HARD_CAP: int = 0
 
     model_config = {
         # 固定从项目根加载 .env，避免 API/worker 从不同目录启动时读不到配置

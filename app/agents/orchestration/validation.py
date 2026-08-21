@@ -43,7 +43,10 @@ _DELIVERY_CODES = {"OUTPUT_MISSING", "ARTIFACT_TRANSFER_FAILED", "SANDBOX_OUTPUT
 
 def validate_job_outcome(job: Job) -> ValidationOutcome:
     """Validate the contract of the selected layer without another LLM call."""
-    failed = next((node for node in job.nodes if node.status == TaskStatus.FAILED), None)
+    failed = next(
+        (node for node in job.nodes if node.status in {TaskStatus.FAILED, TaskStatus.ESCALATED}),
+        None,
+    )
     if job.status == JobStatus.COMPLETED and job.nodes and all(
         node.status == TaskStatus.COMPLETED for node in job.nodes
     ):

@@ -54,3 +54,18 @@ async def finish_effect(key: str, status: str, result: dict | None = None) -> No
         return
     async with _memory_lock:
         _memory[key] = record
+
+
+async def abandon_pending_effect(key: str) -> None:
+    """Remove a reservation made before a confirmation-gated tool ran.
+
+    This is intentionally narrow: callers use it only for an
+    ``approval_required`` escalation, which is guaranteed to occur before the
+    underlying tool body starts. Other failure classes stay durable/uncertain.
+    """
+    redis = await _redis()
+    if redis is not None:
+        await redis.delete(_key(key))
+        return
+    async with _memory_lock:
+        _memory.pop(key, None)

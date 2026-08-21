@@ -29,14 +29,15 @@ CACHE_TTL = 5.0
 
 
 def _env_fallback(scene: str | None = None, provider: str | None = None) -> dict:
-    """.env 兜底配置（保留 LLM_PROVIDER 选择逻辑；普通聊天场景默认多模态模型）."""
+    """.env 兜底配置（普通聊天默认轻量文本模型，视觉请求显式选 VL）。"""
     provider = provider or settings.LLM_PROVIDER
-    # 普通模式（chat）：Qwen-VL-Plus 多模态，131k 上下文
+    # 普通文本聊天不应为视觉能力支付额外首 token 延迟。图片由编排层
+    # 显式切到 QWEN_VL_MODEL，或先转写为文本后再交给此处的文本模型。
     if scene == "chat":
         return {
             "base_url": settings.QWEN_BASE_URL,
             "api_key": settings.QWEN_API_KEY,
-            "model": settings.QWEN_VL_MODEL,
+            "model": settings.QWEN_MODEL,
             "timeout": 120,
             "source": "env",
         }
@@ -85,7 +86,7 @@ async def _resolve_user_cfg(user_cfg: dict, provider: str | None) -> dict | None
     非 BYOK：api_key 用服务端 .env 里对应 provider 的密钥；
     BYOK：api_key 留空，由 LLMClient 用请求头临时携带的 key 覆盖（绝不落库）。
     """
-    from app.core.model_catalog import PROVIDER_BASE_URLS
+    from app.core.model_catalog import PROVIDER_BASE_URLS, normalize_model_id
 
     prov = user_cfg.get("provider") or provider
     base_url = ""
@@ -111,7 +112,7 @@ async def _resolve_user_cfg(user_cfg: dict, provider: str | None) -> dict | None
     cfg = {
         "base_url": base_url,
         "api_key": "" if user_cfg.get("byok") else env_key,
-        "model": user_cfg.get("model") or "",
+        "model": normalize_model_id(user_cfg.get("model")),
         "timeout": 120,
         "source": "user",
         "byok": bool(user_cfg.get("byok")),

@@ -158,7 +158,7 @@ Python MCP client 的实现包括：
 
 | 配置 | 默认值 | 用途 |
 | --- | --- | --- |
-| `AGENT_ORCHESTRATION` | `temporal` | `temporal` 优先，失败回退 `legacy` |
+| `AGENT_ORCHESTRATION` | `legacy` | 默认动态 DAG；`manifest_temporal` 仅用于本地验证的纯读清单试点 |
 | `AGENT_NODE_TIMEOUT_SECONDS` | 120 | 单个原子节点上限 |
 | `AGENT_NODE_MAX_RETRIES` | 1 | 节点的有界恢复次数 |
 | `AGENT_USER_ACTIVE_JOB_LIMIT` | 2 | 单用户并发办公任务上限 |

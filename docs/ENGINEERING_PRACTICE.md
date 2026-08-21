@@ -181,7 +181,7 @@ A/B 实测（health）：
 
 | 场景 | 降级路径 | 依据 |
 | --- | --- | --- |
-| Temporal 不可用 | 自动回退自建 DAG（legacy 引擎） | `AGENT_ORCHESTRATION` |
+| 本地 Temporal 清单 Worker 不可用 | 纯读清单自动回退动态 DAG（legacy 引擎） | `AGENT_ORCHESTRATION=manifest_temporal` |
 | MCP 客户端不可用 | 失败冷却 30s + Redis 轮询通道 | `app/agents/mcp/manager.py` |
 | 主 LLM 供应商失败 | 自动切换备用供应商（qwen ↔ deepseek） | `LLM_FALLBACK_PROVIDER` |
 | Redis 限流故障 | 放行（防击穿） | 限流中间件 |

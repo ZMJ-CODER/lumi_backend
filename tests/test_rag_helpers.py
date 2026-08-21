@@ -3,11 +3,13 @@
 import asyncio
 
 from app.services.rag.knowledge import (
+    _chunk_metadata,
     _extract_keywords,
     _hybrid_fuse,
     _passes_similarity_gate,
     _scope_conditions,
 )
+import json
 from app.services.rag.query_rewriter import _rewrite_local
 
 
@@ -61,3 +63,11 @@ def test_local_query_rewriter_rejects_vision_model(monkeypatch):
 
     monkeypatch.setattr(query_rewriter.settings, "RAG_QUERY_REWRITE_MODEL", "qwen2.5vl:7b")
     assert asyncio.run(_rewrite_local("查找合同")) is None
+
+
+def test_chunk_metadata_keeps_verifiable_structural_locator():
+    raw = _chunk_metadata("handbook.md", "# 付款条款\n\n付款日期为月底。", 3)
+    locator = json.loads(raw)
+    assert locator["chunk_index"] == 3
+    assert locator["heading_path"] == "付款条款"
+    assert locator["source"] == "handbook.md"

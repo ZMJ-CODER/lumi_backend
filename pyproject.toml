@@ -39,6 +39,10 @@ dependencies = [
     "docling>=2.118.0",
     "pypdf>=5.0.0",
     "striprtf>=0.0.20",
+    # 新建办公文档的受控渲染器：Docker 通过 `pip install .` 安装，不能只依赖 uv.lock 的间接依赖。
+    "python-docx>=1.2.0",
+    "python-pptx>=1.0.2",
+    "openpyxl>=3.1.5",
     "jieba>=0.42.1",
     # ── 语音（ASR + TTS 兜底）──
     "openai-whisper>=20250625",

@@ -13,11 +13,11 @@ class DeleteFileSkill(Skill):
     name = "delete_file"
     description = (
         "删除用户电脑上的文件或目录（移入回收站，可恢复）。"
-        "当需要清理临时脚本、缓存或废弃文件时使用。删除移入回收站可恢复，无需逐次确认。"
+        "默认需要用户确认。仅当用户在当前轮明确要求删除该单个文件时，执行器才可免确认。"
     )
     category = "filesystem"
     environment = "client"
-    requires_confirmation = False
+    requires_confirmation = True
     scenes = ["office"]
     parameters_schema = {
         "type": "object",
@@ -34,10 +34,15 @@ class DeleteFileSkill(Skill):
         path = str(params.get("path") or "").strip()
         if not path:
             return SkillResult(success=False, error="缺少路径 path", error_code="INVALID_ARGS", retryable=False)
-        _notify(context, f"（正在请求删除：{path}，请在弹出的确认框中确认）")
+        _notify(context, f"（正在请求删除：{path}）")
+        # The fallback request queue cannot trust tool parameters either.  The
+        # executor alone may place this narrow, current-turn grant in context.
+        explicit_user_delete = bool(
+            context.execution_policy and context.execution_policy.get("explicit_user_delete")
+        )
         return await run_client_skill_request(
             context.user_id,
             self.name,
             {"path": path, "recursive": bool(params.get("recursive"))},
-            False,
+            not explicit_user_delete,
         )

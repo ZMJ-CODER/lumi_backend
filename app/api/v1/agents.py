@@ -18,9 +18,22 @@ from app.core.exceptions import (
     NotFoundException,
     RateLimitException,
 )
-from app.models.agent import ApproveAgentJobRequest, CancelAgentJobRequest, CreateAgentJobRequest
+from app.models.agent import (
+    ApproveAgentJobRequest,
+    CancelAgentJobRequest,
+    CreateAgentJobRequest,
+    ForkAgentJobRequest,
+)
 
 router = APIRouter()
+
+
+async def _get_owned_job(job_id: str, user_id: str):
+    """Resolve ownership before any state-changing job operation."""
+    job = await orchestrator.get_job(job_id)
+    if not job or job.user_id != user_id:
+        raise NotFoundException("任务不存在")
+    return job
 
 
 @router.post("/jobs")
@@ -93,6 +106,51 @@ async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     return {"code": 0, "data": job.model_dump()}
 
 
+@router.get("/jobs/{job_id}/spans")
+async def get_agent_job_spans(
+    job_id: str,
+    limit: int = Query(default=200, ge=1, le=500),
+    payload: dict = Depends(require_auth),
+):
+    """Return redacted node lifecycle spans for diagnosis and branch comparison."""
+    job = await _get_owned_job(job_id, payload["sub"])
+    from app.agents.orchestration.execution_lineage import list_node_spans
+
+    return {
+        "code": 0,
+        "data": {
+            "execution_id": job.execution_id or job.job_id,
+            "parent_execution_id": job.parent_execution_id,
+            "root_execution_id": job.root_execution_id or job.execution_id or job.job_id,
+            "spans": await list_node_spans(job.execution_id or job.job_id, limit),
+        },
+    }
+
+
+@router.post("/jobs/{job_id}/fork")
+async def fork_agent_job(
+    job_id: str,
+    req: ForkAgentJobRequest,
+    request: Request,
+    payload: dict = Depends(require_auth),
+):
+    """Fork a completed execution at a safe node; the original remains immutable."""
+    await _get_owned_job(job_id, payload["sub"])
+    try:
+        job = await orchestrator.fork_job(
+            job_id,
+            node_id=req.node_id,
+            params=req.params,
+            instruction=req.instruction,
+            llm_api_key=request.headers.get("x-llm-api-key") or None,
+        )
+    except UserJobLimitError as exc:
+        raise RateLimitException(str(exc), error_code="OFFICE_JOB_LIMIT") from exc
+    except RuntimeError as exc:
+        raise BadRequestException(str(exc), error_code="OFFICE_FORK_REJECTED") from exc
+    return {"code": 0, "data": job.model_dump(), "message": "已创建新的执行分支"}
+
+
 @router.get("/jobs/{job_id}/stream")
 async def get_agent_job_stream(
     job_id: str,
@@ -123,8 +181,9 @@ async def cancel_agent_job(
     payload: dict = Depends(require_auth),
 ):
     """终止任务：立即停止调度，可选择保留已完成节点."""
+    await _get_owned_job(job_id, payload["sub"])
     job = await orchestrator.cancel_job(job_id, req.keep_completed)
-    if not job or job.user_id != payload["sub"]:
+    if not job:
         raise NotFoundException("任务不存在")
     return {"code": 0, "data": job.model_dump(), "message": "任务已终止"}
 
@@ -136,6 +195,7 @@ async def approve_agent_job(
     payload: dict = Depends(require_auth),
 ):
     """人工审批：批准/拒绝高风险节点（Human-in-the-Loop）."""
+    await _get_owned_job(job_id, payload["sub"])
     try:
         await orchestrator.approve_job(job_id, req.node_id, req.approved)
     except RuntimeError as exc:
@@ -146,8 +206,9 @@ async def approve_agent_job(
 @router.post("/jobs/{job_id}/pause")
 async def pause_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     """暂停任务（不调度新节点；运行中的节点会执行完）."""
+    await _get_owned_job(job_id, payload["sub"])
     job = await orchestrator.pause_job(job_id)
-    if not job or job.user_id != payload["sub"]:
+    if not job:
         raise NotFoundException("任务不存在")
     return {"code": 0, "data": job.model_dump(), "message": "任务已暂停"}
 
@@ -155,7 +216,8 @@ async def pause_agent_job(job_id: str, payload: dict = Depends(require_auth)):
 @router.post("/jobs/{job_id}/resume")
 async def resume_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     """恢复被暂停的任务."""
+    await _get_owned_job(job_id, payload["sub"])
     job = await orchestrator.resume_job(job_id)
-    if not job or job.user_id != payload["sub"]:
+    if not job:
         raise NotFoundException("任务不存在")
     return {"code": 0, "data": job.model_dump(), "message": "任务已恢复"}

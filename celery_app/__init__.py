@@ -2,6 +2,7 @@
 
 from celery import Celery
 from celery.schedules import crontab
+from kombu import Exchange, Queue
 
 from app.core.config import settings
 
@@ -12,6 +13,11 @@ celery_app = Celery(
     include=["celery_app.tasks"],
 )
 
+QUEUE_DURABLE = "durable"
+QUEUE_BEST_EFFORT = "best_effort"
+QUEUE_MAINTENANCE = "maintenance"
+_default_exchange = Exchange("lumi", type="direct")
+
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -19,8 +25,39 @@ celery_app.conf.update(
     timezone="Asia/Shanghai",
     enable_utc=True,
     task_track_started=True,
-    task_time_limit=30 * 60,  # 单任务最长 30 分钟
-    task_soft_time_limit=25 * 60,
+    task_time_limit=settings.CELERY_TASK_TIME_LIMIT_SECONDS,
+    task_soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT_SECONDS,
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    worker_prefetch_multiplier=1,
+    broker_transport_options={
+        "visibility_timeout": settings.CELERY_REDIS_VISIBILITY_TIMEOUT_SECONDS,
+    },
+    task_default_queue=QUEUE_DURABLE,
+    task_default_exchange="lumi",
+    task_default_routing_key=QUEUE_DURABLE,
+    task_queues=(
+        Queue(QUEUE_DURABLE, _default_exchange, routing_key=QUEUE_DURABLE),
+        Queue(QUEUE_BEST_EFFORT, _default_exchange, routing_key=QUEUE_BEST_EFFORT),
+        Queue(QUEUE_MAINTENANCE, _default_exchange, routing_key=QUEUE_MAINTENANCE),
+    ),
+    task_routes={
+        "celery_app.tasks.process_document": {"queue": QUEUE_DURABLE},
+        "celery_app.tasks.rebuild_index": {"queue": QUEUE_DURABLE},
+        "celery_app.tasks.cleanup_vectors": {"queue": QUEUE_DURABLE},
+        "celery_app.tasks.delete_user_data": {"queue": QUEUE_DURABLE},
+        "celery_app.tasks.extract_memories": {"queue": QUEUE_BEST_EFFORT},
+        "celery_app.tasks.maintain_conversation_memory_task": {"queue": QUEUE_BEST_EFFORT},
+        "celery_app.tasks.build_user_profile": {"queue": QUEUE_BEST_EFFORT},
+        "celery_app.tasks.touch_memories": {"queue": QUEUE_BEST_EFFORT},
+        "celery_app.tasks.trim_conversation_messages": {"queue": QUEUE_MAINTENANCE},
+        "celery_app.tasks.build_all_user_profiles": {"queue": QUEUE_MAINTENANCE},
+        "celery_app.tasks.cleanup_memories": {"queue": QUEUE_MAINTENANCE},
+        "celery_app.tasks.cleanup_conversations": {"queue": QUEUE_MAINTENANCE},
+        "celery_app.tasks.cleanup_generated_files": {"queue": QUEUE_MAINTENANCE},
+        "celery_app.tasks.aggregate_token_stats": {"queue": QUEUE_MAINTENANCE},
+        "celery_app.tasks.recover_stale_documents": {"queue": QUEUE_MAINTENANCE},
+    },
 )
 
 # 定时任务（Celery beat）
@@ -49,5 +86,9 @@ celery_app.conf.beat_schedule = {
     "aggregate-token-stats": {
         "task": "celery_app.tasks.aggregate_token_stats",
         "schedule": crontab(hour=2, minute=0),
+    },
+    "recover-stale-documents": {
+        "task": "celery_app.tasks.recover_stale_documents",
+        "schedule": crontab(minute="*/10"),
     },
 }

@@ -43,10 +43,20 @@ class SkillContext:
     user_id: str = ""
     scene: str = "chat"
     conversation_id: str = ""
+    # Correlation id of the currently executing DAG job.  Direct chat skills
+    # may leave it empty; the executor then uses ``conversation_id`` as the
+    # stable fallback.  Keeping both avoids conflating a user conversation
+    # with a retried/resumed office job.
+    job_id: str = ""
     # BYOK：用户自备 API key（由执行器透传，仅本次调用临时使用，不落库）
     llm_api_key: str | None = None
     # 进度通知回调（如"正在请求访问本地文件…"），流式模式下展示给用户
     on_notify: Callable[[str], None] | None = None
+    # Async callback receiving generated text deltas (office text only).
+    on_output: Callable[[str], object] | None = None
+    # Executor-only policy.  Never hydrate this from tool arguments, document
+    # text or persisted conversation state.
+    execution_policy: dict | None = None
 
 
 class Skill(ABC):
@@ -77,6 +87,17 @@ class Skill(ABC):
     preferred_over: list[str] = []
     # 参数 JSON Schema（LLM 调用时校验参数用），空 dict 表示无参数
     parameters_schema: dict = Field(default_factory=dict)
+    # 直接执行契约：DAG Planner 已选定工具后，执行器可用原子步骤的完整
+    # instruction 填充到该参数，而无需再发起 Function Calling。空字符串表示
+    # 此工具只接受 Planner 给出的显式 inputs。
+    direct_instruction_field: str = ""
+    # ``parameters_schema.required`` 是 Function Calling 的通用契约；部分
+    # 工具（如写作）支持一个 instruction 覆盖多个结构字段。这里声明直接
+    # 执行时真正需要的字段，空列表时沿用 JSON Schema 的 required。
+    direct_required_fields: list[str] = []
+    # 兼容 Planner 内部字段与实际工具字段的受控映射，例如 analyze_mode -> mode。
+    # 只允许声明的映射，执行器不会猜测或注入未知参数。
+    direct_input_aliases: dict[str, str] = {}
 
     @abstractmethod
     async def execute(self, params: dict, context: SkillContext | None = None) -> SkillResult:
@@ -127,6 +148,9 @@ class Skill(ABC):
             "intent_tags": list(self.intent_tags),
             "conflicts_with": list(self.conflicts_with),
             "preferred_over": list(self.preferred_over),
+            "direct_instruction_field": self.direct_instruction_field,
+            "direct_required_fields": list(self.direct_required_fields),
+            "direct_input_aliases": dict(self.direct_input_aliases),
         }
 
     def __repr__(self) -> str:

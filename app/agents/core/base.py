@@ -27,6 +27,18 @@ class WorkerContext:
     user_role: str = "user"
     # BYOK：agent 任务提交时临时携带的 API key（内存持有，任务结束即释放，不落库）
     llm_api_key: str | None = None
+    # Original current-turn user request; only this may authorize a narrow
+    # destructive-action confirmation bypass.
+    user_request: str = ""
+    # Optional text delta sink for office tasks.  The orchestrator wires this
+    # to a short-lived Redis stream so API/SSE consumers can render text while
+    # a node is still running.  File/document generators intentionally leave
+    # it unset and return a reviewable artifact instead.
+    on_output: object | None = None
+    # Compatibility/audit field. Execution authorization is bound to exact
+    # normalized tool arguments through ``confirmed_tool_calls`` below.
+    confirmed_tools: frozenset[str] = frozenset()
+    confirmed_tool_calls: frozenset[str] = frozenset()
 
 
 class WorkerAgent(ABC):
@@ -78,6 +90,10 @@ class WorkerAgent(ABC):
             ctx.scene,
             ctx.job_id,
             user_role=ctx.user_role,
+            user_message=ctx.user_request,
+            confirmed_tools=ctx.confirmed_tools,
+            confirmed_tool_calls=ctx.confirmed_tool_calls,
+            on_output=ctx.on_output,
         )
         if not result.success:
             return {
@@ -86,6 +102,8 @@ class WorkerAgent(ABC):
                 "error_code": result.error_code,
                 "retryable": result.retryable,
                 "tool_metadata": result.metadata,
+                "tool": skill_name,
+                "approval_fingerprint": str(result.metadata.get("approval_fingerprint") or ""),
             }
         return {"success": True, "content": result.output, **result.metadata}
 

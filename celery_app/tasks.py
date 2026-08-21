@@ -21,10 +21,15 @@ from celery_app import celery_app
 from app.core.config import settings
 from app.models.db_models import Memory
 from app.services.rag.cleaner import DocumentQualityError
-from app.services.rag.knowledge import process_document_pipeline
+from app.services.rag.knowledge import (
+    mark_document_retryable,
+    process_document_pipeline,
+    recover_stale_document_jobs,
+)
 from app.services import conversation_trim
 from app.services.memory.extraction import extract_memories_from_dialog
 from app.services.memory.profile import build_user_profile
+from app.services.conversation_memory import maintain_conversation_memory
 from app.services.usage import aggregate_daily_stats
 
 
@@ -49,7 +54,13 @@ def process_document(
         engine, factory = _new_async_session()
         try:
             async with factory() as session:
-                return await process_document_pipeline(session, document_id, file_path, user_category=category)
+                return await process_document_pipeline(
+                    session,
+                    document_id,
+                    file_path,
+                    user_category=category,
+                    celery_task_id=str(self.request.id or ""),
+                )
         finally:
             await engine.dispose()
 
@@ -61,7 +72,52 @@ def process_document(
         logger.warning("[Task] process_document 质量不达标，跳过重试: {}", exc)
     except Exception as exc:
         logger.error("[Task] process_document 失败: doc={} err={}", document_id, exc)
+        # Celery 已耗尽重试时，管线写入的 error 是最终状态；不能再置为
+        # pending，否则 watchdog 会把确定性错误当作 worker 丢失重新投递。
+        if self.request.retries >= self.max_retries:
+            raise
+        async def _release() -> None:
+            engine, factory = _new_async_session()
+            try:
+                async with factory() as session:
+                    await mark_document_retryable(session, document_id)
+            finally:
+                await engine.dispose()
+        asyncio.run(_release())
         raise self.retry(exc=exc, countdown=5)
+
+
+@celery_app.task(bind=True, max_retries=1)
+def recover_stale_documents(self):
+    """Requeue documents abandoned by a killed/evicted Celery worker."""
+    async def _run() -> list[dict]:
+        engine, factory = _new_async_session()
+        try:
+            async with factory() as session:
+                return await recover_stale_document_jobs(
+                    session, settings.CELERY_DOCUMENT_STALE_AFTER_SECONDS
+                )
+        finally:
+            await engine.dispose()
+
+    try:
+        documents = asyncio.run(_run())
+        for document in documents:
+            process_document.apply_async(
+                args=(
+                    document["document_id"],
+                    document["file_path"],
+                    document["user_id"],
+                    document["space_id"],
+                    document["category"],
+                )
+            )
+        if documents:
+            logger.warning("[Task] 恢复 {} 个超时文档任务", len(documents))
+        return len(documents)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[Task] recover_stale_documents 失败: {}", exc)
+        raise self.retry(exc=exc, countdown=60)
 
 
 @celery_app.task(bind=True, max_retries=3)
@@ -82,6 +138,25 @@ def extract_memories(self, user_id: str, conversation_id: str, messages: list[di
         logger.debug("[Task] extract_memories 完成: user={} conv={} new={}", user_id, conversation_id, count)
     except Exception as exc:
         logger.error("[Task] extract_memories 失败: user={} conv={} err={}", user_id, conversation_id, exc)
+        raise self.retry(exc=exc, countdown=10)
+
+
+@celery_app.task(bind=True, max_retries=3)
+def maintain_conversation_memory_task(self, user_id: str, conversation_id: str):
+    """异步生成普通会话的段摘要和总摘要，绝不占用 SSE 完成路径。"""
+    async def _run() -> int:
+        engine, factory = _new_async_session()
+        try:
+            async with factory() as session:
+                return await maintain_conversation_memory(session, user_id, conversation_id)
+        finally:
+            await engine.dispose()
+
+    try:
+        count = asyncio.run(_run())
+        logger.debug("[Task] maintain_conversation_memory 完成: conv={} segments={}", conversation_id, count)
+    except Exception as exc:
+        logger.error("[Task] maintain_conversation_memory 失败: conv={} err={}", conversation_id, exc)
         raise self.retry(exc=exc, countdown=10)
 
 

@@ -26,6 +26,7 @@ _MODEL_ACTION_REQUIRED = {
     "MODEL_AUTH_ERROR",
     "MODEL_NOT_FOUND",
     "MODEL_CONFIG_ERROR",
+    "MODEL_TOOL_CALL_UNSUPPORTED",
 }
 
 
@@ -74,7 +75,25 @@ def classify_model_error(error: Exception | str) -> tuple[str, str]:
             "MODEL_NOT_FOUND",
             "当前选择的模型不可用或已下架，办公任务已停止。请在模型设置中切换到可用模型后重试。",
         )
-    if "400" in lowered or "unsupported parameter" in lowered or "invalid_request" in lowered:
+    # A text/JSON capable model may still reject the provider's Function
+    # Calling dialect.  This is a capability mismatch of that request, not an
+    # invalid model name or API key, and must not trigger repeated replanning.
+    if any(marker in lowered for marker in (
+        "tool_choice", "tool choice", "function calling", "function_call",
+        "tool calls are not supported", "tools are not supported",
+    )):
+        return (
+            "MODEL_TOOL_CALL_UNSUPPORTED",
+            "当前模型接口不支持工具调用格式。系统会优先使用已规划参数直接执行；"
+            "若仍无法完成，请切换支持 Function Calling 的模型接口后重试。",
+        )
+    if "unsupported parameter" in lowered or "unknown parameter" in lowered:
+        return (
+            "MODEL_CONFIG_ERROR",
+            "模型服务商拒绝了高级参数，办公任务已停止。系统已默认关闭不兼容的推理参数；"
+            "请重新发起任务，如仍失败请检查自备接口的模型名称和地址。",
+        )
+    if "400" in lowered or "invalid_request" in lowered:
         return (
             "MODEL_CONFIG_ERROR",
             "当前模型配置不被服务商支持，办公任务已停止。请检查模型名称、接口地址和高级参数后重试。",

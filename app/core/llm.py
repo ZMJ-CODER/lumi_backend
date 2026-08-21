@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+import time
 from typing import Any
 
 import httpx
@@ -252,6 +253,8 @@ class LLMClient:
         disable_reasoning_effort: bool = False,
         usage_user_id: str | None = None,
         usage_category: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         """LangChain ``astream``；首个输出前失败才允许切备用供应商。"""
@@ -259,12 +262,14 @@ class LLMClient:
             logger.debug("忽略 ChatModel 流式调用的 legacy 参数: {}", sorted(kwargs))
 
         usage: tuple[int | None, int | None] = (None, None)
+        started_at = time.perf_counter()
+        first_token_at: float | None = None
 
         async def stream_once(call_base_url: str | None, call_api_key: str | None, call_model: str | None):
             nonlocal usage
             chat_model, used_model, used_base_url = await self._model(
                 scene=scene, user_id=usage_user_id, api_key=call_api_key, model=call_model, base_url=call_base_url,
-                timeout=timeout, temperature=None, max_tokens=None, reasoning_effort=reasoning_effort,
+                timeout=timeout, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort,
                 disable_reasoning_effort=disable_reasoning_effort, messages=messages,
             )
             breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
@@ -289,6 +294,14 @@ class LLMClient:
             async for delta in stream_once(base_url, api_key, model):
                 emitted = True
                 text += delta
+                if first_token_at is None:
+                    first_token_at = time.perf_counter()
+                    logger.info(
+                        "LLM 流首 token: scene={} model={} ttft_ms={}",
+                        scene or "default",
+                        used_model,
+                        round((first_token_at - started_at) * 1000, 1),
+                    )
                 yield delta
         except Exception as exc:
             fallback = self._fallback_cfg()
@@ -305,6 +318,13 @@ class LLMClient:
             used_model or settings.DEEPSEEK_MODEL,
             usage[0] if usage[0] is not None else sum(estimate_tokens(str(message.get("content") or "")) for message in messages),
             usage[1] if usage[1] is not None else estimate_tokens(text),
+        )
+        logger.info(
+            "LLM 流完成: scene={} model={} duration_ms={} output_chars={}",
+            scene or "default",
+            used_model,
+            round((time.perf_counter() - started_at) * 1000, 1),
+            len(text),
         )
 
     async def embed(self, texts: list[str], *, scene: str | None = None, model: str | None = None) -> list[list[float]]:

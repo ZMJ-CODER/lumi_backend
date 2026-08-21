@@ -14,11 +14,11 @@ class DeleteProjectFileSkill(Skill):
     description = (
         "删除本地代码项目中的文件或目录（相对项目根，移入回收站可恢复）。"
         "当 agent 创建临时脚本/缓存运行后需要清理，或删除废弃文件时使用。"
-        "删除移入回收站可恢复，无需逐次确认。"
+        "删除移入回收站可恢复，但默认需要用户确认。"
     )
     category = "filesystem"
     environment = "client"
-    requires_confirmation = False
+    requires_confirmation = True
     scenes = ["office"]
     parameters_schema = {
         "type": "object",
@@ -47,5 +47,5 @@ class DeleteProjectFileSkill(Skill):
             context.user_id,
             self.name,
             {"project_id": project_id, "path": rel, "recursive": bool(params.get("recursive"))},
-            False,
+            True,
         )

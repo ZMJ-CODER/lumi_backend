@@ -1,0 +1,23 @@
+[
+  {
+    "id": "knowledge-contract-payment",
+    "scope": "personal_knowledge",
+    "query": "合同的付款条款是什么？",
+    "expected_document_names": ["contract.pdf"],
+    "notes": "替换为测试知识空间中的真实文件名"
+  },
+  {
+    "id": "knowledge-negative",
+    "scope": "personal_knowledge",
+    "query": "光的折射原理是什么？",
+    "expected_document_names": [],
+    "notes": "无相关私有资料时应零命中"
+  },
+  {
+    "id": "memory-preference",
+    "scope": "memory",
+    "query": "按我上次的输出偏好继续",
+    "expected_memory_substrings": ["Markdown"],
+    "notes": "替换为标注账号的真实记忆事实"
+  }
+]

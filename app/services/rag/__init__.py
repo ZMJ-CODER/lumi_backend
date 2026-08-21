@@ -26,6 +26,7 @@ from app.services.rag.knowledge import (
     list_documents,
     list_spaces,
     process_document_pipeline,
+    record_document_enqueue,
     search_public_vectors,
     search_user_knowledge,
     update_space,
@@ -58,6 +59,7 @@ __all__ = [
     "list_documents",
     "delete_document",
     "process_document_pipeline",
+    "record_document_enqueue",
     "search_user_knowledge",
     "search_public_vectors",
 ]

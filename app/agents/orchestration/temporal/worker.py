@@ -27,13 +27,14 @@ async def main() -> None:
         settings.TEMPORAL_ADDRESS, namespace=settings.TEMPORAL_NAMESPACE
     )
     worker = build_worker(client)
+    manifest_worker = build_manifest_worker(client)
     logger.info(
         "Temporal Worker 已启动: {} ns={} queue={}",
         settings.TEMPORAL_ADDRESS,
         settings.TEMPORAL_NAMESPACE,
-        settings.TEMPORAL_TASK_QUEUE,
+        f"{settings.TEMPORAL_TASK_QUEUE}, {settings.TEMPORAL_MANIFEST_TASK_QUEUE}",
     )
-    await worker.run()
+    await asyncio.gather(worker.run(), manifest_worker.run())
 
 
 def build_worker(client) -> "Worker":
@@ -53,6 +54,27 @@ def build_worker(client) -> "Worker":
             execute_node_activity,
             cleanup_job_secrets_activity,
             synthesize_final_answer_activity,
+        ],
+    )
+
+
+def build_manifest_worker(client) -> "Worker":
+    """Worker for the rolling manifest runtime, isolated from frozen static DAGs."""
+    from app.agents.orchestration.temporal.activities import cleanup_job_secrets_activity
+    from app.agents.orchestration.temporal.manifest_activities import (
+        fail_manifest_job_activity,
+        run_manifest_batch_activity,
+    )
+    from app.agents.temporal_manifest_workflows import ManifestWorkflow
+
+    return Worker(
+        client,
+        task_queue=settings.TEMPORAL_MANIFEST_TASK_QUEUE,
+        workflows=[ManifestWorkflow],
+        activities=[
+            run_manifest_batch_activity,
+            fail_manifest_job_activity,
+            cleanup_job_secrets_activity,
         ],
     )
 

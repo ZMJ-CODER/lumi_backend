@@ -124,6 +124,94 @@ def test_office_document_request_with_open_app_uses_free_planning():
     assert result["task_type"] == "free"
 
 
+def test_office_direct_generation_bypasses_dag(monkeypatch):
+    """办公模式的纯文本创作也应走直接模型回复，而非任务编排。"""
+    orch = Orchestrator.__new__(Orchestrator)
+    calls = {"chat": 0, "office": 0}
+
+    async def resolve(content, attachments):
+        return content
+
+    async def prepare(*args, **kwargs):
+        return {"is_first": False, "messages": [{"role": "system", "content": "office"}, {"role": "user", "content": "作文"}], "citations": []}
+
+    async def no_images(*args, **kwargs):
+        return []
+
+    async def title(*args, **kwargs):
+        return "existing"
+
+    async def chat(*args, **kwargs):
+        calls["chat"] += 1
+        return "作文正文"
+
+    async def office(*args, **kwargs):
+        calls["office"] += 1
+        return "错误路径", [], []
+
+    async def finalize(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(orch, "_resolve_transcript", resolve)
+    monkeypatch.setattr(orch, "_prepare_chat", prepare)
+    monkeypatch.setattr(orch, "_load_image_data_uris", no_images)
+    monkeypatch.setattr(orch, "get_conversation_title", title)
+    monkeypatch.setattr(orch, "_call_llm_auto", chat)
+    monkeypatch.setattr(orch, "_run_office_job", office)
+    monkeypatch.setattr(orch, "_finalize_reply", finalize)
+
+    result = asyncio.run(orch.handle_message("u1", "c1", "写一篇作文，800 字以上", scene="office"))
+
+    assert result["content"] == "作文正文"
+    assert result["steps"] == []
+    assert calls == {"chat": 1, "office": 0}
+
+
+def test_office_direct_generation_stream_bypasses_job_events(monkeypatch):
+    """纯文本办公回复在 SSE 中只输出正文和 done，不创建办公 job。"""
+    orch = Orchestrator.__new__(Orchestrator)
+    calls = {"office": 0}
+
+    async def resolve(content, attachments):
+        return content
+
+    async def prepare(*args, **kwargs):
+        return {"is_first": False, "messages": [{"role": "system", "content": "office"}, {"role": "user", "content": "作文"}], "citations": []}
+
+    async def no_images(*args, **kwargs):
+        return []
+
+    async def title(*args, **kwargs):
+        return "existing"
+
+    async def text_stream(*args, **kwargs):
+        yield {"type": "delta", "content": "第一段"}
+        yield {"type": "delta", "content": "第二段"}
+
+    async def office_stream(*args, **kwargs):
+        calls["office"] += 1
+        yield {"type": "job", "job_id": "wrong-path"}
+
+    async def finalize(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(orch, "_resolve_transcript", resolve)
+    monkeypatch.setattr(orch, "_prepare_chat", prepare)
+    monkeypatch.setattr(orch, "_load_image_data_uris", no_images)
+    monkeypatch.setattr(orch, "get_conversation_title", title)
+    monkeypatch.setattr(orch, "_stream_llm_auto", text_stream)
+    monkeypatch.setattr(orch, "_stream_office_job", office_stream)
+    monkeypatch.setattr(orch, "_finalize_reply", finalize)
+
+    async def scenario():
+        return [event async for event in orch.handle_message_stream("u1", "c1", "写一篇作文", scene="office")]
+
+    events = asyncio.run(scenario())
+    assert [event["type"] for event in events] == ["delta", "delta", "done"]
+    assert events[-1]["content"] == "第一段第二段"
+    assert calls == {"office": 0}
+
+
 def test_office_stream_disconnect_does_not_cancel_job(monkeypatch):
     from app.agents.orchestration import orchestrator as agent_orchestrator
 

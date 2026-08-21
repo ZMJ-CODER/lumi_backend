@@ -53,6 +53,44 @@ def test_datetime_request_uses_system_skill_without_model_planning(monkeypatch):
     assert tree.nodes[0].params["preferred_tool"] == "get_datetime"
 
 
+def test_pure_writing_is_not_an_office_execution_request():
+    """文本创作应直接交给聊天模型，不能被某个办公文体模板劫持。"""
+    from app.agents.orchestration.intent import requires_office_execution
+
+    assert not requires_office_execution("帮我写一篇以本手、妙手、俗手为题的作文，800 字以上")
+    assert not requires_office_execution("写一段欢迎词，语气自然亲切")
+    assert not requires_office_execution("帮我起草一封给客户的邮件正文")
+    assert not requires_office_execution("生成一份季度报告")
+    assert requires_office_execution("生成一份季度报告并导出为 Word 文档")
+
+
+def test_office_stream_logging_uses_skill_context_correlation_id(monkeypatch):
+    """Streaming a skill must not assume WorkerContext fields on SkillContext."""
+    from app.agents.skills.base import SkillContext
+    from app.services.office_skill_utils import office_llm
+
+    class FakeLlm:
+        async def chat_stream(self, messages, **kwargs):
+            yield "第一段"
+
+    emitted = []
+
+    async def collect(text):
+        emitted.append(text)
+
+    monkeypatch.setattr("app.services.office_skill_utils.LLMClient", FakeLlm)
+    result = asyncio.run(
+        office_llm(
+            SkillContext(user_id="u1", scene="office", conversation_id="job-1", on_output=collect),
+            "system",
+            "user",
+            stream=True,
+        )
+    )
+    assert result == "第一段"
+    assert emitted == ["第一段"]
+
+
 def test_pattern_auth_error_is_returned_instead_of_falling_back_to_retrieval(monkeypatch):
     planner = LlmPlanner()
 

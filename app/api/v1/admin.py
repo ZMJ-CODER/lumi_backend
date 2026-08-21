@@ -191,9 +191,10 @@ async def upload_public_kb_document(
     )
     await db.commit()
     if is_new:
-        process_document.delay(
+        task = process_document.apply_async(args=(
             str(doc.id), str(file_path), str(doc.user_id), str(doc.space_id), doc.category
-        )
+        ))
+        await kb.record_document_enqueue(db, str(doc.id), task.id)
     return {
         "code": 0,
         "data": {

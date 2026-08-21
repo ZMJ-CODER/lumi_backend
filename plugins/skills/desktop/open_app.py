@@ -51,6 +51,7 @@ class OpenAppSkill(Skill):
     )
     category = "desktop"
     environment = "client"
+    requires_confirmation = True
     scenes = ["chat", "office"]
     parameters_schema = {
         "type": "object",
@@ -76,7 +77,7 @@ class OpenAppSkill(Skill):
             context.user_id if context else "",
             self.name,
             {"name": name, "args": list(params.get("args") or [])},
-            False,
+            True,
         )
         # 本地未安装 → 提供网页版入口，让 LLM 询问用户"打开网页版 or 下载安装"
         if not result.success:

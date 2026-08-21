@@ -7,6 +7,7 @@
 """
 
 import hashlib
+import json
 import math
 import re
 import uuid
@@ -40,6 +41,43 @@ def is_code_filename(filename: str | None) -> bool:
     """按文件名判断是否为代码文件（用于归类 code，避免代码污染普通聊天检索）."""
     name = (filename or "").lower()
     return Path(name).suffix in CODE_FILE_EXTS
+
+
+def _chunk_metadata(filename: str, chunk_text: str, chunk_index: int) -> str:
+    """Persist only verifiable, parser-derived locator data for citations.
+
+    Page and table-cell coordinates are deliberately absent until the parser
+    returns them.  Guessing those locations would make citations look precise
+    while being wrong.  The existing JSON column keeps this forward compatible
+    with richer Docling output later.
+    """
+    ext = Path(filename or "").suffix.lower()
+    lines = [line.strip() for line in chunk_text.splitlines() if line.strip()]
+    headings = [line.lstrip("#").strip() for line in lines if line.startswith("#")]
+    data: dict[str, object] = {
+        "source": Path(filename or "").name,
+        "file_extension": ext,
+        "chunk_index": chunk_index,
+    }
+    if headings:
+        data["heading_path"] = " > ".join(headings[:6])[:500]
+    if ext in {".csv", ".tsv"} and len(lines) > 1:
+        # The chunker repeats the header for every row group.  This is a local
+        # range inside the chunk, not a fabricated source-file row number.
+        data["table_rows_in_chunk"] = max(0, len(lines) - 1)
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def _read_chunk_metadata(raw: object) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 # ── 工具 ─────────────────────────────────────────────
@@ -216,12 +254,25 @@ async def upload_document_file(
         file_hash=file_hash,
         file_size=len(content),
         status="pending",
+        queued_at=datetime.now(timezone.utc),
         chunk_count=0,
         category=normalize_category(category) or settings.RAG_DEFAULT_CATEGORY,
     )
     session.add(doc)
     await session.flush()
     return doc, path, True
+
+
+async def record_document_enqueue(
+    session: AsyncSession, document_id: str, celery_task_id: str | None
+) -> None:
+    """Persist the broker task reference after the document transaction commits."""
+    doc = await session.get(Document, _uuid(document_id), with_for_update=True)
+    if not doc or doc.status not in {"pending", "processing"}:
+        return
+    doc.celery_task_id = celery_task_id or None
+    doc.queued_at = datetime.now(timezone.utc)
+    await session.commit()
 
 
 async def list_documents(
@@ -284,15 +335,36 @@ async def process_document_pipeline(
     document_id: str,
     file_path: str,
     user_category: str | None = None,
+    celery_task_id: str | None = None,
 ) -> int:
     """文档处理管线: 解析 → 清洗 → 质量门 → 分类 → 分块 → 嵌入 → 入库.
 
     Returns:
         入库的分块数量
     """
-    doc = await session.get(Document, _uuid(document_id))
+    doc = await session.get(Document, _uuid(document_id), with_for_update=True)
     if not doc:
         raise LookupError(f"文档不存在: {document_id}")
+
+    # The broker provides at-least-once delivery.  Claim the document in the
+    # database before doing CPU/LLM work so a redelivered task cannot run the
+    # pipeline concurrently.  A worker dying after this commit is recovered by
+    # the scheduled stale-document watchdog.
+    if doc.status == "ready":
+        return int(doc.chunk_count or 0)
+    # Redis redelivery keeps Celery's task id. With a visibility timeout above
+    # the hard limit, the same id may reclaim work after a former worker died;
+    # a different id still belongs to another worker and must not be raced.
+    if doc.status == "processing":
+        if not celery_task_id or doc.celery_task_id != celery_task_id:
+            logger.info("文档任务已被其他 worker 领取，跳过重复执行: {}", document_id)
+            return int(doc.chunk_count or 0)
+    doc.status = "processing"
+    doc.celery_task_id = celery_task_id or doc.celery_task_id
+    doc.processing_started_at = datetime.now(timezone.utc)
+    doc.attempt_count = int(doc.attempt_count or 0) + 1
+    doc.error_message = None
+    await session.commit()
 
     try:
         try:
@@ -337,12 +409,14 @@ async def process_document_pipeline(
                         chunk_index=i,
                         chunk_text=chunk_text,
                         embedding=vec,
+                        metadata_=_chunk_metadata(doc.filename, chunk_text, i),
                     )
                 )
 
         doc.status = "ready"
         doc.chunk_count = len(chunks)
         doc.error_message = None
+        doc.processing_started_at = None
         await session.commit()
         logger.debug("✅ 文档 {} 处理完成，chunks={}", doc.filename, len(chunks))
         return len(chunks)
@@ -352,9 +426,68 @@ async def process_document_pipeline(
         if failed:
             failed.status = "error"
             failed.error_message = str(e)[:500]
+            failed.processing_started_at = None
             await session.commit()
         logger.error("❌ 文档 {} 处理失败: {}", document_id, e)
         raise
+
+
+async def mark_document_retryable(session: AsyncSession, document_id: str) -> None:
+    """Return a transiently failed document to the durable queue state."""
+    doc = await session.get(Document, _uuid(document_id), with_for_update=True)
+    if not doc or doc.status == "ready":
+        return
+    doc.status = "pending"
+    doc.processing_started_at = None
+    doc.queued_at = datetime.now(timezone.utc)
+    await session.commit()
+
+
+async def recover_stale_document_jobs(session: AsyncSession, stale_after_seconds: int) -> list[dict]:
+    """Release documents whose worker likely died before acknowledging.
+
+    This intentionally performs no broker operation inside the transaction.
+    The caller commits the state change first, then publishes fresh tasks.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(1, stale_after_seconds))
+    rows = (
+        await session.execute(
+            select(Document)
+            .where(
+                (
+                    (Document.status == "processing")
+                    & (Document.processing_started_at.is_not(None))
+                    & (Document.processing_started_at < cutoff)
+                )
+                | (
+                    (Document.status == "pending")
+                    & (Document.queued_at.is_not(None))
+                    & (Document.queued_at < cutoff)
+                )
+            )
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars().all()
+    recovered: list[dict] = []
+    now = datetime.now(timezone.utc)
+    for doc in rows:
+        doc.status = "pending"
+        doc.processing_started_at = None
+        doc.queued_at = now
+        doc.celery_task_id = None
+        doc.error_message = "任务执行超时，已自动重新入队"
+        recovered.append(
+            {
+                "document_id": str(doc.id),
+                "file_path": str(_doc_file_path(str(doc.user_id), doc.id, doc.filename)),
+                "user_id": str(doc.user_id),
+                "space_id": str(doc.space_id),
+                "category": doc.category,
+            }
+        )
+    if recovered:
+        await session.commit()
+    return recovered
 
 
 # ── 混合检索 ─────────────────────────────────────────
@@ -583,7 +716,7 @@ async def search_user_knowledge(
     if vec:
         vec_top = settings.RAG_HYBRID_VECTOR_TOP_K
         sql = f"""
-            SELECT c.id AS chunk_id, c.chunk_text, d.filename AS title,
+            SELECT c.id AS chunk_id, c.chunk_text, c.metadata AS chunk_metadata, d.filename AS title,
                    d.id AS document_id, s.is_public, d.created_at AS created_at, d.category AS category,
                    1 - (c.embedding <=> CAST(:qvec AS vector)) AS similarity
             FROM document_chunks c
@@ -623,7 +756,7 @@ async def search_user_knowledge(
         )
         kw_params.update({f"kw{i}": f"%{kw}%" for i, kw in enumerate(keywords)})
         sql = f"""
-            SELECT c.id AS chunk_id, c.chunk_text, d.filename AS title,
+            SELECT c.id AS chunk_id, c.chunk_text, c.metadata AS chunk_metadata, d.filename AS title,
                    d.id AS document_id, s.is_public, d.created_at AS created_at, d.category AS category,
                    ({match_expr}) AS kw_score
             FROM document_chunks c
@@ -653,7 +786,10 @@ async def search_user_knowledge(
     context_parts: list[str] = []
     citations: list[dict] = []
     for i, row in enumerate(fused, 1):
-        context_parts.append(f"[{i}] {row['chunk_text']}")
+        metadata = _read_chunk_metadata(row.get("chunk_metadata"))
+        locator = str(metadata.get("heading_path") or "").strip()
+        prefix = f"[{i}] {row['title']}" + (f" | {locator}" if locator else "")
+        context_parts.append(f"{prefix}\n{row['chunk_text']}")
         created_at = row.get("created_at")
         citations.append(
             {
@@ -669,6 +805,7 @@ async def search_user_knowledge(
                 "category": row.get("category"),
                 "recency": row.get("recency"),
                 "score": round(float(row.get("score") or 0.0), 4),
+                "locator": metadata,
             }
         )
 

@@ -10,6 +10,7 @@ from app.agents.sandbox.registry import available_sandboxes
 from app.agents.skills.base import Skill, SkillResult
 from app.agents.skills.executor import (
     execute_tool_call,
+    is_explicit_user_delete_request,
     get_skills_for_scene,
     get_office_react_capabilities_for_request,
     get_tools_for_scene,
@@ -57,6 +58,36 @@ def test_project_skills_metadata():
     rp = SkillRegistry.get("read_project_file")
     assert rp.environment == "client"
     assert rp.requires_confirmation is False
+
+
+def test_delete_confirmation_bypass_requires_current_explicit_single_file_request():
+    args = {"path": "C:/Users/demo/scores.csv", "recursive": False}
+    assert is_explicit_user_delete_request("请删除 scores.csv", "delete_file", args)
+    assert is_explicit_user_delete_request("把这个文件删掉", "delete_file", args)
+    assert not is_explicit_user_delete_request("清理临时文件", "delete_file", args)
+    assert not is_explicit_user_delete_request("请删除 scores.csv", "delete_file", {**args, "recursive": True})
+    assert not is_explicit_user_delete_request("请删除 scores.csv", "delete_project_file", args)
+
+
+def test_executor_only_signs_delete_bypass_from_current_user_message(monkeypatch):
+    import app.agents.mcp.manager as manager
+    import app.agents.skills.executor as executor
+
+    captured = []
+
+    async def fake_call_skill(*_args, **kwargs):
+        captured.append(kwargs.get("execution_policy"))
+        return {"success": True, "content": "done", "metadata": {}, "is_error": False}
+
+    async def noop_log(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(manager, "call_skill", fake_call_skill)
+    monkeypatch.setattr(executor, "_record_skill_log", noop_log)
+    tool_call = {"function": {"name": "delete_file", "arguments": {"path": "C:/demo/scores.csv"}}}
+    assert asyncio.run(execute_tool_call(tool_call, "u1", "office", user_message="请删除 scores.csv")).success
+    assert asyncio.run(execute_tool_call(tool_call, "u1", "office", user_message="整理一下资料")).success
+    assert captured == [{"explicit_user_delete": True}, None]
 
 
 def test_tool_definition_shape():

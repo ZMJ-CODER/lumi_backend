@@ -19,6 +19,7 @@ class TaskStatus(str, Enum):
     INTERRUPTED = "interrupted"  # 被中断（用户终止/断网超时）
     CANCELLED = "cancelled"      # 用户取消
     SKIPPED = "skipped"          # 依赖失败，跳过
+    ESCALATED = "escalated"      # 节点已上报，由编排器接管后续裁决
 
 
 class JobStatus(str, Enum):
@@ -89,6 +90,12 @@ class Job(BaseModel):
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
     revision: int = 0
+    # Execution lineage is immutable after creation. A fork creates a new Job
+    # and never overwrites the historical execution the user is comparing.
+    execution_id: str = ""
+    parent_execution_id: str | None = None
+    root_execution_id: str | None = None
+    forked_from_node_id: str | None = None
 
 
 class ReviewVerdict(BaseModel):

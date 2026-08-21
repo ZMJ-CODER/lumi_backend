@@ -79,6 +79,13 @@ class LangGraphChatRunner:
 
     async def run(self, messages: list[dict] | list[BaseMessage]) -> tuple[str, list[dict], list[dict]]:
         """执行串行工具循环，返回旧 ``run_skill_loop`` 保持的三元组契约。"""
+        current_user_message = ""
+        for message in reversed(messages):
+            role = message.get("role") if isinstance(message, dict) else getattr(message, "type", "")
+            content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
+            if role in {"user", "human"} and isinstance(content, str):
+                current_user_message = content
+                break
         capabilities = await get_capabilities_for_scene(self.scene, self.user_role)
         tools = []
         for capability in capabilities:
@@ -90,6 +97,7 @@ class LangGraphChatRunner:
                 user_role=self.user_role,
                 on_notify=self._emit,
                 on_result=self._on_tool_result,
+                user_message=current_user_message,
             )
             if tool is not None:
                 tools.append(tool)
@@ -124,8 +132,10 @@ class LangGraphChatRunner:
             # 其余调用由下一轮在已获得结果的上下文中重新判断，避免办公写操作
             # 或客户端请求之间发生竞争。
             if reply.tool_calls:
-                first = reply.tool_calls[0]
-                reply = AIMessage(content=reply.content or "", tool_calls=[first])
+                # Do not rebuild ``AIMessage``: reasoning-capable compatible
+                # providers require their additional reasoning payload to be
+                # replayed after tool results on the next model call.
+                reply.tool_calls = [reply.tool_calls[0]]
             return {"messages": [reply]}
 
         async def before_tool(state: ChatGraphState) -> dict:

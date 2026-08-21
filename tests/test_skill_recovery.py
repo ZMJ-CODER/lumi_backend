@@ -32,3 +32,15 @@ def test_model_auth_and_missing_model_are_actionable():
     assert code == "MODEL_AUTH_ERROR"
     assert "未携带" in message
     assert classify_model_error("404 model not found")[0] == "MODEL_NOT_FOUND"
+    code, message = classify_model_error("400 unsupported parameter: reasoning_effort")
+    assert code == "MODEL_CONFIG_ERROR"
+    assert "高级参数" in message
+
+
+def test_tool_call_dialect_error_is_not_reported_as_model_name_error():
+    code, message = classify_model_error("400 invalid_request: tool_choice is not supported")
+    assert code == "MODEL_TOOL_CALL_UNSUPPORTED"
+    assert "工具调用格式" in message
+    decision = decide_failure(code, message)
+    assert decision.user_action_required is True
+    assert decision.replan_required is False

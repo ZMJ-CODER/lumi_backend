@@ -1,0 +1,88 @@
+# Local-only Temporal stack for the manifest migration spike.
+#
+# Start it with:
+# docker compose -f docker-compose.yml -f docker-compose.temporal.yml --profile temporal up -d
+#
+# This is deliberately a development topology, not the later production
+# deployment. It keeps Temporal's database separate from Lumi's PostgreSQL.
+services:
+  temporal-postgres:
+    image: postgres:16-alpine
+    profiles: ["temporal"]
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+    volumes:
+      - temporal_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  temporal:
+    image: temporalio/auto-setup:1.28
+    profiles: ["temporal"]
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_SEEDS: temporal-postgres
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    ports:
+      - "7233:7233"
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+
+  temporal-ui:
+    image: temporalio/ui:2.34.0
+    profiles: ["temporal"]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000,http://localhost:5173
+    ports:
+      - "8233:8080"
+    depends_on:
+      - temporal
+
+  temporal-worker:
+    build: .
+    profiles: ["temporal"]
+    command: python -m app.agents.orchestration.temporal.worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/lumi_db
+      DATABASE_ADMIN_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379/0
+      TEMPORAL_ADDRESS: temporal:7233
+      AGENT_ORCHESTRATION: manifest_temporal
+      TEMPORAL_RUN_WORKER_INPROCESS: "false"
+    group_add:
+      - "${DOCKER_GID:-0}"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./plugins:/app/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+
+  api:
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      AGENT_ORCHESTRATION: manifest_temporal
+      TEMPORAL_RUN_WORKER_INPROCESS: "false"
+    depends_on:
+      temporal:
+        condition: service_started
+
+volumes:
+  temporal_postgres_data:

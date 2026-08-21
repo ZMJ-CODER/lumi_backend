@@ -8,6 +8,7 @@
   - 每次调用写审计日志（control_logs）
 """
 
+import hashlib
 import json
 import re
 import time
@@ -40,8 +41,28 @@ _CHAT_SKILL_ALLOWLIST = {"web_search", "query_knowledge", "get_datetime"}
 # 一并交给模型。普通办公只保留业务办公、桌面/进程控制、系统信息，以及明确
 # 审核过的检索和隔离脚本能力。开发工具仍可由显式的代码 Worker / M2 计划使用。
 _OFFICE_REACT_ALLOWED_CATEGORIES = {"office", "desktop", "process", "system"}
-_OFFICE_REACT_ALLOWED_SKILLS = {"python_exec", "query_knowledge", "web_search"}
+_OFFICE_REACT_ALLOWED_SKILLS = {"python_exec", "create_office_document", "query_knowledge", "web_search"}
 _OFFICE_REACT_DENIED_SKILLS = {"env"}
+
+
+def tool_call_fingerprint(tool_name: str, args: dict) -> str:
+    """Return a stable approval identity for one exact tool invocation."""
+    payload = json.dumps(
+        {"tool": str(tool_name or ""), "args": args if isinstance(args, dict) else {}},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def is_tool_call_confirmed(
+    tool_name: str,
+    args: dict,
+    confirmed_tool_calls: frozenset[str] | set[str] | None,
+) -> bool:
+    return tool_call_fingerprint(tool_name, args) in (confirmed_tool_calls or set())
 
 # 历史插件不必一次性逐文件改元数据；这里是普通办公 ReAct 已审核能力的
 # 集中语义目录。插件自身声明优先，目录只补齐空字段。后续新 Skill 应直接
@@ -50,6 +71,7 @@ _OFFICE_REACT_ROUTING_METADATA: dict[str, dict] = {
     "office_doc_read": {"domain": "document", "intent_tags": ["阅读", "读取", "文档", "附件", "内容"], "preferred_over": ["document_qa"]},
     "office_doc_analyze": {"domain": "document", "intent_tags": ["分析", "解读", "文档", "表格", "附件"]},
     "office_doc_edit": {"domain": "document", "intent_tags": ["修改", "编辑", "文档", "批注", "修订"]},
+    "create_office_document": {"domain": "document", "intent_tags": ["生成", "创建", "制作", "ppt", "pptx", "word", "docx", "excel", "xlsx", "演示文稿"]},
     "python_exec": {"domain": "data", "intent_tags": ["转换", "导出", "生成文件", "清洗", "合并", "拆分", "csv", "xlsx", "脚本"], "preferred_over": ["office_doc_read", "office_doc_analyze"]},
     "extract_info": {"domain": "document", "intent_tags": ["提取", "字段", "金额", "姓名", "信息"]},
     "invoice_parse": {"domain": "document", "intent_tags": ["发票", "报销", "税额", "金额"]},
@@ -80,7 +102,7 @@ _OFFICE_REACT_ROUTING_METADATA: dict[str, dict] = {
 }
 
 _OFFICE_REACT_DOMAIN_MARKERS = {
-    "document": ("文档", "文件", "附件", "表格", "csv", "xlsx", "pdf", "docx", "提取", "发票"),
+    "document": ("文档", "文件", "附件", "表格", "csv", "xlsx", "pdf", "docx", "ppt", "pptx", "word", "演示文稿", "提取", "发票"),
     "data": ("转换", "转为", "导出", "生成文件", "清洗", "合并", "拆分", "脚本"),
     "research": ("查询", "检索", "搜索", "研究", "竞品", "资料", "知识库", "原因", "分析"),
     "writing": ("撰写", "改写", "润色", "摘要", "报告", "通知", "公文"),
@@ -234,18 +256,18 @@ async def select_capabilities_for_request(
     lower = (request or "").casefold()
     preferred_domains = _preferred_domains(request)
     preferred: set[str] = {"query_knowledge", "web_search", "get_datetime"}
-    file_markers = ("文档", "文件", "csv", "xlsx", "docx", "pdf", "txt", "表格")
+    file_markers = ("文档", "文件", "csv", "xlsx", "docx", "ppt", "pptx", "word", "excel", "pdf", "txt", "表格")
     transform_markers = (
         "转换", "转为", "转成", "导出", "生成文件", "保存为", "另存为", "批量",
-        "清洗", "合并", "拆分", "格式化", "重命名",
+        "清洗", "合并", "拆分", "格式化", "重命名", "创建", "制作",
     )
     coarse_file_script = (
         any(marker in lower for marker in file_markers)
         and any(marker in lower for marker in transform_markers)
     )
     groups = {
-        ("文档", "文件", "csv", "xlsx", "docx", "pdf", "txt", "表格", "转换", "导出"):
-            {"office_doc_read", "office_doc_analyze", "office_doc_edit", "python_exec", "extract_info"},
+        ("文档", "文件", "csv", "xlsx", "docx", "ppt", "pptx", "word", "excel", "pdf", "txt", "表格", "转换", "导出", "创建", "制作"):
+            {"office_doc_read", "office_doc_analyze", "office_doc_edit", "create_office_document", "python_exec", "extract_info"},
         ("邮件", "email", "发送"):
             {"compose_email", "send_email"},
         ("日历", "会议", "日程"):
@@ -275,7 +297,7 @@ async def select_capabilities_for_request(
         if coarse_file_script:
             # 转换/导出需要的是一次产生真实产物的粗粒度能力。读取、写入等细工具
             # 仍保留给文档问答和编辑，但不应在这种请求里压过脚本执行器。
-            if capability.name == "python_exec":
+            if capability.name in {"python_exec", "create_office_document"}:
                 score += 100
             elif capability.name in {"read_file", "write_file", "office_doc_read", "office_doc_analyze"}:
                 score -= 35
@@ -360,6 +382,32 @@ def _parse_arguments(raw) -> dict:
     return {}
 
 
+_EXPLICIT_DELETE_RE = re.compile(r"(?:删除|删掉|删去|移除|清理|扔进回收站)")
+
+
+def is_explicit_user_delete_request(user_message: str, skill_name: str, args: dict) -> bool:
+    """Return whether this *current user message* authorizes one file deletion.
+
+    This deliberately does not inspect tool output, document text, memories or
+    a planner-produced instruction.  Those are all untrusted for destructive
+    actions.  Recursive directory deletes always require a local confirmation.
+    """
+    if skill_name != "delete_file" or bool(args.get("recursive")):
+        return False
+    message = str(user_message or "").strip()
+    if not message or not _EXPLICIT_DELETE_RE.search(message):
+        return False
+    target = str(args.get("path") or "").strip().replace("\\", "/")
+    filename = target.rsplit("/", 1)[-1].casefold()
+    normalized = message.replace("\\", "/").casefold()
+    # A named target is the strongest signal.  Pronouns are allowed only for a
+    # single non-recursive file because the user intentionally delegated that
+    # exact current-context action, not a directory cleanup.
+    return bool(filename and filename in normalized) or any(
+        marker in normalized for marker in ("这个文件", "该文件", "刚才的文件", "上述文件", "此文件")
+    )
+
+
 def _has_json_ref(value) -> bool:
     if isinstance(value, dict):
         return "$ref" in value or any(_has_json_ref(v) for v in value.values())
@@ -394,11 +442,18 @@ async def execute_tool_call(
     conversation_id: str = "",
     on_notify=None,
     user_role: str = "user",
+    user_message: str = "",
+    llm_api_key: str | None = None,
+    confirmed_tools: frozenset[str] | set[str] | None = None,
+    confirmed_tool_calls: frozenset[str] | set[str] | None = None,
+    on_output=None,
 ) -> SkillResult:
     """执行一次技能调用：校验 → 高危拦截 → 执行 → 审计."""
     fn = tool_call.get("function") or {}
     name = str(fn.get("name") or "")
     args = _parse_arguments(fn.get("arguments"))
+    # Reserved policy fields can never originate from a model tool call.
+    args.pop("_lumi_execution_policy", None)
     capability = await get_tool_capability(name, scene, user_role)
     if capability is None:
         registered = SkillRegistry.get(name)
@@ -435,13 +490,21 @@ async def execute_tool_call(
                 retryable=False,
                 metadata={"server": server_name, "tool": tool_name},
             )
-        if capability.requires_confirmation and capability.confirmation_mode != "client":
+        if (
+            capability.requires_confirmation
+            and capability.confirmation_mode != "client"
+            and not is_tool_call_confirmed(name, args, confirmed_tool_calls)
+        ):
             return SkillResult(
                 success=False,
                 error="该 MCP 操作需要用户确认",
                 error_code="NEEDS_CONFIRMATION",
                 retryable=False,
-                metadata={"server": server_name, "tool": tool_name},
+                metadata={
+                    "server": server_name,
+                    "tool": tool_name,
+                    "approval_fingerprint": tool_call_fingerprint(name, args),
+                },
             )
         raw = await call_tool(
             server_name,
@@ -493,52 +556,76 @@ async def execute_tool_call(
             metadata={"skill": name, "required": skill.permission, "actual": user_role},
         )
 
-    # 高危操作：server/sandbox 技能执行前必须确认（暂不支持，一律拒绝）；
+    explicit_user_delete = is_explicit_user_delete_request(user_message, name, args)
+    # 高危操作：server/sandbox 技能执行前必须确认；用户当前指令明确要求
+    # 删除同一目标时由已有窄范围策略放行。client 技能仍由用户端确认。
     # client 技能由用户端弹窗确认（执行体内部处理），不在此拦截
-    if skill.requires_confirmation and skill.environment != "client":
+    if (
+        skill.requires_confirmation
+        and skill.environment != "client"
+        and not explicit_user_delete
+        and not is_tool_call_confirmed(name, args, confirmed_tool_calls)
+    ):
         result = SkillResult(
             success=False,
             error="该操作属于高危行为，需要用户确认后才能执行",
             error_code="NEEDS_CONFIRMATION",
             retryable=False,
-            metadata={"skill": name, "params": args},
+            metadata={
+                "skill": name,
+                "params": args,
+                "approval_fingerprint": tool_call_fingerprint(name, args),
+            },
         )
         await _record_skill_log(user_id, skill, args, result)
         return result
 
+    execution_policy = (
+        {"explicit_user_delete": True}
+        if explicit_user_delete
+        else None
+    )
     context = SkillContext(
         user_id=user_id,
         scene=scene,
         conversation_id=conversation_id,
+        job_id=conversation_id,
+        llm_api_key=llm_api_key,
         on_notify=on_notify,
+        on_output=on_output,
+        execution_policy=execution_policy,
     )
+    # All registered Skills now pass through the MCP gateway.  The gateway
+    # chooses Electron MCP for client capabilities and an in-process adapter
+    # for backend/sandbox capabilities, preserving one timeout/result path.
+    from app.agents.mcp.manager import call_skill
+
+    raw = await call_skill(
+        skill,
+        args,
+        context=context,
+        task_id=conversation_id or None,
+        on_progress=on_notify,
+        execution_policy=execution_policy,
+    )
+    result = SkillResult(
+        success=bool(raw.get("success")) and not bool(raw.get("is_error")),
+        output=str(raw.get("content") or "") if not raw.get("is_error") else "",
+        error=str(raw.get("content") or "技能执行失败") if raw.get("is_error") else None,
+        error_code=raw.get("error_code") or ("EXEC_ERROR" if raw.get("is_error") else None),
+        retryable=bool(raw.get("retryable", False)),
+        metadata=raw.get("metadata") or {},
+    )
+    # server/sandbox results may contain stack traces, environment variables or
+    # absolute paths; client paths are user-device data and remain untouched.
+    if skill.environment in {"server", "sandbox"}:
+        result = sanitize_server_result(result)
     try:
-        result = await skill.execute(args, context)
-        # server/sandbox 结果可能含异常栈、环境变量或绝对路径；在进入 LLM、
-        # 任务快照、前端与审计日志之前统一剥离。客户端路径由用户设备产生，不在此处理。
-        if skill.environment in {"server", "sandbox"}:
-            result = sanitize_server_result(result)
-        try:
-            from app.core.observability import inc_skill_call
+        from app.core.observability import inc_skill_call
 
-            inc_skill_call(name, result.success)
-        except Exception:  # noqa: BLE001
-            pass
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("技能执行异常: {} | {}", name, exc)
-        result = SkillResult(
-            success=False,
-            error=str(exc) or "技能执行失败",
-            error_code="EXEC_ERROR",
-            retryable=True,
-            metadata={"skill": name},
-        )
-        try:
-            from app.core.observability import inc_skill_call
-
-            inc_skill_call(name, False)
-        except Exception:  # noqa: BLE001
-            pass
+        inc_skill_call(name, result.success)
+    except Exception:  # noqa: BLE001
+        pass
     await _record_skill_log(user_id, skill, args, result)
     return result
 
@@ -648,6 +735,7 @@ async def _run_skill_loop_legacy(
     on_text=None,
     on_progress=None,
     user_role: str = "user",
+    user_message: str = "",
 ) -> tuple[str, list[dict], list[dict]]:
     """兼容工具循环（仅供非 LangChain mock 与图运行故障后的降级）.
 
@@ -725,6 +813,7 @@ async def _run_skill_loop_legacy(
                 conversation_id,
                 on_notify=emit_progress,
                 user_role=user_role,
+                user_message=user_message,
             )
             records.append(
                 {
@@ -855,4 +944,5 @@ async def run_skill_loop(
         on_text=on_text,
         on_progress=on_progress,
         user_role=user_role,
+        user_message=str(messages[-1].get("content") or "") if messages else "",
     )

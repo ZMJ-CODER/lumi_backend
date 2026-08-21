@@ -21,6 +21,7 @@ from loguru import logger
 from app.agents.base import AgentContext
 from app.agents.registry import AgentRegistry
 from app.agents.skills.executor import run_skill_loop
+from app.agents.orchestration.intent import requires_office_execution
 from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.llm import LLMClient
@@ -30,9 +31,11 @@ from app.services.speech import speech_to_text
 from app.services.content_codec import normalize_content, serialize_content
 from app.services.rag.query_rewriter import get_retrieval_query
 from app.services.rag.knowledge import search_user_knowledge
+from app.services.rag.scope import RetrievalScope, has_memory_reference, route_chat_retrieval_scope
 from app.services.scene_manager import get_scene_config, get_scene_knowledge_tags
 from app.services.memory.retrieval import search_user_memories
 from app.services.memory.privacy import resolve_decrypt_candidates
+from app.services.conversation_memory import ConversationRecall, retrieve_conversation_recall
 from app.services.prompts import get_base_system_prompt, get_prompt_content
 from app.services.usage import (
     CATEGORY_CHAT,
@@ -85,6 +88,17 @@ _CHAT_TOOL_GRAPH_KEYWORDS = (
     "现在几点", "当前时间", "当前日期", "几号", "星期几",
 )
 
+def _should_retrieve_chat_knowledge(
+    content: str, attachments: list | None, retrieval_query: str | None
+) -> bool:
+    """兼容旧调用方：普通聊天的资料检索必须由 scope 路由授权。"""
+    return route_chat_retrieval_scope(content, attachments, retrieval_query) == RetrievalScope.PERSONAL_KNOWLEDGE
+
+
+def _needs_memory_fact_retrieval(content: str, retrieval_query: str | None) -> bool:
+    """兼容旧调用方：仅检测历史引用，不承担跨库优先级裁决。"""
+    return has_memory_reference(content, retrieval_query)
+
 
 def _looks_like_chitchat(question: str) -> bool:
     """简单闲聊/寒暄判断：很短且不含搜索意图关键词 → 跳过联网决策（省一次 LLM 调用）."""
@@ -130,6 +144,18 @@ def _chat_model_override(scene: str, thinking_mode: str, llm_api_key: str | None
     }
 
 
+async def _get_chat_model_override(
+    scene: str, thinking_mode: str, llm_api_key: str | None, user_id: str
+) -> dict | None:
+    """默认档位可以覆盖服务端默认值，但绝不能覆盖用户的模型选择。"""
+    if scene != "chat" or llm_api_key:
+        return None
+    cfg = await get_llm_config(scene, user_id=user_id)
+    if cfg.get("source") == "user":
+        return None
+    return _chat_model_override(scene, thinking_mode, llm_api_key)
+
+
 # 角色提示词下的场景行为补充（角色负责性格，场景负责行为）
 _SCENE_BEHAVIOR = {
     "chat": "",
@@ -141,6 +167,16 @@ _SCENE_BEHAVIOR = {
 _TITLE_SYSTEM_PROMPT = (
     "你是对话标题生成助手。用一句话概括这段对话的主题，10~20 个字，"
     "不要引号、不要句号结尾、不要任何多余解释，只输出标题本身。"
+)
+
+# 纯文本生成不应被办公编排或某个专业 Skill 的格式覆盖。这个规则描述产品
+# 行为而非某个文体的模板：保留用户的目标、约束和表达方式，按需直接交付。
+_DIRECT_GENERATION_PROMPT = (
+    "\n\n[直接生成]\n"
+    "本轮不需要任何外部工具或文件操作。请直接完成用户要求的内容，"
+    "以用户给出的题目、体裁、受众、语气、长度和格式为最高创作约束。"
+    "不要把普通内容擅自改写成公文、通知或固定模板；未要求标题、称谓、落款、"
+    "提纲或说明时不要额外添加。只交付用户需要的成品。"
 )
 
 
@@ -195,9 +231,22 @@ class Orchestrator:
     # ── 对话摘要（压缩短期记忆，节省 token） ────────────
 
     async def get_conversation_summary(self, conversation_id: str) -> str | None:
-        """获取会话摘要（Redis，可能为空）."""
+        """获取会话总摘要，Redis 为热缓存，数据库状态为回退来源。"""
         r = get_redis()
-        return await r.get(SUMMARY_KEY.format(conversation_id=conversation_id))
+        cached = await r.get(SUMMARY_KEY.format(conversation_id=conversation_id))
+        if cached:
+            return cached
+        try:
+            from app.services.conversation_memory import get_conversation_global_summary
+
+            async with async_session_factory() as session:
+                summary = await get_conversation_global_summary(session, conversation_id)
+            if summary:
+                await r.set(SUMMARY_KEY.format(conversation_id=conversation_id), summary, ex=604800)
+            return summary or None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("读取会话总摘要回退失败: {}", exc)
+            return None
 
     async def save_conversation_summary(self, conversation_id: str, summary: str) -> None:
         """保存会话摘要（7 天 TTL，与上下文一致）."""
@@ -441,15 +490,23 @@ class Orchestrator:
             logger.warning("获取用户画像失败: {}", exc)
             return None
 
-    async def retrieve_memory_facts(self, user_id: str, query: str) -> list[dict]:
+    async def retrieve_memory_facts(self, user_id: str, query: str, top_k: int | None = None) -> list[dict]:
         """按当前问题混合检索用户记忆事实（L1 只含占位符）；命中后异步强化."""
         if not query or not query.strip():
             return []
         try:
             async with async_session_factory() as session:
                 facts = await search_user_memories(
-                    session, user_id, query, top_k=settings.MEMORY_FACT_TOP_K
+                    session, user_id, query, top_k=top_k or settings.MEMORY_FACT_TOP_K
                 )
+                # 向量低分命中宁可不注入；关键词命中没有 similarity 时仍保留，
+                # 以避免“用户明确提到文件名/项目名却被向量误伤”。
+                facts = [
+                    item
+                    for item in facts
+                    if item.get("similarity") is None
+                    or float(item.get("similarity") or 0) >= settings.MEMORY_FACT_MIN_VECTOR_SIMILARITY
+                ]
                 ids = [str(f["memory_id"]) for f in facts]
                 if ids:
                     try:
@@ -464,12 +521,40 @@ class Orchestrator:
             return []
 
     async def get_memory_context(
-        self, user_id: str, query: str = "", retrieval_query: str | None = None
+        self,
+        user_id: str,
+        query: str = "",
+        retrieval_query: str | None = None,
+        thinking_mode: str = "fast",
+        retrieve_facts: bool = True,
     ) -> tuple[dict | None, list[dict]]:
         """注入内容 = 画像（常驻） + 与当前问题相关的事实（按需召回）."""
-        profile = await self.get_user_profile(user_id)
-        facts = await self.retrieve_memory_facts(user_id, retrieval_query or query)
+        profile_task = asyncio.create_task(self.get_user_profile(user_id))
+        facts_task = (
+            asyncio.create_task(
+                self.retrieve_memory_facts(
+                    user_id,
+                    retrieval_query or query,
+                    top_k=5 if thinking_mode == "think" else 3,
+                )
+            )
+            if retrieve_facts and _needs_memory_fact_retrieval(query, retrieval_query)
+            else None
+        )
+        profile = await profile_task
+        facts = await facts_task if facts_task is not None else []
         return profile, facts
+
+    async def get_conversation_recall_context(
+        self, conversation_id: str, query: str, thinking_mode: str
+    ) -> ConversationRecall:
+        """按档位加载段摘要与少量原文，不让长历史污染普通聊天上下文。"""
+        try:
+            async with async_session_factory() as session:
+                return await retrieve_conversation_recall(session, conversation_id, query, thinking_mode)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("会话历史回捞失败，继续无回捞回复: {}", str(exc)[:160])
+            return ConversationRecall()
 
     # ── 消息处理主流程 ──────────────────────────────────
 
@@ -517,8 +602,30 @@ class Orchestrator:
             attachments,
             reply_style,
             retrieve_knowledge=scene != "office",
+            thinking_mode=thinking_mode,
         )
         image_uris = await self._load_image_data_uris(user_id, attachments)
+
+        office_execution = scene == "office" and requires_office_execution(content, office_docs)
+        if scene == "office" and not office_execution:
+            # 办公模式也可以是纯文本创作/问答。不要为此生成虚假的任务、工具
+            # 步骤或公文模板；直接使用完整对话上下文获得正常 C 端生成体验。
+            prep["messages"][0]["content"] += _DIRECT_GENERATION_PROMPT
+            reply = await self._call_llm_auto(
+                user_id, prep["messages"], scene, image_uris, content, prep["citations"],
+                conversation_id, llm_api_key, thinking_mode=thinking_mode,
+            )
+            title = await self.get_conversation_title(conversation_id)
+            if prep["is_first"] and not title:
+                title = await self._generate_title(content, user_id, llm_api_key)
+                if title:
+                    await self.save_conversation_title(conversation_id, title)
+            await self._finalize_reply(conversation_id, user_id, reply, scene)
+            return {
+                "message_id": str(uuid.uuid4()), "content": reply,
+                "citations": prep["citations"], "scene": scene, "local_mode": False,
+                "title": title or "", "transcript": transcript, "steps": [],
+            }
 
         if scene == "office":
             reply, office_steps, office_citations = await self._run_office_job(
@@ -636,6 +743,7 @@ class Orchestrator:
             attachments,
             reply_style,
             retrieve_knowledge=scene != "office",
+            thinking_mode=thinking_mode,
         )
         image_uris = await self._load_image_data_uris(user_id, attachments)
         message_id = str(uuid.uuid4())
@@ -648,6 +756,9 @@ class Orchestrator:
 
         full_text = ""
         atomic_steps: dict[str, dict] = {}
+        office_execution = scene == "office" and requires_office_execution(content, office_docs)
+        if scene == "office" and not office_execution:
+            prep["messages"][0]["content"] += _DIRECT_GENERATION_PROMPT
         stream = (
             self._stream_office_job(
                 user_id,
@@ -658,7 +769,7 @@ class Orchestrator:
                 prep["citations"],
                 user_role,
             )
-            if scene == "office"
+            if office_execution
             else self._stream_llm_auto(
                 user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key,
                 thinking_mode=thinking_mode,
@@ -677,9 +788,22 @@ class Orchestrator:
             yield evt
 
         if title_task is not None:
-            title = await title_task
-            if title:
-                await self.save_conversation_title(conversation_id, title)
+            try:
+                # A title is cosmetic.  It starts concurrently with the main
+                # response, but must never hold the terminal SSE event hostage
+                # when a provider is slow (this used to add tens of seconds to
+                # an otherwise completed first office reply).
+                title = await asyncio.wait_for(asyncio.shield(title_task), timeout=2.0)
+                if title:
+                    await self.save_conversation_title(conversation_id, title)
+            except asyncio.TimeoutError:
+                title_task.cancel()
+                await asyncio.gather(title_task, return_exceptions=True)
+                logger.info("会话标题生成超时，已跳过以完成回复: {}", conversation_id[:12])
+            except Exception as exc:  # noqa: BLE001
+                # Title generation is cosmetic. Do not turn a fully streamed
+                # answer into an SSE error when Redis/LLM is briefly unavailable.
+                logger.warning("生成或保存会话标题失败（回复继续）：{}", str(exc)[:200])
 
         # 普通模式短句回复：把整段回复切成多条短句（存储时合并为一次交互）
         segments = (
@@ -688,7 +812,12 @@ class Orchestrator:
             else None
         )
         # 保存助手回复 + 摘要 + 记忆抽取（办公模式不做长期记忆）
-        await self._finalize_reply(conversation_id, user_id, full_text, scene, segments=segments)
+        try:
+            await self._finalize_reply(conversation_id, user_id, full_text, scene, segments=segments)
+        except Exception as exc:  # noqa: BLE001
+            # Context/memory persistence is best-effort after delivery.  The
+            # client must receive ``done`` rather than a misleading interrupt.
+            logger.warning("回复上下文持久化失败（不影响已完成回复）：{}", str(exc)[:200])
 
         yield {
             "type": "done",
@@ -835,6 +964,8 @@ class Orchestrator:
             JobStatus.INTERRUPTED,
         }
         missing_snapshots = 0
+        output_cursor = 0
+        streamed_answer = ""
         try:
             while True:
                 routing = getattr(job, "routing", None) or {}
@@ -871,6 +1002,16 @@ class Orchestrator:
                     if last.get(node.id) != signature:
                         last[node.id] = signature
                         yield {"type": "step", "job_id": job.job_id, "step": step}
+                # Text-producing office skills publish deltas independently of
+                # status snapshots. Drain them while the node is still running.
+                from app.services.office_stream import read_deltas
+
+                deltas, output_cursor = await read_deltas(job.job_id, output_cursor)
+                for delta in deltas:
+                    text = str(delta.get("content") or "")
+                    if text:
+                        streamed_answer += text
+                        yield {"type": "delta", "content": text, "job_id": job.job_id}
                 if job.status in terminal:
                     break
                 await asyncio.sleep(0.15)
@@ -931,8 +1072,12 @@ class Orchestrator:
             raise
         citations.extend(self._job_citations(job))
         answer = self._job_answer(job)
-        if answer:
+        if answer and not streamed_answer:
             yield {"type": "delta", "content": answer}
+        elif answer and not answer.startswith(streamed_answer):
+            yield {"type": "delta", "content": "\n\n" + answer}
+        elif answer and len(answer) > len(streamed_answer):
+            yield {"type": "delta", "content": answer[len(streamed_answer):]}
 
     # ── 消息处理公共流程 ────────────────────────────────
 
@@ -961,8 +1106,10 @@ class Orchestrator:
         attachments: list | None,
         reply_style: str | None = None,
         retrieve_knowledge: bool = True,
+        thinking_mode: str = "fast",
     ) -> dict:
         """LLM 调用前的公共准备：上下文、长期记忆、消息构建、RAG 检索、隐私解密门."""
+        started_at = time.perf_counter()
         # 1. 保存用户消息到上下文
         is_first = len(await self.get_context(conversation_id)) == 0
         user_msg = {"role": "user", "content": content, "timestamp": datetime.now(timezone.utc).isoformat()}
@@ -975,13 +1122,31 @@ class Orchestrator:
         # 2. 上下文 + 长期记忆（画像常驻 + 事实按需召回）
         history = await self.get_context(conversation_id)
         summary = await self.get_conversation_summary(conversation_id)
+        conversation_recall = ConversationRecall(global_summary=summary or "")
         if scene == "office":
             # 办公模式：无长期记忆注入，只靠短期窗口保证当次任务连贯
             profile, memory_facts = None, []
+            retrieval_scope = RetrievalScope.NONE
         else:
-            profile, memory_facts = await self.get_memory_context(
-                user_id, query=content, retrieval_query=retrieval_query
+            # 一个普通问题默认只读一个语料 scope。资料引用优先于历史引用，
+            # 防止文件问答被用户画像/旧任务事实污染；跨 scope 组合只能由
+            # 显式 DAG 节点完成，不能在聊天预处理阶段静默拼接。
+            retrieval_scope = (
+                route_chat_retrieval_scope(content, attachments, retrieval_query)
+                if scene == "chat"
+                else RetrievalScope.PERSONAL_KNOWLEDGE
             )
+            profile, memory_facts = await self.get_memory_context(
+                user_id,
+                query=content,
+                retrieval_query=retrieval_query,
+                thinking_mode=thinking_mode,
+                retrieve_facts=retrieval_scope == RetrievalScope.MEMORY,
+            )
+            conversation_recall = await self.get_conversation_recall_context(
+                conversation_id, content, thinking_mode
+            )
+            summary = conversation_recall.global_summary or summary
 
         # 3. 消息列表（System Prompt + 画像 + 记忆 + 摘要 + 历史 + 当前提问）
         system_prompt = await self._get_system_prompt(user_id, scene)
@@ -993,13 +1158,22 @@ class Orchestrator:
                 "每段尽量简短（一般不超过 30 字），整体控制在 3-8 段，避免机械逐字断句。"
             )
         messages = self._build_messages(
-            scene, profile, memory_facts, history, content, summary, system_prompt=system_prompt
+            scene,
+            profile,
+            memory_facts,
+            history,
+            content,
+            summary,
+            system_prompt=system_prompt,
+            thinking_mode=thinking_mode,
+            conversation_recall=conversation_recall,
         )
 
         # 4. RAG 知识库检索（按场景过滤空间标签）。办公模式由 DAG
         # 的显式检索节点决定是否查询，不能在进入规划前隐式检索。
         citations: list[dict] = []
-        if retrieve_knowledge:
+        should_retrieve = retrieve_knowledge and retrieval_scope == RetrievalScope.PERSONAL_KNOWLEDGE
+        if should_retrieve:
             knowledge_tags = get_scene_knowledge_tags(scene)
             search_query = await get_retrieval_query(content, retrieval_query, scene, user_id)
             rag_context, citations = await self._retrieve_knowledge(user_id, search_query, knowledge_tags)
@@ -1019,6 +1193,14 @@ class Orchestrator:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("隐私解密门处理失败: {}", exc)
 
+        logger.info(
+            "聊天准备完成: scene={} scope={} duration_ms={} rag={} memory_facts={}",
+            scene,
+            retrieval_scope.value,
+            round((time.perf_counter() - started_at) * 1000, 1),
+            should_retrieve,
+            len(memory_facts),
+        )
         return {"is_first": is_first, "messages": messages, "citations": citations}
 
     async def _get_system_prompt(self, user_id: str, scene: str) -> str:
@@ -1058,7 +1240,7 @@ class Orchestrator:
         scene: str = "chat",
         segments: list[str] | None = None,
     ) -> None:
-        """保存助手回复到上下文，触发摘要与长期记忆抽取.
+        """保存助手回复到上下文，触发长期记忆抽取。
 
         content 以 JSON 数组形态存储（多短句合并为一次交互），
         后续"多条短句回复"策略接入时直接往数组里追加分段即可。
@@ -1069,7 +1251,8 @@ class Orchestrator:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         await self.append_context(conversation_id, assistant_msg)
-        await self._maybe_summarize_context(conversation_id, user_id, scene)
+        # 会话段摘要只允许读取消息持久化后的原文，由 conversations API
+        # 在 commit 后投递 Celery；这里绝不能在 SSE 收尾等待一次摘要模型调用。
         # 办公模式：无长期记忆
         if scene != "office":
             await self._maybe_extract_memories(conversation_id, user_id)
@@ -1146,7 +1329,7 @@ class Orchestrator:
     ) -> str:
         """阻塞版：技能循环（开启时）或 模型自主联网 + 场景模型回复."""
         # 先确定本次实际使用的模型（快速/思考档覆盖优先），再决定图片直传还是 VL 描述成文本
-        override = _chat_model_override(scene, thinking_mode, llm_api_key)
+        override = await _get_chat_model_override(scene, thinking_mode, llm_api_key, user_id)
         if image_uris:
             target_model = override["model"] if override else str(
                 (await get_llm_config(scene, self._llm.provider, user_id=user_id)).get("model") or ""
@@ -1220,7 +1403,7 @@ class Orchestrator:
     ):
         """流式版：技能循环（开启时）或 模型自主联网，最终回复流式产出."""
         # 先确定本次实际使用的模型（快速/思考档覆盖优先），再决定图片直传还是 VL 描述成文本
-        override = _chat_model_override(scene, thinking_mode, llm_api_key)
+        override = await _get_chat_model_override(scene, thinking_mode, llm_api_key, user_id)
         if image_uris:
             target_model = override["model"] if override else str(
                 (await get_llm_config(scene, self._llm.provider, user_id=user_id)).get("model") or ""
@@ -1398,6 +1581,8 @@ class Orchestrator:
         current: str,
         summary: str | None = None,
         system_prompt: str | None = None,
+        thinking_mode: str = "fast",
+        conversation_recall: ConversationRecall | None = None,
     ) -> list[dict]:
         """构建 LLM 请求消息列表（画像 + 记忆事实 + 摘要 + 历史按 token 预算裁剪）."""
         system_prompt = system_prompt or get_scene_config(scene)["system_prompt"]
@@ -1414,20 +1599,43 @@ class Orchestrator:
         if facts:
             system_prompt += f"\n\n[用户长期记忆]\n{self._render_facts(facts)}"
 
+        # 仅在当前问题明确指向旧上下文时注入段摘要；它们是带来源的参考，
+        # 不是新的系统指令。原文片段作为独立消息加入，避免淹没当前窗口。
+        recall = conversation_recall or ConversationRecall()
+        if recall.segment_summaries:
+            blocks = "\n".join(f"- {item}" for item in recall.segment_summaries)
+            system_prompt += f"\n\n[相关此前话题摘要，仅作参考]\n{blocks}"
+
         # 隐私规则（恒常附加）
         system_prompt += _PRIVACY_RULES
 
         messages = [{"role": "system", "content": system_prompt}]
 
         # 注入最近历史（token 预算内），排除最后一条（当前消息已包含）
-        # 普通模式超大窗口（25 万 token）；办公模式只保短期窗口（6 万 token）
-        budget = (
-            settings.LLM_HISTORY_MAX_TOKENS_WORK
-            if scene == "office"
-            else settings.LLM_HISTORY_MAX_TOKENS
-        )
+        # 普通模式只保留注意力窗口；更早内容由摘要和按需回捞承担。
+        if scene == "office":
+            budget = settings.LLM_HISTORY_MAX_TOKENS_WORK
+        else:
+            rounds = (
+                settings.CONVERSATION_RECENT_ROUNDS_THINK
+                if thinking_mode == "think"
+                else settings.CONVERSATION_RECENT_ROUNDS_FAST
+            )
+            budget = min(settings.LLM_HISTORY_MAX_TOKENS, max(1, rounds) * 1000)
         for msg in self._trim_history(history, budget):
             messages.append({"role": msg["role"], "content": normalize_content(msg.get("content") or "")})
+
+        if recall.raw_messages:
+            evidence = "\n".join(
+                f"{('用户' if item.get('role') == 'user' else '助手')}: {item.get('content', '')}"
+                for item in recall.raw_messages
+            )
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "[此前对话原文片段，仅用于回答当前问题]\n" + evidence,
+                }
+            )
 
         messages.append({"role": "user", "content": current})
         return messages
@@ -1461,7 +1669,9 @@ class Orchestrator:
             t = _TYPE_CN.get(str(f.get("memory_type") or ""), str(f.get("memory_type") or "记忆"))
             imp = f.get("importance")
             suffix = f"（重要度 {round(float(imp), 1)}）" if imp is not None else ""
-            lines.append(f"- [{t}] {text}{suffix}")
+            created_at = f.get("created_at")
+            source = f"，记录于 {str(created_at)[:10]}" if created_at else ""
+            lines.append(f"- [{t}] {text}{suffix}{source}")
         return "\n".join(lines)
 
     async def _retrieve_knowledge(self, user_id: str, query: str, space_tags: list[str]) -> tuple[str, list[dict]]:

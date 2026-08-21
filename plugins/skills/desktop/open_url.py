@@ -17,6 +17,7 @@ class OpenUrlSkill(Skill):
     )
     category = "desktop"
     environment = "client"
+    requires_confirmation = True
     scenes = ["chat", "office"]
     parameters_schema = {
         "type": "object",
@@ -40,5 +41,5 @@ class OpenUrlSkill(Skill):
             context.user_id if context else "",
             self.name,
             {"url": url},
-            False,
+            True,
         )

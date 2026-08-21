@@ -35,6 +35,7 @@ async def make_skill_tool(
     user_role: str = "user",
     on_notify: Callable[[str | dict], None] | None = None,
     on_result: Callable[[SkillResult], Any] | None = None,
+    user_message: str = "",
 ) -> StructuredTool | None:
     """构造绑定到当前用户/场景的工具实例，不能跨用户复用。"""
     capability = await get_tool_capability(name, scene, user_role)
@@ -53,6 +54,7 @@ async def make_skill_tool(
             conversation_id,
             on_notify=on_notify,
             user_role=user_role,
+            user_message=user_message,
         )
         # ToolNode 会把抛出的异常转成一条工具消息，但那会中断我们的审计/引用
         # 收集，也会把底层异常文本暴露给模型。失败统一作为受控工具结果回填，

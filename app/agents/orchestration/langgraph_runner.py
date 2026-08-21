@@ -28,6 +28,7 @@ class NodeGraphState(TypedDict, total=False):
     action: Literal["retry", "finish"]
     succeeded: bool
     recovery: dict[str, Any]
+    escalation: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class NodeGraphOutcome:
     error_code: str | None = None
     retries: int = 0
     recovery: dict[str, Any] | None = None
+    escalation: dict[str, Any] | None = None
 
 
 AttemptHook = Callable[[int], Awaitable[None]]
@@ -90,6 +92,7 @@ class LangGraphNodeRunner:
             error_code=state.get("error_code"),
             retries=int(state.get("attempt") or 0),
             recovery=state.get("recovery"),
+            escalation=state.get("escalation"),
         )
 
     async def _execute(self, state: NodeGraphState) -> dict:
@@ -183,6 +186,20 @@ class LangGraphNodeRunner:
             "user_action_required": decision.user_action_required,
             "switched_tool": decision.try_alternative,
         }
+        # The worker may emit an explicit L2/L3 protocol object.  Otherwise
+        # preserve existing Skill recovery semantics through a conservative
+        # compatibility mapping.  This data only leaves the node; it does not
+        # grant the worker permission to mutate the enclosing DAG.
+        from app.agents.orchestration.escalation import coerce_escalation, infer_escalation
+
+        explicit = result.get("escalation") if isinstance(result, dict) else None
+        signal = coerce_escalation(explicit, default_node_id=self.node.id) or infer_escalation(
+            error_code=error_code,
+            recovery=recovery,
+            message=str(error or ""),
+            node_id=self.node.id,
+        )
+        escalation = signal.model_dump(mode="json") if signal else None
         attempt = int(state.get("attempt") or 0)
         may_retry = attempt < self.max_retries and (decision.retry_same or decision.try_alternative)
         if may_retry:
@@ -193,6 +210,7 @@ class LangGraphNodeRunner:
                 "error": error,
                 "error_code": error_code,
                 "recovery": recovery,
+                "escalation": escalation,
                 "action": "retry",
                 "succeeded": False,
             }
@@ -200,6 +218,7 @@ class LangGraphNodeRunner:
             "error": error,
             "error_code": error_code,
             "recovery": recovery,
+            "escalation": escalation,
             "action": "finish",
             "succeeded": False,
         }

@@ -66,6 +66,10 @@ def prepare_node_safety(node: TaskNode, user_id: str, job_id: str) -> None:
     if node.agent == "react_step":
         # 动态工具在运行时才确定，先用用户级写锁隔离整个循环。
         claims.append(ResourceClaim(key=f"react:user:{user_id}", mode="write"))
+    if node.agent == "office_document":
+        # A generated artifact is an intentional write, isolated by the job
+        # directory and still recorded as an effect for replay protection.
+        claims.append(ResourceClaim(key=f"office-output:{job_id}", mode="write"))
     if tool:
         try:
             from app.agents.skills.registry import SkillRegistry
@@ -88,7 +92,7 @@ def prepare_node_safety(node: TaskNode, user_id: str, job_id: str) -> None:
     doc_write = (
         str(inputs.get("mode") or "").lower() in {"edit", "write", "commit"}
         or "edit" in tool.lower()
-        or node.agent == "office_script"
+        or node.agent in {"office_script", "office_document"}
     )
     for doc_id in doc_ids:
         claims.append(ResourceClaim(key=f"office-doc:{doc_id}", mode="write" if doc_write else "read"))

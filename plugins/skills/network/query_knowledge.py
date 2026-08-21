@@ -19,6 +19,8 @@ class QueryKnowledgeSkill(Skill):
     category = "network"
     environment = "server"
     scenes = ["chat", "office", "game"]
+    direct_instruction_field = "query"
+    direct_required_fields = ["query"]
     parameters_schema = {
         "type": "object",
         "properties": {

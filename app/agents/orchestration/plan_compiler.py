@@ -193,13 +193,57 @@ def _validate_plan_step_contract(
 
 def _critical_path(nodes: list[TaskNode]) -> int:
     durations: dict[str, int] = {}
-    by_id = {node.id: node for node in nodes}
     for node in nodes:
         own = _NODE_COST.get(node.agent, (3_000, 30_000))[1]
         durations[node.id] = own + max((durations.get(dep, 0) for dep in node.depends_on), default=0)
     # Invalid dependencies are reported separately; this value remains useful
     # for logging even when a plan is rejected.
     return max(durations.values(), default=0)
+
+
+# These are execution requirements rather than domain entities.  They are
+# deliberately small and multilingual: the LLM remains responsible for the
+# actual wording and decomposition, while the compiler only catches a clearly
+# omitted deliverable such as "translate ... then make a table".
+_REQUEST_REQUIREMENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("summarize", ("总结", "提炼", "概括", "要点", "summarize", "summary", "key points", "extract")),
+    ("translate", ("翻译", "翻成", "译成", "translate", "translation", "translated")),
+    ("table", ("表格", "markdown table", "markdown 表", "table", "tabular", "rows", "columns")),
+    ("send", ("发送", "发给", "转发", "send", "email", "e-mail", "forward")),
+)
+
+
+def validate_request_coverage(request: str, nodes: list[TaskNode]) -> list[PlanViolation]:
+    """Reject an accepted plan that silently drops an explicit second action.
+
+    This is intentionally a guardrail, not a semantic planner.  It activates
+    only when at least two independently recognizable deliverables are present
+    in the request, so ordinary one-step prompts remain untouched.  Node text
+    is inspected after normalization; a corrective planning pass can therefore
+    satisfy the same contract with any valid worker or tool.
+    """
+    request_text = str(request or "").casefold()
+    requested: list[tuple[str, tuple[str, ...]]] = [
+        (name, markers)
+        for name, markers in _REQUEST_REQUIREMENTS
+        if any(marker.casefold() in request_text for marker in markers)
+    ]
+    if len(requested) < 2 or not nodes:
+        return []
+    node_text = "\n".join(
+        json.dumps(node.model_dump(mode="json"), ensure_ascii=False, default=str)
+        for node in nodes
+    ).casefold()
+    missing = [
+        name for name, markers in requested
+        if not any(marker.casefold() in node_text for marker in markers)
+    ]
+    return [
+        PlanViolation(
+            code="PLAN_COVERAGE",
+            message="计划未覆盖用户明确要求的动作：" + "、".join(missing),
+        )
+    ] if missing else []
 
 
 async def build_capability_snapshot(

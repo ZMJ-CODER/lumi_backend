@@ -50,7 +50,7 @@ class ManifestWorkflow:
                 )
             )
             await workflow.wait_condition(
-                lambda: activity_task.done() or self._cancel_requested or self._paused
+                lambda task=activity_task: task.done() or self._cancel_requested or self._paused
             )
             if self._cancel_requested:
                 activity_task.cancel()

@@ -78,7 +78,7 @@ class OfficeTextAgent(WorkerAgent):
             params = {"text": instruction}
         result = await self.run_skill(skill, params, ctx)
         if result.get("success"):
-            result["step_title"] = _STEP_TITLES.get(task, "办公文本任务")
+            result["step_title"] = self._STEP_TITLES.get(task, "办公文本任务")
         return result
 
 

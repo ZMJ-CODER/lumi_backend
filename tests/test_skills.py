@@ -235,6 +235,24 @@ def test_office_react_candidate_limit_is_eight_or_less():
     assert 1 <= len(selected) <= 8
 
 
+def test_office_react_scopes_clear_schedule_request(monkeypatch):
+    import app.agents.skills.executor as exec_mod
+
+    capabilities = [
+        ToolCapability(name="todo_manager", domain="schedule"),
+        ToolCapability(name="calendar_manager", domain="schedule"),
+        ToolCapability(name="query_knowledge", domain="research"),
+        ToolCapability(name="web_search", domain="research"),
+    ]
+
+    async def fake_select(*args, **kwargs):
+        return capabilities
+
+    monkeypatch.setattr(exec_mod, "select_capabilities_for_request", fake_select)
+    selected = asyncio.run(get_office_react_capabilities_for_request("列一下当前待办事项"))
+    assert {item.name for item in selected} == {"todo_manager", "calendar_manager"}
+
+
 def test_semantic_score_is_only_a_legal_pool_tiebreaker(monkeypatch):
     import app.agents.skills.executor as exec_mod
 

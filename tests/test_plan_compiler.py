@@ -3,10 +3,13 @@ from types import SimpleNamespace
 
 from app.agents.orchestration import plan_compiler
 from app.agents.orchestration.models import TaskNode
+from app.agents.orchestration.plan_compilation_service import PlanCompilationService
+from app.agents.orchestration.plan_context import PlanRequestContext
 from app.agents.orchestration.plan_compiler import (
     CapabilitySnapshot,
     CompileDecision,
     compile_plan,
+    validate_request_coverage,
 )
 
 
@@ -91,3 +94,86 @@ def test_compiler_rejects_malformed_explicit_tool_input(monkeypatch):
 
     assert result.decision == CompileDecision.REPLAN_REQUIRED
     assert any(item.code == "PARAM_TYPE" for item in result.violations)
+
+
+def test_request_coverage_catches_dropped_multilingual_deliverables():
+    partial = TaskNode(
+        id="t1",
+        name="提炼重点",
+        agent="direct_llm",
+        params={"instruction": "提炼 release note 的三个重点"},
+    )
+
+    violations = validate_request_coverage(
+        "先提炼重点，然后 translate 成英文，最后做一个 Markdown table",
+        [partial],
+    )
+
+    assert [item.code for item in violations] == ["PLAN_COVERAGE"]
+    assert "translate" in violations[0].message
+    assert "table" in violations[0].message
+
+
+def test_request_coverage_accepts_one_node_when_it_contains_all_deliverables():
+    complete = TaskNode(
+        id="t1",
+        name="完成请求",
+        agent="direct_llm",
+        params={"instruction": "提炼重点、translate 成英文并生成 Markdown table"},
+    )
+
+    assert validate_request_coverage(
+        "先提炼重点，然后 translate 成英文，最后做一个 Markdown table",
+        [complete],
+    ) == []
+
+
+def test_compilation_feedback_replans_when_request_action_is_dropped(monkeypatch):
+    async def fake_snapshot(**_kwargs):
+        return CapabilitySnapshot(
+            scene="office", user_role="user", workers=["direct_llm"], tools={}, fingerprint="test"
+        )
+
+    monkeypatch.setattr(plan_compiler, "build_capability_snapshot", fake_snapshot)
+    calls = []
+    partial = type("Tree", (), {
+        "nodes": [TaskNode(id="t1", name="提炼", agent="direct_llm", params={"instruction": "提炼重点"})],
+        "error": None,
+        "error_code": None,
+        "plan_text": None,
+    })()
+    complete = type("Tree", (), {
+        "nodes": [TaskNode(
+            id="t1",
+            name="提炼并翻译",
+            agent="direct_llm",
+            params={"instruction": "提炼重点、translate 成英文并生成 Markdown table"},
+        )],
+        "error": None,
+        "error_code": None,
+        "plan_text": None,
+    })()
+
+    async def replan(context):
+        calls.append(context.prior_summaries)
+        return complete
+
+    async def scenario():
+        service = PlanCompilationService(
+            workers={"direct_llm": object()},
+            plan_with_context=replan,
+        )
+        return await service.compile_with_feedback(
+            partial,
+            routing={},
+            user_role="user",
+            context=PlanRequestContext(
+                user_id="u1",
+                request="先提炼重点，然后 translate 成英文，最后做一个 Markdown table",
+            ),
+        )
+
+    result = asyncio.run(scenario())
+    assert result.error is None
+    assert len(result.nodes) == 1
+    assert calls and "PLAN_COVERAGE" not in calls[0]

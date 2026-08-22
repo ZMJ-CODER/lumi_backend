@@ -3,7 +3,6 @@
 import asyncio
 from types import SimpleNamespace
 
-from app.agents.skills.capability import ToolCapability
 from app.services import mcp_bindings
 
 

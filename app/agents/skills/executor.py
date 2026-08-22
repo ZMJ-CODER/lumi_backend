@@ -393,6 +393,18 @@ async def get_office_react_capabilities_for_request(
         denied_names=_OFFICE_REACT_DENIED_SKILLS,
         user_id=user_id,
     )
+    # Once the request contains a clear domain marker, unrelated generic tools
+    # should not fill the remaining candidate slots.  Keep knowledge retrieval
+    # available for document requests because it is the read-only companion to
+    # document analysis; all other domains stay within their declared scope.
+    preferred_domains = _preferred_domains(request)
+    if preferred_domains:
+        allowed_domains = set(preferred_domains)
+        if "document" in preferred_domains:
+            allowed_domains.add("research")
+        scoped = [item for item in capabilities if item.domain in allowed_domains]
+        if scoped:
+            capabilities = scoped
     excluded_names = excluded_names or set()
     return [item for item in capabilities if item.name not in excluded_names]
 

@@ -54,7 +54,11 @@ class PlanCompilationService:
         user_role: str,
     ):
         """Compile a tree and permit one planner correction with violations."""
-        from app.agents.orchestration.plan_compiler import CompileDecision, compile_plan
+        from app.agents.orchestration.plan_compiler import (
+            CompileDecision,
+            compile_plan,
+            validate_request_coverage,
+        )
 
         async def compile_current(current_tree):
             result = await compile_plan(
@@ -64,6 +68,10 @@ class PlanCompilationService:
                 user_id=context.user_id,
                 workers=self._workers,
             )
+            coverage_violations = validate_request_coverage(context.request, result.nodes)
+            if coverage_violations:
+                result.violations.extend(coverage_violations)
+                result.decision = CompileDecision.REPLAN_REQUIRED
             routing["plan_compiler"] = {
                 "decision": result.decision.value,
                 "capability_fingerprint": result.capabilities.fingerprint,

@@ -13,7 +13,6 @@
 import asyncio
 import hashlib
 import json
-import time
 
 from app.agents.orchestration.execution_backend import (
     LegacyDagBackend,
@@ -61,6 +60,15 @@ from app.repositories.memory_repository import MemoryRepository
 from app.repositories.project_repository import ProjectRepository, SqlAlchemyProjectRepository
 from app.agents.orchestration.workers import WORKERS
 from app.core.config import settings
+
+# Kept as module-level compatibility exports for API callers and older tests;
+# the orchestrator itself does not need to reference these exception classes.
+__all__ = [
+    "AgentOrchestrator",
+    "ActiveConversationJobError",
+    "AgentBackpressureError",
+    "UserJobLimitError",
+]
 
 
 class AgentOrchestrator:

@@ -33,7 +33,13 @@ class JobForkService:
         run_job: Callable[[str], Awaitable[None]],
     ) -> None:
         self._repository = repository
-        self._workers = workers if workers is not None else WORKERS
+        if workers is None:
+            # Import lazily: workers registers role modules, some of which
+            # import the orchestration package during application startup.
+            from app.agents.orchestration.workers import WORKERS
+
+            workers = WORKERS
+        self._workers = workers
         self._list_jobs = list_jobs
         self._start_heartbeat = start_heartbeat
         self._live_jobs = live_jobs

@@ -11,7 +11,7 @@ import hashlib
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import TypeVar
 
 import httpx
 
@@ -120,9 +120,9 @@ return state.failures
             async with _local_lock:
                 state = _local_states.setdefault(self._key, _LocalCircuitState())
                 if state.opened_until > now:
-                    raise CircuitOpenError(self.name, state.opened_until - now)
+                    raise CircuitOpenError(self.name, state.opened_until - now) from None
                 if state.probe_until > now:
-                    raise CircuitOpenError(self.name, state.probe_until - now)
+                    raise CircuitOpenError(self.name, state.probe_until - now) from None
                 if state.opened_until:
                     state.probe_until = now + settings.CIRCUIT_BREAKER_HALF_OPEN_PROBE_SECONDS
 

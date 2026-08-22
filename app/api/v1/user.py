@@ -13,7 +13,6 @@ from app.core.exceptions import BadRequestException, ForbiddenException, NotFoun
 from app.core.security import hash_password, validate_password_strength, verify_password
 from app.models.db_models import (
     Attachment,
-    CodeEmbedding,
     Conversation,
     DailyTokenStat,
     Document,
@@ -25,7 +24,6 @@ from app.models.db_models import (
     Message,
     OfficeSession,
     Project,
-    ProjectIndex,
     RefreshToken,
     User,
     UserPreference,

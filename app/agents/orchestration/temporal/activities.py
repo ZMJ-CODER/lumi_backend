@@ -8,11 +8,10 @@ worker.execute → 质检 → React 重试（最多 max_retries 次）。
 import asyncio
 import json
 
-from loguru import logger
 from temporalio import activity
 import temporalio.exceptions
 
-from app.agents.orchestration.models import TaskNode, TaskStatus
+from app.agents.orchestration.models import TaskNode
 from app.agents.orchestration.review import get_reviewer
 from app.agents.orchestration.workers import WORKERS, WorkerContext
 from app.agents.orchestration.temporal.client import load_job_llm_config

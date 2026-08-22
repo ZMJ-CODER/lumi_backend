@@ -77,7 +77,9 @@ return 1
                 self._RESERVE_LUA, 1, key, now, now + lease, settings.AGENT_SUBMISSION_MAX_INFLIGHT, token, lease
             )
             if int(result) != 1:
-                raise AdmissionBackpressureError("办公任务正在繁忙处理，请稍后重试或切换普通模式对话")
+                raise AdmissionBackpressureError(
+                    "办公任务正在繁忙处理，请稍后重试或切换普通模式对话"
+                ) from None
             return
         except AdmissionBackpressureError:
             raise
@@ -102,9 +104,13 @@ return 1
                 settings.AGENT_GLOBAL_ACTIVE_JOB_LIMIT, settings.AGENT_USER_ACTIVE_JOB_LIMIT, token, job_id, lease,
             )
             if int(result) == 0:
-                raise AdmissionBackpressureError("办公任务容量已满，请稍后重试或切换普通模式对话")
+                raise AdmissionBackpressureError(
+                    "办公任务容量已满，请稍后重试或切换普通模式对话"
+                ) from None
             if int(result) < 0:
-                raise AdmissionBackpressureError("当前有任务正在进行中，请切换到普通模式对话")
+                raise AdmissionBackpressureError(
+                    "当前有任务正在进行中，请切换到普通模式对话"
+                ) from None
             return
         except AdmissionBackpressureError:
             raise

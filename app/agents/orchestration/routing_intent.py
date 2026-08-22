@@ -70,41 +70,53 @@ _ROUTE_OBJECTS = {
 _ACTION_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("lookup_history", ("上次", "上回", "之前", "此前", "前面", "前文", "刚才那个", "刚才的结果", "刚才说的", "刚才那份", "当时", "历史记录", "那个结果", "之前的结果", "最后确认")),
     ("converse", ("你怎么看", "你觉得", "怎么看待", "聊聊", "说说", "谈谈")),
-    ("send", ("发送", "发出", "转发", "发给", "发我")),
+    ("send", ("发送", "发出", "转发", "发给", "发我", "send", "email", "e-mail", "forward")),
     # Keep the bare verb useful for commands, but exclude common nouns such as
     # “执行难度/执行成本”; substring matching must not turn analysis criteria
     # into a system-command risk.
-    ("execute", ("打开", "启动", "运行", "执行", "访问", "关闭", "结束进程", "跑起来", "丢给测试环境")),
-    ("modify", ("修改", "编辑", "删除", "移除", "更新", "保存", "上传", "下载", "改一下", "修一下", "修好")),
-    ("transform", ("转换", "转成", "转为", "改成", "导出", "整理", "清洗", "合并", "拆分", "弄成", "做成", "压缩")),
-    ("create", ("创建", "新建", "制作", "生成", "写一份", "写个", "编写", "一份新的", "画个", "存成")),
-    ("analyze", ("分析", "判断", "对比", "比较", "比一下", "比一比", "比对", "放一起比", "总结", "概括", "提取", "归纳", "判断问题", "问题在哪", "怎么回事", "对不对", "是不是", "有没有问题", "有没有坑", "风险", "哪里不对", "哪儿不对", "标一下", "标出来", "看着不太对", "探索", "规律")),
-    ("read", ("读取", "阅读", "查看", "解析", "看看", "看下", "看一下", "看一遍", "读完", "过一遍", "过一下", "瞅瞅", "说明内容")),
-    ("query", ("查询", "查一下", "查查", "搜索", "搜一下", "检索", "了解", "解释", "说明", "告诉我", "列出", "找出", "找找", "找一下", "怎么看", "想知道", "会不会", "有没有", "能不能", "帮我确认", "催一下进度", "啥情况", "什么情况")),
+    ("execute", ("打开", "启动", "运行", "执行", "访问", "关闭", "结束进程", "跑起来", "丢给测试环境", "run", "execute", "open")),
+    ("modify", ("修改", "编辑", "删除", "移除", "更新", "保存", "上传", "下载", "改一下", "修一下", "修好", "edit", "delete", "update", "save")),
+    ("transform", ("转换", "转成", "转为", "改成", "导出", "整理", "清洗", "合并", "拆分", "弄成", "做成", "压缩", "translate", "翻译", "convert", "format", "rewrite", "翻成")),
+    ("create", ("创建", "新建", "制作", "生成", "写一份", "写个", "编写", "一份新的", "画个", "存成", "create", "make", "generate", "table", "markdown table")),
+    ("analyze", ("分析", "判断", "对比", "比较", "比一下", "比一比", "比对", "放一起比", "总结", "概括", "提取", "提炼", "归纳", "判断问题", "问题在哪", "怎么回事", "对不对", "是不是", "有没有问题", "有没有坑", "风险", "哪里不对", "哪儿不对", "标一下", "标出来", "看着不太对", "探索", "规律", "summarize", "summary", "extract", "analyze", "compare", "review")),
+    ("read", ("读取", "阅读", "查看", "解析", "看看", "看下", "看一下", "看一遍", "读完", "过一遍", "过一下", "瞅瞅", "说明内容", "read", "inspect", "look at")),
+    ("query", ("查询", "查一下", "查查", "搜索", "搜一下", "检索", "了解", "解释", "说明", "告诉我", "列出", "找出", "找找", "找一下", "怎么看", "想知道", "会不会", "有没有", "能不能", "帮我确认", "催一下进度", "啥情况", "什么情况", "query", "search", "find out", "tell me")),
 )
 
 _OBJECT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("task_history", ("上次", "上回", "之前", "此前", "前面", "前文", "刚才那个", "刚才的结果", "刚才说的", "刚才那份", "当时", "历史记录", "那个结果", "最后确认")),
-    ("external_resource", ("网页", "网址", "网上", "网络", "公开资料", "外部资料", "链接")),
+    ("external_resource", ("网页", "网址", "网上", "网络", "公开资料", "外部资料", "链接", "web", "website", "online", "internet")),
     ("application", ("应用", "软件", "程序", "浏览器", "计算器", "进程", "桌面")),
-    ("message", ("消息", "通知", "收件人", "联系人")),
-    ("document", ("文档", "文件", "附件", "资料", "材料", "表格", ".pdf", ".docx", ".xlsx", ".csv", ".txt")),
-    ("data", ("数据", "记录", "内容", "字段", "信息", "东西")),
+    ("message", ("消息", "通知", "收件人", "联系人", "message", "email", "recipient")),
+    ("document", ("文档", "文件", "附件", "资料", "材料", "表格", "document", "file", "attachment", "spreadsheet", ".pdf", ".docx", ".xlsx", ".csv", ".txt")),
+    ("data", ("数据", "记录", "内容", "字段", "信息", "东西", "data", "content", "fields", "release note")),
     ("task_result", ("结果", "日志", "报错", "错误", "异常", "返回", "空的", "乱码", "重复行", "字符串", "401", "404", "500", "missing_")),
     ("project", ("项目", "代码库", "仓库")),
 )
 
-_NETWORK_MARKERS = ("最新", "实时", "今天", "本周", "本月")
+_NETWORK_MARKERS = ("最新", "实时", "今天", "本周", "本月", "latest", "real-time", "today", "this week", "this month")
 _NETWORK_CONTEXT_MARKERS = ("现在外面", "现在几点", "现在时间", "现在天气", "当前股价", "当前版本", "当前天气")
 _RETRIEVAL_MARKERS = ("知识库", "上传的", "上传内容", "附件中", "资料中", "文档中", "文件中", "根据我的资料", "根据文档", "根据文件")
-_MULTI_CONNECTORS = ("然后", "接着", "之后", "并且", "同时", "另外", "还要", "最后", "再", "以及")
+_MULTI_CONNECTORS = ("然后", "接着", "之后", "并且", "同时", "另外", "还要", "最后", "再", "以及", "then", "next", "after that", "and then", "finally", "also")
 _VAGUE_REFERENTS = ("那个", "这份", "这个", "该文件", "它", "相关内容", "想要的样子")
 _VAGUE_ACTIONS = ("处理一下", "处理下", "整理一下", "弄一下", "做成我想要的样子", "帮我处理")
 _BARE_QUERY_COMMANDS = ("查询", "搜索", "检索")
 _GREETING_MARKERS = ("你好", "嗨", "哈喽", "早上好", "晚上好", "在吗")
-_FEEDBACK_MARKERS = ("结果不对", "跑出来不对", "又错了", "有问题", "乱码", "异常", "报错", "错误", "数字不对")
+_FEEDBACK_MARKERS = (
+    "结果不对", "跑出来不对", "又错了", "有问题", "乱码", "异常", "报错", "错误", "数字不对",
+    "output is garbled", "garbled output", "wrong result", "something went wrong", "what went wrong",
+    "error", "failed", "failure", "bug", "incorrect",
+)
 _IMPLICIT_HISTORY_MARKERS = ("也发给", "再发给", "同样发给", "改成", "它怎么", "它又", "图表里")
-_DYNAMIC_MARKERS = ("探索一下", "探索", "根据结果", "能修就修", "按这个思路继续", "继续做下去")
+_DYNAMIC_MARKERS = (
+    "探索一下", "探索", "根据结果", "能修就修", "按这个思路继续", "继续做下去",
+    "try to fix", "try a low-risk fix", "if possible fix", "diagnose and fix",
+    "figure out what went wrong", "determine what went wrong", "根据分析结果",
+)
+_CONDITIONAL_MARKERS = (
+    "如果", "若", "要是", "否则", "不然", "根据结果", "满足条件", "超过", "低于", "达到",
+    "if ", "unless ", "otherwise", "depending on", "when ", "exceeds", "below",
+)
 
 
 def _matches(text: str, markers: tuple[str, ...]) -> bool:
@@ -241,7 +253,11 @@ def infer_route_intent(
         or _matches(text, ("发消息", "调用系统", "操作系统"))
     )
     has_feedback = "task_result" in objects
-    requires_dynamic = _matches(text, _DYNAMIC_MARKERS) or has_feedback
+    # Conditional branches and repair requests cannot be compiled safely from
+    # the initial text: the next action depends on an intermediate result.
+    # Route them to the bounded dynamic runner even when only one lexical
+    # action was recognized.
+    requires_dynamic = _matches(text, _DYNAMIC_MARKERS) or _matches(text, _CONDITIONAL_MARKERS) or has_feedback
     # “看下现在什么情况”会同时命中 read + query，但它仍是一条查询链路；
     # 只有不同的执行动作才算多步骤，避免把网络查询误送进 ReAct。
     execution_actions = [action for action in actions if action not in {"read", "query", "converse"}]
@@ -250,7 +266,7 @@ def infer_route_intent(
     # 单次知识检索（例如“对比 A.pdf 和 B.pdf”）。
     multiple_targets = (
         len(re.findall(r"\.[a-z0-9]{1,10}", text, flags=re.IGNORECASE)) >= 2
-        or bool(re.search(r"(?:两|2|多个|几份|几个|几 个).{0,8}(?:文件|文档|材料|资料)", text))
+        or bool(re.search(r"(?:两|2|多个|几份|几个|几 个).{0,8}(?:文件|文档|材料|资料|附件)", text))
     )
     has_multiple_actions = action_count >= 2 or multiple_targets or (
         action_count >= 1 and _matches(text, _MULTI_CONNECTORS)
@@ -329,6 +345,12 @@ def should_use_llm_route_fallback(intent: RouteIntent, request: str) -> bool:
     text = (request or "").strip()
     if not text or intent.needs_clarification and intent.requires_side_effect:
         return False
+    # Purely foreign-language requests use the classifier as a semantic
+    # fallback even when a few English verbs happen to match the lexical
+    # table. Mixed-language requests retain their deterministic Chinese
+    # scaffolding and can still be routed without an extra model round trip.
+    if re.search(r"[A-Za-z]{4}", text) and not re.search(r"[\u4e00-\u9fff]", text):
+        return True
     if not intent.actions:
         return True
     if intent.confidence < 0.7:

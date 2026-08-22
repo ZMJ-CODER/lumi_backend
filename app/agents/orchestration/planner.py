@@ -703,17 +703,6 @@ class LlmPlanner(Planner):
         office_docs = [dict(item) for item in context.office_docs]
         prior_summaries = context.prior_summaries
         level = ComplexityLevel(level)
-        args = (
-            user_id,
-            request,
-            scene,
-            project_id,
-            project_ids,
-            llm_api_key,
-            clarification_answer,
-            office_docs,
-            prior_summaries,
-        )
         if bypass_fast_paths:
             selected_docs, unresolved_docs, has_named_docs = select_named_office_documents(
                 request, office_docs
@@ -968,7 +957,7 @@ class LlmPlanner(Planner):
             from app.agents.core.registry import AgentRegistry
 
             if AgentRegistry.get("office_document") is not None:
-                return _new_office_document_tree(request, new_document, office_docs if has_named_docs else [])
+                return _new_office_document_tree(request, new_document, office_docs or [])
         if output_contract.get("requires_artifact"):
             return TaskTree(
                 nodes=[TaskNode(

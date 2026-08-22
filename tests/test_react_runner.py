@@ -2,7 +2,6 @@ import asyncio
 
 from langchain_core.messages import AIMessage
 
-from app.agents.langchain.tools import make_skill_tool
 from app.agents.orchestration.models import TaskNode
 from app.agents.orchestration.react_runner import OfficeReactRunner
 from app.agents.roles.react import ReactStepAgent

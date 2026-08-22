@@ -4,16 +4,32 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="拆分高耦合dag引擎，优化dag链路，优化mcp设计，加入reranker模型">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="优化提交">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/core/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/core/base.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/orchestration/admission.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/admission.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docker-compose.yml" beforeDir="false" afterPath="$PROJECT_DIR$/docker-compose.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/MCP_SKILL_GOVERNANCE.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/MCP_SKILL_GOVERNANCE.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/OPERATIONS.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/OPERATIONS.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/init_db.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/init_db.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/dag.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/dag.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/fork_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/fork_service.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/intent.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/intent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/office_plan_selection_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/office_plan_selection_service.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/plan_compilation_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/plan_compilation_service.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/plan_compiler.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/plan_compiler.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/planner.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/planner.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/query_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/query_service.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/routing_intent.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/routing_intent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/temporal/activities.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/activities.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/roles/office/agents.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/office/agents.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/executor.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/temporal_manifest_workflows.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/temporal_manifest_workflows.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/user.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/user.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/resilience.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/resilience.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/conversation_memory.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/conversation_memory.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_mcp_bindings.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_mcp_bindings.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_orchestration.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_orchestration.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_plan_compiler.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_plan_compiler.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_planner_routing_intent.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_planner_routing_intent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_react_runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_react_runner.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_skills.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_skills.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -387,7 +403,15 @@
       <option name="project" value="LOCAL" />
       <updated>1787395255630</updated>
     </task>
-    <option name="localTasksCounter" value="37" />
+    <task id="LOCAL-00037" summary="优化提交">
+      <option name="closed" value="true" />
+      <created>1787397255190</created>
+      <option name="number" value="00037" />
+      <option name="presentableId" value="LOCAL-00037" />
+      <option name="project" value="LOCAL" />
+      <updated>1787397255190</updated>
+    </task>
+    <option name="localTasksCounter" value="38" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -414,7 +438,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="添加沙箱实例，预留skill编写基底" />
     <MESSAGE value="优化文档上传异常处理" />
     <MESSAGE value="重构优化会话管理" />
     <MESSAGE value="实现短期记忆" />
@@ -439,6 +462,7 @@
     <MESSAGE value="迁移到langchain生态，优化dag流程与算法，优化mcp服务器" />
     <MESSAGE value="继续优化dag架构，优化记忆系统，优化rag处理，添加消息队列" />
     <MESSAGE value="拆分高耦合dag引擎，优化dag链路，优化mcp设计，加入reranker模型" />
-    <option name="LAST_COMMIT_MESSAGE" value="拆分高耦合dag引擎，优化dag链路，优化mcp设计，加入reranker模型" />
+    <MESSAGE value="优化提交" />
+    <option name="LAST_COMMIT_MESSAGE" value="优化提交" />
   </component>
 </project>

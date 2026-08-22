@@ -66,8 +66,14 @@ _NAMED_CONVERSION_RE = re.compile(
     r"(?:文件\s*)?([^\s，。；;：:]+\.[a-z0-9]{1,10})\b"
 )
 _OUTPUT_FILENAME_RE = re.compile(
-    r"(?iu)(?:保存为|另存为|输出为|导出为|生成(?:文件)?(?:名为)?|命名为|文件名为|文件名叫|文件叫)\s*"
+    r"(?iu)(?:保存为|另存为|输出为|导出为|存成|存为|生成(?:文件)?(?:名为)?|命名为|文件名为|文件名叫|文件叫|"
+    r"save(?:\s+it)?\s+as|export(?:\s+it)?\s+as|"
+    r"guardar(?:lo)?\s+como|guárdalo\s+como|enregistrer\s+sous)\s*"
     r"(?:文件\s*)?([a-z0-9_\-\u4e00-\u9fff][a-z0-9_.\-\u4e00-\u9fff]*\.[a-z0-9]{1,10})\b"
+)
+_OUTPUT_FILENAME_SUFFIX_RE = re.compile(
+    r"(?iu)([a-z0-9_\-\u4e00-\u9fff][a-z0-9_.\-\u4e00-\u9fff]*\.[a-z0-9]{1,10})\s*"
+    r"(?:として保存|として出力|に保存(?:して)?ください?|として保存してください)"
 )
 
 _NEW_DOCUMENT_ACTIONS = ("生成", "创建", "制作", "做一份", "写一份", "新建")
@@ -151,8 +157,12 @@ def _is_standalone_conversion(request: str, match: re.Match[str]) -> bool:
 
 def _explicit_output_filename(request: str) -> str | None:
     """Extract an explicit deliverable name only from unambiguous command phrases."""
-    match = _OUTPUT_FILENAME_RE.search(request or "")
-    return Path(match.group(1)).name if match else None
+    text = request or ""
+    matches = [match for pattern in (_OUTPUT_FILENAME_RE, _OUTPUT_FILENAME_SUFFIX_RE) if (match := pattern.search(text))]
+    if not matches:
+        return None
+    match = min(matches, key=lambda item: item.start())
+    return Path(match.group(1)).name
 
 
 def _output_filenames_in_request(request: str) -> set[str]:

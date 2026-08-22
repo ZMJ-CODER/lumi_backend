@@ -304,7 +304,7 @@ async def retrieve_conversation_recall(
         lexical = _lexical_score(query, haystack)
         semantic = 0.0
         if vector and segment.embedding:
-            semantic = sum(a * b for a, b in zip(vector, segment.embedding))
+            semantic = sum(a * b for a, b in zip(vector, segment.embedding, strict=False))
         score = max(lexical, semantic)
         # 快速档只接受明确关键词；思考档允许足够接近的语义命中。
         threshold = 0.2 if thinking_mode == "fast" else 0.45

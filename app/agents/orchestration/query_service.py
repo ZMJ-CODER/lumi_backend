@@ -8,7 +8,6 @@ terminal-cleanup rules while accepting callbacks for coordinator-owned state.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
 
 from loguru import logger
 

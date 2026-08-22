@@ -688,6 +688,23 @@ def test_named_document_selection_does_not_treat_output_filename_as_input():
     assert selected == [{"doc_id": "scores", "filename": "scores.csv"}]
 
 
+def test_multilingual_output_filename_is_not_treated_as_input():
+    from app.agents.orchestration.intent import extract_output_contract, select_named_office_documents
+
+    docs = [{"doc_id": "scores", "filename": "scores.csv"}]
+    for request in (
+        "基于 scores.csv 存成 review.md",
+        "Use scores.csv and save it as review.md",
+        "Usa scores.csv y guárdalo como review.md",
+        "scores.csv を review.md として保存してください",
+    ):
+        selected, unresolved, referenced = select_named_office_documents(request, docs)
+        assert referenced is True
+        assert unresolved == []
+        assert selected == docs
+        assert extract_output_contract(request)["expected_output_names"] == ["review.md"]
+
+
 def test_compound_office_and_daily_task_plans_and_executes_in_order(monkeypatch):
     """A fast path must not discard a daily system action after file work."""
     from app.agents.orchestration.planner import LlmPlanner
@@ -1547,7 +1564,7 @@ def test_orchestrator_rejects_second_active_job_in_same_conversation():
     )
 
     async def scenario():
-        first = await orch.submit_job(
+        await orch.submit_job(
             "u1", "总结文档", conversation_id="c1", office_docs=[{"doc_id": "d1"}]
         )
         with pytest.raises(ActiveConversationJobError):

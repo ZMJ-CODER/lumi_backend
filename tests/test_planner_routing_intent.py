@@ -108,6 +108,26 @@ def test_feedback_with_implicit_repair_request_routes_to_react():
     assert [node.agent for node in tree.nodes] == ["react_step"]
 
 
+def test_conditional_branch_routes_to_dynamic_execution_instead_of_retrieval():
+    tree = _plan(
+        "先读取两个附件，把差异摆出来；如果金额超过十万就通知财务，否则只给我一段结论。",
+        [
+            {"doc_id": "a", "filename": "one.xlsx"},
+            {"doc_id": "b", "filename": "two.xlsx"},
+        ],
+    )
+    assert [node.agent for node in tree.nodes] == ["react_step"]
+
+
+def test_english_feedback_and_repair_routes_to_dynamic_execution():
+    tree = _plan(
+        "The upload finished but the output is garbled. Figure out what went wrong, "
+        "try a low-risk fix, and tell me what you changed.",
+        [{"doc_id": "a", "filename": "input.csv"}],
+    )
+    assert [node.agent for node in tree.nodes] == ["react_step"]
+
+
 def test_colloquial_diagnostic_question_routes_to_react():
     tree = _plan("帮我看看这个结果对不对，哪里不对就先标出来。")
     assert [node.agent for node in tree.nodes] == ["react_step"]
@@ -143,6 +163,16 @@ def test_route_keeps_action_order_for_implicit_follow_up():
     assert [step.action for step in intent.action_steps] == ["lookup_history", "send"]
     assert intent.requires_side_effect is True
     assert intent.confidence_detail is not None
+
+
+def test_route_intent_recognizes_mixed_language_actions_and_order():
+    intent = infer_route_intent(
+        "先提炼 release note 的重点，然后 translate 成英文，最后做一个 Markdown table"
+    )
+
+    assert {"analyze", "transform", "create"}.issubset(set(intent.actions))
+    assert intent.has_multiple_actions
+    assert [step.action for step in intent.action_steps][:3] == ["analyze", "transform", "create"]
 
 
 def test_missing_context_for_implicit_follow_up_clarifies():

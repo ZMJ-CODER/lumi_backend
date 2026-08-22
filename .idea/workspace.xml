@@ -4,76 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="继续优化dag架构，优化记忆系统，优化rag处理，添加消息队列">
-      <change beforePath="$PROJECT_DIR$/.env.example" beforeDir="false" afterPath="$PROJECT_DIR$/.env.example" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Dockerfile.sandbox" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile.sandbox" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/core/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/core/base.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/core/tools.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/core/tools.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/langchain/agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/langchain/agent.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/langchain/chat_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/langchain/chat_graph.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/langchain/models.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/langchain/models.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/langchain/planning.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/langchain/planning.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/langchain/tools.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/langchain/tools.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/mcp/manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/mcp/manager.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/dag.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/dag.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/intent.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/intent.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/langgraph_runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/langgraph_runner.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/planner.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/planner.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/react_runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/react_runner.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/review.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/review.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/routing.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/routing.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/task_manifest.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/task_manifest.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/tca.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/tca.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/temporal/activities.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/activities.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/temporal/client.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/client.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/temporal/manifest_activities.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/temporal/manifest_activities.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/roles/atomic.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/atomic.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/roles/direct_llm.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/direct_llm.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/roles/office/agents.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/office/agents.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/roles/react.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/react.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/base.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/capability.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/capability.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/executor.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/recovery.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/recovery.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/registry.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/registry.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/temporal_workflows.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/temporal_workflows.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/router.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/router.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/admin.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/office_docs.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/office_docs.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/user.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/user.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/llm.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/llm.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/llm_config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/llm_config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/db_models.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/db_models.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/prompts/_base.md" beforeDir="false" afterPath="$PROJECT_DIR$/app/prompts/_base.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/office_docs.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/office_docs.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/office_skill_utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/office_skill_utils.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/chunker.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/chunker.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/docling_parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/docling_parser.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/document_parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/document_parser.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/embeddings.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/embeddings.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/knowledge.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/knowledge.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/query_rewriter.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/query_rewriter.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/scope.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/scope.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docker-compose.yml" beforeDir="false" afterPath="$PROJECT_DIR$/docker-compose.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/CURRENT_DAG_ARCHITECTURE.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/CURRENT_DAG_ARCHITECTURE.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/RAG_DESIGN.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/RAG_DESIGN.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_orchestration.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_orchestration.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_rag_helpers.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_rag_helpers.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_rag_scope.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_rag_scope.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_react_runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_react_runner.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_skills.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_skills.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_tca.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_tca.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
-    </list>
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="拆分高耦合dag引擎，优化dag链路，优化mcp设计，加入reranker模型" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -430,7 +361,15 @@
       <option name="project" value="LOCAL" />
       <updated>1787295777973</updated>
     </task>
-    <option name="localTasksCounter" value="35" />
+    <task id="LOCAL-00035" summary="拆分高耦合dag引擎，优化dag链路，优化mcp设计，加入reranker模型">
+      <option name="closed" value="true" />
+      <created>1787394992791</created>
+      <option name="number" value="00035" />
+      <option name="presentableId" value="LOCAL-00035" />
+      <option name="project" value="LOCAL" />
+      <updated>1787394992791</updated>
+    </task>
+    <option name="localTasksCounter" value="36" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -445,7 +384,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="几乎优化rag检索" />
     <MESSAGE value="添加沙箱实例，预留skill编写基底" />
     <MESSAGE value="优化文档上传异常处理" />
     <MESSAGE value="重构优化会话管理" />
@@ -470,6 +408,7 @@
     <MESSAGE value="修复一些问题，完善dag与普通和办公模式执行链路" />
     <MESSAGE value="迁移到langchain生态，优化dag流程与算法，优化mcp服务器" />
     <MESSAGE value="继续优化dag架构，优化记忆系统，优化rag处理，添加消息队列" />
-    <option name="LAST_COMMIT_MESSAGE" value="继续优化dag架构，优化记忆系统，优化rag处理，添加消息队列" />
+    <MESSAGE value="拆分高耦合dag引擎，优化dag链路，优化mcp设计，加入reranker模型" />
+    <option name="LAST_COMMIT_MESSAGE" value="拆分高耦合dag引擎，优化dag链路，优化mcp设计，加入reranker模型" />
   </component>
 </project>

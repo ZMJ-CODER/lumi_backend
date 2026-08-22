@@ -1,6 +1,6 @@
 """Temporal Workflow：多智能体 DAG 任务编排（替换自建 execute_dag）.
 
-⚠️ 本模块必须保持"轻"：Temporal 会在受限沙箱中导入它做校验，
+本模块必须保持"轻"：Temporal 会在受限沙箱中导入它做校验，
 因此不能 import loguru / pydantic / 配置模块等重依赖。
 父包 app.agents 的 __init__ 保持为空（docstring 仅注释）。
 
@@ -404,9 +404,16 @@ class AgentDagWorkflow:
                     "final_answer": str(out["final_answer"]),
                     "source_nodes": len(results),
                 }
-        except Exception:  # noqa: BLE001
-            # 汇总失败不影响任务完成（节点结果仍在前端可见）
-            pass
+        except Exception as exc:  # noqa: BLE001
+            from app.agents.skills.recovery import classify_model_error
+
+            code, message = classify_model_error(exc)
+            if code.startswith("MODEL_"):
+                self._job["status"] = JOB_FAILED
+                self._job["error"] = message[:500]
+                self._job["error_code"] = code
+            # Non-provider formatting failures remain non-fatal because the
+            # completed node results are still directly deliverable.
 
     async def _run_node(self, node: dict) -> None:
         cfg = self._cfg()

@@ -140,11 +140,16 @@ class LangGraphNodeRunner:
                 self.ctx.job_id[:8], self.node.id, self.node.agent,
                 int((time.perf_counter() - started) * 1000), exc,
             )
+            error_code, user_error = self._classify_model_exception(exc)
             return {
                 "result": None,
-                "error": str(exc) or "执行失败",
-                "error_code": "EXEC_ERROR",
-                "retryable": True,
+                "error": user_error or str(exc) or "执行失败",
+                "error_code": error_code or "EXEC_ERROR",
+                "retryable": error_code not in {
+                    "MODEL_INSUFFICIENT_BALANCE", "MODEL_AUTH_ERROR", "MODEL_NOT_FOUND",
+                    "MODEL_CONFIG_ERROR", "MODEL_TOOL_CALL_UNSUPPORTED",
+                    "MODEL_PROVIDER_UNAVAILABLE", "MODEL_CONNECTION_ERROR", "MODEL_UNAVAILABLE",
+                },
             }
         finally:
             try:
@@ -157,6 +162,18 @@ class LangGraphNodeRunner:
                 )
             except Exception:  # noqa: BLE001
                 pass
+
+    def _classify_model_exception(self, exc: Exception) -> tuple[str | None, str | None]:
+        """Normalize provider failures before recovery can consider a retry."""
+        try:
+            from app.agents.skills.recovery import classify_model_error
+
+            code, message = classify_model_error(exc)
+            if code != "MODEL_UNAVAILABLE" or getattr(self.ctx, "llm_config", None):
+                return code, message
+        except Exception:  # noqa: BLE001
+            pass
+        return None, None
 
     async def _assess(self, state: NodeGraphState) -> dict:
         result = state.get("result")

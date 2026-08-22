@@ -41,6 +41,7 @@ class DirectLlmAgent(WorkerAgent):
             SkillContext(
                 user_id=ctx.user_id, scene=ctx.scene, conversation_id=ctx.job_id,
                 job_id=ctx.job_id, llm_api_key=ctx.llm_api_key, on_output=ctx.on_output,
+                llm_config=ctx.llm_config,
             ),
             "你是内容生成执行器。直接完成当前原子任务，严格遵守用户指定的格式、题目、字数和语气。"
             "不要调用或声称调用任何外部工具；不要把普通文本套成公文模板。只输出交付内容。"

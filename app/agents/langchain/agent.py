@@ -39,6 +39,7 @@ async def extract_tool_arguments(
     scene: str,
     user_id: str,
     api_key: str | None = None,
+    llm_config: dict | None = None,
 ) -> dict:
     """Extract arguments for one already-authorized tool using JSON mode.
 
@@ -49,7 +50,7 @@ async def extract_tool_arguments(
     function = tool_definition.get("function") or {}
     name = str(function.get("name") or "")
     schema = function.get("parameters") or {}
-    model = await get_chat_model(scene=scene, user_id=user_id, api_key=api_key, temperature=0)
+    model = await get_chat_model(scene=scene, user_id=user_id, api_key=api_key, temperature=0, llm_config=llm_config)
     system = (
         "你是受控参数提取器。工具已经由规划器授权，不能改换工具、不能执行工具、"
         "不能解释任务。只输出一个 JSON 对象，键必须属于给定 JSON Schema 的 properties。"
@@ -74,6 +75,7 @@ async def choose_single_tool(
     scene: str,
     user_id: str,
     api_key: str | None = None,
+    llm_config: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """执行一次强制单工具选择，输出兼容现有执行器的 OpenAI tool-call 结构。"""
     model = await get_chat_model(
@@ -81,6 +83,7 @@ async def choose_single_tool(
         user_id=user_id,
         api_key=api_key,
         temperature=0,
+        llm_config=llm_config,
     )
     runnable = model.bind_tools([tool], tool_choice=tool.name)
     reply = await runnable.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])

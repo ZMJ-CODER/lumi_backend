@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Annotated, TypedDict
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage, convert_to_messages
 from langchain_core.runnables import Runnable
@@ -50,6 +51,7 @@ class LangGraphChatRunner:
         api_key: str | None = None,
         model: str | None = None,
         base_url: str | None = None,
+        llm_config: dict[str, Any] | None = None,
         max_rounds: int = 5,
         on_progress: ProgressCallback | None = None,
         chat_model: Runnable | None = None,
@@ -61,6 +63,7 @@ class LangGraphChatRunner:
         self.api_key = api_key
         self.model_name = model
         self.base_url = base_url
+        self.llm_config = llm_config
         self.max_rounds = max(1, max_rounds)
         self.on_progress = on_progress
         self.chat_model = chat_model
@@ -86,7 +89,7 @@ class LangGraphChatRunner:
             if role in {"user", "human"} and isinstance(content, str):
                 current_user_message = content
                 break
-        capabilities = await get_capabilities_for_scene(self.scene, self.user_role)
+        capabilities = await get_capabilities_for_scene(self.scene, self.user_role, self.user_id)
         tools = []
         for capability in capabilities:
             tool = await make_skill_tool(
@@ -98,6 +101,7 @@ class LangGraphChatRunner:
                 on_notify=self._emit,
                 on_result=self._on_tool_result,
                 user_message=current_user_message,
+                llm_config=self.llm_config,
             )
             if tool is not None:
                 tools.append(tool)
@@ -110,6 +114,7 @@ class LangGraphChatRunner:
             api_key=self.api_key,
             model=self.model_name,
             base_url=self.base_url,
+            llm_config=self.llm_config,
         )
         bound_model = model.bind_tools(tools)
 

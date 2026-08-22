@@ -104,6 +104,7 @@ class AtomicStepAgent(WorkerAgent):
             user_role=ctx.user_role,
             user_message=ctx.user_request,
             llm_api_key=ctx.llm_api_key,
+            llm_config=ctx.llm_config,
             confirmed_tools=ctx.confirmed_tools,
             confirmed_tool_calls=ctx.confirmed_tool_calls,
             on_output=ctx.on_output,
@@ -173,7 +174,15 @@ class AtomicStepAgent(WorkerAgent):
             len(planned_tools) - 1,
         )
         selected_tool = planned_tools[selected_index]
-        all_tools = await get_tools_for_scene(ctx.scene, ctx.user_role)
+        # ``user_id`` enables per-user MCP bindings in production.  Keep a
+        # narrow compatibility fallback for older plugin/test providers that
+        # still expose the original two-argument discovery contract.
+        try:
+            all_tools = await get_tools_for_scene(ctx.scene, ctx.user_role, ctx.user_id)
+        except TypeError as exc:
+            if "positional" not in str(exc) and "argument" not in str(exc):
+                raise
+            all_tools = await get_tools_for_scene(ctx.scene, ctx.user_role)
         tools = [
             tool
             for tool in all_tools
@@ -205,6 +214,7 @@ class AtomicStepAgent(WorkerAgent):
                 scene=ctx.scene,
                 user_id=ctx.user_id,
                 api_key=ctx.llm_api_key,
+                llm_config=ctx.llm_config,
             )
         except Exception as exc:  # noqa: BLE001
             error_code, user_error = classify_model_error(exc)
@@ -212,7 +222,7 @@ class AtomicStepAgent(WorkerAgent):
                 "success": False,
                 "error": user_error,
                 "error_code": error_code,
-                "retryable": error_code == "MODEL_UNAVAILABLE",
+                "retryable": False,
                 "tool": selected_tool,
                 "attempt": node.retries + 1,
                 "method_chain": planned_tools,

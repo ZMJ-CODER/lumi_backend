@@ -155,7 +155,7 @@ def test_office_react_recomputes_tools_and_excludes_failed_method(monkeypatch):
     ])
     toolsets = []
 
-    async def route(request, user_role, limit=8, excluded_names=None):
+    async def route(request, user_role, limit=8, excluded_names=None, user_id=""):
         excluded = set(excluded_names or [])
         names = ["first", "second"] if not excluded else ["second"]
         toolsets.append((request, excluded, names))

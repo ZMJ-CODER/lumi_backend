@@ -15,7 +15,7 @@ import temporalio.exceptions
 from app.agents.orchestration.models import TaskNode, TaskStatus
 from app.agents.orchestration.review import get_reviewer
 from app.agents.orchestration.workers import WORKERS, WorkerContext
-from app.agents.orchestration.temporal.client import load_byok_key
+from app.agents.orchestration.temporal.client import load_job_llm_config
 from app.core.config import settings
 
 
@@ -65,7 +65,8 @@ async def _execute_node_activity_inner(payload: dict) -> dict:
         for dep_id, value in (payload.get("dependency_results") or {}).items()
     }
     review = get_reviewer()
-    llm_api_key = await load_byok_key(job_id) if job_id else None
+    llm_config = await load_job_llm_config(job_id) if job_id else None
+    llm_api_key = (llm_config or {}).get("api_key")
 
     # Temporal Activities run in a separate execution boundary from the API
     # SSE coroutine.  Publish text deltas to the same short-lived Redis stream
@@ -82,6 +83,7 @@ async def _execute_node_activity_inner(payload: dict) -> dict:
         scene=scene,
         user_role=user_role,
         llm_api_key=llm_api_key,
+        llm_config=llm_config,
         user_request=user_request,
         confirmed_tools=frozenset(
             str(value) for value in ((node.metadata or {}).get("confirmed_tools") or [])
@@ -209,7 +211,8 @@ async def synthesize_final_answer_activity(payload: dict) -> dict:
     job_id = str(payload.get("job_id") or "")
     # Workflow 输入不能携带密钥（会被 Temporal history 持久化）；从短 TTL
     # Redis 桥接读取，和节点执行保持同一 BYOK 模型。
-    llm_api_key = await load_byok_key(job_id) if job_id else None
+    llm_config = await load_job_llm_config(job_id) if job_id else None
+    llm_api_key = (llm_config or {}).get("api_key")
     request = str(payload.get("request") or "")
     presentation_preferences = str(payload.get("presentation_preferences") or "")[:500]
     nodes = payload.get("nodes") or []
@@ -272,9 +275,15 @@ async def synthesize_final_answer_activity(payload: dict) -> dict:
             usage_category=CATEGORY_SKILL,
             disable_reasoning_effort=True,
             api_key=llm_api_key,
+            llm_config=llm_config,
         )
         return {"final_answer": (reply or "").strip()}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        from app.agents.skills.recovery import classify_model_error, is_terminal_model_error_code
+
+        code, message = classify_model_error(exc)
+        if is_terminal_model_error_code(code):
+            raise RuntimeError(message) from exc
         return {"final_answer": ""}
 
 

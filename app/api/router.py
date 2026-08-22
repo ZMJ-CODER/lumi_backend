@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     admin,
+    admin_mcp,
     admin_system,
     agents,
     auth,
@@ -16,6 +17,7 @@ from app.api.v1 import (
     knowledge,
     local,
     local_corpus,
+    mcp,
     memory_manage,
     memories,
     office_docs,
@@ -64,6 +66,9 @@ api_router.include_router(memory_manage.router, prefix="/memory", tags=["memory"
 # 客户端工具（本地文件操作等：用户端轮询 + 结果回传）
 api_router.include_router(tools.router, prefix="/tools", tags=["tools"])
 
+# 用户显式绑定的第三方 MCP 工具（配置白名单 + 用户授权后才进入候选池）
+api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])
+
 # 知识库
 api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledge"])
 
@@ -82,6 +87,7 @@ api_router.include_router(control_logs.router, prefix="/control-logs", tags=["co
 
 # 管理员
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
+api_router.include_router(admin_mcp.router, prefix="/admin/mcp", tags=["admin"])
 api_router.include_router(admin_system.router, prefix="/admin/system", tags=["admin"])
 
 # 公共知识库

@@ -15,6 +15,7 @@ from app.agents.orchestration.orchestrator import (
 )
 from app.agents.orchestration import admission
 from app.agents.orchestration.planner import Planner, TaskTree
+from app.agents.orchestration.plan_compilation_service import PlanCompilationService
 from app.agents.orchestration.review import NoopReviewer
 from app.agents.orchestration.state import InMemoryStateStore
 from app.agents.orchestration.task_manifest import authorize_manifest_source
@@ -860,7 +861,16 @@ def test_retrieval_worker_registered():
 def test_orchestrator_serializes_all_planned_steps():
     nodes = [_node("a"), _node("b"), _node("c", deps=["a"])]
 
-    AgentOrchestrator._serialize_steps(nodes)
+    async def unused_plan(_context):
+        raise AssertionError("serialization must not invoke the planner")
+
+    compiler = PlanCompilationService(workers={}, plan_with_context=unused_plan)
+    compiler.normalize_for_replan(
+        nodes,
+        "test",
+        preserve_dependencies=False,
+        adapt_workers=False,
+    )
 
     assert [node.id for node in nodes] == ["a", "b", "c"]
     assert nodes[0].depends_on == []
@@ -933,8 +943,10 @@ def test_natural_language_manifest_is_cleaned_only_after_authorization(monkeypat
         assert "请执行这份任务清单" in source_text
         return [{"instruction": f"规范任务 {i}", "dependencies": [i - 1] if i > 1 else []} for i in range(1, 9)]
 
-    orchestration_module = importlib.import_module("app.agents.orchestration.orchestrator")
-    monkeypatch.setattr(orchestration_module, "extract_natural_language_manifest", clean)
+    manifest_module = importlib.import_module(
+        "app.agents.orchestration.manifest_submission_service"
+    )
+    monkeypatch.setattr(manifest_module, "extract_natural_language_manifest", clean)
 
     class ForbiddenPlanner(Planner):
         async def plan(self, *args, **kwargs):

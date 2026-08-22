@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Annotated, TypedDict
+from typing import Any, Annotated, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
@@ -37,7 +37,8 @@ class OfficeReactRunner:
 
     def __init__(self, *, user_id: str, job_id: str, user_role: str = "user",
                  api_key: str | None = None, model: str | None = None,
-                 base_url: str | None = None, max_rounds: int = 6,
+                 base_url: str | None = None, llm_config: dict[str, Any] | None = None,
+                 max_rounds: int = 6,
                  on_progress=None, user_request: str = "") -> None:
         self.user_id = user_id
         self.job_id = job_id
@@ -45,6 +46,7 @@ class OfficeReactRunner:
         self.api_key = api_key
         self.model_name = model
         self.base_url = base_url
+        self.llm_config = llm_config
         self.max_rounds = max(1, int(max_rounds))
         self.on_progress = on_progress
         self.user_request = str(user_request or "")
@@ -69,6 +71,7 @@ class OfficeReactRunner:
             model = await get_chat_model(
                 scene="office", user_id=self.user_id, api_key=self.api_key,
                 model=self.model_name, base_url=self.base_url,
+                llm_config=self.llm_config,
             )
             async def agent(state: ReactState) -> dict:
                 # 每一轮重新按当前任务和已失败工具收窄函数定义。模型只能看见
@@ -89,6 +92,7 @@ class OfficeReactRunner:
                     self.user_role,
                     limit=8,
                     excluded_names=self._failed_tools,
+                    user_id=self.user_id,
                 )
                 tool_pairs = []
                 for capability in capabilities:
@@ -96,7 +100,7 @@ class OfficeReactRunner:
                         capability.name, user_id=self.user_id, scene="office",
                         conversation_id=self.job_id, user_role=self.user_role,
                         on_notify=self._emit, on_result=self._on_result,
-                        user_message=self.user_request,
+                        user_message=self.user_request, llm_config=self.llm_config,
                     )
                     if tool is not None:
                         tool_pairs.append((capability.name, tool))
@@ -158,7 +162,7 @@ class OfficeReactRunner:
                 tool = await make_skill_tool(
                     name, user_id=self.user_id, scene="office", conversation_id=self.job_id,
                     user_role=self.user_role, on_notify=self._emit, on_result=self._on_result,
-                    user_message=self.user_request,
+                    user_message=self.user_request, llm_config=self.llm_config,
                 )
                 if tool is None:
                     return {"messages": [ToolMessage(
@@ -231,4 +235,10 @@ class OfficeReactRunner:
                 final = "任务已执行，但模型未生成总结。请查看已完成步骤和产物。"
             return ReactRunResult(bool(final or self.records), redact_server_text(final), records=self.records, citations=self.citations)
         except Exception as exc:  # noqa: BLE001
-            return ReactRunResult(False, error=str(exc)[:500] or "ReAct 执行失败", error_code="REACT_ERROR", records=self.records, citations=self.citations)
+            try:
+                from app.agents.skills.recovery import classify_model_error
+
+                code, message = classify_model_error(exc)
+            except Exception:  # noqa: BLE001
+                code, message = "REACT_ERROR", str(exc)[:500] or "ReAct 执行失败"
+            return ReactRunResult(False, error=message, error_code=code, records=self.records, citations=self.citations)

@@ -18,6 +18,10 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+import hashlib
+import json
+import re
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -36,6 +40,18 @@ class SkillResult(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class SkillProgress(BaseModel):
+    """跨 MCP、Skill、DAG 与 SSE 的稳定进度事件契约。"""
+
+    task_id: str = ""
+    job_id: str = ""
+    node_id: str | None = None
+    skill_name: str
+    phase: Literal["started", "awaiting_confirmation", "executing", "completed", "failed", "cancelled"]
+    percentage: float | None = None
+    message: str = ""
+
+
 @dataclass
 class SkillContext:
     """技能执行上下文（技能需要的用户/会话信息，由执行器注入，不来自 LLM 参数）."""
@@ -50,6 +66,7 @@ class SkillContext:
     job_id: str = ""
     # BYOK：用户自备 API key（由执行器透传，仅本次调用临时使用，不落库）
     llm_api_key: str | None = None
+    llm_config: dict[str, Any] | None = None
     # 进度通知回调（如"正在请求访问本地文件…"），流式模式下展示给用户
     on_notify: Callable[[str], None] | None = None
     # Async callback receiving generated text deltas (office text only).
@@ -64,6 +81,11 @@ class Skill(ABC):
 
     name: str = ""
     description: str = ""
+    # Skill 是可被计划缓存和长期 Job 引用的能力 API，而不是一次性的 Python
+    # 函数。版本和状态用于在插件热更新后维持恢复/灰度的确定性。
+    version: str = "1.0.0"
+    status: str = "stable"  # experimental / stable / deprecated / disabled
+    replacement_skill_id: str = ""
     category: str = "general"           # 功能域，用于分组/过滤
     environment: str = "server"         # server / sandbox / client
     permission: str = "user"            # user / admin
@@ -133,6 +155,10 @@ class Skill(ABC):
         """Return scheduler metadata without exposing implementation paths or secrets."""
         return {
             "name": self.name,
+            "version": self.version,
+            "status": self.status,
+            "replacement_skill_id": self.replacement_skill_id,
+            "schema_fingerprint": self.schema_fingerprint,
             "category": self.category,
             "environment": self.environment,
             "permission": self.permission,
@@ -152,6 +178,27 @@ class Skill(ABC):
             "direct_required_fields": list(self.direct_required_fields),
             "direct_input_aliases": dict(self.direct_input_aliases),
         }
+
+    @property
+    def schema_fingerprint(self) -> str:
+        """Stable identity for the callable contract used by persisted plans."""
+        payload = {
+            "name": self.name,
+            "version": self.version,
+            "parameters": self.parameters_schema if isinstance(self.parameters_schema, dict) else {},
+            "environment": self.environment,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
+
+    def validate_lifecycle(self) -> None:
+        if not self.name:
+            raise ValueError("Skill name 不能为空")
+        if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", str(self.version or "")):
+            raise ValueError(f"Skill {self.name} 的 version 必须是 semver")
+        if self.status not in {"experimental", "stable", "deprecated", "disabled"}:
+            raise ValueError(f"Skill {self.name} 的 status 无效: {self.status}")
 
     def __repr__(self) -> str:
         return (

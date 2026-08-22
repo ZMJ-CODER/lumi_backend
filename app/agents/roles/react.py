@@ -66,6 +66,7 @@ class ReactStepAgent(WorkerAgent):
             job_id=ctx.job_id,
             user_role=ctx.user_role,
             api_key=ctx.llm_api_key,
+            llm_config=ctx.llm_config,
             max_rounds=int(node.params.get("max_rounds") or 6),
             on_progress=on_progress,
             user_request=ctx.user_request,

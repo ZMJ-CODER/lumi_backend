@@ -80,8 +80,9 @@ class LLMClient:
         reasoning_effort: str | None,
         disable_reasoning_effort: bool,
         messages: list[dict],
+        llm_config: dict[str, Any] | None = None,
     ):
-        cfg = await get_llm_config(scene, self.provider, user_id=user_id)
+        cfg = dict(llm_config or await get_llm_config(scene, self.provider, user_id=user_id))
         selected_base_url = (base_url or cfg.get("base_url") or "").rstrip("/")
         selected_api_key = api_key or cfg.get("api_key") or ""
         selected_model = model or cfg.get("model") or settings.DEEPSEEK_MODEL
@@ -97,6 +98,7 @@ class LLMClient:
             max_tokens=max_tokens,
             timeout=selected_timeout,
             reasoning_effort=effort,
+            llm_config=cfg,
         ), selected_model, selected_base_url
 
     @staticmethod
@@ -134,6 +136,7 @@ class LLMClient:
         timeout: float | None = None,
         reasoning_effort: str | None = None,
         disable_reasoning_effort: bool = False,
+        llm_config: dict[str, Any] | None = None,
         usage_user_id: str | None = None,
         usage_category: str | None = None,
         **kwargs: Any,
@@ -148,6 +151,7 @@ class LLMClient:
                 scene=scene, user_id=usage_user_id, api_key=call_api_key, model=call_model, base_url=call_base_url,
                 timeout=timeout, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort,
                 disable_reasoning_effort=disable_reasoning_effort, messages=messages,
+                llm_config=llm_config,
             )
             breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
             reply = await breaker.call(lambda: chat_model.ainvoke(convert_to_messages(messages)))
@@ -160,7 +164,7 @@ class LLMClient:
             reply, text, used_model = await invoke(base_url, api_key, model)
         except Exception as exc:
             fallback = self._fallback_cfg()
-            if not (fallback and self._is_retryable_error(exc)):
+            if scene == "office" or llm_config or not (fallback and self._is_retryable_error(exc)):
                 raise
             logger.warning("LLM 主供应商调用失败，切换 {} 重试: {}", fallback["model"], str(exc)[:120])
             reply, text, used_model = await invoke(fallback["base_url"], fallback["api_key"], fallback["model"])
@@ -180,6 +184,7 @@ class LLMClient:
         reasoning_effort: str | None = None,
         usage_user_id: str | None = None,
         usage_category: str | None = None,
+        llm_config: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> tuple[str, list[dict]]:
         """LangChain 工具绑定，返回原有 OpenAI tool-call 字典形状。"""
@@ -191,6 +196,7 @@ class LLMClient:
                 scene=scene, user_id=usage_user_id, api_key=call_api_key, model=call_model, base_url=call_base_url,
                 timeout=timeout, temperature=None, max_tokens=None, reasoning_effort=reasoning_effort,
                 disable_reasoning_effort=False, messages=messages,
+                llm_config=llm_config,
             )
             breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
             bound = chat_model.bind_tools(tools, parallel_tool_calls=False)
@@ -205,7 +211,7 @@ class LLMClient:
             reply, content, tool_calls, used_model = await invoke(base_url, api_key, model)
         except Exception as exc:
             fallback = self._fallback_cfg()
-            if not (fallback and self._is_retryable_error(exc)):
+            if scene == "office" or llm_config or not (fallback and self._is_retryable_error(exc)):
                 raise
             logger.warning("LLM 工具调用主供应商失败，切换 {} 重试: {}", fallback["model"], str(exc)[:120])
             reply, content, tool_calls, used_model = await invoke(fallback["base_url"], fallback["api_key"], fallback["model"])
@@ -255,6 +261,7 @@ class LLMClient:
         usage_category: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        llm_config: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
         """LangChain ``astream``；首个输出前失败才允许切备用供应商。"""
@@ -271,6 +278,7 @@ class LLMClient:
                 scene=scene, user_id=usage_user_id, api_key=call_api_key, model=call_model, base_url=call_base_url,
                 timeout=timeout, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort,
                 disable_reasoning_effort=disable_reasoning_effort, messages=messages,
+                llm_config=llm_config,
             )
             breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
             await breaker.before_call()
@@ -288,7 +296,7 @@ class LLMClient:
             else:
                 await breaker.record_success()
 
-        runtime_cfg = await get_llm_config(scene, self.provider, user_id=usage_user_id)
+        runtime_cfg = dict(llm_config or await get_llm_config(scene, self.provider, user_id=usage_user_id))
         text, used_model, emitted = "", model or runtime_cfg.get("model") or settings.DEEPSEEK_MODEL, False
         try:
             async for delta in stream_once(base_url, api_key, model):
@@ -305,7 +313,7 @@ class LLMClient:
                 yield delta
         except Exception as exc:
             fallback = self._fallback_cfg()
-            if emitted or not (fallback and self._is_retryable_error(exc)):
+            if scene == "office" or llm_config or emitted or not (fallback and self._is_retryable_error(exc)):
                 raise
             logger.warning("LLM 流式主供应商失败，切换 {} 重试: {}", fallback["model"], str(exc)[:120])
             used_model = fallback["model"]

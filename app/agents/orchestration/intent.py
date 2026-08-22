@@ -66,7 +66,7 @@ _NAMED_CONVERSION_RE = re.compile(
     r"(?:文件\s*)?([^\s，。；;：:]+\.[a-z0-9]{1,10})\b"
 )
 _OUTPUT_FILENAME_RE = re.compile(
-    r"(?iu)(?:保存为|另存为|输出为|导出为|生成(?:文件)?(?:名为)?|命名为)\s*"
+    r"(?iu)(?:保存为|另存为|输出为|导出为|生成(?:文件)?(?:名为)?|命名为|文件名为|文件名叫|文件叫)\s*"
     r"(?:文件\s*)?([a-z0-9_\-\u4e00-\u9fff][a-z0-9_.\-\u4e00-\u9fff]*\.[a-z0-9]{1,10})\b"
 )
 
@@ -199,7 +199,10 @@ def extract_output_contract(request: str, conversion: dict[str, Any] | None = No
         contract["encoding"] = encoding
     return contract
 _FILENAME_RE = re.compile(
-    r"(?iu)(?:^|[\s《“\"'：:，,])([a-z0-9_\-\u4e00-\u9fff][a-z0-9_.\-\u4e00-\u9fff]*\.[a-z0-9]{1,10})\b"
+    # 允许扩展名后紧跟中文连接词（如 ``合同A.pdf和合同B.pdf``），否则
+    # Python 的 ``\b`` 会把整段中文短语误当成一个文件名。
+    r"(?iu)([a-z0-9_\-\u4e00-\u9fff][a-z0-9_.\-\u4e00-\u9fff]*?\.[a-z][a-z0-9]{0,9})"
+    r"(?=$|[\s《“\"'：:，,。；;、和与及并或])"
 )
 
 
@@ -242,7 +245,8 @@ def select_named_office_documents(request: str, office_docs: list[dict] | None) 
         # is an input document.  Otherwise a deliverable is mistaken for a
         # missing upload and the planner asks an unnecessary clarification.
         name = re.sub(
-            r"^(?:生成(?:文件)?(?:名为)?|导出为|保存为|另存为|命名为|将|把)",
+            r"^(?:生成(?:文件)?(?:名为)?|导出为|保存为|另存为|命名为|将|把|"
+            r"对比|比较|总结|分析|提取|读取|查看|阅读|和|与|及|并)",
             "",
             Path(raw.strip()).name,
             flags=re.IGNORECASE,

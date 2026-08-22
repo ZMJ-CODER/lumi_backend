@@ -60,6 +60,52 @@ def test_project_skills_metadata():
     assert rp.requires_confirmation is False
 
 
+def test_skill_lifecycle_is_exposed_and_experimental_is_not_auto_routable():
+    class _ExperimentalSkill(Skill):
+        name = "experimental_lifecycle_test"
+        description = "仅供显式灰度测试"
+        status = "experimental"
+        scenes = ["office"]
+
+        async def execute(self, params, context=None):
+            return SkillResult(success=True, output="ok")
+
+    SkillRegistry.register(_ExperimentalSkill())
+    skill = SkillRegistry.get("experimental_lifecycle_test")
+    assert skill.version == "1.0.0"
+    assert len(skill.schema_fingerprint) == 64
+    assert "experimental_lifecycle_test" not in {
+        item["function"]["name"] for item in asyncio.run(get_tools_for_scene("office"))
+    }
+
+
+def test_invalid_skill_lifecycle_is_rejected():
+    class _BrokenSkill(Skill):
+        name = "broken_lifecycle_test"
+        version = "not-a-version"
+
+        async def execute(self, params, context=None):
+            return SkillResult(success=True)
+
+    with pytest.raises(ValueError, match="semver"):
+        SkillRegistry.register(_BrokenSkill())
+
+
+def test_registered_skills_meet_minimum_contract():
+    """Shared CI guard for breaking Skill API changes."""
+    allowed_statuses = {"experimental", "stable", "deprecated", "disabled"}
+    for skill in SkillRegistry.list():
+        tool = skill.to_tool_definition()["function"]
+        assert skill.name and tool["name"] == skill.name
+        assert skill.status in allowed_statuses
+        assert len(skill.schema_fingerprint) == 64
+        assert isinstance(tool["description"], str) and tool["description"].strip()
+        assert isinstance(tool["parameters"], dict)
+        if tool["parameters"]:
+            assert tool["parameters"].get("type") == "object"
+            assert isinstance(tool["parameters"].get("properties", {}), dict)
+
+
 def test_delete_confirmation_bypass_requires_current_explicit_single_file_request():
     args = {"path": "C:/Users/demo/scores.csv", "recursive": False}
     assert is_explicit_user_delete_request("请删除 scores.csv", "delete_file", args)
@@ -187,6 +233,26 @@ def test_office_react_metadata_routes_conversion_to_script_before_document_read(
 def test_office_react_candidate_limit_is_eight_or_less():
     selected = asyncio.run(get_office_react_capabilities_for_request("分析一个复杂办公任务"))
     assert 1 <= len(selected) <= 8
+
+
+def test_semantic_score_is_only_a_legal_pool_tiebreaker(monkeypatch):
+    import app.agents.skills.executor as exec_mod
+
+    capabilities = [
+        ToolCapability(name="legal", description="处理报销合同", category="office"),
+        ToolCapability(name="other", description="处理图片", category="office"),
+    ]
+
+    async def fake_capabilities(*_args, **_kwargs):
+        return capabilities
+
+    async def fake_semantic(*_args, **_kwargs):
+        return {"legal": 0.01, "forbidden": 1.0}
+
+    monkeypatch.setattr(exec_mod, "get_capabilities_for_scene", fake_capabilities)
+    monkeypatch.setattr("app.agents.skills.routing.semantic_scores", fake_semantic)
+    selected = asyncio.run(select_capabilities_for_request("无关表达", "office", limit=1))
+    assert [item.name for item in selected] == ["legal"]
 
 
 class _EchoSkill(Skill):

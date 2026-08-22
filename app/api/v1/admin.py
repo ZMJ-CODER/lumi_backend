@@ -397,6 +397,10 @@ async def list_skills_view(payload: dict = Depends(require_admin)):
     items = [
         {
             "name": s.name,
+            "version": s.version,
+            "status": s.status,
+            "schema_fingerprint": s.schema_fingerprint,
+            "replacement_skill_id": s.replacement_skill_id,
             "category": s.category,
             "environment": s.environment,
             "permission": s.permission,

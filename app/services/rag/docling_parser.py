@@ -132,3 +132,37 @@ def parse_with_docling(file_path: str, filename: str | None = None) -> str:
     except Exception as exc:  # noqa: BLE001
         logger.opt(exception=True).warning("pypdf 降级解析失败: {}", str(exc)[:300])
     raise ValueError("文档解析失败：无可提取文本（扫描件需要 Docling OCR，当前模型不可用）")
+
+
+def parse_with_docling_metadata(file_path: str, filename: str | None = None):
+    """Docling 结构化解析：按其真实 page_no 输出 segments。
+
+    Docling 版本差异或格式没有页信息时返回一个无页码 segment；调用方不能把
+    segment 序号当作页码。
+    """
+    from app.services.rag.document_parser import ParsedDocument, ParsedSegment
+
+    try:
+        converter = _get_converter()
+        with contextlib.redirect_stderr(io.StringIO()):
+            result = converter.convert(Path(file_path))
+        document = result.document
+        segments: list[ParsedSegment] = []
+        page_count = int(getattr(document, "num_pages", 0) or 0)
+        for page_no in range(1, page_count + 1):
+            page_text = document.export_to_markdown(page_no=page_no).strip()
+            if page_text:
+                segments.append(ParsedSegment(page_text, page_start=page_no, page_end=page_no))
+        if segments:
+            return ParsedDocument(
+                text="\n\n".join(segment.text for segment in segments),
+                segments=segments,
+                parser="docling",
+            )
+        markdown = document.export_to_markdown().strip()
+        if markdown:
+            return ParsedDocument(markdown, [ParsedSegment(markdown)], "docling")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Docling 结构化解析失败，回退普通解析: {}", str(exc)[:240])
+    markdown = parse_with_docling(file_path, filename)
+    return ParsedDocument(markdown, [ParsedSegment(markdown)], "docling")

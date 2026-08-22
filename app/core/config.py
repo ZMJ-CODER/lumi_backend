@@ -141,6 +141,10 @@ class Settings(BaseSettings):
     EMBEDDING_BATCH_SIZE: int = 16
     EMBEDDING_DEVICE: str = "cpu"   # cpu / cuda
     EMBEDDING_CACHE_DIR: str = ""   # 模型缓存目录；为空用 HuggingFace 默认缓存
+    # Hugging Face Hub 的下载端点由 Dockerfile/Compose 在进程启动前注入；
+    # 同时在 Settings 声明，避免本地测试读取 .env 时被 Pydantic 视为未知配置。
+    HF_ENDPOINT: str = ""
+    HF_HUB_DISABLE_XET: bool = True
     # 检索指令前缀。bge 官方建议查询时附加，但本项目实测不加区分度更好，
     # 默认关闭；切换 bge-m3 后可重新开启对比效果。
     EMBEDDING_QUERY_INSTRUCTION: str = "为这个句子生成表示以用于检索相关文章："
@@ -186,15 +190,25 @@ class Settings(BaseSettings):
     RAG_RECENCY_QUERY_WEIGHT: float = 0.6   # 查询含时间意图（"最新/最近"等）时的时效性权重
     RAG_RECENCY_HALF_LIFE_DAYS: int = 90    # 时效性半衰期（天）：越新权重越高
     RAG_TIME_FILTER_DAYS: int | None = None # 可选硬过滤：只检索最近 N 天的文档（None=不过滤）
+    # 思考档/复杂办公检索可选 cross-encoder 重排；默认关闭，避免快速路径加载模型和增加延迟。
+    RAG_RERANK_ENABLED: bool = False
+    RAG_RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    RAG_RERANK_TOP_K: int = 20
+    RAG_RERANK_FINAL_K: int = 5
+    RAG_RERANK_DEVICE: str = "cpu"
+    # BGE-M3 sparse 仅用于离线评测阶段；评测通过后再设计持久化/在线召回。
+    RAG_SPARSE_EXPERIMENT_ENABLED: bool = False
+    RAG_SPARSE_MODEL: str = "BAAI/bge-m3"
+    RAG_SPARSE_DEVICE: str = "cpu"
 
-    # ── 服务端查询重写（仅办公模式启用；默认云端 qwen-turbo）──
-    # 优先级：客户端 retrieval_query > 服务端重写 > 原始 content。
-    # 其他场景不做改写，保证回复速度；本地小模型为预留插槽（见下）。
+    # ── 服务端查询扩写（思考档/办公检索；快速档不做任何前置 LLM 调用）──
+    # 原 query 始终保留，扩写仅作为第二个召回来源；显式文件名/编号/日期禁用扩写。
     RAG_QUERY_REWRITE_ENABLED: bool = True
     RAG_QUERY_REWRITE_PROVIDER: str = "cloud"  # cloud（默认，qwen-turbo）/ local（服务端本地小模型插槽）
     RAG_QUERY_REWRITE_BASE_URL: str = "http://localhost:11434/v1"  # local 插槽：OpenAI 兼容端点（Ollama 等）
     RAG_QUERY_REWRITE_MODEL: str = ""          # local 插槽：模型名；配置后自动走本地
     RAG_QUERY_REWRITE_TIMEOUT_SECONDS: int = 15
+    RAG_QUERY_REWRITE_MAX_VARIANTS: int = 2
 
     # ── 智能体技能与沙箱 ──
     AGENT_SKILLS_ENABLED: bool = True    # 技能调用开关（LLM 可请求调用技能；快速/思考档模型均支持 function calling）
@@ -221,6 +235,22 @@ class Settings(BaseSettings):
     AGENT_REVIEW_ENABLED: bool = False   # activity 级质检开关：与 writer 自检 + reviewer 节点重复，
                                          # 默认关闭省一次 LLM 调用/节点；需要可改回 True
     SKILL_PLUGINS_DIR: str = "plugins/skills"     # 技能插件目录（Docker 挂载为 volume 支持热更新）
+    # 合法 Skill 池内的向量排序；权限/场景过滤永远在它之前。未就绪或嵌入
+    # 模型不可用时自动回退词法和显式规则，不阻塞请求。
+    SKILL_SEMANTIC_ROUTING_ENABLED: bool = True
+    SKILL_ROUTING_SEMANTIC_WEIGHT: float = 35.0
+    SKILL_ROUTING_RELIABILITY_WEIGHT: float = 12.0
+    SKILL_ROUTING_COST_WEIGHT: float = 3.0
+    # 用户显式绑定的外部 MCP 走独立配额，避免其可用性或成本拖垮内置 Skill。
+    # 部署可在 MCP_SERVERS 的单个 server 配置中用 mcp_daily_call_limit /
+    # mcp_concurrency_limit 覆盖这些默认值。
+    MCP_EXTERNAL_DEFAULT_DAILY_CALL_LIMIT: int = 100
+    MCP_EXTERNAL_DEFAULT_CONCURRENCY_LIMIT: int = 2
+    # 只有在部署方明确打开后，外部 MCP 用户绑定才需要管理员二次批准；默认保留
+    # 用户显式绑定即可使用的低摩擦模式。
+    MCP_EXTERNAL_REQUIRE_ADMIN_APPROVAL: bool = False
+    SKILL_TELEMETRY_LOOKBACK_DAYS: int = 30
+    SKILL_TELEMETRY_MIN_SAMPLES: int = 10
     # ── 多智能体协作编排 ──
     AGENT_JOBS_TTL_SECONDS: int = 86400           # 任务状态保留时间（24h，Redis appendonly 持久化）
     AGENT_NODE_CONCURRENCY: int = 2               # 同时执行的 DAG 节点数（资源协调上限）
@@ -240,6 +270,8 @@ class Settings(BaseSettings):
     AGENT_LOGICAL_PLAN_MIN_NODES: int = 3
     AGENT_LOGICAL_PLAN_FRONTIER_SIZE: int = 4
     AGENT_LOGICAL_PLAN_TOKEN_BUDGET: int = 80000
+    # 单次普通 DAG 的编译窗口上限；超过时转为逻辑计划/清单，不截断用户动作。
+    AGENT_PLAN_MAX_NODES: int = 8
     # L3 needs a stateful graph that can mount a validated replacement
     # subgraph. The default remains the persisted DAG runtime until the
     # Temporal manifest workflow has completed its local rollout.

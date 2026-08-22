@@ -36,6 +36,15 @@ def test_predictable_multistep_task_is_m2():
     assert score.dependency > 0
 
 
+def test_explicit_workflow_with_conversational_filler_stays_m2():
+    score = assess(
+        "把 score.csv 转为 excel，然后判定数据是否合规，并且看一下是否需要打开系统工具",
+        docs=[{"doc_id": "d1", "filename": "score.csv"}],
+    )
+    assert score.level == ComplexityLevel.M2
+    assert score.mode.value == "plan_execute"
+
+
 def test_open_ended_analysis_is_m3():
     score = assess("分析销售下滑原因并给出建议")
     assert score.level == ComplexityLevel.M3
@@ -59,4 +68,3 @@ def test_low_confidence_route_uses_optional_classifier():
     assert calls
     assert score.level == ComplexityLevel.M1
     assert score.stage == "classifier"
-

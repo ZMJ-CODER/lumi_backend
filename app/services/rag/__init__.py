@@ -17,7 +17,7 @@ from app.services.rag.cleaner import (
 )
 from app.services.rag.classifier import CATEGORY_LABELS, classify_document, normalize_category
 from app.services.rag.chunker import chunk_document
-from app.services.rag.query_rewriter import get_retrieval_query, rewrite_query
+from app.services.rag.query_rewriter import get_retrieval_queries, get_retrieval_query, rewrite_query
 from app.services.rag.embeddings import embed_query, embed_texts
 from app.services.rag.knowledge import (
     create_space,
@@ -47,6 +47,7 @@ __all__ = [
     "normalize_category",
     "chunk_document",
     "get_retrieval_query",
+    "get_retrieval_queries",
     "rewrite_query",
     "split_text",
     "embed_query",

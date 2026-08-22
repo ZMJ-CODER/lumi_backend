@@ -37,7 +37,7 @@ async def run_manifest_batch_activity(payload: dict) -> dict:
     from app.agents.orchestration.dag import execute_dag
     from app.agents.orchestration.orchestrator import AgentOrchestrator
     from app.agents.orchestration.review import get_reviewer
-    from app.agents.orchestration.temporal.client import load_byok_key
+    from app.agents.orchestration.temporal.client import load_job_llm_config
 
     store = RedisStateStore()
     job = await store.get_job(job_id)
@@ -63,7 +63,8 @@ async def run_manifest_batch_activity(payload: dict) -> dict:
 
     heartbeat_task = asyncio.create_task(heartbeat_loop())
     try:
-        api_key = await load_byok_key(job_id)
+        llm_config = await load_job_llm_config(job_id)
+        api_key = (llm_config or {}).get("api_key")
         await execute_dag(
             job,
             WORKERS,
@@ -71,6 +72,7 @@ async def run_manifest_batch_activity(payload: dict) -> dict:
             store,
             concurrency=settings.AGENT_NODE_CONCURRENCY,
             llm_api_key=api_key,
+            llm_config=llm_config,
         )
         job = await store.get_job(job_id)
         if job is None:
@@ -97,8 +99,11 @@ async def run_manifest_batch_activity(payload: dict) -> dict:
             review=get_reviewer(),
             temporal_enabled=False,
         )
-        if api_key:
-            controller._job_plan_context[job_id] = {"llm_api_key": api_key}
+        if llm_config:
+            controller._job_plan_context[job_id] = {
+                "llm_api_key": api_key,
+                "llm_config": llm_config,
+            }
         advance = await controller._continue_manifest_job(job)
         job = await store.get_job(job_id) or job
         terminal = job.status in {

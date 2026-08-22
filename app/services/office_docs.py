@@ -11,6 +11,7 @@
 
 import csv
 import json
+import hashlib
 import shutil
 import time
 import uuid
@@ -538,6 +539,7 @@ async def persist_session_record(
                 kind=meta["kind"],
                 content_text=text or None,
                 file_bytes=content,
+                file_hash=hashlib.sha256(content).hexdigest(),
                 status="active",
                 expire_at=_session_expire_at(),
                 last_used_at=datetime.now(timezone.utc),
@@ -549,6 +551,7 @@ async def persist_session_record(
                     "kind": stmt.excluded.kind,
                     "content_text": stmt.excluded.content_text,
                     "file_bytes": stmt.excluded.file_bytes,
+                    "file_hash": stmt.excluded.file_hash,
                     "status": "active",
                     "expire_at": stmt.excluded.expire_at,
                     "last_used_at": stmt.excluded.last_used_at,
@@ -558,6 +561,61 @@ async def persist_session_record(
             await db.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning("办公会话 DB 持久化失败: {}", exc)
+
+
+async def promote_session_to_knowledge(
+    user_id: str, doc_id: str, space_id: str, category: str | None = None
+) -> dict:
+    """在用户明确操作后将临时附件复制到长期知识库。
+
+    该操作不自动触发，也不删除办公会话；同空间同 SHA-256 文件沿用知识库
+    的幂等去重规则。正文和原始字节均来自会话本身，不能接受客户端路径。
+    """
+    from app.core.database import async_session_factory
+    from app.models.db_models import OfficeSession
+    from app.services.rag.knowledge import upload_document_file
+    from sqlalchemy import select
+
+    uid = uuid.UUID(str(user_id))
+    async with async_session_factory() as db:
+        row = (
+            await db.execute(
+                select(OfficeSession).where(
+                    OfficeSession.doc_id == str(doc_id),
+                    OfficeSession.user_id == uid,
+                    OfficeSession.status == "active",
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise LookupError("办公文档会话不存在")
+        content = row.file_bytes
+        if not content:
+            meta = await ensure_session(user_id, doc_id)
+            content = (Path(meta["_session"]) / f"original{meta['ext']}").read_bytes()
+        doc, path, is_new = await upload_document_file(
+            db, user_id, space_id, row.filename, content, category=category
+        )
+        await db.commit()
+        result = {
+            "document_id": str(doc.id),
+            "filename": doc.filename,
+            "space_id": str(doc.space_id),
+            "status": doc.status,
+            "deduplicated": not is_new,
+            "file_hash": hashlib.sha256(content).hexdigest(),
+        }
+        if is_new:
+            from celery_app.tasks import process_document
+
+            task = process_document.apply_async(
+                args=(str(doc.id), str(path), str(doc.user_id), str(doc.space_id), doc.category)
+            )
+            from app.services.rag.knowledge import record_document_enqueue
+
+            await record_document_enqueue(db, str(doc.id), task.id)
+            result["celery_task_id"] = task.id
+        return result
 
 
 async def ensure_session(user_id: str, doc_id: str) -> dict:
@@ -1233,6 +1291,7 @@ async def analyze_doc(
     from app.agents.skills.base import SkillContext
     from app.core.database import async_session_factory
     from app.services.office_skill_utils import office_llm
+    from app.services.rag.query_rewriter import get_retrieval_queries
     from app.services.rag.knowledge import search_user_knowledge
 
     try:
@@ -1259,26 +1318,36 @@ async def analyze_doc(
             citations = []
         else:
             await ensure_rag_index(user_id, doc_id)
+            query_variants = await get_retrieval_queries(
+                instruction, scene="office", user_id=user_id, thinking_mode="think"
+            )
             async with async_session_factory() as session:
                 rag_text, citations = await search_user_knowledge(
                     session,
                     user_id,
-                    instruction,
+                    query_variants[0] if query_variants else instruction,
                     [space_tag],
                     top_k=6,
                     exclude_categories=["code"],
                     own_space_override=False,
+                    rerank_enabled=True,
+                    query_variants=query_variants,
                 )
     else:
+        query_variants = await get_retrieval_queries(
+            instruction, scene="office", user_id=user_id, thinking_mode="think"
+        )
         async with async_session_factory() as session:
             rag_text, citations = await search_user_knowledge(
                 session,
                 user_id,
-                instruction,
+                query_variants[0] if query_variants else instruction,
                 [space_tag],
                 top_k=6,
                 exclude_categories=["code"],
                 own_space_override=False,
+                rerank_enabled=True,
+                query_variants=query_variants,
             )
     if not rag_text:
         return {

@@ -254,9 +254,8 @@ async def delete_account(
     uid = user.id
 
     try:
-        # 1. 项目 / 代码索引 / 代码嵌入
-        await db.execute(delete(CodeEmbedding).where(CodeEmbedding.user_id == uid))
-        await db.execute(delete(ProjectIndex).where(ProjectIndex.user_id == uid))
+        # 1. 项目 / 代码索引 / 代码嵌入。后两者以 project_id 关联，
+        # 没有 user_id；删除项目会由 FK ON DELETE CASCADE 清理子记录。
         await db.execute(delete(Project).where(Project.user_id == uid))
         # 2. 知识库（分块 → 文档 → 空间）
         await db.execute(delete(DocumentChunk).where(DocumentChunk.user_id == uid))

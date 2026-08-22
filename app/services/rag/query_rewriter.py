@@ -1,13 +1,15 @@
-"""服务端查询重写（可插拔）.
+"""服务端查询扩写（可插拔）.
 
 设计：
   - 改写发生在服务端，默认走云端 qwen-turbo；
-  - 仅办公模式（scene=office）启用，其他场景直接原文，保证回复速度；
+  - 仅办公模式、普通模式的思考档启用；快速档始终直接原文；
   - 服务端本地小模型为预留插槽：RAG_QUERY_REWRITE_PROVIDER=local。
     仅在安装了独立文本 Ollama 模型时启用；视觉模型不作为改写器使用。
 
-优先级：客户端提供的 retrieval_query > 服务端重写 > 原始 content。
+原 query 永远保留为主查询，扩写仅作为第二路候选来源，绝不覆盖原文。
 """
+
+import re
 
 from loguru import logger
 
@@ -16,10 +18,26 @@ from app.core.llm import LLMClient
 from app.services.usage import CATEGORY_REWRITE, record_usage
 
 REWRITE_SYSTEM_PROMPT = (
-    "你是查询精炼助手。把用户的口语化提问改写为适合知识库检索的查询："
-    "保留关键实体和术语，补充必要的同义词，去除口语冗余和语气词。"
-    "如果原问题已经清晰可直接检索，原样输出。只输出改写后的查询文本，不要输出其他内容。"
+    "你是查询扩写助手。为知识库检索生成一个补充查询：保留关键实体、术语、否定和限定条件，"
+    "仅补充必要同义词或全称，去掉口语冗余。不要改写文件名、编号、日期或引号内原文。"
+    "若原问题已经清晰且无需补充，原样输出。只输出一条查询文本，不要解释。"
 )
+
+# 对精确定位类查询扩写会稀释关键字，宁可只用原 query。
+_EXACT_LITERAL_RE = re.compile(
+    r"(?:[\"'“”‘’]|\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b|\b[A-Za-z]{1,8}[-_]\d{2,}\b|"
+    r"\b\d{5,}\b|\.(?:pdf|docx?|xlsx?|pptx?|csv|tsv|md|txt)\b)",
+    re.IGNORECASE,
+)
+
+
+def should_expand_query(text: str, *, scene: str | None, thinking_mode: str = "fast") -> bool:
+    """是否允许 LLM 扩写。快速档和精确字面量查询必须零前置调用。"""
+    if not settings.RAG_QUERY_REWRITE_ENABLED or not text or not text.strip():
+        return False
+    if scene == "office":
+        return not bool(_EXACT_LITERAL_RE.search(text))
+    return thinking_mode == "think" and not bool(_EXACT_LITERAL_RE.search(text))
 
 
 async def _rewrite(
@@ -123,11 +141,24 @@ async def get_retrieval_query(
     scene: str | None = None,
     user_id: str | None = None,
 ) -> str:
-    """决定本次检索查询：客户端精炼 > 服务端重写（仅办公模式）> 原文."""
+    """兼容旧调用：返回单个检索 query，不再以改写结果覆盖原文。"""
     if client_query and client_query.strip():
         return client_query
-    # 仅办公模式启用改写，其他场景直接原文（保回复速度）
-    if scene != "office":
-        return content
-    rewritten = await rewrite_query(content, user_id)
-    return (rewritten or content).strip()[:500]
+    return content.strip()[:500]
+
+
+async def get_retrieval_queries(
+    content: str,
+    client_query: str | None = None,
+    scene: str | None = None,
+    user_id: str | None = None,
+    thinking_mode: str = "fast",
+) -> list[str]:
+    """返回原 query + 可选扩写 query，去重且任一路失败均不阻塞原 query。"""
+    primary = (client_query or content).strip()[:500]
+    if not primary or client_query or not should_expand_query(primary, scene=scene, thinking_mode=thinking_mode):
+        return [primary] if primary else []
+    expanded = (await rewrite_query(primary, user_id) or "").strip()[:500]
+    if not expanded or expanded.casefold() == primary.casefold():
+        return [primary]
+    return [primary, expanded][: settings.RAG_QUERY_REWRITE_MAX_VARIANTS]

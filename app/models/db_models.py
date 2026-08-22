@@ -274,6 +274,7 @@ class OfficeSession(Base):
     kind: Mapped[str] = mapped_column(String(20), default="text", nullable=False)
     content_text: Mapped[str | None] = mapped_column(Text, comment="提取的全文（聊天注入 / RAG 索引用）")
     file_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, comment="原始文件（编辑/保存用，可重建磁盘缓存）")
+    file_hash: Mapped[str | None] = mapped_column(String(64), index=True, comment="原始文件 SHA-256，用于显式晋升时去重")
     conversation_id: Mapped[str | None] = mapped_column(String(64), index=True, comment="关联会话（可选）")
     status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
     expire_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
@@ -309,6 +310,74 @@ class OfficeTaskIndex(Base):
     __table_args__ = (
         Index("idx_office_task_indices_user_conv_completed", "user_id", "conversation_id", text("completed_at DESC")),
         Index("idx_office_task_indices_user_status_completed", "user_id", "status", text("completed_at DESC")),
+    )
+
+
+# ── 用户外部 MCP 工具绑定 ────────────────────────────────
+
+class UserMcpToolBinding(Base, UUIDMixin):
+    """用户显式批准进入候选池的外部 MCP 工具。
+
+    服务端地址始终引用部署配置中的 ``server_name``，不存用户提交的 URL，
+    从数据模型上避免把 MCP 连接入口变成 SSRF 能力。
+    """
+
+    __tablename__ = "user_mcp_tool_bindings"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    server_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    raw_tool_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    input_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    domain: Mapped[str] = mapped_column(String(80), nullable=False, default="external")
+    intent_tags: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    scenes: Mapped[list] = mapped_column(JSONB, nullable=False, default=lambda: ["office"])
+    permission: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
+    write_op: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    requires_confirmation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    confirmation_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="server")
+    idempotent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    resource_templates: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    daily_call_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    concurrency_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="enabled")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "server_name", "raw_tool_name", name="uq_user_mcp_tool_binding"),
+        Index("idx_user_mcp_tool_bindings_user_status", "user_id", "status"),
+    )
+
+
+class SkillTelemetryDaily(Base, UUIDMixin):
+    """按能力版本聚合的非敏感运行遥测，供候选排序和运维观察使用。"""
+
+    __tablename__ = "skill_telemetry_daily"
+
+    metric_date: Mapped[date] = mapped_column(Date, nullable=False)
+    skill_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    skill_version: Mapped[str] = mapped_column(String(32), nullable=False, default="1.0.0")
+    scene: Mapped[str] = mapped_column(String(32), nullable=False)
+    error_class: Mapped[str] = mapped_column(String(80), nullable=False, default="none")
+    calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    successes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duration_ms_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "metric_date", "skill_name", "skill_version", "scene", "error_class",
+            name="uq_skill_telemetry_daily_bucket",
+        ),
+        Index("idx_skill_telemetry_daily_lookup", "skill_name", "skill_version", "scene", "metric_date"),
     )
 
 

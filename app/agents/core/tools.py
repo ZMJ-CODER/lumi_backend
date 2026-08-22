@@ -161,6 +161,7 @@ async def _llm_step_title(ctx, instruction: str, path: str) -> str | None:
                 reasoning_effort="low",
                 disable_reasoning_effort=True,
                 api_key=ctx.llm_api_key,
+                llm_config=ctx.llm_config,
             ),
             timeout=10,
         )
@@ -610,6 +611,7 @@ async def generate_code_content(
                     "reasoning_effort": effort,
                     "disable_reasoning_effort": no_reasoning,
                     "api_key": ctx.llm_api_key,
+                    "llm_config": ctx.llm_config,
                 }
                 if max_tokens is not None:
                     kwargs["max_tokens"] = max_tokens
@@ -665,6 +667,11 @@ async def generate_code_content(
                 if not (reply or "").strip():
                     raise RuntimeError("模型返回空内容")
             except Exception as exc:  # noqa: BLE001
+                from app.agents.skills.recovery import classify_model_error, is_terminal_model_error_code
+
+                code, message = classify_model_error(exc)
+                if is_terminal_model_error_code(code):
+                    raise RuntimeError(message) from exc
                 if not no_reasoning:
                     # 兜底：若开启推理，空内容多为推理把输出预算烧光 → 关推理重试
                     logger.warning("[Agent] LLM 生成失败（effort={}）: {}，关闭推理重试", effort, exc)
@@ -674,6 +681,8 @@ async def generate_code_content(
                 if nxt != effort:
                     effort = nxt
                     continue
+                if getattr(ctx, "scene", None) == "office":
+                    raise RuntimeError("模型未能生成可用代码，请检查模型连接后重试。") from exc
                 logger.warning("[Agent] 推理档到顶，回退本地模型")
                 reply = await _generate_local(instruction, path, original)
                 break
@@ -706,6 +715,8 @@ async def generate_code_content(
                     prompt=system_prompt,
                 )
             except Exception as exc:  # noqa: BLE001
+                if getattr(ctx, "scene", None) == "office":
+                    raise
                 logger.warning("[Agent] 全文重写失败: {}", exc)
                 reply = await _generate_local(instruction, path, original)
         reply = (reply or "").strip()
@@ -715,6 +726,8 @@ async def generate_code_content(
         return reply
     except Exception as exc:  # noqa: BLE001
         logger.warning("[Agent] LLM 生成失败: {}", exc)
+        if getattr(ctx, "scene", None) == "office":
+            raise
         return await _generate_local(instruction, path, original)
 
 
@@ -774,6 +787,7 @@ async def review_code_content(ctx, instruction: str, path: str, content: str) ->
             ),
             user_id=ctx.user_id,
             api_key=ctx.llm_api_key,
+            llm_config=ctx.llm_config,
             max_tokens=4096,
         )
         if data:

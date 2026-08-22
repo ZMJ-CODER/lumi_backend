@@ -7,6 +7,10 @@ from pydantic import BaseModel, Field
 
 class ToolCapability(BaseModel):
     name: str
+    version: str = "1.0.0"
+    status: str = "stable"
+    schema_fingerprint: str = ""
+    replacement_skill_id: str = ""
     description: str = ""
     category: str = "general"
     domain: str = ""

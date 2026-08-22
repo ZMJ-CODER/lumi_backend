@@ -4,6 +4,41 @@ from datetime import datetime
 from pathlib import Path
 import csv
 import io
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class ParsedSegment:
+    """解析器向分块器提供的最小结构化契约。"""
+
+    text: str
+    page_start: int | None = None
+    page_end: int | None = None
+    heading_path: str | None = None
+
+
+@dataclass(slots=True)
+class ParsedDocument:
+    """正文与可验证来源元数据；缺失字段必须保持 None，禁止猜测。"""
+
+    text: str
+    segments: list[ParsedSegment]
+    parser: str
+
+
+def _parse_pdf_segments(file_path: str) -> list[ParsedSegment]:
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(file_path))
+    segments: list[ParsedSegment] = []
+    for page_no, page in enumerate(reader.pages, 1):
+        try:
+            text = page.extract_text() or ""
+        except Exception:  # noqa: BLE001
+            text = ""
+        if text.strip():
+            segments.append(ParsedSegment(text=text.strip(), page_start=page_no, page_end=page_no))
+    return segments
 
 
 # 支持的纯文本扩展名
@@ -241,6 +276,36 @@ def parse_document(file_path: str, filename: str | None = None) -> str:
     from app.services.rag.docling_parser import parse_with_docling
 
     return parse_with_docling(file_path, filename)
+
+
+def parse_document_with_metadata(file_path: str, filename: str | None = None) -> ParsedDocument:
+    """解析正文并保留可验证 provenance。
+
+    旧调用继续使用 ``parse_document``。PDF 优先按页解析，因此页码不会在进入
+    分块阶段前丢失；Docling 尚未暴露稳定映射时只返回无页码 segment，绝不推算页码。
+    """
+    name = filename or file_path
+    ext = Path(name).suffix.lower()
+    if ext == ".pdf":
+        try:
+            segments = _parse_pdf_segments(file_path)
+            if segments:
+                return ParsedDocument(
+                    text="\n\n".join(segment.text for segment in segments),
+                    segments=segments,
+                    parser="pypdf",
+                )
+        except Exception:  # noqa: BLE001
+            pass
+    if ext not in _TEXT_EXTS and ext not in {".eml", ".ics"}:
+        try:
+            from app.services.rag.docling_parser import parse_with_docling_metadata
+
+            return parse_with_docling_metadata(file_path, filename)
+        except Exception:  # noqa: BLE001
+            pass
+    text = parse_document(file_path, filename)
+    return ParsedDocument(text=text, segments=[ParsedSegment(text=text)], parser="text_or_docling")
 
 
 # 分隔符优先级：先按大块切，再按句子、标点、空格兜底

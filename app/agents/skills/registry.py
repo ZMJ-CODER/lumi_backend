@@ -14,10 +14,18 @@ class SkillRegistry:
     @classmethod
     def register(cls, skill: Skill, source: str = "builtin") -> None:
         """注册一个技能（source: builtin / plugin）."""
+        skill.validate_lifecycle()
         if skill.name in cls._skills:
             logger.warning(f"技能 '{skill.name}' 已存在，将被覆盖（来源: {source}）")
         cls._skills[skill.name] = skill
         cls._sources[skill.name] = source
+        try:
+            from app.agents.skills.routing import invalidate_skill_semantic_index
+
+            invalidate_skill_semantic_index()
+        except Exception:
+            # 注册表不能被可选的检索加速层阻断。
+            pass
         logger.debug(f"技能已注册: {skill.name} | 需要沙箱: {skill.requires_sandbox}")
 
     @classmethod
@@ -30,6 +38,12 @@ class SkillRegistry:
         """卸载技能（插件热更新用）；返回被移除的技能."""
         removed = cls._skills.pop(name, None)
         cls._sources.pop(name, None)
+        try:
+            from app.agents.skills.routing import invalidate_skill_semantic_index
+
+            invalidate_skill_semantic_index()
+        except Exception:
+            pass
         return removed
 
     @classmethod

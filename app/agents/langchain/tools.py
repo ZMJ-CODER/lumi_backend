@@ -33,6 +33,7 @@ async def make_skill_tool(
     scene: str,
     conversation_id: str = "",
     user_role: str = "user",
+    llm_config: dict | None = None,
     on_notify: Callable[[str | dict], None] | None = None,
     on_result: Callable[[SkillResult], Any] | None = None,
     user_message: str = "",
@@ -55,6 +56,7 @@ async def make_skill_tool(
             on_notify=on_notify,
             user_role=user_role,
             user_message=user_message,
+            llm_config=llm_config,
         )
         # ToolNode 会把抛出的异常转成一条工具消息，但那会中断我们的审计/引用
         # 收集，也会把底层异常文本暴露给模型。失败统一作为受控工具结果回填，

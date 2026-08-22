@@ -22,6 +22,11 @@ class AnalyzeRequest(BaseModel):
     mode: str = "qa"  # qa / summary
 
 
+class PromoteRequest(BaseModel):
+    space_id: str
+    category: str | None = None
+
+
 def _session_or_404(user_id: str, doc_id: str) -> dict:
     try:
         return office_docs.load_session(user_id, doc_id)
@@ -151,6 +156,7 @@ async def get_office_doc(doc_id: str, payload: dict = Depends(require_auth)):
 
 @router.post("/{doc_id}/edit")
 async def edit_office_doc(
+    request: Request,
     doc_id: str,
     req: EditRequest,
     payload: dict = Depends(require_auth),
@@ -166,7 +172,7 @@ async def edit_office_doc(
         info["structure"],
         info["kind"],
         payload["sub"],
-        api_key=None,
+        api_key=request.headers.get("x-llm-api-key") or None,
     )
     records = await run_in_compute(office_docs.apply_edits, payload["sub"], doc_id, ops)
     # 只写入缓冲副本：用户在前端预览确认（保留/撤销）后才落盘
@@ -306,6 +312,24 @@ async def analyze_office_doc(
         )
     except LookupError as exc:
         raise NotFoundException(str(exc)) from exc
+    return {"code": 0, "data": result}
+
+
+@router.post("/{doc_id}/promote")
+async def promote_office_doc(
+    doc_id: str,
+    req: PromoteRequest,
+    payload: dict = Depends(require_auth),
+):
+    """用户明确确认后，将办公附件转存到指定长期知识空间。"""
+    try:
+        result = await office_docs.promote_session_to_knowledge(
+            payload["sub"], doc_id, req.space_id, req.category
+        )
+    except LookupError as exc:
+        raise NotFoundException(str(exc)) from exc
+    except (ValueError, PermissionError) as exc:
+        raise BadRequestException(str(exc)) from exc
     return {"code": 0, "data": result}
 
 

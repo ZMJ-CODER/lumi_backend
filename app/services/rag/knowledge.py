@@ -25,7 +25,7 @@ from app.services.rag.classifier import classify_document, normalize_category
 from app.services.rag.embeddings import embed_query, embed_texts
 from app.models.db_models import Document, DocumentChunk, KnowledgeSpace
 from app.services.rag.cleaner import HARD_FAIL_CODES, DocumentQualityError, assess_document, clean_document
-from app.services.rag.document_parser import parse_document
+from app.services.rag.document_parser import parse_document_with_metadata
 
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
 
@@ -43,7 +43,12 @@ def is_code_filename(filename: str | None) -> bool:
     return Path(name).suffix in CODE_FILE_EXTS
 
 
-def _chunk_metadata(filename: str, chunk_text: str, chunk_index: int) -> str:
+def _chunk_metadata(
+    filename: str,
+    chunk_text: str,
+    chunk_index: int,
+    locator: dict | None = None,
+) -> str:
     """Persist only verifiable, parser-derived locator data for citations.
 
     Page and table-cell coordinates are deliberately absent until the parser
@@ -56,6 +61,7 @@ def _chunk_metadata(filename: str, chunk_text: str, chunk_index: int) -> str:
     headings = [line.lstrip("#").strip() for line in lines if line.startswith("#")]
     data: dict[str, object] = {
         "source": Path(filename or "").name,
+        "doc_title": Path(filename or "").name,
         "file_extension": ext,
         "chunk_index": chunk_index,
     }
@@ -65,6 +71,10 @@ def _chunk_metadata(filename: str, chunk_text: str, chunk_index: int) -> str:
         # The chunker repeats the header for every row group.  This is a local
         # range inside the chunk, not a fabricated source-file row number.
         data["table_rows_in_chunk"] = max(0, len(lines) - 1)
+    for key in ("page_start", "page_end", "heading_path", "table_id", "row_range"):
+        value = (locator or {}).get(key)
+        if value is not None and value != "":
+            data[key] = value
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -368,7 +378,8 @@ async def process_document_pipeline(
 
     try:
         try:
-            raw_text = parse_document(file_path, doc.filename)
+            parsed = parse_document_with_metadata(file_path, doc.filename)
+            raw_text = parsed.text
         except Exception as e:
             # 解析失败归类为"无法解析"（如严重损坏的 PDF），终止处理不重试
             raise DocumentQualityError(
@@ -391,7 +402,24 @@ async def process_document_pipeline(
             category, tags = await classify_document(cleaned_text, user_category or doc.category)
             doc.category = category
             doc.tags = ", ".join(tags) if tags else None
-        chunks = chunk_document(cleaned_text, doc.filename, settings.RAG_CHUNK_SIZE, settings.RAG_CHUNK_OVERLAP)
+        # 按解析器 segment 分块，页码等 provenance 随 chunk 一起进入 metadata。
+        # 纯文本只有一个无页码 segment，行为与旧版完全一致。
+        chunk_records: list[tuple[str, dict]] = []
+        segments = parsed.segments if parsed.segments else []
+        for segment in segments:
+            segment_text = clean_document(segment.text, doc.filename).strip()
+            if not segment_text:
+                continue
+            for chunk_text in chunk_document(
+                segment_text, doc.filename, settings.RAG_CHUNK_SIZE, settings.RAG_CHUNK_OVERLAP
+            ):
+                locator = {
+                    "page_start": segment.page_start,
+                    "page_end": segment.page_end,
+                    "heading_path": segment.heading_path,
+                }
+                chunk_records.append((chunk_text, locator))
+        chunks = [text for text, _ in chunk_records]
 
         # 重处理时清掉旧分块
         await session.execute(delete(DocumentChunk).where(DocumentChunk.document_id == doc.id))
@@ -409,7 +437,7 @@ async def process_document_pipeline(
                         chunk_index=i,
                         chunk_text=chunk_text,
                         embedding=vec,
-                        metadata_=_chunk_metadata(doc.filename, chunk_text, i),
+                        metadata_=_chunk_metadata(doc.filename, chunk_text, i, chunk_records[i][1]),
                     )
                 )
 
@@ -594,11 +622,12 @@ def _hybrid_fuse(vector_rows, keyword_rows, top_k: int) -> list[dict]:
             {
                 "chunk_id": cid,
                 "chunk_text": row["chunk_text"],
+                "chunk_metadata": row.get("chunk_metadata"),
                 "title": row["title"],
                 "document_id": str(row["document_id"]),
-                "is_public": bool(row["is_public"]),
-                "created_at": row["created_at"],
-                "category": row["category"],
+                "is_public": bool(row.get("is_public", True)),
+                "created_at": row.get("created_at"),
+                "category": row.get("category"),
                 "similarity": round(float(row["similarity"]), 4),
                 "score": 0.0,
                 "kw_hit": False,
@@ -615,16 +644,40 @@ def _hybrid_fuse(vector_rows, keyword_rows, top_k: int) -> list[dict]:
             merged[cid] = {
                 "chunk_id": cid,
                 "chunk_text": row["chunk_text"],
+                "chunk_metadata": row.get("chunk_metadata"),
                 "title": row["title"],
                 "document_id": str(row["document_id"]),
-                "is_public": bool(row["is_public"]),
-                "created_at": row["created_at"],
-                "category": row["category"],
+                "is_public": bool(row.get("is_public", True)),
+                "created_at": row.get("created_at"),
+                "category": row.get("category"),
                 "similarity": None,
                 "score": 1.0 / (rrf_k + rank),
                 "kw_hit": True,
             }
     return sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:top_k]
+
+
+def _multi_query_fuse(result_sets: list[list[dict]], top_k: int) -> list[dict]:
+    """对原 query 与扩写 query 的候选做第二层 RRF。
+
+    原 query 排名作为第一路，扩写仅提供补充候选；相同 chunk 不重复，且保留原有
+    keyword/similarity/metadata 字段供后续门槛、citation 和 reranker 使用。
+    """
+    merged: dict[str, dict] = {}
+    rrf_k = 60
+    for result_set in result_sets:
+        for rank, row in enumerate(result_set, 1):
+            chunk_id = str(row["chunk_id"])
+            entry = merged.get(chunk_id)
+            if entry is None:
+                entry = dict(row)
+                entry["score"] = 0.0
+                merged[chunk_id] = entry
+            entry["score"] += 1.0 / (rrf_k + rank)
+            entry["kw_hit"] = bool(entry.get("kw_hit") or row.get("kw_hit"))
+            if entry.get("similarity") is None and row.get("similarity") is not None:
+                entry["similarity"] = row["similarity"]
+    return sorted(merged.values(), key=lambda row: row["score"], reverse=True)[:top_k]
 
 
 def _passes_similarity_gate(row: dict, threshold: float) -> bool:
@@ -689,6 +742,8 @@ async def search_user_knowledge(
     threshold: float | None = None,
     exclude_categories: list[str] | None = None,
     own_space_override: bool = True,
+    rerank_enabled: bool = False,
+    query_variants: list[str] | None = None,
 ) -> tuple[str, list[dict]]:
     """对话 RAG 混合检索：向量相似度 top-N + 关键词检索，RRF 融合.
 
@@ -699,7 +754,14 @@ async def search_user_knowledge(
     threshold = await effective_threshold(
         settings.RAG_SIMILARITY_THRESHOLD if threshold is None else threshold
     )
-    if not query or not query.strip():
+    primary_query = query.strip()
+    variants = [primary_query]
+    for variant in query_variants or []:
+        value = str(variant or "").strip()
+        if value and value.casefold() not in {item.casefold() for item in variants}:
+            variants.append(value)
+    variants = variants[: settings.RAG_QUERY_REWRITE_MAX_VARIANTS]
+    if not primary_query:
         return "", []
 
     conds, params = _scope_conditions(
@@ -709,13 +771,17 @@ async def search_user_knowledge(
         exclude_categories=exclude_categories,
         own_space_override=own_space_override,
     )
-    fused: list[dict] = []
+    candidate_k = max(top_k, settings.RAG_RERANK_TOP_K) if rerank_enabled and settings.RAG_RERANK_ENABLED else top_k
+    vec_top = max(settings.RAG_HYBRID_VECTOR_TOP_K, candidate_k)
+    kw_top = max(settings.RAG_HYBRID_KEYWORD_TOP_K, candidate_k)
+    all_fused: list[list[dict]] = []
 
-    # ── 第一路：向量相似度 top-N ──
-    vec = await embed_query(query)
-    if vec:
-        vec_top = settings.RAG_HYBRID_VECTOR_TOP_K
-        sql = f"""
+    for retrieval_query in variants:
+        vector_rows: list[dict] = []
+        # ── 第一路：向量相似度 top-N ──
+        vec = await embed_query(retrieval_query)
+        if vec:
+            sql = f"""
             SELECT c.id AS chunk_id, c.chunk_text, c.metadata AS chunk_metadata, d.filename AS title,
                    d.id AS document_id, s.is_public, d.created_at AS created_at, d.category AS category,
                    1 - (c.embedding <=> CAST(:qvec AS vector)) AS similarity
@@ -724,38 +790,37 @@ async def search_user_knowledge(
             JOIN knowledge_spaces s ON s.id = c.space_id
             WHERE {' AND '.join(conds)}
             ORDER BY c.embedding <=> CAST(:qvec AS vector)
-            LIMIT :top_k
-        """
-        stmt = text(sql).bindparams(
-            bindparam("qvec", _vector_str(vec)),
-            bindparam("top_k", vec_top),
-        )
-        if space_tags:
-            stmt = stmt.bindparams(bindparam("tags", expanding=True))
-        if exclude_categories:
-            stmt = stmt.bindparams(bindparam("excl_cats", expanding=True))
-        rows = (await session.execute(stmt, params)).mappings().all()
-        fused = [dict(r) for r in rows]
+                LIMIT :top_k
+            """
+            stmt = text(sql).bindparams(
+                bindparam("qvec", _vector_str(vec)),
+                bindparam("top_k", vec_top),
+            )
+            if space_tags:
+                stmt = stmt.bindparams(bindparam("tags", expanding=True))
+            if exclude_categories:
+                stmt = stmt.bindparams(bindparam("excl_cats", expanding=True))
+            vector_rows = [dict(row) for row in (await session.execute(stmt, params)).mappings().all()]
 
-    # ── 第二路：关键词检索 top-N ──
-    keywords = _extract_keywords(query)
-    if keywords:
-        kw_top = settings.RAG_HYBRID_KEYWORD_TOP_K
-        kw_conds, kw_params = _scope_conditions(
-            user_id,
-            space_tags,
-            need_embedding=False,
-            exclude_categories=exclude_categories,
-            own_space_override=own_space_override,
-        )
-        kw_conds.append(
-            "(" + " OR ".join(f"c.chunk_text ILIKE :kw{i}" for i in range(len(keywords))) + ")"
-        )
-        match_expr = " + ".join(
-            f"(CASE WHEN c.chunk_text ILIKE :kw{i} THEN 1 ELSE 0 END)" for i in range(len(keywords))
-        )
-        kw_params.update({f"kw{i}": f"%{kw}%" for i, kw in enumerate(keywords)})
-        sql = f"""
+        # ── 第二路：关键词检索 top-N ──
+        keyword_rows: list[dict] = []
+        keywords = _extract_keywords(retrieval_query)
+        if keywords:
+            kw_conds, kw_params = _scope_conditions(
+                user_id,
+                space_tags,
+                need_embedding=False,
+                exclude_categories=exclude_categories,
+                own_space_override=own_space_override,
+            )
+            kw_conds.append(
+                "(" + " OR ".join(f"c.chunk_text ILIKE :kw{i}" for i in range(len(keywords))) + ")"
+            )
+            match_expr = " + ".join(
+                f"(CASE WHEN c.chunk_text ILIKE :kw{i} THEN 1 ELSE 0 END)" for i in range(len(keywords))
+            )
+            kw_params.update({f"kw{i}": f"%{kw}%" for i, kw in enumerate(keywords)})
+            sql = f"""
             SELECT c.id AS chunk_id, c.chunk_text, c.metadata AS chunk_metadata, d.filename AS title,
                    d.id AS document_id, s.is_public, d.created_at AS created_at, d.category AS category,
                    ({match_expr}) AS kw_score
@@ -764,20 +829,28 @@ async def search_user_knowledge(
             JOIN knowledge_spaces s ON s.id = c.space_id
             WHERE {' AND '.join(kw_conds)}
             ORDER BY kw_score DESC, c.created_at DESC
-            LIMIT :top_k
-        """
-        stmt = text(sql).bindparams(bindparam("top_k", kw_top))
-        if space_tags:
-            stmt = stmt.bindparams(bindparam("tags", expanding=True))
-        if exclude_categories:
-            stmt = stmt.bindparams(bindparam("excl_cats", expanding=True))
-        kw_rows = (await session.execute(stmt, kw_params)).mappings().all()
-        fused = _hybrid_fuse(fused, kw_rows, top_k)
-    elif fused:
-        fused = fused[:top_k]
+                LIMIT :top_k
+            """
+            stmt = text(sql).bindparams(bindparam("top_k", kw_top))
+            if space_tags:
+                stmt = stmt.bindparams(bindparam("tags", expanding=True))
+            if exclude_categories:
+                stmt = stmt.bindparams(bindparam("excl_cats", expanding=True))
+            keyword_rows = [dict(row) for row in (await session.execute(stmt, kw_params)).mappings().all()]
+        if keyword_rows:
+            all_fused.append(_hybrid_fuse(vector_rows, keyword_rows, candidate_k))
+        elif vector_rows:
+            all_fused.append(vector_rows[:candidate_k])
 
+    fused = _multi_query_fuse(all_fused, candidate_k) if len(all_fused) > 1 else (all_fused[0] if all_fused else [])
+
+    # cross-encoder 只重排混合候选，不参与快速路径；失败自动回退 RRF。
+    if rerank_enabled and settings.RAG_RERANK_ENABLED and fused:
+        from app.services.rag.reranker import rerank
+
+        fused = rerank(primary_query, fused, min(settings.RAG_RERANK_FINAL_K, top_k))
     # 时效性加权：相关性为主，新文档占优（时间意图查询权重更高）
-    fused = _apply_recency(fused, _time_intent_weight(query))
+    fused = _apply_recency(fused, _time_intent_weight(primary_query))
 
     # 相关性硬门槛（宁缺毋滥）：向量路相似度低于阈值的引用完全不可信，直接丢弃；
     # 关键词路精确命中（子串 ILIKE 匹配）是强证据，无论其向量相似度高低都保留。

@@ -495,13 +495,14 @@ print(f"已生成文件：{{target.name}}")
                 usage_category=CATEGORY_PLAN,
                 disable_reasoning_effort=True,
                 api_key=ctx.llm_api_key,
+                llm_config=ctx.llm_config,
             )
         except Exception as exc:  # noqa: BLE001
             # 上游偶发会返回 HTTP 200 但 choices.content 为空。脚本没有副作用，
             # 因而可以安全地用更短、更直接的提示再试一次，避免一次空响应终止任务。
             logger.warning("[Agent:office_script] 首次脚本生成失败: {}", exc)
             error_code, user_error = classify_model_error(exc)
-            if error_code != "MODEL_UNAVAILABLE":
+            if error_code != "MODEL_EMPTY_RESPONSE":
                 raise ScriptGenerationError(error_code, user_error) from exc
             try:
                 retry_prompt = (
@@ -519,6 +520,7 @@ print(f"已生成文件：{{target.name}}")
                     usage_category=CATEGORY_PLAN,
                     disable_reasoning_effort=True,
                     api_key=ctx.llm_api_key,
+                    llm_config=ctx.llm_config,
                 )
             except Exception as retry_exc:  # noqa: BLE001
                 logger.warning("[Agent:office_script] 重试脚本生成仍失败: {}", retry_exc)
@@ -643,6 +645,7 @@ class OfficeDocumentAgent(WorkerAgent):
                 prompt,
                 user_id=ctx.user_id,
                 api_key=ctx.llm_api_key,
+                llm_config=ctx.llm_config,
                 max_tokens=5000,
             )
         except Exception as exc:  # noqa: BLE001

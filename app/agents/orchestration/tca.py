@@ -172,7 +172,19 @@ class TaskComplexityAssessor:
                 + ambiguity * 0.25
                 + history_dependency * 0.12
             )
-            if _OPEN_ENDED_RE.search(text) or (ambiguity >= 0.65 and dependency >= 0.4):
+            # Explicit workflows should stay on the plan/execute path even if
+            # they contain conversational fillers such as "看一下" or
+            # "处理一下".  Sending these requests to the single-node ReAct
+            # shortcut collapses a concrete conversion -> validation -> system
+            # action DAG into one 120s-bounded node.  ReAct is reserved for
+            # genuinely open-ended decisions or history-dependent requests.
+            explicit_workflow = bool(
+                dependency >= 0.35
+                and (has_output or has_named_file or entities >= 1)
+            )
+            if _OPEN_ENDED_RE.search(text) or (
+                ambiguity >= 0.65 and dependency >= 0.4 and not explicit_workflow
+            ):
                 level = ComplexityLevel.M3
                 confidence = 0.82
                 reasons.append("成功标准开放或需根据中间结果动态决策")

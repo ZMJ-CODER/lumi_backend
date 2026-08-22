@@ -20,14 +20,22 @@ class RecoveryDecision:
 _INPUT = {"INVALID_ARGS", "RULE_VIOLATION", "TOOL_NOT_PLANNED", "TOOL_NOT_CALLED", "NON_ATOMIC_TOOL_CALL"}
 _PERMISSION = {"FORBIDDEN", "NEEDS_CONFIRMATION", "REJECTED"}
 _CAPABILITY = {"SANDBOX_REQUIRED", "SKILL_NOT_FOUND", "MCP_UNAVAILABLE", "CLIENT_OFFLINE", "CLIENT_TIMEOUT"}
-_TRANSIENT = {"TIMEOUT", "RATE_LIMIT", "NETWORK_ERROR", "MODEL_EMPTY_RESPONSE", "MODEL_UNAVAILABLE"}
+_TRANSIENT = {"TIMEOUT", "RATE_LIMIT", "NETWORK_ERROR", "MODEL_EMPTY_RESPONSE"}
 _MODEL_ACTION_REQUIRED = {
     "MODEL_INSUFFICIENT_BALANCE",
     "MODEL_AUTH_ERROR",
     "MODEL_NOT_FOUND",
     "MODEL_CONFIG_ERROR",
     "MODEL_TOOL_CALL_UNSUPPORTED",
+    "MODEL_PROVIDER_UNAVAILABLE",
+    "MODEL_CONNECTION_ERROR",
+    "MODEL_UNAVAILABLE",
 }
+
+
+def is_terminal_model_error_code(code: str | None) -> bool:
+    """Provider failures that must stop the request-scoped office job."""
+    return str(code or "").upper() in _MODEL_ACTION_REQUIRED
 
 
 def classify_model_error(error: Exception | str) -> tuple[str, str]:
@@ -38,10 +46,22 @@ def classify_model_error(error: Exception | str) -> tuple[str, str]:
     """
     text = str(error or "")
     lowered = text.lower()
+    if any(marker in lowered or marker in text for marker in ("empty response", "empty content", "返回空内容", "空内容", "no content")):
+        return "MODEL_EMPTY_RESPONSE", "模型未返回有效内容，请稍后重试。"
     if (
         "402" in lowered
         or "insufficient balance" in lowered
         or "insufficient_balance" in lowered
+        or "quota exceeded" in lowered
+        or "quota_exceeded" in lowered
+        or "insufficient_quota" in lowered
+        or "billing_hard_limit" in lowered
+        or "hard limit" in lowered
+        or "payment required" in lowered
+        or "account balance" in lowered
+        or "credits" in lowered and ("low" in lowered or "exhaust" in lowered or "insufficient" in lowered)
+        or "欠费" in text
+        or "余额" in text and ("不足" in text or "用尽" in text)
         or "余额不足" in text
     ):
         return (
@@ -93,12 +113,26 @@ def classify_model_error(error: Exception | str) -> tuple[str, str]:
             "模型服务商拒绝了高级参数，办公任务已停止。系统已默认关闭不兼容的推理参数；"
             "请重新发起任务，如仍失败请检查自备接口的模型名称和地址。",
         )
+    if (
+        "connection refused" in lowered
+        or "connection reset" in lowered
+        or "provider unavailable" in lowered
+        or "bad gateway" in lowered
+        or "gateway timeout" in lowered
+        or "service unavailable" in lowered
+        or "dns" in lowered
+        or any(token in lowered for token in (" 502", " 503", " 504"))
+    ):
+        return (
+            "MODEL_PROVIDER_UNAVAILABLE",
+            "模型供应商已断开或暂时停止服务，办公任务已停止。请检查模型连接、接口地址、API Key 和供应商状态后重试。",
+        )
     if "400" in lowered or "invalid_request" in lowered:
         return (
             "MODEL_CONFIG_ERROR",
             "当前模型配置不被服务商支持，办公任务已停止。请检查模型名称、接口地址和高级参数后重试。",
         )
-    return ("MODEL_UNAVAILABLE", "模型服务暂时不可用，请稍后重试或切换到其他模型。")
+    return ("MODEL_UNAVAILABLE", "模型连接异常，办公任务已停止。请检查模型连接、API Key、账户余额或供应商状态后重试。")
 
 
 def classify_failure(error_code: str | None, error: str | None = "", retryable: bool = False) -> str:
@@ -106,7 +140,7 @@ def classify_failure(error_code: str | None, error: str | None = "", retryable: 
     if code in _MODEL_ACTION_REQUIRED:
         return "model_action_required"
     # 兼容尚未使用 ``classify_model_error`` 的历史调用点。
-    if code == "MODEL_UNAVAILABLE":
+    if code in {"MODEL_UNAVAILABLE", "MODEL_PROVIDER_UNAVAILABLE", "MODEL_CONNECTION_ERROR"}:
         inferred, _ = classify_model_error(error or "")
         if inferred in _MODEL_ACTION_REQUIRED:
             return "model_action_required"

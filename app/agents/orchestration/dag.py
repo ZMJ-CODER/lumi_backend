@@ -109,6 +109,7 @@ async def execute_dag(
     *,
     concurrency: int | None = None,
     llm_api_key: str | None = None,
+    llm_config: dict | None = None,
 ) -> Job:
     """执行整个 DAG；就地更新 job.nodes 状态并持久化."""
     validate_dag(job.nodes)
@@ -296,6 +297,7 @@ async def execute_dag(
             scene=job.scene,
             user_role=job.user_role,
             llm_api_key=llm_api_key,
+            llm_config=llm_config,
             user_request=job.request,
             confirmed_tools=frozenset(
                 str(value) for value in ((node.metadata or {}).get("confirmed_tools") or [])

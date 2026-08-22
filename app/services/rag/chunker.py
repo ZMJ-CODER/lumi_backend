@@ -135,11 +135,12 @@ def _emit_section(lines: list[str], title: str, chunk_size: int, overlap: int) -
 
 
 def chunk_structured(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
-    """结构化 Markdown 分块：识别 代码块/表格/标题/段落，按块类型选策略."""
+    """结构化 Markdown 分块：标题路径、表头与代码边界都保留在候选上下文中。"""
     lines = text.splitlines()
     chunks: list[str] = []
     section: list[str] = []
     section_title = ""
+    heading_stack: list[tuple[int, str]] = []
     i = 0
 
     while i < len(lines):
@@ -149,7 +150,8 @@ def chunk_structured(text: str, chunk_size: int = 500, overlap: int = 50) -> lis
         if _CODE_FENCE_RE.match(line):
             if section:
                 chunks.extend(_emit_section(section, section_title, chunk_size, overlap))
-                section, section_title = [], ""
+                # 标题路径是后续表格/代码块的必要上下文，只清空正文缓冲。
+                section = []
             code_lines = [line]
             i += 1
             while i < len(lines) and not _CODE_FENCE_RE.match(lines[i]):
@@ -159,27 +161,37 @@ def chunk_structured(text: str, chunk_size: int = 500, overlap: int = 50) -> lis
                 code_lines.append(lines[i])
                 i += 1
             inner = "\n".join(code_lines[1:-1]) if len(code_lines) >= 2 else "\n".join(code_lines)
-            chunks.extend(chunk_code(inner, chunk_size, overlap))
+            code_chunks = chunk_code(inner, chunk_size, overlap)
+            chunks.extend([f"{section_title}\n\n{chunk}" if section_title else chunk for chunk in code_chunks])
             continue
 
         # 表格：连续表格行整组提取，按表格策略分块
         if _TABLE_LINE_RE.match(line):
             if section:
                 chunks.extend(_emit_section(section, section_title, chunk_size, overlap))
-                section, section_title = [], ""
+                # 标题路径是后续表格/代码块的必要上下文，只清空正文缓冲。
+                section = []
             table = [line]
             i += 1
             while i < len(lines) and _TABLE_LINE_RE.match(lines[i]):
                 table.append(lines[i])
                 i += 1
-            chunks.extend(chunk_table("\n".join(table), chunk_size, overlap))
+            table_chunks = chunk_table("\n".join(table), chunk_size, overlap)
+            chunks.extend([f"{section_title}\n\n{chunk}" if section_title else chunk for chunk in table_chunks])
             continue
 
         # 标题：结束当前小节，开启新小节
-        if _HEADING_RE.match(line):
+        heading = _HEADING_RE.match(line)
+        if heading:
             if section:
                 chunks.extend(_emit_section(section, section_title, chunk_size, overlap))
-            section_title = line.strip()
+            level = len(heading.group(1))
+            heading_text = heading.group(2).strip()
+            heading_stack = [(old_level, value) for old_level, value in heading_stack if old_level < level]
+            heading_stack.append((level, heading_text))
+            section_title = "\n".join(
+                f"{'#' * heading_level} {value}" for heading_level, value in heading_stack
+            )
             section = []
             i += 1
             continue

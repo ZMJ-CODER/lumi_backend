@@ -248,6 +248,7 @@ async def extract_natural_language_manifest(
     *,
     user_id: str,
     api_key: str | None = None,
+    llm_config: dict[str, Any] | None = None,
     source_label: str = "用户消息",
 ) -> list[dict[str, Any]]:
     """Use a bounded model call only after the source has been explicitly authorized.
@@ -274,7 +275,13 @@ async def extract_natural_language_manifest(
         f"{text}\n"
         "[清单来源结束]"
     )
-    data = await invoke_json_object(prompt, user_id=user_id, api_key=api_key, max_tokens=6000)
+    data = await invoke_json_object(
+        prompt,
+        user_id=user_id,
+        api_key=api_key,
+        llm_config=llm_config,
+        max_tokens=6000,
+    )
     raw_items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(raw_items, list):
         return []

@@ -9,6 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from typing import Any
 
 from app.agents.skills.base import SkillContext
 from app.agents.skills.registry import SkillRegistry
@@ -27,6 +28,7 @@ class WorkerContext:
     user_role: str = "user"
     # BYOK：agent 任务提交时临时携带的 API key（内存持有，任务结束即释放，不落库）
     llm_api_key: str | None = None
+    llm_config: dict[str, Any] | None = None
     # Original current-turn user request; only this may authorize a narrow
     # destructive-action confirmation bypass.
     user_request: str = ""
@@ -93,6 +95,8 @@ class WorkerAgent(ABC):
             user_message=ctx.user_request,
             confirmed_tools=ctx.confirmed_tools,
             confirmed_tool_calls=ctx.confirmed_tool_calls,
+            llm_api_key=ctx.llm_api_key,
+            llm_config=ctx.llm_config,
             on_output=ctx.on_output,
         )
         if not result.success:

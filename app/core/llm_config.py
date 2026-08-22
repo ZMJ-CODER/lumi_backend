@@ -10,6 +10,7 @@
 
 import json
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
@@ -26,6 +27,66 @@ _cache: dict[str, tuple[float, dict | None]] = {}
 
 # 配置生效延迟（秒）
 CACHE_TTL = 5.0
+
+
+@dataclass(frozen=True, slots=True)
+class EffectiveLLMConfig:
+    """Request-scoped model selection frozen for one office job.
+
+    The API key is intentionally kept only in the short-lived runtime/Redis
+    bridge.  ``public_dict`` is safe to put in job routing/audit metadata.
+    """
+
+    provider: str
+    model: str
+    base_url: str
+    api_key: str
+    timeout: float = 120.0
+    reasoning_effort: str | None = None
+    source: str = "env"
+    byok: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "base_url": self.base_url,
+            "api_key": self.api_key,
+            "timeout": self.timeout,
+            "reasoning_effort": self.reasoning_effort,
+            "source": self.source,
+            "byok": self.byok,
+        }
+
+    def public_dict(self) -> dict[str, Any]:
+        value = self.as_dict()
+        value.pop("api_key", None)
+        return value
+
+
+async def resolve_effective_llm_config(
+    *,
+    scene: str | None = "office",
+    user_id: str | None = None,
+    request_api_key: str | None = None,
+) -> EffectiveLLMConfig:
+    """Resolve once at submission time and freeze model + endpoint + key.
+
+    A request key only supplies credentials; the persisted user selection still
+    determines model/endpoint.  This prevents a key from silently selecting a
+    different provider midway through a task.
+    """
+    cfg = await get_llm_config(scene=scene, user_id=user_id)
+    return EffectiveLLMConfig(
+        provider=str(cfg.get("provider") or settings.LLM_PROVIDER or ""),
+        model=str(cfg.get("model") or settings.DEEPSEEK_MODEL),
+        base_url=str(cfg.get("base_url") or "").rstrip("/"),
+        api_key=str(request_api_key or cfg.get("api_key") or ""),
+        timeout=float(cfg.get("timeout") or 120),
+        reasoning_effort=cfg.get("reasoning_effort"),
+        source="byok" if request_api_key else str(cfg.get("source") or "env"),
+        byok=bool(cfg.get("byok") or request_api_key),
+    )
 
 
 def _env_fallback(scene: str | None = None, provider: str | None = None) -> dict:

@@ -89,9 +89,10 @@ async def get_chat_model(
     max_tokens: int | None = None,
     timeout: float | None = None,
     reasoning_effort: str | None = None,
+    llm_config: dict[str, Any] | None = None,
 ) -> CompatibleChatOpenAI:
     """每次创建短生命周期模型，保证 Redis 动态配置即时生效。"""
-    cfg = await get_llm_config(scene, user_id=user_id)
+    cfg = dict(llm_config or await get_llm_config(scene, user_id=user_id))
     from app.core.model_catalog import normalize_model_id
 
     selected_model = normalize_model_id(model or cfg.get("model"))

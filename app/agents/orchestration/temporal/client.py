@@ -6,6 +6,7 @@ workflow history），改为存 Redis（短 TTL），执行 Activity 时按 job_
 """
 
 import asyncio
+import json
 
 from loguru import logger
 from temporalio.client import Client
@@ -21,6 +22,10 @@ _client_lock = asyncio.Lock()
 
 def _byok_key(job_id: str) -> str:
     return f"multiagent:byok:{job_id}"
+
+
+def _llm_config_key(job_id: str) -> str:
+    return f"multiagent:llm-config:{job_id}"
 
 
 async def get_temporal_client() -> Client:
@@ -119,6 +124,32 @@ async def store_byok_key(job_id: str, api_key: str) -> None:
     await r.set(_byok_key(job_id), api_key, ex=settings.TEMPORAL_BYOK_TTL_SECONDS)
 
 
+async def store_job_llm_config(job_id: str, config: dict) -> None:
+    """Store the frozen model selection in the same short-lived secret bridge."""
+    r = get_redis()
+    await r.set(_llm_config_key(job_id), json.dumps(config, ensure_ascii=False), ex=settings.TEMPORAL_BYOK_TTL_SECONDS)
+
+
+async def load_job_llm_config(job_id: str) -> dict | None:
+    if not job_id:
+        return None
+    try:
+        r = get_redis()
+        raw = await r.get(_llm_config_key(job_id))
+    except Exception:
+        # Compatibility with deployments created before the full snapshot
+        # bridge: the old key remains a valid credential-only fallback.
+        legacy = await load_byok_key(job_id)
+        return {"api_key": legacy} if legacy else None
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
+        return value if isinstance(value, dict) else None
+    except (TypeError, ValueError):
+        return None
+
+
 async def load_byok_key(job_id: str) -> str | None:
     if not job_id:
         return None
@@ -134,3 +165,4 @@ async def delete_byok_key(job_id: str) -> None:
         return
     r = get_redis()
     await r.delete(_byok_key(job_id))
+    await r.delete(_llm_config_key(job_id))

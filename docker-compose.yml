@@ -51,6 +51,12 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       # 本地查询重写小模型（Ollama 在 Windows 宿主）：容器内 localhost 到不了宿主，用 host.docker.internal
       RAG_QUERY_REWRITE_BASE_URL: http://host.docker.internal:11434/v1
+      # Hugging Face 国内镜像：RAG embedding / reranker 若本地模型目录缺失时，
+      # 按此地址下载；Xet CAS 在国内网络常不可用，强制普通 HTTP。
+      HF_ENDPOINT: "${HF_ENDPOINT:-https://hf-mirror.com}"
+      HF_HUB_DISABLE_XET: "${HF_HUB_DISABLE_XET:-1}"
+      # RAG 重排序器使用 CUDA；Docker Desktop (WSL2) 的驱动库见下方只读挂载。
+      LD_LIBRARY_PATH: /usr/lib/wsl/lib
       # 本地 TTS 走 compose 内的 tts 服务
       TTS_LOCAL_URL: http://tts:8765/tts
       # 当前 Compose 未部署 Temporal server。默认使用本地 DAG；本地验证
@@ -76,6 +82,8 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./plugins:/app/plugins
+      # Docker Desktop (WSL2) 下为 CUDA PyTorch 暴露宿主 NVIDIA 驱动库。
+      - /usr/lib/wsl/lib:/usr/lib/wsl/lib:ro
       # 脚本沙箱需经 Docker CLI 创建一次性受限容器。Docker socket 等同宿主机高权限：
       # 仅用于受信任的自托管部署；公网多租户应改为独立 sandbox service。
       - /var/run/docker.sock:/var/run/docker.sock
@@ -84,6 +92,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     restart: unless-stopped
 
   # ── Celery durable worker（文档解析/入库等不能丢的工作） ──
@@ -101,6 +116,8 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       # 本地推理依赖的模型缓存目录
       EMBEDDING_CACHE_DIR: /app/data/models
+      HF_ENDPOINT: "${HF_ENDPOINT:-https://hf-mirror.com}"
+      HF_HUB_DISABLE_XET: "${HF_HUB_DISABLE_XET:-1}"
     group_add:
       - "${DOCKER_GID:-0}"
     volumes:
@@ -130,6 +147,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      HF_ENDPOINT: "${HF_ENDPOINT:-https://hf-mirror.com}"
+      HF_HUB_DISABLE_XET: "${HF_HUB_DISABLE_XET:-1}"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
@@ -155,6 +174,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      HF_ENDPOINT: "${HF_ENDPOINT:-https://hf-mirror.com}"
+      HF_HUB_DISABLE_XET: "${HF_HUB_DISABLE_XET:-1}"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
@@ -180,6 +201,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      HF_ENDPOINT: "${HF_ENDPOINT:-https://hf-mirror.com}"
+      HF_HUB_DISABLE_XET: "${HF_HUB_DISABLE_XET:-1}"
     depends_on:
       redis:
         condition: service_healthy

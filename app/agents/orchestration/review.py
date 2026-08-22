@@ -60,6 +60,7 @@ class LlmReviewHook(ReviewHook):
                 f"{self._SYSTEM_PROMPT}\n\n{prompt}",
                 user_id=ctx.user_id,
                 api_key=ctx.llm_api_key,
+                llm_config=ctx.llm_config,
                 max_tokens=4096,
             )
             if data:
@@ -68,6 +69,11 @@ class LlmReviewHook(ReviewHook):
                     feedback=str(data.get("feedback") or ""),
                 )
         except Exception as exc:  # noqa: BLE001
+            from app.agents.skills.recovery import classify_model_error, is_terminal_model_error_code
+
+            code, message = classify_model_error(exc)
+            if is_terminal_model_error_code(code) and code != "MODEL_UNAVAILABLE":
+                raise RuntimeError(message) from exc
             logger.warning("[Review] LLM 质检失败，默认放行: {}", exc)
         return ReviewVerdict(approved=True)
 REVIEWER: ReviewHook = LlmReviewHook()

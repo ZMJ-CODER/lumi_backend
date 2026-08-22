@@ -25,7 +25,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.resilience import CircuitOpenError, get_breaker
-from app.agents.skills.base import Skill, SkillContext, SkillResult
+from app.agents.skills.base import Skill, SkillContext, SkillProgress, SkillResult
 
 # 连接失败冷却：Electron 未启动/后端先于前端启动时，避免每次调用都重试并刷日志
 _RETRY_COOLDOWN_S = 30.0
@@ -99,6 +99,27 @@ def _server_cfg(name: str) -> dict | None:
         if s.get("name") == name:
             return s
     return None
+
+
+def server_is_healthy(name: str) -> bool:
+    """Whether a configured server is outside its local failure cooldown.
+
+    This intentionally exposes no transport internals. Candidate routing uses
+    it to hide a temporarily broken external capability before an LLM wastes a
+    tool round; the call path still remains the final source of truth.
+    """
+    if _server_cfg(name) is None:
+        return False
+    until = _failed_until.get(name)
+    return until is None or time.monotonic() >= until
+
+
+def invalidate_tool_cache(name: str | None = None) -> None:
+    """Forget discovery data after a user binding changes or a server reconnects."""
+    if name:
+        _tools_cache.pop(name, None)
+    else:
+        _tools_cache.clear()
 
 
 async def _call_with_session(
@@ -248,9 +269,14 @@ async def call_tool(
             call_kwargs["read_timeout_seconds"] = timedelta(seconds=effective_timeout)
         if on_progress:
             async def _progress(progress: float, total: float | None = None, message: str | None = None):
+                percentage = (progress / total * 100) if total and total > 0 else progress
                 event = {
-                    "type": "mcp_progress", "task_id": task_id, "progress": progress,
-                    "total": total, "message": message or "",
+                    "type": "mcp_progress",
+                    **SkillProgress(
+                        task_id=task_id or "", job_id=task_id or "", skill_name=tool_name,
+                        phase="executing", percentage=percentage, message=message or "",
+                    ).model_dump(),
+                    "total": total,
                 }
                 value = on_progress(event)
                 if hasattr(value, "__await__"):
@@ -409,9 +435,25 @@ async def call_skill(
             "task_id": task_id,
         }
     except Exception as exc:  # noqa: BLE001
+        error_code = "MCP_EXEC_ERROR"
+        error_message = str(exc) or "技能执行失败"
+        # Skill implementations may call the request-scoped model directly.
+        # Preserve billing/auth/provider semantics so the DAG cannot retry or
+        # replan them as if they were an ordinary tool error.
+        lowered = error_message.lower()
+        model_markers = (
+            "api key", "unauthorized", "authentication", "insufficient balance",
+            "quota", "payment required", "provider unavailable", "connection refused",
+            "connection reset", "bad gateway", "service unavailable", "model not found",
+            "余额", "欠费", "供应商",
+        )
+        if context is not None and context.scene == "office" and any(marker in lowered or marker in error_message for marker in model_markers):
+            from app.agents.skills.recovery import classify_model_error
+
+            error_code, error_message = classify_model_error(exc)
         return {
             "success": False,
-            "content": str(exc) or "技能执行失败",
+            "content": error_message,
             "metadata": {
                 "skill": skill.name,
                 "task_id": task_id,
@@ -419,8 +461,8 @@ async def call_skill(
                 "server": LOCAL_SKILL_SERVER,
             },
             "is_error": True,
-            "error_code": "MCP_EXEC_ERROR",
-            "retryable": True,
+            "error_code": error_code,
+            "retryable": False if error_code.startswith("MODEL_") else True,
             "task_id": task_id,
         }
     if not isinstance(result, SkillResult):

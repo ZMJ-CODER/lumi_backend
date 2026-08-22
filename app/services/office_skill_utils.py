@@ -49,6 +49,7 @@ async def office_llm(
         "usage_category": CATEGORY_SKILL,
         "disable_reasoning_effort": True,
         "api_key": context.llm_api_key if context else None,
+        "llm_config": context.llm_config if context else None,
     }
     if not stream or not (context and context.on_output):
         return await llm.chat(messages, **kwargs)

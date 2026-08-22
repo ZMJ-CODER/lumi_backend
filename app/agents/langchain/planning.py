@@ -62,6 +62,7 @@ async def invoke_structured_planner(
     *,
     user_id: str,
     api_key: str | None = None,
+    llm_config: dict[str, Any] | None = None,
 ) -> PlannerOutput:
     """调用规划模型并解析普通 JSON。
 
@@ -77,6 +78,7 @@ async def invoke_structured_planner(
         temperature=0.1,
         max_tokens=settings.AGENT_PLANNER_MAX_TOKENS,
         timeout=settings.AGENT_PLANNER_TIMEOUT_SECONDS,
+        llm_config=llm_config,
     )
     reply = await model.ainvoke([HumanMessage(content=prompt)])
     return _parse_json_planner_output(_message_text(reply))
@@ -87,6 +89,7 @@ async def invoke_json_object(
     *,
     user_id: str,
     api_key: str | None = None,
+    llm_config: dict[str, Any] | None = None,
     max_tokens: int = 2000,
 ) -> dict[str, Any] | None:
     """无固定 Schema 的 JSON 对象，走兼容的普通聊天调用。"""
@@ -97,6 +100,7 @@ async def invoke_json_object(
         temperature=0.1,
         max_tokens=max_tokens,
         timeout=settings.AGENT_PLANNER_TIMEOUT_SECONDS,
+        llm_config=llm_config,
     )
     reply = await model.ainvoke([HumanMessage(content=prompt)])
     raw = _message_text(reply).strip()

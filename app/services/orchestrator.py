@@ -29,7 +29,7 @@ from app.core.llm_config import get_llm_config
 from app.core.redis import get_redis
 from app.services.speech import speech_to_text
 from app.services.content_codec import normalize_content, serialize_content
-from app.services.rag.query_rewriter import get_retrieval_query
+from app.services.rag.query_rewriter import get_retrieval_queries
 from app.services.rag.knowledge import search_user_knowledge
 from app.services.rag.scope import RetrievalScope, has_memory_reference, route_chat_retrieval_scope
 from app.services.scene_manager import get_scene_config, get_scene_knowledge_tags
@@ -1175,8 +1175,20 @@ class Orchestrator:
         should_retrieve = retrieve_knowledge and retrieval_scope == RetrievalScope.PERSONAL_KNOWLEDGE
         if should_retrieve:
             knowledge_tags = get_scene_knowledge_tags(scene)
-            search_query = await get_retrieval_query(content, retrieval_query, scene, user_id)
-            rag_context, citations = await self._retrieve_knowledge(user_id, search_query, knowledge_tags)
+            search_queries = await get_retrieval_queries(
+                content,
+                retrieval_query,
+                scene,
+                user_id,
+                thinking_mode=thinking_mode,
+            )
+            rag_context, citations = await self._retrieve_knowledge(
+                user_id,
+                search_queries[0] if search_queries else content,
+                knowledge_tags,
+                thinking_mode=thinking_mode,
+                query_variants=search_queries,
+            )
             if rag_context:
                 messages[-1]["content"] = f"参考以下知识库内容回答用户问题：\n\n{rag_context}\n\n用户问题：{content}"
 
@@ -1674,7 +1686,14 @@ class Orchestrator:
             lines.append(f"- [{t}] {text}{suffix}{source}")
         return "\n".join(lines)
 
-    async def _retrieve_knowledge(self, user_id: str, query: str, space_tags: list[str]) -> tuple[str, list[dict]]:
+    async def _retrieve_knowledge(
+        self,
+        user_id: str,
+        query: str,
+        space_tags: list[str],
+        thinking_mode: str = "fast",
+        query_variants: list[str] | None = None,
+    ) -> tuple[str, list[dict]]:
         """RAG 检索 —— pgvector 相似度检索（个人空间 + 公共空间）.
 
         Returns:
@@ -1691,6 +1710,8 @@ class Orchestrator:
                     threshold=settings.RAG_SIMILARITY_THRESHOLD,
                     # 代码文件走 code 索引，不混入普通聊天/办公知识检索
                     exclude_categories=["code"],
+                    rerank_enabled=thinking_mode == "think",
+                    query_variants=query_variants,
                 )
         except Exception as e:
             # 检索失败不阻塞对话主流程，仅记录并跳过知识库

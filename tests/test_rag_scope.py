@@ -15,3 +15,7 @@ def test_normal_question_does_not_search_any_personal_corpus():
 
 def test_explicit_retrieval_query_routes_to_knowledge():
     assert route_chat_retrieval_scope("帮我总结", retrieval_query="合同付款条款") == RetrievalScope.PERSONAL_KNOWLEDGE
+
+
+def test_first_person_uploaded_material_reference_uses_knowledge_scope():
+    assert route_chat_retrieval_scope("请根据我上传的资料解释这个概念") == RetrievalScope.PERSONAL_KNOWLEDGE

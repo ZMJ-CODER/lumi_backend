@@ -73,6 +73,14 @@ async def lifespan(app: FastAPI):
             )
     except Exception as exc:  # noqa: BLE001 - 列已存在/无权限时静默
         logger.debug("增量字段补齐跳过: {}", exc)
+    # 遥测只是候选排序的辅助信号，启动时预热缓存，绝不让用户工具选择首轮查库。
+    try:
+        from app.services.skill_telemetry import refresh_success_rate_hints
+
+        await refresh_success_rate_hints("office")
+        await refresh_success_rate_hints("chat")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Skill 遥测缓存预热跳过: {}", exc)
     # 多智能体编排：Temporal Worker 随后端进程启动（未开则需独立进程跑 worker）
     if settings.AGENT_ORCHESTRATION == "manifest_temporal" and settings.TEMPORAL_RUN_WORKER_INPROCESS:
         from app.agents.orchestration.temporal.runtime import start_inprocess_worker

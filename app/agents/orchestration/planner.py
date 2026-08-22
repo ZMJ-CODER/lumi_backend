@@ -14,6 +14,7 @@ import re
 from loguru import logger
 
 from app.agents.orchestration.models import TaskNode
+from app.agents.orchestration.plan_context import PlanRequestContext
 from app.agents.orchestration.intent import (
     classify,
     extract_output_contract,
@@ -21,7 +22,19 @@ from app.agents.orchestration.intent import (
     resolve_direct_text_conversion,
     select_named_office_documents,
 )
+from app.agents.orchestration.routing_intent import (
+    clarification_for_intent,
+    classify_route_with_llm,
+    infer_route_intent,
+    merge_llm_route_intent,
+    should_use_llm_route_fallback,
+)
+from app.agents.orchestration.route_plan import compile_static_route
 from app.agents.skills.recovery import classify_model_error
+from app.repositories.project_repository import (
+    ProjectRepository,
+    SqlAlchemyProjectRepository,
+)
 
 
 def _is_datetime_request(request: str) -> bool:
@@ -162,6 +175,40 @@ def _apply_output_contract(nodes: list[TaskNode], request: str) -> None:
 class Planner(ABC):
     """指挥层基类."""
 
+    async def plan_context(self, context: PlanRequestContext) -> TaskTree:
+        """Context-based compatibility entry point.
+
+        Custom planners only need to keep implementing ``plan`` for now.  The
+        default adapter keeps those implementations working while callers can
+        use one stable context object internally.
+        """
+        # Preserve the old plugin signature while making the new routing
+        # signals visible to planners that still consume ``prior_summaries``.
+        summary = context.prior_summaries
+        context_lines: list[str] = []
+        if context.recent_messages:
+            context_lines.append("最近对话：" + " | ".join(context.recent_messages[-6:]))
+        if context.recent_artifacts:
+            context_lines.append("最近产物：" + ", ".join(
+                str(item.get("filename") or item.get("artifact_type") or "未命名产物")
+                for item in context.recent_artifacts[-6:]
+            ))
+        if context.previous_plan:
+            context_lines.append("上一计划：" + str(context.previous_plan.get("plan_text") or "已存在上一计划"))
+        if context_lines:
+            summary = (summary + "\n" if summary else "") + "\n".join(context_lines)
+        args = list(context.as_legacy_args())
+        args[-1] = summary
+        try:
+            if context.llm_config is None:
+                return await self.plan(*args)
+            return await self.plan(*args, llm_config=context.llm_config)
+        except TypeError as exc:
+            # Third-party planners may still expose the historical signature.
+            if "llm_config" not in str(exc):
+                raise
+            return await self.plan(*args)
+
     @abstractmethod
     async def plan(
         self,
@@ -174,6 +221,8 @@ class Planner(ABC):
         clarification_answer: str | None = None,
         office_docs: list[dict] | None = None,
         prior_summaries: str = "",
+        *,
+        llm_config: dict | None = None,
     ) -> TaskTree:
         ...
 
@@ -187,6 +236,9 @@ class RulePlanner(Planner):
       - 意图不明确时反问用户（限 2~3 轮）
     """
 
+    def __init__(self, project_repository: ProjectRepository | None = None):
+        self._project_repository = project_repository or SqlAlchemyProjectRepository()
+
     async def plan(
         self,
         user_id: str,
@@ -198,6 +250,8 @@ class RulePlanner(Planner):
         clarification_answer: str | None = None,
         office_docs: list[dict] | None = None,
         prior_summaries: str = "",
+        *,
+        llm_config: dict | None = None,
     ) -> TaskTree:
         # 代码任务：显式指定 project_id，或在请求+澄清回答中匹配到已注册项目名
         combined = request + (f" {clarification_answer}" if clarification_answer else "")
@@ -234,7 +288,13 @@ class RulePlanner(Planner):
         if has_named_docs:
             office_docs = selected_docs
         new_document = infer_new_office_document(request)
-        if new_document:
+        # 已明确引用输入附件时，“生成一个新 Excel/PPT”通常是基于输入加工，
+        # 不能被误判为从零创作文档；留给脚本/动态规划保留分析和交付约束。
+        attachment_context = bool(
+            office_docs
+            and re.search(r"(?:这份|这些|附件|上传|材料|数据|文档|文件|表格)", request or "")
+        )
+        if new_document and not attachment_context:
             from app.agents.core.registry import AgentRegistry
 
             if AgentRegistry.get("office_document") is not None:
@@ -312,26 +372,150 @@ class RulePlanner(Planner):
             )
             return TaskTree(nodes=[node])
 
-        node = TaskNode(
-            id=f"t{int(time.time())}-{uuid.uuid4().hex[:6]}",
-            name="知识库检索",
-            agent="retrieval",
-            params={"query": request, "top_k": 5},
-            depends_on=[],
+        # 通用意图路由是确定性规划的最后一道边界。旧的办公快捷路径已经在
+        # 上面处理；这里不再把所有未知请求伪装成 retrieval，而是按来源和
+        # 副作用选择执行形态，低置信度请求直接向用户补问。
+        route = infer_route_intent(request, office_docs, prior_summaries=prior_summaries)
+        # Rules remain the fast path. A small, strict JSON classifier only fills
+        # long-tail gaps; its candidate is merged and still goes through the
+        # existing clarification, permission, approval, and compiler gates.
+        # The classifier resolves request BYOK first and configured office /
+        # global credentials second, so absence of a request-level key must not
+        # disable multilingual fallback by itself.
+        if should_use_llm_route_fallback(route, request):
+            candidate = await classify_route_with_llm(
+                request,
+                user_id=user_id,
+                api_key=llm_api_key,
+                prior_summaries=prior_summaries,
+                office_docs=office_docs,
+                llm_config=llm_config,
+            )
+            if candidate:
+                route = merge_llm_route_intent(route, candidate, request)
+        if route.needs_clarification or (
+            route.confidence < 0.7 and route.risk_level != "read_only"
+        ):
+            return TaskTree(
+                nodes=[],
+                clarification=clarification_for_intent(route, request, office_docs),
+            )
+
+        from app.agents.core.registry import AgentRegistry, ensure_registered
+
+        ensure_registered()
+        static_nodes = compile_static_route(request, route, office_docs)
+        if static_nodes:
+            required_agents = {node.agent for node in static_nodes}
+            if all(AgentRegistry.get(name) is not None for name in required_agents):
+                for static_node in static_nodes:
+                    static_node.metadata.setdefault("routing", {
+                        "confidence": route.confidence,
+                        "confidence_detail": route.confidence_detail.__dict__ if route.confidence_detail else {},
+                        "risk_level": route.risk_level,
+                        "action_steps": [step.__dict__ for step in route.action_steps],
+                        "resolution_notes": list(route.resolution_notes),
+                    })
+                return TaskTree(
+                    nodes=static_nodes,
+                    plan_text="按预先确定的动作顺序执行静态计划。",
+                )
+        node_id = f"r{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        if (
+            route.has_multiple_actions
+            or route.requires_side_effect
+            or route.requires_dynamic
+            or "lookup_history" in route.actions
+            or "task_result" in route.objects
+        ):
+            if AgentRegistry.get("react_step") is None:
+                return TaskTree(
+                    nodes=[],
+                    clarification="当前没有可用的动态执行能力，无法安全编排这个多步骤或外部操作请求。",
+                )
+            return TaskTree(
+                nodes=[TaskNode(
+                    id=node_id,
+                    name="动态编排并执行",
+                    agent="react_step",
+                    params={
+                        "instruction": route.resolved_request or request,
+                        "max_rounds": 6,
+                        "office_docs": [
+                            {"doc_id": str(item.get("doc_id")), "filename": str(item.get("filename") or "")}
+                            for item in (office_docs or [])
+                            if item.get("doc_id")
+                        ],
+                    },
+                    metadata={
+                        "routing": {
+                            "confidence": route.confidence,
+                            "confidence_detail": route.confidence_detail.__dict__ if route.confidence_detail else {},
+                            "risk_level": route.risk_level,
+                            "action_steps": [step.__dict__ for step in route.action_steps],
+                            "resolution_notes": list(route.resolution_notes),
+                        },
+                    },
+                    depends_on=[],
+                    approval=route.requires_side_effect,
+                    approval_note="该计划包含外部状态变化，执行前需要确认。" if route.requires_side_effect else "",
+                )],
+                plan_text="识别多个动作后动态编排执行步骤。",
+            )
+        if "converse" in route.actions and not route.objects:
+            if AgentRegistry.get("direct_llm") is None:
+                return TaskTree(nodes=[], clarification="当前没有可用的普通对话能力，请稍后重试。")
+            return TaskTree(
+                nodes=[TaskNode(
+                    id=node_id,
+                    name="直接回答",
+                    agent="direct_llm",
+                    params={"instruction": request},
+                    metadata={"routing": {"confidence": route.confidence, "risk_level": route.risk_level}},
+                    depends_on=[],
+                )],
+                plan_text="这是普通对话请求，直接生成回答。",
+            )
+        if route.requires_network:
+            if AgentRegistry.get("web_research") is None:
+                return TaskTree(nodes=[], clarification="当前没有可用的联网查询能力，请稍后重试或明确提供资料来源。")
+            return TaskTree(
+                nodes=[TaskNode(
+                    id=node_id,
+                    name="联网查询",
+                    agent="web_research",
+                    params={"query": request, "top_k": 5},
+                    depends_on=[],
+                )],
+                plan_text="按请求查询时效性外部信息。",
+            )
+        if route.requires_retrieval or "query" in route.actions:
+            if AgentRegistry.get("retrieval") is None:
+                return TaskTree(nodes=[], clarification="当前没有可用的知识检索能力，请稍后重试。")
+            return TaskTree(
+                nodes=[TaskNode(
+                    id=node_id,
+                    name="知识库检索",
+                    agent="retrieval",
+                    params={"query": request, "top_k": 5},
+                    depends_on=[],
+                )],
+                plan_text="检索与问题相关的资料后回答。",
+            )
+        return TaskTree(
+            nodes=[],
+            clarification=clarification_for_intent(route, request, office_docs),
         )
-        return TaskTree(nodes=[node])
 
     async def _match_project(self, user_id: str, request: str) -> str | None:
         """请求中包含已注册项目名时，返回该项目 id."""
         try:
-            from app.core.database import async_session_factory
-            from app.services import project_index
-
-            async with async_session_factory() as session:
-                projects = await project_index.list_projects(session, user_id)
+            projects = await self._project_repository.list_projects(user_id)
             for p in projects:
-                if p.name and p.name in request:
-                    return str(p.id)
+                name = str(p.get("name") or "") if isinstance(p, dict) else str(getattr(p, "name", "") or "")
+                project_id = p.get("id") if isinstance(p, dict) else getattr(p, "id", None)
+                if name and name in request:
+                    return str(project_id)
         except Exception:  # noqa: BLE001
             return None
         return None
@@ -415,14 +599,31 @@ def _build_planner_prompt() -> str:
     )
 
 
-async def _runtime_capability_note(request: str) -> str:
+async def _runtime_capability_note(request: str, user_id: str = "") -> str:
     """把当前真正能执行的工具给规划模型，避免规划不可部署的方案。"""
     try:
         from app.agents.skills.executor import select_capabilities_for_request
 
-        capabilities = await select_capabilities_for_request(request, "office")
-        names = [c.name for c in capabilities]
-        return "\n当前请求可用的候选 Skill（已按权限和相关性收窄）：" + ", ".join(names)
+        capabilities = await select_capabilities_for_request(request, "office", user_id=user_id)
+        entries = []
+        for capability in capabilities:
+            schema = capability.parameters if isinstance(capability.parameters, dict) else {}
+            required = schema.get("required") if isinstance(schema, dict) else []
+            flags = []
+            if required:
+                flags.append("required=" + ",".join(str(item) for item in required[:8]))
+            if capability.write_op:
+                flags.append("write=true")
+            if capability.requires_confirmation:
+                flags.append("confirmation=true")
+            description = str(capability.description or "").replace("\n", " ")[:120]
+            entries.append(
+                f"{capability.name}({'; '.join(flags) or 'read'}): {description}"
+            )
+        return (
+            "\n当前请求可用的候选 Skill（已按权限、场景和运行时状态收窄；"
+            "preferred_tool 必须从此列表选择）：\n- " + "\n- ".join(entries)
+        )
     except Exception:  # noqa: BLE001
         return ""
 
@@ -445,14 +646,26 @@ class LlmPlanner(Planner):
     任何失败（模型不支持工具 / 解析失败 / 未定位到项目）→ 回退 RulePlanner。
     """
 
-    def __init__(self, fallback: Planner | None = None):
-        self._fallback = fallback or RulePlanner()
+    def __init__(
+        self,
+        fallback: Planner | None = None,
+        project_repository: ProjectRepository | None = None,
+    ):
+        self._project_repository = project_repository or SqlAlchemyProjectRepository()
+        self._fallback = fallback or RulePlanner(project_repository=self._project_repository)
+        from app.agents.orchestration.planner_strategies import PlannerStrategies
+
+        self._strategies = PlannerStrategies()
+
+    # Routing can use the context-aware level entry point for the built-in
+    # planner while preserving positional dispatch for third-party planners.
+    supports_context_planning = True
 
     async def plan_for_level(
         self,
         level,
-        user_id: str,
-        request: str,
+        user_id: str | None = None,
+        request: str | None = None,
         scene: str = "office",
         project_id: str | None = None,
         project_ids: list[str] | None = None,
@@ -461,10 +674,34 @@ class LlmPlanner(Planner):
         office_docs: list[dict] | None = None,
         prior_summaries: str = "",
         bypass_fast_paths: bool = False,
+        *,
+        context: PlanRequestContext | None = None,
     ) -> TaskTree:
         """Dispatch planning by TCA level while keeping the public Planner API stable."""
         from app.agents.orchestration.tca import ComplexityLevel
 
+        if context is None:
+            context = PlanRequestContext.from_legacy_args(
+                user_id or "",
+                request or "",
+                scene,
+                project_id,
+                project_ids,
+                llm_api_key,
+                clarification_answer,
+                office_docs,
+                prior_summaries,
+            )
+        user_id = context.user_id
+        request = context.request
+        scene = context.scene
+        project_id = context.project_id
+        project_ids = list(context.project_ids)
+        llm_api_key = context.llm_api_key
+        llm_config = context.llm_config
+        clarification_answer = context.clarification_answer
+        office_docs = [dict(item) for item in context.office_docs]
+        prior_summaries = context.prior_summaries
         level = ComplexityLevel(level)
         args = (
             user_id,
@@ -500,6 +737,7 @@ class LlmPlanner(Planner):
                     clarification_answer,
                     office_docs,
                     prior_summaries,
+                    llm_config=llm_config,
                 )
             except PlannerModelError as exc:
                 return TaskTree(nodes=[], error=str(exc), error_code=exc.code)
@@ -511,8 +749,16 @@ class LlmPlanner(Planner):
                 error_code="REPLAN_EMPTY",
             )
         if level == ComplexityLevel.M0:
-            return await self._fallback.plan(*args)
+            return await self._fallback.plan_context(context)
         if level == ComplexityLevel.M3 and scene == "office":
+            route = infer_route_intent(request, office_docs, prior_summaries=prior_summaries)
+            # M3 is not synonymous with ReAct. If the action types are known
+            # and the deterministic planner can compile them, preserve the
+            # static DAG even when the complexity assessor was conservative.
+            if not route.requires_dynamic and not route.requires_side_effect:
+                static_tree = await self._fallback.plan_context(context)
+                if static_tree.nodes and all(node.agent != "react_step" for node in static_tree.nodes):
+                    return static_tree
             return TaskTree(
                 nodes=[TaskNode(
                     id=f"r{int(time.time())}-{uuid.uuid4().hex[:6]}",
@@ -527,13 +773,23 @@ class LlmPlanner(Planner):
                             if item.get("doc_id")
                         ],
                     },
+                    metadata={
+                        "routing": {
+                            "confidence": route.confidence,
+                            "confidence_detail": route.confidence_detail.__dict__ if route.confidence_detail else {},
+                            "risk_level": route.risk_level,
+                            "action_steps": [step.__dict__ for step in route.action_steps],
+                        },
+                    },
                     depends_on=[],
+                    approval=route.requires_side_effect,
+                    approval_note="该计划包含外部状态变化，执行前需要确认。" if route.requires_side_effect else "",
                 )],
                 plan_text="根据中间结果动态选择工具并完成任务。",
             )
         if level == ComplexityLevel.M1:
             if extract_output_contract(request).get("requires_artifact"):
-                return await self.plan(*args)
+                return await self.plan_context(context)
             intent = classify(request, office_docs)
             template = intent.get("template") if intent.get("task_type") == "template" else None
             if template:
@@ -544,10 +800,11 @@ class LlmPlanner(Planner):
                     llm_api_key,
                     force_template=str(template),
                     prior_summaries=prior_summaries,
+                    llm_config=llm_config,
                 )
                 if tree is not None:
                     return tree
-        return await self.plan(*args)
+        return await self.plan_context(context)
 
     async def plan(
         self,
@@ -560,6 +817,8 @@ class LlmPlanner(Planner):
         clarification_answer: str | None = None,
         office_docs: list[dict] | None = None,
         prior_summaries: str = "",
+        *,
+        llm_config: dict | None = None,
     ) -> TaskTree:
         # 确定性、无副作用的系统查询不进入模型规划。这样即使用户的 BYOK
         # 临时密钥缺失，也不会把“当前几点”这类请求误转为知识库检索。
@@ -600,6 +859,7 @@ class LlmPlanner(Planner):
                 clarification_answer,
                 office_docs,
                 prior_summaries,
+                llm_config=llm_config,
             )
         except PlannerModelError as exc:
             logger.warning("[Planner] 办公规划模型不可用: {}", exc)
@@ -614,19 +874,28 @@ class LlmPlanner(Planner):
             project_id,
             project_ids,
             llm_api_key,
-            clarification_answer,
-            office_docs,
-            prior_summaries,
-        )
+                clarification_answer,
+                office_docs,
+                prior_summaries,
+                llm_config=llm_config,
+            )
 
     async def _list_projects(self, user_id: str) -> list[dict]:
         try:
-            from app.core.database import async_session_factory
-            from app.services import project_index
-
-            async with async_session_factory() as session:
-                projects = await project_index.list_projects(session, user_id)
-            return [{"id": str(p.id), "name": p.name} for p in projects]
+            projects = await self._project_repository.list_projects(user_id)
+            normalized = []
+            for project in projects:
+                if isinstance(project, dict):
+                    normalized.append({
+                        "id": str(project.get("id") or ""),
+                        "name": str(project.get("name") or ""),
+                    })
+                else:
+                    normalized.append({
+                        "id": str(getattr(project, "id", "") or ""),
+                        "name": str(getattr(project, "name", "") or ""),
+                    })
+            return normalized
         except Exception:  # noqa: BLE001
             return []
 
@@ -641,6 +910,8 @@ class LlmPlanner(Planner):
         clarification_answer: str | None = None,
         office_docs: list[dict] | None = None,
         prior_summaries: str = "",
+        *,
+        llm_config: dict | None = None,
     ) -> TaskTree | None:
         # 只展示用户本机项目（自动定位时聚焦这些项目，避免无关项目干扰）
         if project_ids:
@@ -659,13 +930,9 @@ class LlmPlanner(Planner):
         if needs_project_files:
             for p in projects:
                 try:
-                    from app.core.database import async_session_factory
-                    from app.services import project_index
-
-                    async with async_session_factory() as session:
-                        project_files[p["id"]] = await project_index.list_project_files(
-                            session, user_id, p["id"], limit=30
-                        )
+                    project_files[p["id"]] = await self._project_repository.list_project_files(
+                        user_id, p["id"], limit=30
+                    )
                 except Exception:  # noqa: BLE001
                     project_files[p["id"]] = []
         files_ctx = "\n".join(
@@ -851,70 +1118,18 @@ class LlmPlanner(Planner):
         llm_api_key: str | None,
         force_template: str | None = None,
         prior_summaries: str = "",
+        *,
+        llm_config: dict | None = None,
     ) -> TaskTree | None:
-        """模板优先：规则分类命中 → 规则抽参（免 LLM）→ 模板构造器生成确定性 DAG."""
-        from app.agents.orchestration.templates import get_template, template_catalog_text
-        from app.agents.langchain.planning import invoke_json_object
-
-        # 模板任务：规则抽参（不调 LLM，可靠性最高）
-        if force_template:
-            tmpl = get_template(force_template)
-            if tmpl:
-                params = _template_default_params(force_template, request)
-                nodes = tmpl.build(request, params, office_docs)
-                if nodes:
-                    logger.info("[Planner] 模板 {} 构建 DAG（规则抽参，{} 节点）", force_template, len(nodes))
-                    return TaskTree(
-                        nodes=[TaskNode(**n) for n in nodes],
-                        plan_text=f"按模板 {force_template} 执行：{request}",
-                    )
-        # 未指定模板：LLM 分类 + 抽参
-        doc_desc = "、".join(
-            f"{d.get('filename')}(doc_id={d.get('doc_id')})"
-            for d in office_docs or []
-            if d.get("doc_id")
+        return await self._strategies.template(
+            user_id=user_id,
+            request=request,
+            office_docs=office_docs,
+            llm_api_key=llm_api_key,
+            force_template=force_template,
+            prior_summaries=prior_summaries,
+            llm_config=llm_config,
         )
-        prompt = (
-            "你是办公流程规划器。根据用户请求，从模板库选择最匹配的模板并抽取参数。\n"
-            "可用模板：\n"
-            + template_catalog_text()
-            + f"\n当前上传的文档：{doc_desc or '（无）'}\n"
-            + (f"\n此前已完成的任务摘要（延续上下文用）：\n{prior_summaries}\n" if prior_summaries else "")
-            + "只输出 JSON（不要 Markdown 围栏、不要解释）："
-            '{"template": "模板名或null", "params": {"参数名": 值}}\n'
-            "没有合适模板时 template 为 null。"
-        )
-        try:
-            data = await invoke_json_object(
-                prompt,
-                user_id=user_id,
-                api_key=llm_api_key,
-                max_tokens=2000,
-            )
-            if not data:
-                return None
-            tname = str(data.get("template") or "")
-            tmpl = get_template(tname) if tname else None
-            if not tmpl:
-                return None
-            nodes = tmpl.build(request, dict(data.get("params") or {}), office_docs)
-            if not nodes:
-                return None
-            logger.info(
-                "[Planner] 模板 {} 构建 DAG（{} 节点）", tname, len(nodes)
-            )
-            return TaskTree(nodes=[TaskNode(**n) for n in nodes])
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[Planner] 模板规划失败，回退自由规划: {}", exc)
-            error_code, user_error = classify_model_error(exc)
-            if error_code in {
-                "MODEL_INSUFFICIENT_BALANCE",
-                "MODEL_AUTH_ERROR",
-                "MODEL_NOT_FOUND",
-                "MODEL_CONFIG_ERROR",
-            }:
-                raise PlannerModelError(error_code, user_error) from exc
-            return None
 
     async def _plan_with_pattern(
         self,
@@ -923,50 +1138,17 @@ class LlmPlanner(Planner):
         office_docs: list[dict] | None,
         llm_api_key: str | None,
         prior_summaries: str = "",
+        *,
+        llm_config: dict | None = None,
     ) -> TaskTree | None:
-        """半结构任务：LLM 选模式 + 填参数 → 模式构造器生成 DAG."""
-        from app.agents.orchestration.patterns import build_pattern, pattern_catalog_text
-        from app.agents.langchain.planning import invoke_json_object
-
-        prompt = (
-            "你是办公流程规划器。用户请求是带条件的半结构任务，请选择一个模式并抽取参数。\n"
-            + pattern_catalog_text()
-            + "\n只输出 JSON（不要 Markdown 围栏）：{\"pattern\": \"模式名\", \"params\": {\"参数名\": 值}}\n"
-            + (f"此前已完成的任务摘要（延续上下文用）：\n{prior_summaries}\n" if prior_summaries else "")
+        return await self._strategies.pattern(
+            user_id=user_id,
+            request=request,
+            office_docs=office_docs,
+            llm_api_key=llm_api_key,
+            prior_summaries=prior_summaries,
+            llm_config=llm_config,
         )
-        try:
-            data = await invoke_json_object(
-                prompt + f"\n用户请求：{request}",
-                user_id=user_id,
-                api_key=llm_api_key,
-                max_tokens=2000,
-            )
-            if not data:
-                return None
-            nodes = build_pattern(
-                str(data.get("pattern") or ""),
-                request,
-                dict(data.get("params") or {}),
-                office_docs,
-            )
-            if not nodes:
-                return None
-            logger.info("[Planner] 模式 {} 构建 DAG（{} 节点）", data.get("pattern"), len(nodes))
-            return TaskTree(
-                nodes=[TaskNode(**n) for n in nodes],
-                plan_text=f"按模式 {data.get('pattern')} 执行：{request}",
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[Planner] 模式规划失败，回退自由规划: {}", exc)
-            error_code, user_error = classify_model_error(exc)
-            if error_code in {
-                "MODEL_INSUFFICIENT_BALANCE",
-                "MODEL_AUTH_ERROR",
-                "MODEL_NOT_FOUND",
-                "MODEL_CONFIG_ERROR",
-            }:
-                raise PlannerModelError(error_code, user_error) from exc
-            return None
 
     async def _call_structured_planner(
         self,
@@ -974,6 +1156,8 @@ class LlmPlanner(Planner):
         request: str,
         context: str,
         llm_api_key: str | None,
+        *,
+        llm_config: dict | None = None,
     ) -> dict | None:
         """走 LangChain JSON 规划调用；失败交由 RulePlanner 确定性回退。"""
         started = time.perf_counter()
@@ -981,11 +1165,13 @@ class LlmPlanner(Planner):
             from app.agents.langchain.planning import invoke_structured_planner
             from app.agents.orchestration.cases import format_cases, get_similar_cases
 
-            prompt = _build_planner_prompt() + await _runtime_capability_note(request) + "\n" + context
+            prompt = _build_planner_prompt() + await _runtime_capability_note(request, user_id) + "\n" + context
             similar = await get_similar_cases(request, 3)
             if similar:
                 prompt += "\n\n" + format_cases(similar)
-            output = await invoke_structured_planner(prompt, user_id=user_id, api_key=llm_api_key)
+            output = await invoke_structured_planner(
+                prompt, user_id=user_id, api_key=llm_api_key, llm_config=llm_config
+            )
             return output.model_dump()
         except Exception as exc:  # noqa: BLE001
             logger.debug("[Planner] LangChain 结构化规划不可用，交由 RulePlanner 回退: {}", exc)
@@ -995,6 +1181,9 @@ class LlmPlanner(Planner):
                 "MODEL_AUTH_ERROR",
                 "MODEL_NOT_FOUND",
                 "MODEL_CONFIG_ERROR",
+                "MODEL_PROVIDER_UNAVAILABLE",
+                "MODEL_CONNECTION_ERROR",
+                "MODEL_UNAVAILABLE",
             }:
                 raise PlannerModelError(error_code, user_error) from exc
             return None

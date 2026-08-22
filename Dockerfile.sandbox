@@ -8,7 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # 只提供办公脚本公开声明的库；脚本容器本身由运行参数禁网、只读和去权限。
-RUN pip install --no-cache-dir pandas openpyxl python-docx python-pptx \
+# 使用清华 PyPI 镜像加速国内构建（海外可改用官方源）
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple pandas openpyxl python-docx python-pptx \
     && python -c "import docx, openpyxl, pandas, pptx; print('sandbox dependency check passed')" \
     && useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser
 

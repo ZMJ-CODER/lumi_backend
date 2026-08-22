@@ -40,7 +40,7 @@ _CHAT_SKILL_ALLOWLIST = {"web_search", "query_knowledge", "get_datetime"}
 # M3 ReAct 是动态选择工具的路径，不能把项目开发、通用文件系统和通用 Shell
 # 一并交给模型。普通办公只保留业务办公、桌面/进程控制、系统信息，以及明确
 # 审核过的检索和隔离脚本能力。开发工具仍可由显式的代码 Worker / M2 计划使用。
-_OFFICE_REACT_ALLOWED_CATEGORIES = {"office", "desktop", "process", "system"}
+_OFFICE_REACT_ALLOWED_CATEGORIES = {"office", "desktop", "process", "system", "mcp"}
 _OFFICE_REACT_ALLOWED_SKILLS = {"python_exec", "create_office_document", "query_knowledge", "web_search"}
 _OFFICE_REACT_DENIED_SKILLS = {"env"}
 
@@ -156,6 +156,7 @@ def get_skills_for_scene(scene: str, user_role: str = "user") -> list[Skill]:
         s
         for s in SkillRegistry.list()
         if s.supports_scene(scene)
+        and s.status != "disabled"
         and (scene != "chat" or s.name in _CHAT_SKILL_ALLOWLIST)
         and (allow_write or not _skill_is_write(s))
         and role_allows(s.permission, user_role)
@@ -175,6 +176,10 @@ def _skill_capability(skill: Skill) -> ToolCapability:
     routing = _OFFICE_REACT_ROUTING_METADATA.get(skill.name, {})
     return ToolCapability(
         name=skill.name,
+        version=skill.version,
+        status=skill.status,
+        schema_fingerprint=skill.schema_fingerprint,
+        replacement_skill_id=skill.replacement_skill_id,
         description=skill.description,
         category=skill.category,
         domain=str(getattr(skill, "domain", "") or routing.get("domain") or skill.category),
@@ -189,23 +194,49 @@ def _skill_capability(skill: Skill) -> ToolCapability:
         confirmation_mode="client" if skill.environment == "client" else "server",
         idempotent=bool(skill.idempotent and not _skill_is_write(skill)),
         resource_templates=list(resource_templates),
+        annotations={
+            "cost_estimate": skill.cost_estimate,
+            "success_rate": skill.success_rate,
+        },
     )
 
 
 async def get_capabilities_for_scene(
     scene: str,
     user_role: str = "user",
+    user_id: str = "",
+    include_nonstable: bool = False,
 ) -> list[ToolCapability]:
     """统一能力目录；在暴露给 Planner/Executor 前完成权限和写开关过滤。"""
     capabilities = [
         _skill_capability(s)
         for s in get_skills_for_scene(scene, user_role)
         if skill_runtime_unavailable(s) is None
+        and (include_nonstable or s.status == "stable")
     ]
     # 桌面端能力不以 MCP 全局发现：后端无法从固定地址判断某个 Electron
     # 属于哪位用户。所有客户端 Skill 必须经 run_client_skill_request() 投递到
     # 当前 JWT 用户的专属队列，由其已登录桌面端领取。这样 user_id、角色和
     # 场景在服务端已完成授权，模型不能指定或切换其他人的客户端。
+    if user_id:
+        try:
+            from app.services.mcp_bindings import get_bound_capabilities
+
+            capabilities.extend(await get_bound_capabilities(user_id, scene, user_role))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("加载用户 MCP 工具绑定失败，继续使用本地 Skill: {}", exc)
+    try:
+        from app.services.skill_telemetry import apply_success_rate_hints
+
+        await apply_success_rate_hints(capabilities, scene)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.agents.skills.routing import schedule_skill_semantic_index
+
+        schedule_skill_semantic_index(capabilities)
+    except Exception:  # noqa: BLE001
+        pass
     return capabilities
 
 
@@ -235,13 +266,14 @@ async def select_capabilities_for_request(
     allowed_names: set[str] | None = None,
     allowed_categories: set[str] | None = None,
     denied_names: set[str] | None = None,
+    user_id: str = "",
 ) -> list[ToolCapability]:
     """Narrow the planner's tool namespace without changing authorization.
 
     This is a cheap first stage only.  The selected capabilities have already
     passed scene, role, write-toggle and runtime-availability checks.
     """
-    capabilities = await get_capabilities_for_scene(scene, user_role)
+    capabilities = await get_capabilities_for_scene(scene, user_role, user_id)
     if allowed_names is not None or allowed_categories is not None or denied_names:
         capabilities = [
             capability
@@ -281,6 +313,12 @@ async def select_capabilities_for_request(
         if any(marker in lower for marker in markers):
             preferred.update(names)
 
+    try:
+        from app.agents.skills.routing import semantic_scores
+
+        semantic = await semantic_scores(request, capabilities)
+    except Exception:  # noqa: BLE001
+        semantic = {}
     ranked = []
     for index, capability in enumerate(capabilities):
         searchable = " ".join([
@@ -292,6 +330,14 @@ async def select_capabilities_for_request(
         overlap = len(request_terms & _routing_terms(searchable))
         tag_overlap = len(request_terms & _routing_terms(" ".join(capability.intent_tags)))
         score = overlap * 10 + tag_overlap * 18 + (30 if capability.name in preferred else 0)
+        score += semantic.get(capability.name, 0.0) * float(settings.SKILL_ROUTING_SEMANTIC_WEIGHT)
+        metadata = capability.annotations if isinstance(capability.annotations, dict) else {}
+        success_rate = metadata.get("success_rate")
+        cost_estimate = metadata.get("cost_estimate")
+        if isinstance(success_rate, (int, float)):
+            score += max(0.0, min(1.0, float(success_rate))) * float(settings.SKILL_ROUTING_RELIABILITY_WEIGHT)
+        if isinstance(cost_estimate, (int, float)):
+            score -= max(0.0, float(cost_estimate)) * float(settings.SKILL_ROUTING_COST_WEIGHT)
         if capability.domain in preferred_domains:
             score += 42
         if coarse_file_script:
@@ -329,6 +375,7 @@ async def get_office_react_capabilities_for_request(
     user_role: str = "user",
     limit: int = 8,
     excluded_names: set[str] | None = None,
+    user_id: str = "",
 ) -> list[ToolCapability]:
     """Return the ordinary-office tool namespace for the M3 ReAct runner.
 
@@ -344,18 +391,19 @@ async def get_office_react_capabilities_for_request(
         allowed_names=_OFFICE_REACT_ALLOWED_SKILLS,
         allowed_categories=_OFFICE_REACT_ALLOWED_CATEGORIES,
         denied_names=_OFFICE_REACT_DENIED_SKILLS,
+        user_id=user_id,
     )
     excluded_names = excluded_names or set()
     return [item for item in capabilities if item.name not in excluded_names]
 
 
-async def get_tools_for_scene(scene: str, user_role: str = "user") -> list[dict]:
+async def get_tools_for_scene(scene: str, user_role: str = "user", user_id: str = "") -> list[dict]:
     """统一工具目录：本地 Skill（含 system）+ 所有已连接的 MCP 工具."""
-    return [c.to_tool_definition() for c in await get_capabilities_for_scene(scene, user_role)]
+    return [c.to_tool_definition() for c in await get_capabilities_for_scene(scene, user_role, user_id)]
 
 
-async def get_tool_capability(name: str, scene: str, user_role: str = "user") -> ToolCapability | None:
-    for capability in await get_capabilities_for_scene(scene, user_role):
+async def get_tool_capability(name: str, scene: str, user_role: str = "user", user_id: str = "") -> ToolCapability | None:
+    for capability in await get_capabilities_for_scene(scene, user_role, user_id):
         if capability.name == name:
             return capability
     return None
@@ -444,6 +492,7 @@ async def execute_tool_call(
     user_role: str = "user",
     user_message: str = "",
     llm_api_key: str | None = None,
+    llm_config: dict | None = None,
     confirmed_tools: frozenset[str] | set[str] | None = None,
     confirmed_tool_calls: frozenset[str] | set[str] | None = None,
     on_output=None,
@@ -454,7 +503,7 @@ async def execute_tool_call(
     args = _parse_arguments(fn.get("arguments"))
     # Reserved policy fields can never originate from a model tool call.
     args.pop("_lumi_execution_policy", None)
-    capability = await get_tool_capability(name, scene, user_role)
+    capability = await get_tool_capability(name, scene, user_role, user_id)
     if capability is None:
         registered = SkillRegistry.get(name)
         unavailable = skill_runtime_unavailable(registered) if registered is not None else None
@@ -479,6 +528,12 @@ async def execute_tool_call(
     mcp_target = _parse_mcp_name(name)
     if mcp_target:
         from app.agents.mcp.manager import call_tool
+        from app.services.mcp_bindings import (
+            acquire_call_quota,
+            register_active_binding_call,
+            release_call_quota,
+            unregister_active_binding_call,
+        )
 
         server_name, tool_name = mcp_target
         validation_error = _validate_mcp_arguments(capability.parameters, args)
@@ -506,13 +561,38 @@ async def execute_tool_call(
                     "approval_fingerprint": tool_call_fingerprint(name, args),
                 },
             )
-        raw = await call_tool(
-            server_name,
-            tool_name,
-            args,
-            task_id=conversation_id or None,
-            on_progress=on_notify,
-        )
+        binding_id = str((capability.annotations or {}).get("binding_id") or "")
+        quota_acquired = False
+        if binding_id:
+            quota_acquired, quota_reason = await acquire_call_quota(
+                binding_id, user_id,
+                int((capability.annotations or {}).get("daily_call_limit") or 1),
+                int((capability.annotations or {}).get("concurrency_limit") or 1),
+            )
+            if not quota_acquired:
+                return SkillResult(
+                    success=False,
+                    error="外部 MCP 调用配额已用尽或配额服务暂不可用",
+                    error_code=quota_reason or "MCP_QUOTA_EXCEEDED",
+                    retryable=quota_reason in {"CONCURRENCY_LIMIT", "QUOTA_UNAVAILABLE"},
+                    metadata={"server": server_name, "tool": tool_name, "binding_id": binding_id},
+                )
+        started_at = time.perf_counter()
+        active_task_id = conversation_id or ""
+        if quota_acquired:
+            register_active_binding_call(binding_id, active_task_id)
+        try:
+            raw = await call_tool(
+                server_name,
+                tool_name,
+                args,
+                task_id=conversation_id or None,
+                on_progress=on_notify,
+            )
+        finally:
+            if quota_acquired:
+                unregister_active_binding_call(binding_id, active_task_id)
+                await release_call_quota(binding_id, user_id)
         if raw is None:
             return SkillResult(
                 success=False,
@@ -521,7 +601,7 @@ async def execute_tool_call(
                 retryable=True,
                 metadata={"server": server_name, "tool": tool_name},
             )
-        return sanitize_server_result(SkillResult(
+        result = sanitize_server_result(SkillResult(
             success=bool(raw.get("success")) and not bool(raw.get("is_error")),
             output=str(raw.get("content") or ""),
             error=(str(raw.get("content") or "MCP 工具执行失败") if raw.get("is_error") else None),
@@ -533,6 +613,11 @@ async def execute_tool_call(
                 **(raw.get("metadata") or {}),
             },
         ))
+        await _record_skill_telemetry(
+            capability, scene, result, int((time.perf_counter() - started_at) * 1000)
+        )
+        await _record_skill_log(user_id, capability, args, result)
+        return result
 
     skill = SkillRegistry.get(name)
     if not skill:
@@ -591,6 +676,7 @@ async def execute_tool_call(
         conversation_id=conversation_id,
         job_id=conversation_id,
         llm_api_key=llm_api_key,
+        llm_config=llm_config,
         on_notify=on_notify,
         on_output=on_output,
         execution_policy=execution_policy,
@@ -600,6 +686,7 @@ async def execute_tool_call(
     # for backend/sandbox capabilities, preserving one timeout/result path.
     from app.agents.mcp.manager import call_skill
 
+    started_at = time.perf_counter()
     raw = await call_skill(
         skill,
         args,
@@ -620,19 +707,37 @@ async def execute_tool_call(
     # absolute paths; client paths are user-device data and remain untouched.
     if skill.environment in {"server", "sandbox"}:
         result = sanitize_server_result(result)
-    try:
-        from app.core.observability import inc_skill_call
-
-        inc_skill_call(name, result.success)
-    except Exception:  # noqa: BLE001
-        pass
+    await _record_skill_telemetry(
+        capability, scene, result, int((time.perf_counter() - started_at) * 1000)
+    )
     await _record_skill_log(user_id, skill, args, result)
     return result
 
 
+async def _record_skill_telemetry(
+    capability: ToolCapability,
+    scene: str,
+    result: SkillResult,
+    duration_ms: int,
+) -> None:
+    try:
+        from app.core.observability import inc_skill_call
+        from app.services.skill_telemetry import record_skill_outcome
+
+        inc_skill_call(capability.name, result.success)
+        await record_skill_outcome(
+            capability, scene,
+            success=result.success,
+            error_code=result.error_code,
+            duration_ms=duration_ms,
+        )
+    except Exception:  # noqa: BLE001
+        return
+
+
 async def _record_skill_log(
     user_id: str,
-    skill: Skill,
+    skill: Skill | ToolCapability,
     params: dict,
     result: SkillResult,
 ) -> None:
@@ -732,6 +837,7 @@ async def _run_skill_loop_legacy(
     llm_api_key: str | None = None,
     llm_base_url: str | None = None,
     llm_model: str | None = None,
+    llm_config: dict | None = None,
     on_text=None,
     on_progress=None,
     user_role: str = "user",
@@ -758,7 +864,7 @@ async def _run_skill_loop_legacy(
     """
     # 能力目录已在场景、角色与运行时可用性维度过滤；办公场景可见 office/system
     # Skill，普通聊天仅保留问答白名单。MCP 不在此环节作全局发现。
-    tools = await get_tools_for_scene(scene, user_role)
+    tools = await get_tools_for_scene(scene, user_role, user_id)
     if not tools:
         return "", [], []
     max_rounds = settings.AGENT_SKILLS_MAX_ROUNDS
@@ -783,6 +889,7 @@ async def _run_skill_loop_legacy(
             usage_user_id=user_id,
             usage_category=CATEGORY_SKILL,
             api_key=llm_api_key,
+            llm_config=llm_config,
         )
         if content:
             final_text = content
@@ -814,6 +921,7 @@ async def _run_skill_loop_legacy(
                 on_notify=emit_progress,
                 user_role=user_role,
                 user_message=user_message,
+                llm_config=llm_config,
             )
             records.append(
                 {
@@ -856,6 +964,7 @@ async def _run_skill_loop_legacy(
                 usage_user_id=user_id,
                 usage_category=CATEGORY_CHAT,
                 api_key=llm_api_key,
+                llm_config=llm_config,
             )
             if on_text:
                 on_text(final_text)
@@ -892,6 +1001,7 @@ async def run_skill_loop(
     llm_api_key: str | None = None,
     llm_base_url: str | None = None,
     llm_model: str | None = None,
+    llm_config: dict | None = None,
     on_text=None,
     on_progress=None,
     user_role: str = "user",
@@ -920,6 +1030,7 @@ async def run_skill_loop(
                 api_key=llm_api_key,
                 model=llm_model,
                 base_url=llm_base_url,
+                llm_config=llm_config,
                 max_rounds=settings.AGENT_SKILLS_MAX_ROUNDS,
                 on_progress=on_progress,
                 user_role=user_role,
@@ -930,6 +1041,8 @@ async def run_skill_loop(
         except Exception as exc:  # noqa: BLE001
             # 图适配层的供应商兼容性故障不应让请求整体失败；真正的工具权限和
             # 执行边界仍由兼容循环调用同一个 execute_tool_call 负责。
+            if scene == "office" and llm_config:
+                raise
             logger.warning("LangGraph 工具图失败，回退兼容执行器: {}", str(exc)[:300])
 
     return await _run_skill_loop_legacy(
@@ -941,6 +1054,7 @@ async def run_skill_loop(
         llm_api_key=llm_api_key,
         llm_base_url=llm_base_url,
         llm_model=llm_model,
+        llm_config=llm_config,
         on_text=on_text,
         on_progress=on_progress,
         user_role=user_role,

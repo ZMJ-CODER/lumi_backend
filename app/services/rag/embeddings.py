@@ -22,6 +22,11 @@ _model_lock = threading.Lock()
 _model_failed = False  # 加载失败后缓存，避免每次请求都重新尝试下载
 
 
+def embedding_model_loaded() -> bool:
+    """Whether an already-loaded embedding model can be reused without I/O."""
+    return _model is not None and not _model_failed
+
+
 def _resolve_device() -> str:
     """解析嵌入设备：配置了 cuda 但 torch 无 CUDA 支持时自动回退 cpu，避免整条链路失败."""
     device = settings.EMBEDDING_DEVICE or "cpu"

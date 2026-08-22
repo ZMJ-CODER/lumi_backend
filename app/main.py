@@ -50,29 +50,9 @@ async def lifespan(app: FastAPI):
 
     init_skills()
     await init_redis()
-    # 自动补齐缺失的数据表（幂等：仅创建不存在的表；新增表如 user_preferences 无需手动迁移）
-    try:
-        from app.core.database import engine
-        from app.models.db_models import Base
-
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-    except Exception as exc:  # noqa: BLE001 - 建表失败不阻塞启动（可能无 DB 权限）
-        logger.warning("自动建表跳过（可运行 scripts/init_db.py 手动补齐）: {}", exc)
-    # 增量字段补齐（幂等）：create_all 只建新表，老表新增列需显式 ALTER
-    try:
-        from sqlalchemy import text as _sql_text
-        from app.core.database import engine as _engine
-
-        async with _engine.begin() as _conn:
-            await _conn.execute(
-                _sql_text(
-                    "ALTER TABLE user_preferences "
-                    "ADD COLUMN IF NOT EXISTS email_client VARCHAR(32) NOT NULL DEFAULT ''"
-                )
-            )
-    except Exception as exc:  # noqa: BLE001 - 列已存在/无权限时静默
-        logger.debug("增量字段补齐跳过: {}", exc)
+    # Schema ownership belongs exclusively to Alembic.  Deployment runs
+    # ``alembic upgrade head`` before starting an API replica, so application
+    # workers never race over DDL or silently patch production tables.
     # 遥测只是候选排序的辅助信号，启动时预热缓存，绝不让用户工具选择首轮查库。
     try:
         from app.services.skill_telemetry import refresh_success_rate_hints

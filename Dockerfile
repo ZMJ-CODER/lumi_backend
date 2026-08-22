@@ -101,5 +101,6 @@ USER appuser
 # API: 8000 / TTS: 8765
 EXPOSE 8000 8765
 
-# 默认启动：先跑数据库迁移（幂等），再启动 FastAPI（worker/tts 由 docker-compose 覆盖）
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# Schema 迁移由部署阶段的单实例 ``migrate`` job 负责；应用副本只提供服务，
+# 避免多副本启动时并发执行 DDL。
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

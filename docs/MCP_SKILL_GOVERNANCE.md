@@ -120,8 +120,8 @@ Redis 配额不可用时外部 MCP 调用会失败关闭，避免失去限额后
 执行部署迁移：
 
 ```powershell
-docker compose exec api alembic upgrade head
+docker compose run --rm migrate
 ```
 
-开发环境启动时 `create_all` 会补建新表，但生产部署仍应使用 Alembic，确保唯一约束和
-索引存在。
+应用进程不执行 `create_all` 或手写 DDL；开发和生产均在启动前运行 Alembic，确保
+表、列、唯一约束和索引都由同一迁移链管理。

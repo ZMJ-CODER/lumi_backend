@@ -85,7 +85,9 @@ return 1
             async with self._lock:
                 self._purge(self._inflight, now)
                 if len(self._inflight) >= settings.AGENT_SUBMISSION_MAX_INFLIGHT:
-                    raise AdmissionBackpressureError("办公任务正在繁忙处理，请稍后重试或切换普通模式对话")
+                    raise AdmissionBackpressureError(
+                        "办公任务正在繁忙处理，请稍后重试或切换普通模式对话"
+                    ) from None
                 self._inflight[token] = now + lease
 
     async def promote(self, token: str, job_id: str, user_id: str) -> None:
@@ -114,9 +116,13 @@ return 1
                 self._purge(users, now)
                 self._inflight.pop(token, None)
                 if len(self._global) >= settings.AGENT_GLOBAL_ACTIVE_JOB_LIMIT:
-                    raise AdmissionBackpressureError("办公任务容量已满，请稍后重试或切换普通模式对话")
+                    raise AdmissionBackpressureError(
+                        "办公任务容量已满，请稍后重试或切换普通模式对话"
+                    ) from None
                 if len(users) >= settings.AGENT_USER_ACTIVE_JOB_LIMIT:
-                    raise AdmissionBackpressureError("当前有任务正在进行中，请切换到普通模式对话")
+                    raise AdmissionBackpressureError(
+                        "当前有任务正在进行中，请切换到普通模式对话"
+                    ) from None
                 self._global[job_id] = now + lease
                 users[job_id] = now + lease
 

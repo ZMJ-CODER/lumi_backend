@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from typing import Any
 
-from app.agents.skills.base import SkillContext
 from app.agents.skills.registry import SkillRegistry
 
 if TYPE_CHECKING:

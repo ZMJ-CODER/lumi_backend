@@ -10,7 +10,8 @@ docker compose up -d
 docker compose -f docker-compose.yml -f docker-compose.secrets.yml up -d
 ```
 
-`api` 容器启动时会先执行 `alembic upgrade head`（幂等），再启动 uvicorn。
+`migrate` 是唯一执行 `alembic upgrade head` 的一次性部署服务；`api` 副本不会执行 DDL，
+可安全横向扩容。先确认 `lumi-migrate` 以退出码 0 结束，再检查 API 健康状态。
 
 异步任务已按 `durable`、`best_effort`、`maintenance` 三个 worker 隔离；本地 Compose
 应整体启动，避免记忆/维护队列无人消费：
@@ -45,7 +46,8 @@ python -m alembic revision --autogenerate -m "describe change"
 python -m alembic upgrade head
 ```
 
-迁移记录表 `alembic_version`；基线 `0001_baseline` 幂等建全量表。
+迁移记录表为 `alembic_version`。应用进程不执行运行时 DDL；所有模式变更必须通过新的
+Alembic revision 发布。
 
 ## 4. 密钥管理
 

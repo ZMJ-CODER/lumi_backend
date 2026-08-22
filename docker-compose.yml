@@ -35,6 +35,20 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # ── Schema migration（一次性部署步骤，禁止由 API 副本执行 DDL） ──
+  migrate:
+    build: .
+    command: alembic upgrade head
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/lumi_db
+      DATABASE_ADMIN_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   # ── FastAPI 后端服务 ──
   api:
     build: .
@@ -92,6 +106,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     deploy:
       resources:
         reservations:

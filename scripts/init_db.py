@@ -1,13 +1,11 @@
-"""数据库初始化脚本 —— 创建 lumi_db 数据库 + 所有表 + pgvector 索引.
+"""数据库初始化脚本 —— 创建 lumi_db 数据库并运行 Alembic schema 迁移.
 
 使用方式:
     python scripts/init_db.py
 
 功能:
   1. 连接 postgres 默认库 → 创建 lumi_db（如不存在）
-  2. 启用 pgvector 扩展
-  3. 根据 SQLAlchemy ORM 模型创建所有表
-  4. 创建向量索引（ivfflat）
+  2. 运行 ``alembic upgrade head`` 创建表、扩展和索引
 """
 
 import asyncio
@@ -44,30 +42,14 @@ async def create_database_if_not_exists() -> None:
         await admin_engine.dispose()
 
 
-async def enable_pgvector() -> None:
-    """启用 pgvector 扩展."""
-    engine = create_async_engine(settings.DATABASE_URL, isolation_level="AUTOCOMMIT")
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-            print("[OK] pgvector 扩展已启用")
-    finally:
-        await engine.dispose()
+def upgrade_schema() -> None:
+    """Apply the versioned schema contract in the Alembic migration chain."""
+    from alembic import command
+    from alembic.config import Config
 
-
-async def create_all_tables() -> None:
-    """根据 ORM 模型创建所有表."""
-    engine = create_async_engine(settings.DATABASE_URL)
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        print("[OK] 所有表创建完成")
-        print()
-        print("已创建的表:")
-        for table_name in sorted(Base.metadata.tables.keys()):
-            print(f"  - {table_name}")
-    finally:
-        await engine.dispose()
+    config = Config(os.path.join(os.path.dirname(os.path.dirname(__file__)), "alembic.ini"))
+    command.upgrade(config, "head")
+    print("[OK] Alembic 已升级到 head")
 
 
 async def verify_tables() -> None:
@@ -105,8 +87,7 @@ async def main() -> None:
     print()
 
     await create_database_if_not_exists()
-    await enable_pgvector()
-    await create_all_tables()
+    await asyncio.to_thread(upgrade_schema)
     await verify_tables()
 
     print()

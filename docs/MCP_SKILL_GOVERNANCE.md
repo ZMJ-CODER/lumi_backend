@@ -1,13 +1,13 @@
 # MCP 与 Skill 治理
 
-> 版本：v1.0（2026-08-21）
+> 版本：v1.1（2026-08-23）
 
 本文件描述 Skill 生命周期、候选工具路由和外部 MCP 工具准入。它们建立在现有
 执行器的场景、角色、确认、沙箱、审计边界之上，不能替代这些边界。
 
 ## 1. 候选工具路由
 
-工具选择分两阶段：
+工具选择分两阶段；候选召回与模型选择必须分开观测和评测：
 
 ```text
 场景/角色/写开关/运行时/用户 MCP 绑定硬过滤
@@ -15,6 +15,7 @@
   -> 词法规则 + 可选语义相似度 + 可靠性/成本排序
   -> 冲突消解和类别去重
   -> Planner 或 ReAct 的 Top-K Function Calling 工具
+  -> 模型在已注入候选中调用或直接回答
 ```
 
 语义相似度只用于合法池内排序，永远不能授权工具。以下规则仍保留优先级：
@@ -22,11 +23,21 @@
 - 明确的文件转换、导出和创建请求优先粗粒度产物工具；
 - `conflicts_with` 与 `preferred_over` 处理互斥能力；
 - 普通聊天仍只允许问答白名单；
-- 办公 ReAct 每轮最多暴露 8 个工具，并会剔除已失败工具。
+- 聊天只使用一次请求级候选池（最多 5 个）；办公 ReAct 每轮最多暴露 8 个工具，会结合最新工具观察刷新候选并剔除已失败工具。
 
-`SKILL_SEMANTIC_ROUTING_ENABLED=true` 默认开启，但不会主动加载或下载 bge 模型。
-只有 RAG 已完成 embedding 模型加载后才异步建立 Skill 描述向量；在未就绪、失败
-或关闭时，自动回退现有词法与规则路由。
+每个候选选择都会产生安全 trace：场景、轮次、`routing_mode`、`name`、`version`、分数、是否 bootstrap、
+最终调用工具与同轮未调用候选。trace 不包含用户原文、提示词、工具参数、思维链或工具正文。
+办公任务将 trace 放入节点 `tool_metadata.selection_traces`；聊天任务仅记录结构化监控事件。
+
+评测至少覆盖两层：`candidate_recall@K` 验证期望工具是否进入候选池，
+`selection_accuracy_given_candidates` 验证给定候选后模型是否正确调用/不调用。明确工具意图却无候选
+或仅低分候选时记录 `TOOL_CANDIDATE_LOW_CONFIDENCE`，并禁止回答伪称已从外部来源核验；该告警
+不会把关键词变成强制联网规则。
+
+`SKILL_SEMANTIC_ROUTING_ENABLED=true` 默认开启。应用启动和插件热更新后会同步预热小规模
+Skill 描述索引；普通请求绝不承担 bge 加载或索引构建成本。若模型/索引不可用，候选 trace 的
+`routing_mode=lexical_fallback` 会明确记录降级，Prometheus 的
+`lumi_skill_routing_modes_total{scene,mode}` 可统计其占比；不能把它当作与语义模式等价的静默行为。
 
 ## 2. Skill 生命周期
 
@@ -44,11 +55,17 @@ name + version + status + schema_fingerprint
 - `schema_fingerprint` 是名称、版本、参数 Schema 和执行环境的哈希，用于计划缓存、
   长任务恢复及审批排障时识别不可兼容变更。
 
-插件热更新会使语义索引失效，后续在 RAG embedding 已就绪时自动重建。管理接口
+插件热更新会同步重建语义索引，`POST /api/v1/admin/skills/reload` 返回
+`semantic_routing_ready`；重建失败时服务继续使用有 trace 的词法降级。管理接口
 `GET /api/v1/admin/skills` 会返回上述生命周期字段。
 
 Skill 修改应在 CI 运行四类契约用例：正常输入、非法/边界参数、权限或确认拒绝、
 运行时不可用。工具路由还应维护“自然语言请求 -> 期望工具在 Top-K”的评测集。
+
+选择契约还包括 `use_when`、`do_not_use_when`、`selection_examples`、`handoff_to`。
+插件注册时静态 lint 会拒绝不存在的相邻工具引用、缺少限定意图/无效日期的 bootstrap，以及
+高重叠 `intent_tags` 却未声明关系的工具。`bootstrap_intents + bootstrap_until` 仅让新 Skill 在
+限定意图、限定日期内优先进入候选池；不会全量注入聊天。选择提示从注册契约编译，避免手写提示词漂移。
 
 ## 3. 外部 MCP 工具准入
 
@@ -83,8 +100,10 @@ POST   /api/v1/mcp/bindings/{binding_id}     # enabled true/false
 DELETE /api/v1/mcp/bindings/{binding_id}
 ```
 
-MCP Server 进入失败冷却或熔断时，其绑定工具会从候选池暂时摘除；调用层仍会做最终
-可用性校验。撤销绑定只阻止后续节点调用，已发生的外部副作用不会自动补偿。
+MCP Server 进入失败冷却或熔断时，不从合法池悄悄摘除；候选 trace 以
+`availability_hint=circuit_breaker` 标明状态，调用层再返回结构化暂不可用错误。这样能区分
+“工具可见但暂不可用”和“模型未选择”，也让模型如实向用户说明限制。撤销绑定只阻止后续节点调用，
+已发生的外部副作用不会自动补偿。
 
 每个绑定还由部署配置给出独立的每日调用与并发上限，默认分别为 100 和 2；可在
 `MCP_SERVERS` 某一 Server 项用 `mcp_daily_call_limit`、`mcp_concurrency_limit` 覆盖。
@@ -114,6 +133,13 @@ Redis 配额不可用时外部 MCP 调用会失败关闭，避免失去限额后
 遥测缓存仅在 API 启动时预热；候选选择路径只读内存缓存，不会因为遥测查询增加工具
 调用的首轮延迟。Electron 的 Redis 兼容轮询采用 500ms 活跃、5 秒空闲、10 分钟后
 30 秒低频的退避策略；MCP 直连不经过该轮询。
+
+工具结果的 `confidence_hint` 只接受 `{level, basis[]}` 结构，其中 `basis` 必须来自 citation 数、
+授权文档读取、供应商结果条数等可观察事实。没有可计算依据时省略置信提示，禁止实现侧写入任意
+`high`/`medium`/`low` 字符串误导后续模型步骤。
+
+bootstrap 到期前三天发出 `BOOTSTRAP_EXPIRING` 告警，并同时审阅该 Skill 的候选命中和模型
+选择率；若它只能依靠 bootstrap 入池，应修复 `intent_tags`、`use_when` 或边界声明，不能直接续期。
 
 ## 5. 数据库迁移
 

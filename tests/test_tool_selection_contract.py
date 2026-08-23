@@ -77,7 +77,36 @@ def test_selection_trace_keeps_only_safe_routing_metadata():
     assert trace["scene"] == "chat"
     assert trace["selection_round"] == 2
     assert "query" not in trace
-    assert all(set(item) == {"name", "version", "score", "bootstrap"} for item in trace["injected_candidates"])
+    assert trace["routing_mode"] in {"semantic", "lexical_fallback"}
+    assert all(
+        set(item) == {"name", "version", "score", "bootstrap", "availability_hint"}
+        for item in trace["injected_candidates"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("帮我算一下 (12873 × 47 - 912) ÷ 13，保留两位小数", "calculator"),
+        ("帮我打开记事本", "open_app"),
+    ],
+)
+def test_chat_tool_candidate_recall_for_deterministic_and_desktop_actions(query, expected):
+    names = {item.name for item in asyncio.run(get_chat_capabilities_for_request(query))}
+    assert expected in names
+
+
+def test_same_intent_recall_is_consistent_between_chat_and_office():
+    cases = [
+        ("帮我算一下 12873 * 47", "calculator"),
+        ("帮我打开记事本", "open_app"),
+        ("请联网搜索本周 AI 政策并给网页来源", "web_search"),
+    ]
+    for query, expected in cases:
+        chat = {item.name for item in asyncio.run(get_chat_capabilities_for_request(query))}
+        office = {item.name for item in asyncio.run(select_capabilities_with_trace(query, "office")).capabilities}
+        assert expected in chat
+        assert expected in office
 
 
 def test_contract_lint_rejects_invalid_bootstrap_date_and_dangling_handoff():

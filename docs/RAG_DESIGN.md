@@ -1,7 +1,8 @@
 # Lumi RAG 与分域检索设计
 
 > 版本：v2.1 ｜ 更新：2026-08-21
-> 对应代码：`app/services/rag/`、`app/services/memory/`、`app/services/office_docs.py`、`app/services/orchestrator.py`
+> 对应代码：`app/services/rag/`、`app/services/memory/`、`app/services/office_docs.py`、
+> `app/agents/orchestration/`。`app/services/orchestrator.py` 仅保留兼容门面，不是编排内核。
 
 ## 1. 目标与边界
 

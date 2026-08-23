@@ -50,6 +50,18 @@ async def lifespan(app: FastAPI):
 
     init_skills()
     await init_redis()
+    # Semantic Skill routing must be ready before normal traffic, or every
+    # first request is explicitly tracked as lexical_fallback. This is not a
+    # request-path warmup: lifecycle startup owns the (small) descriptor index.
+    if settings.SKILL_SEMANTIC_ROUTING_ENABLED and settings.SKILL_SEMANTIC_ROUTING_STARTUP_WARMUP:
+        try:
+            from app.agents.skills.routing import warm_registered_skill_semantic_index
+
+            ready = await warm_registered_skill_semantic_index()
+            if not ready:
+                logger.warning("Skill 语义路由未就绪，当前将记录 lexical_fallback；请检查嵌入模型配置")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Skill 语义路由启动预热失败，当前将记录 lexical_fallback: {}", exc)
     # Schema ownership belongs exclusively to Alembic.  Deployment runs
     # ``alembic upgrade head`` before starting an API replica, so application
     # workers never race over DDL or silently patch production tables.

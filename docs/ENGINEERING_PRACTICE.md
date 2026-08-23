@@ -154,7 +154,7 @@ A/B 实测（health）：
 
 ## 6. 工程质量：ruff 与 pytest 治理
 
-### 6.1 ruff 收敛（239 → 0）
+### 6.1 ruff 治理（历史收敛记录）
 
 - 规则收敛到正确性类：`E F W B`（去掉 I/N/UP/SIM 等大规模重构类），忽略 E501 行长噪音。
 - FastAPI 声明式调用（Depends/File/Query/Header 等）通过
@@ -164,7 +164,7 @@ A/B 实测（health）：
 - `__init__.py` 的 F401 用 per-file-ignores 处理（替代已废弃的
   `ignore-init-module-imports`）。
 
-### 6.2 pytest 治理（70 passed）
+### 6.2 pytest 治理（历史基线）
 
 - `addopts = "-p no:cacheprovider"`：屏蔽 Windows 上 `.pytest_cache` 权限异常
   （WinError 5）导致的 PytestCacheWarning。
@@ -174,8 +174,8 @@ A/B 实测（health）：
 
 ### 6.3 CI 门禁（GitHub Actions）
 
-流水线依次执行：`uv sync --no-sources` → `alembic upgrade head` → `ruff check` →
-`pytest`。三者全绿才算通过；迁移在全新库上跑通，避免"本地能跑、CI 挂"。
+流水线依次执行：`uv sync --no-sources` → `alembic upgrade head` → `ruff check app tests` →
+`pytest`。三者全绿才算通过；具体通过数量不是稳定契约，应以 CI 当次输出为准。迁移在全新库上跑通，避免"本地能跑、CI 挂"。
 
 ## 7. 失败与降级策略
 

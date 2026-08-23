@@ -23,7 +23,7 @@ packages/orchestration/
     policy/tca_models.py # constrained TCA weight/threshold schema
     runner.py       # timeout selection and channel lease protocol
     ports.py         # Worker, review and state-store boundaries
-    policy/         # typed YAML language, matcher, hook registry
+    policy/         # typed YAML models, matcher and hook registry
   tests/            # no app imports
 ```
 
@@ -33,14 +33,15 @@ hooks, Skills, Worker implementations, state persistence and the concrete node
 execution loop. It may import
 `lumi_orch`; `lumi_orch` must never import `app`.
 
-The migration is intentionally incremental. The kernel now owns DAG structural
-validation and dependency scheduling, escalation data validation, resource and
-channel lease protocols, admission capacity semantics, two-phase effect state
-transitions, timeout selection, and the routing-policy matcher. The Lumi side
-keeps thin compatibility modules so existing imports and integration tests do
-not change while Redis and settings stay outside the package. Do not duplicate
-an implementation in both layers: move the invariant to the package, retain
-only the infrastructure adapter in `app`.
+The migration is complete at the invariant boundary. The kernel owns DAG
+structural validation and dependency scheduling, escalation data validation,
+resource and channel lease protocols, admission capacity semantics, two-phase
+effect state transitions, timeout selection, logical-plan/manifest contracts,
+typed static-plan DSL and the routing-policy matcher. The Lumi side owns only
+business adapters: Redis/PostgreSQL clients, settings, monitoring, Worker and
+Skill implementations, document hooks and runtime selection. Do not duplicate
+an invariant in both layers: it belongs in the package, while infrastructure
+code remains in `app`.
 
 ## Local commands
 

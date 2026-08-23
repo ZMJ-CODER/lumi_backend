@@ -89,6 +89,18 @@ docker compose exec postgres psql -U postgres -d lumi_db < backup.sql
 - **错误上报**：`.env` 配置 `SENTRY_DSN` 后自动上报未处理异常
 - **日志**：`logs/lumi_*.log`（按天轮转、30 天保留）
 
+### 本地开发产物清理
+
+以下内容不参与运行时状态、不应提交 Git，可在停止本地开发进程后删除：
+
+```powershell
+Remove-Item -Recurse -Force .pytest_tmp, .ruff_cache, .ruff-cache, .uv-cache, .uv-cache-codex, .uv-tools, .uv-tools-codex -ErrorAction SilentlyContinue
+Remove-Item -Force backend-dev.log -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force logs\* -ErrorAction SilentlyContinue
+```
+
+不要用该命令删除 `data/`、`.venv/`、数据库卷、用户办公文件或 Docker volume；它们不属于可再生的日志/缓存。
+
 ## 7. 排障速查
 
 - 上传文档后"会话不存在"：确认 `data/office` 卷已挂载、`office_sessions` 表存在（`alembic upgrade head`）。

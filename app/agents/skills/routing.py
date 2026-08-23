@@ -1,7 +1,8 @@
 """Skill 合法池内的混合语义排序。
 
 本模块不做授权。调用方必须先完成场景、角色、写操作和运行时过滤；索引
-不可用时返回空分数，让词法/显式规则完整接管，绝不影响请求可执行性。
+不可用时返回空分数，让词法/显式规则完整接管。调用方必须把该状态记录为
+``lexical_fallback``，不能把两种模式混为一谈。
 """
 
 from __future__ import annotations
@@ -18,6 +19,13 @@ _vectors: dict[str, list[float]] = {}
 _build_lock = asyncio.Lock()
 _ready = False
 _invalidated = True
+
+
+def semantic_routing_mode() -> str:
+    """Return the actual scoring mode for a request without triggering I/O."""
+    if not bool(getattr(settings, "SKILL_SEMANTIC_ROUTING_ENABLED", True)):
+        return "lexical_fallback"
+    return "semantic" if _ready and not _invalidated else "lexical_fallback"
 
 
 def _key(capability: ToolCapability) -> str:
@@ -49,9 +57,8 @@ def schedule_skill_semantic_index(capabilities: Iterable[ToolCapability]) -> Non
     if not bool(getattr(settings, "SKILL_SEMANTIC_ROUTING_ENABLED", True)) or (_ready and not _invalidated):
         return
     try:
-        # Skill routing is an enhancement, not an embedding-model bootstrapper.
-        # The RAG path owns model loading/download policy; until it is ready we
-        # stay on deterministic lexical routing without disk/network work.
+        # Request path never loads bge. Startup/reload owns proactive warmup;
+        # before it completes the caller records lexical_fallback explicitly.
         from app.services.rag.embeddings import embedding_model_loaded
 
         if not embedding_model_loaded():
@@ -85,7 +92,28 @@ async def warm_skill_semantic_index(capabilities: Iterable[ToolCapability]) -> N
             _invalidated = False
             logger.info("Skill 语义索引已就绪: {} 个能力", len(_vectors))
         except Exception as exc:  # noqa: BLE001
-            logger.debug("Skill 语义索引预热跳过，保持词法路由: {}", exc)
+            logger.warning("Skill 语义索引预热失败，当前请求将显式使用 lexical_fallback: {}", exc)
+
+
+async def warm_registered_skill_semantic_index() -> bool:
+    """Build the complete legal Skill index during startup or plugin reload.
+
+    The small Skill descriptor set is intentionally rebuilt synchronously at
+    lifecycle boundaries. User requests never wait for BGE loading, and a
+    failed warmup remains observable as ``lexical_fallback``.
+    """
+    if not bool(getattr(settings, "SKILL_SEMANTIC_ROUTING_ENABLED", True)):
+        return False
+    from app.agents.skills.executor import get_capabilities_for_scene
+
+    # A union prevents a chat-only desktop/calculator capability from being
+    # missing after the first request happened to be in office mode.
+    by_key: dict[str, ToolCapability] = {}
+    for scene in ("chat", "office", "game"):
+        for capability in await get_capabilities_for_scene(scene, include_bootstrap=True):
+            by_key[_key(capability)] = capability
+    await warm_skill_semantic_index(by_key.values())
+    return semantic_routing_mode() == "semantic"
 
 
 async def semantic_scores(request: str, capabilities: Iterable[ToolCapability]) -> dict[str, float]:

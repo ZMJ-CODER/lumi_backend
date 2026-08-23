@@ -10,7 +10,7 @@
 AGENT_ORCHESTRATION=legacy
 ```
 
-本机制不改变当前 Docker 或 Temporal 的默认执行路径。
+本机制不改变当前 Docker 默认的持久化 DAG 路径；Temporal 仍只是静态只读任务的可选灰度运行时。
 
 ## 数据边界
 

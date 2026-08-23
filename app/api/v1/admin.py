@@ -419,9 +419,11 @@ async def reload_skills_view(payload: dict = Depends(require_admin)):
 
     不重启进程即可生效；适合开发迭代与线上小步更新。
     """
-    from app.agents.skills.loader import reload_skill_plugins
+    from app.agents.skills.loader import rebuild_skill_semantic_index, reload_skill_plugins
 
     result = reload_skill_plugins()
+    semantic_ready = await rebuild_skill_semantic_index()
+    result["semantic_routing_ready"] = semantic_ready
     return {
         "code": 0,
         "data": result,

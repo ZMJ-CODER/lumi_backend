@@ -82,6 +82,8 @@ _CHAT_TOOL_GRAPH_KEYWORDS = (
     "联网", "网上搜", "网页搜索", "搜索网页", "检索公开资料", "查网页", "给我来源",
     "搜索新闻", "最新新闻", "公开资料", "web search", "search the web", "browse the web",
     "现在几点", "当前时间", "当前日期", "几号", "星期几",
+    "算一下", "计算", "加减乘除", "百分比", "表达式",
+    "打开", "启动", "记事本", "notepad",
 )
 _CHAT_LOCAL_CONTEXT_MARKERS = (
     "上传的", "刚上传", "附件", "这个文件", "这份文件", "知识库", "我的资料",
@@ -146,6 +148,11 @@ def _append_web_search_preference(messages: list[dict]) -> list[dict]:
 def _append_chat_tool_contract(messages: list[dict], *, web_search_preferred: bool) -> list[dict]:
     """Add the tool-selection contract to the existing trusted system prompt."""
     contract = "\n\n[工具选择规则]\n" + _WEB_DECISION_PROMPT
+    contract += (
+        "\n精确算术、百分比或带括号表达式必须调用候选中的 calculator，不要自行心算。"
+        "用户明确要求打开本机应用时，如候选中存在 open_app，必须发起该工具调用；"
+        "客户端未连接、用户拒绝确认或工具失败时，应如实说明该结果，不得声称没有此能力。"
+    )
     if web_search_preferred:
         contract += (
             "\n用户已主动开启联网偏好；这只提高公开来源检索的候选优先级，"

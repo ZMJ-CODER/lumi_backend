@@ -47,7 +47,7 @@ class CreateTaskPlanSkill(Skill):
                         session, context.user_id, project_id, limit=30
                     )
                 if files:
-                    context_text += f"\n项目文件清单：\n" + "\n".join(f"- {f}" for f in files)
+                    context_text += "\n项目文件清单：\n" + "\n".join(f"- {f}" for f in files)
             llm = LLMClient()
             reply = await llm.chat(
                 [

@@ -51,6 +51,12 @@ class OpenAppSkill(Skill):
     )
     category = "desktop"
     environment = "client"
+    domain = "desktop"
+    intent_tags = ["打开", "启动", "打开应用", "软件", "记事本", "notepad"]
+    use_when = ["用户明确要求打开本机已安装的软件或应用"]
+    do_not_use_when = ["仅询问软件使用方法", "只是希望搜索某软件的公开资料"]
+    selection_examples = ["“帮我打开记事本” → 使用"]
+    result_contract = "客户端确认后返回启动结果；客户端未连接或拒绝确认时返回明确错误。"
     requires_confirmation = True
     scenes = ["chat", "office"]
     parameters_schema = {

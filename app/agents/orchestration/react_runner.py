@@ -110,7 +110,7 @@ class OfficeReactRunner:
                     selection = CapabilitySelection(
                         capabilities=selection,
                         candidates=[
-                            {"name": item.name, "version": item.version, "score": 0.0, "bootstrap": False}
+                            {"name": item.name, "version": item.version, "score": 0.0, "bootstrap": False, "availability_hint": "available"}
                             for item in selection
                         ],
                         scene="office",
@@ -133,7 +133,7 @@ class OfficeReactRunner:
                         selection = type(selection)(
                             capabilities=capabilities,
                             candidates=[
-                                {"name": item.name, "version": item.version, "score": 0.0, "bootstrap": False}
+                                {"name": item.name, "version": item.version, "score": 0.0, "bootstrap": False, "availability_hint": "available"}
                                 for item in capabilities
                             ],
                             scene=selection.scene,
@@ -201,7 +201,14 @@ class OfficeReactRunner:
                 if result and isinstance(result.metadata, dict) and result.metadata.get("document_selection"):
                     record["document_selection"] = result.metadata["document_selection"]
                 self.records.append(record)
-                if not record["success"]:
+                # A deterministic contract failure cannot improve on the next
+                # round, so exclude it.  Network/timeout failures remain in
+                # the pool: the model may retry once after using another tool
+                # or receiving fresh context instead of silently losing the
+                # capability for the entire request.
+                if not record["success"] and record["error_code"] in {
+                    "INVALID_ARGS", "SKILL_NOT_FOUND", "FORBIDDEN", "SANDBOX_REQUIRED",
+                }:
                     self._failed_tools.add(name)
                 call_id = str(message.tool_call_id or f"react-{len(self.records)}")
                 self._emit({"type": "step", "id": call_id, "title": name,

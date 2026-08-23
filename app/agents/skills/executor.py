@@ -14,7 +14,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 from loguru import logger
 
@@ -37,7 +37,9 @@ _WRITE_NAME_HINTS = (
 # 普通聊天不是办公自动化入口。即使某个历史 Skill 的 ``scenes`` 元数据仍含
 # ``chat``，也不能因此获得本机操作、写入、日程或文件管理等能力。文档检索、
 # 可信的当前时间与联网查询属于“问答”范畴，保留在聊天白名单中。
-_CHAT_SKILL_ALLOWLIST = {"web_search", "query_knowledge", "get_datetime"}
+_CHAT_SKILL_ALLOWLIST = {
+    "web_search", "query_knowledge", "get_datetime", "calculator", "open_app",
+}
 
 # M3 ReAct 是动态选择工具的路径，不能把项目开发、通用文件系统和通用 Shell
 # 一并交给模型。普通办公只保留业务办公、桌面/进程控制、系统信息，以及明确
@@ -48,6 +50,7 @@ _OFFICE_REACT_ALLOWED_SKILLS = {
     "inspect_document_set", "read_document",
 }
 _OFFICE_REACT_DENIED_SKILLS = {"env"}
+_bootstrap_expiry_alerts: set[tuple[str, str]] = set()
 
 
 def tool_call_fingerprint(tool_name: str, args: dict, upstream_sha256: str = "") -> str:
@@ -109,6 +112,7 @@ _OFFICE_REACT_ROUTING_METADATA: dict[str, dict] = {
     "kill": {"domain": "desktop", "intent_tags": ["结束进程", "关闭进程"]},
     "speech_to_text": {"domain": "document", "intent_tags": ["语音", "转文字", "转写"]},
     "get_datetime": {"domain": "system", "intent_tags": ["日期", "时间", "几点"], "use_when": ["询问当前日期、时间、星期"], "do_not_use_when": ["用户自己的今日待办或日程", "天气、汇率、行情等其他实时数据"], "selection_examples": ["“现在几点？” → get_datetime"]},
+    "calculator": {"domain": "system", "intent_tags": ["计算", "算一下", "算术", "加减乘除", "百分比", "表达式"], "use_when": ["用户要求精确算术、百分比或括号表达式计算"], "do_not_use_when": ["仅需解释数学概念", "需要统计上传数据时先读取数据"], "selection_examples": ["“帮我算一下 (12873×47-912)÷13” → calculator"]},
     "task_memory": {"domain": "memory", "intent_tags": ["上次", "此前", "记忆"]},
     "compliance_check": {"domain": "writing", "intent_tags": ["合规", "敏感词", "审查"]},
 }
@@ -139,6 +143,7 @@ class CapabilitySelection:
     top_score: float = 0.0
     low_confidence: bool = False
     reason: str = "ranked"
+    routing_mode: str = "lexical_fallback"
 
     def to_metadata(self, *, selection_round: int = 1) -> dict:
         return {
@@ -149,6 +154,7 @@ class CapabilitySelection:
             "top_score": round(float(self.top_score), 3),
             "low_confidence": bool(self.low_confidence),
             "reason": self.reason,
+            "routing_mode": self.routing_mode,
         }
 
 
@@ -401,10 +407,12 @@ async def select_capabilities_with_trace(
         if any(marker in lower for marker in markers):
             preferred.update(names)
 
+    routing_mode = "lexical_fallback"
     try:
-        from app.agents.skills.routing import semantic_scores
+        from app.agents.skills.routing import semantic_routing_mode, semantic_scores
 
         semantic = await semantic_scores(request, capabilities)
+        routing_mode = semantic_routing_mode() if semantic else "lexical_fallback"
     except Exception:  # noqa: BLE001
         semantic = {}
     ranked: list[tuple[float, int, ToolCapability, bool]] = []
@@ -457,8 +465,13 @@ async def select_capabilities_with_trace(
             selected_names.add(capability.name)
             if len(selected) >= max(1, limit):
                 break
-    for _, _, capability, _ in ranked:
-        if len(selected) >= max(1, limit):
+    base_limit = max(1, limit)
+    # Keep one strictly bounded slot for a tied K+1 candidate. Explicit tool
+    # intent may use that same slot; it never expands the safety ceiling.
+    hard_limit = base_limit + max(0, int(settings.SKILL_CANDIDATE_MAX_OVERFLOW))
+    last_selected_score: float | None = None
+    for score, _, capability, _ in ranked:
+        if len(selected) >= base_limit:
             break
         # 显式冲突的工具不同时给模型。只有当上位工具不在候选中时才保留它。
         if any(name in selected_names for name in capability.conflicts_with):
@@ -471,6 +484,19 @@ async def select_capabilities_with_trace(
             continue
         selected.append(capability)
         selected_names.add(capability.name)
+        last_selected_score = score
+    # A near-tied next candidate may be semantically equivalent to the Kth
+    # candidate. Keep a bounded overflow rather than making wording decide it.
+    if last_selected_score is not None and len(selected) < hard_limit:
+        for score, _, capability, _ in ranked:
+            if capability.name in selected_names:
+                continue
+            if last_selected_score - score > float(settings.SKILL_CANDIDATE_TIE_EPSILON):
+                break
+            selected.append(capability)
+            selected_names.add(capability.name)
+            if len(selected) >= hard_limit:
+                break
     # ``ranked`` 已以 score 和原始注册顺序作为稳定 tie-breaker 排序；保留该顺序
     # 才能让优先关系真实影响模型看到的工具排列。
     scores = {capability.name: score for score, _, capability, _ in ranked}
@@ -481,6 +507,7 @@ async def select_capabilities_with_trace(
             "version": capability.version,
             "score": round(float(scores.get(capability.name, 0.0)), 3),
             "bootstrap": capability.name in selected_bootstrap,
+            "availability_hint": str((capability.annotations or {}).get("availability_hint") or "available"),
         }
         for capability in selected
     ]
@@ -492,6 +519,7 @@ async def select_capabilities_with_trace(
         top_score=top_score,
         low_confidence=bool(candidate_rows) and top_score < float(settings.SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE),
         reason="bootstrap" if any(row["bootstrap"] for row in candidate_rows) else "ranked",
+        routing_mode=routing_mode,
     )
 
 
@@ -530,6 +558,7 @@ def _selection_with_capabilities(selection: CapabilitySelection, capabilities: l
         top_score=top_score,
         low_confidence=bool(candidates) and top_score < float(settings.SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE),
         reason=reason or selection.reason,
+        routing_mode=selection.routing_mode,
     )
 
 
@@ -539,6 +568,7 @@ def request_has_explicit_tool_intent(request: str) -> bool:
     markers = (
         "联网", "网页来源", "公开资料", "网上查", "搜索一下", "检索一下",
         "知识库", "库里查", "现在几点", "当前时间", "今天几号",
+        "算一下", "计算", "打开", "启动",
     )
     return any(marker in lower for marker in markers)
 
@@ -558,9 +588,11 @@ def record_candidate_selection(
     metadata["model_called"] = model_called
     metadata["not_called_candidates"] = [name for name in names if name and name != model_called]
     try:
+        from app.core.observability import inc_skill_routing_mode
         from app.monitoring.context import MonitorContext
         from app.monitoring.logger import monitor_logger
 
+        inc_skill_routing_mode(selection.scene, selection.routing_mode)
         monitor_logger.info(
             "工具候选池已确定",
             event_type="tool_candidate_selection",
@@ -577,6 +609,34 @@ def record_candidate_selection(
                 code="TOOL_CANDIDATE_LOW_CONFIDENCE",
                 context=MonitorContext(job_id=job_id or None, execution_id=job_id or None, user_id=user_id or None, component="skill_router"),
                 metadata={**metadata, "explicit_tool_intent": True},
+            )
+        expiry_window = max(0, int(settings.SKILL_BOOTSTRAP_EXPIRING_DAYS))
+        today = date.today()
+        for capability in selection.capabilities:
+            if not capability.bootstrap_until:
+                continue
+            try:
+                expires = date.fromisoformat(capability.bootstrap_until)
+            except ValueError:
+                continue
+            if not today <= expires <= today + timedelta(days=expiry_window):
+                continue
+            alert_key = (capability.name, today.isoformat())
+            if alert_key in _bootstrap_expiry_alerts:
+                continue
+            _bootstrap_expiry_alerts.add(alert_key)
+            monitor_logger.warning(
+                "Skill bootstrap 即将到期，请审阅候选命中和模型选择率后修复契约",
+                event_type="tool_candidate_bootstrap_expiring",
+                category="tool_selection",
+                code="BOOTSTRAP_EXPIRING",
+                context=MonitorContext(component="skill_router"),
+                metadata={
+                    "skill": capability.name,
+                    "version": capability.version,
+                    "bootstrap_until": capability.bootstrap_until,
+                    "days_remaining": (expires - today).days,
+                },
             )
     except Exception:  # noqa: BLE001
         logger.debug("候选池监控记录失败，继续执行")

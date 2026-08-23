@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import Annotated, TypedDict
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage, convert_to_messages
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage, convert_to_messages
 from langchain_core.runnables import Runnable
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -21,6 +21,7 @@ from langgraph.prebuilt import ToolNode
 from app.agents.langchain.models import get_chat_model
 from app.agents.langchain.tools import make_skill_tool
 from app.agents.skills.base import SkillResult
+from app.agents.skills.prompting import build_tool_selection_contract
 from app.agents.skills.executor import (
     CapabilitySelection,
     get_capabilities_for_scene,
@@ -141,6 +142,10 @@ class LangGraphChatRunner:
             llm_config=self.llm_config,
         )
         bound_model = model.bind_tools(tools)
+        # Keep chat on the same generated, registry-derived boundary contract
+        # as Office ReAct.  Tool descriptions alone are not enough to explain
+        # why adjacent candidates should or should not be used.
+        selection_contract = SystemMessage(content=build_tool_selection_contract(capabilities))
 
         async def wrap_tool_result(request, execute):
             """将每次工具输出作为不可信数据回填给模型，保留工具本身的原始契约。"""
@@ -156,7 +161,7 @@ class LangGraphChatRunner:
         )
 
         async def agent(state: ChatGraphState) -> dict:
-            reply = await bound_model.ainvoke(state["messages"])
+            reply = await bound_model.ainvoke([selection_contract, *state["messages"]])
             # 工具调用一律串行。即使供应商返回多个调用，也每轮只放行第一个，
             # 其余调用由下一轮在已获得结果的上下文中重新判断，避免办公写操作
             # 或客户端请求之间发生竞争。

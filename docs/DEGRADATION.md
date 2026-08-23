@@ -4,7 +4,8 @@
 
 | 环节 | 主路径 | 降级路径 | 触发条件 |
 | --- | --- | --- | --- |
-| 任务编排 | Temporal Workflow | 自建 DAG（legacy 后台任务） | Temporal 不可用 / 提交失败 |
+| 办公编排 | 持久化自建 DAG（`legacy`） | 明确失败/挂起；只读节点可按策略降级 | Redis/DB/Worker 边界故障；写资源不允许静默放行 |
+| 静态只读 Temporal 灰度 | Temporal Workflow | 默认 DAG（仅任务尚未提交时） | Temporal 不可用 / 提交前探测失败 |
 | 客户端技能 | Electron MCP Streamable HTTP | Redis 轮询（客户端轮询执行） | MCP 未配置 / 连接失败 / 熔断 |
 | 聊天回复 | 主 LLM 供应商 | 备用供应商（`LLM_FALLBACK_PROVIDER`） | 连接/超时/5xx/空内容 |
 | RAG 检索 | 向量 + 关键词 RRF 融合 | 仅关键词 / 仅向量 / 空上下文 | 嵌入模型不可用 / 阈值过滤后无结果 |
@@ -14,15 +15,16 @@
 | 代码执行 | 项目沙箱 | 无（失败即返回错误） | 沙箱不可用 |
 | 文档编辑 | 结构化编辑（缓冲） | 文本全量重写/补丁 | 格式不支持结构化编辑 |
 | 标题/摘要 | LLM 生成 | 跳过（不阻塞回复） | LLM 失败 |
-| 联网决策 | 小模型决策 | 跳过联网 | 决策模型失败 |
+| 工具候选选择 | 合法池 Top-K + 模型自主调用 | 无候选时直接回答或澄清 | 无正向证据 / 候选低置信；不会因“实时”词强制联网 |
 | 长期记忆 | 画像注入 + 事实召回 | 跳过记忆 | 抽取/检索失败 |
-| 限流 | Redis 计数 | 放行 | Redis 不可用（不因限流击穿） |
+| 只读限流 | Redis 计数 | 受控放行 | Redis 不可用（不因限流击穿） |
+| 写资源协调 | Redis 分布式锁 + effect journal | 挂起 `waiting_resources`，超时转暂停 | Redis/journal 不可用，fail-closed |
 | 用量统计 | 异步落库 | 跳过 | DB 异常 |
 
 ## 重试策略
 
 - Celery 任务：`max_retries=3`，指数退避（文档处理/记忆提取/会话裁剪）。
-- Temporal / legacy 节点：`AGENT_NODE_MAX_RETRIES`（默认 1），由 LangGraph 按错误类型执行有界重试或换工具；不可逆副作用不重放。
+- 默认 DAG / Temporal 节点：`AGENT_NODE_MAX_RETRIES`（默认 1），由 LangGraph 按错误类型执行有界重试或换工具；不可逆副作用不重放。
 - LLM 供应商降级：单次失败即切换备用，不再重试主供应商（避免双重延迟）。
 - 客户端工具：MCP 按 server 复用会话、30 秒失败冷却与熔断；不可用时回退 Redis 轮询。任务取消或 MCP deadline 到期会发送标准取消通知并停止本地等待。
 

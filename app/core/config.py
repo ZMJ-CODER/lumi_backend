@@ -235,15 +235,20 @@ class Settings(BaseSettings):
     AGENT_REVIEW_ENABLED: bool = False   # activity 级质检开关：与 writer 自检 + reviewer 节点重复，
                                          # 默认关闭省一次 LLM 调用/节点；需要可改回 True
     SKILL_PLUGINS_DIR: str = "plugins/skills"     # 技能插件目录（Docker 挂载为 volume 支持热更新）
-    # 合法 Skill 池内的向量排序；权限/场景过滤永远在它之前。未就绪或嵌入
-    # 模型不可用时自动回退词法和显式规则，不阻塞请求。
+    # 合法 Skill 池内的向量排序；权限/场景过滤永远在它之前。语义索引在启动时
+    # 预热；未就绪或嵌入异常时会以 ``lexical_fallback`` 显式记录，而不是静默混用。
     SKILL_SEMANTIC_ROUTING_ENABLED: bool = True
+    SKILL_SEMANTIC_ROUTING_STARTUP_WARMUP: bool = True
     SKILL_ROUTING_SEMANTIC_WEIGHT: float = 35.0
     SKILL_ROUTING_RELIABILITY_WEIGHT: float = 12.0
     SKILL_ROUTING_COST_WEIGHT: float = 3.0
     # Candidate-routing observability: below this score a tool-intent request
     # is considered a possible recall miss and emits a monitor event.
     SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE: float = 20.0
+    # Top-K 最后一名与下一名分数接近时允许有限溢出，降低措辞微调造成的 5/6 名跳变。
+    SKILL_CANDIDATE_TIE_EPSILON: float = 3.0
+    SKILL_CANDIDATE_MAX_OVERFLOW: int = 1
+    SKILL_BOOTSTRAP_EXPIRING_DAYS: int = 3
     # 用户显式绑定的外部 MCP 走独立配额，避免其可用性或成本拖垮内置 Skill。
     # 部署可在 MCP_SERVERS 的单个 server 配置中用 mcp_daily_call_limit /
     # mcp_concurrency_limit 覆盖这些默认值。

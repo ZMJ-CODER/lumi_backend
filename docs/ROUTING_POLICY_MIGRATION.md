@@ -54,14 +54,14 @@ rules:
 YAML 仅能引用显式注册的 hook 名称，禁止 dotted path 或运行时发现。Hook 不能新增 Skill、
 权限或写能力。
 
-## 迁移与验收
+## 当前状态与验收
 
 | 阶段 | 范围 | 切换条件 |
 | --- | --- | --- |
-| 1，已完成 | 特征快照、schema、lint、影子模式和单文件转换 canary | 专用策略/规划器回归通过；`shadow` 不改变旧路由。 |
-| 2，进行中 | 多文档事实定位 -> `agent + document_targeting` | 已接入影子计算；钩子只能声明 `document_discovery` 和 `scoped_document_read` 要求。至少 7 天影子数据后，所有预期差异人工归类，意外差异率不超过 0.5%，且无权限/副作用退化。 |
-| 3，已完成 | 迁移 `task_routing.py` 的原子通道路由表 | 单文件转换、多文档定位、显式 RAG、已授权检索、通用 agent 协调及默认直答均已策略化；安全特征和执行授权仍在代码。 |
-| 4，进行中 | 迁移动作词表与 TCA 阈值 | TCA v1 数值和固定动作/对象词典已进入 YAML；特征提取、否定识别和澄清边界仍保留代码与独立回归集。 |
+| 已完成 | 特征快照、schema、lint、影子模式和单文件转换 canary | 专用策略/规划器回归通过；`shadow` 不改变旧路由。 |
+| 已完成 | 多文档事实定位 -> `rag + document_targeting` | 固定路径优先定位并读取；摘要歧义才升级受限 ReAct。hook 只能声明 `document_discovery` 和 `scoped_document_read` 要求。 |
+| 已完成 | `task_routing.py` 的原子通道路由表 | 单文件转换、多文档定位、显式 RAG、已授权检索、通用 agent 协调及默认直答均已策略化；安全特征和执行授权仍在代码。 |
+| 已完成 | 动作词表与 TCA 阈值 | TCA v1 数值和固定动作/对象词典均进入 YAML；特征提取、否定识别和澄清边界仍保留代码与独立回归集。 |
 
 `tca_rules.yaml` 只允许五项权重（总和必须为 1）和有限的 0-1 阈值；不支持
 正则、表达式、文本提示词或路由动作。加载失败会记录 `TCA_POLICY_LOAD_FAILED` 并保持
@@ -81,8 +81,8 @@ AGENT_ROUTING_LEXICON_PATH=config/agent_policies/routing_lexicon.yaml
 AGENT_PLANNING_POLICY_PATH=config/agent_policies/planning_rules.yaml
 ```
 
-默认 `shadow`。只有完成对应灰度验收后，才允许将某批规则切为 `enforce`；动态 DAG、审批和
-写资源的安全验证仍在策略引擎之后执行。
+默认 `shadow`。当前仓库已具备完整 enforce 路径，但部署仍应先在目标环境观察 shadow
+日志并人工归类差异，再切换 `enforce`；动态 DAG、审批和写资源的安全验证始终在策略引擎之后执行。
 
 ## 动作词典
 

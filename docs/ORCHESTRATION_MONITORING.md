@@ -1,35 +1,64 @@
-# 编排状态与监控目录契约
+# 编排监控与异常日志
 
-本轮先建立边界，不一次性搬空 `orchestrator.py`。
+> 更新：2026-08-23
 
-## 目录
+监控位于 `app/monitoring/`，编排执行谱系位于
+`app/agents/orchestration/execution_lineage.py`。两者都只记录排障所需的结构化元数据，
+不会持久化完整 prompt、工具正文、附件内容或密钥。
+
+## 1. 目录与职责
 
 ```text
-app/agents/orchestration/state_machine/
-  transitions.py  Job 合法状态转换，纯函数
-  errors.py       错误分类与恢复提示
-  policies.py     终态、重试、重规划、升级策略
-
 app/monitoring/
-  context.py      request/trace/job/node 关联字段
-  events.py       MonitorEvent 结构化事件与脱敏
-  exceptions.py   可管理的监控异常类型
-  logger.py       Loguru 兼容的统一日志入口
-  metrics.py      Prometheus 兼容代理
+  context.py     # request / trace / job / execution / node 关联 ID
+  events.py      # MonitorEvent 与 metadata 脱敏
+  logger.py      # monitor_logger，监控失败 fail-open
+  metrics.py     # Prometheus 兼容指标代理
+  exceptions.py  # 可管理的异常分类
+
+app/agents/orchestration/
+  execution_lineage.py  # 节点生命周期 span、result_ref
+  effects.py            # effect journal 恢复扫描
+  admission_lease.py    # 准入/等待状态 lease 维护
 ```
 
-## 使用约定
+## 2. 必须关联的字段
 
-- 状态写入前调用 `state_machine.transition(job, target)`；持久化、时间戳和审计仍由调用方负责。
-- 终态任务不可原地恢复或改写；需要继续执行时创建新的 execution/fork。
-- 日志通过 `monitor_logger.record()` 或其 `warning/error/exception` 快捷方法写入。
-- `MonitorEvent.metadata` 不得放入 API key、token、密码、完整 prompt、文件正文或完整用户输入；这些键会被自动脱敏，但调用方仍应尽量不传。
-- 关联字段使用 `MonitorContext`，日志中的 ID 会限制长度，避免异常日志扩大或泄露上下文。
-- 监控故障必须 fail-open，不得阻塞任务主流程。
+所有结构化事件优先使用 `MonitorContext`：`request_id`、`trace_id`、`job_id`、
+`execution_id`、`user_id`、`node_id`、`component`、`runtime`。字段会限长；调用方仍不得
+向 metadata 传入 API key、token、密码、完整用户输入、prompt、文件正文或工具原始输出。
 
-## 后续迁移顺序
+监控写入失败必须 fail-open，不能影响用户任务；但写资源、审批和 effect journal 的持久化失败
+不是“监控失败”，它们必须 fail-closed。
 
-1. 将 `JobFinalizer` 的终态事件接入 `MonitorEvent`。
-2. 将 `orchestrator.py` 的 `_run_job`、重规划和升级异常收敛到 `classify_error()`。
-3. 将 `cancel/pause/resume/approve` 控制面全部改为状态机入口。
-4. 最后再把 API 异常处理和管理查询接到持久化监控日志表；本轮不新增数据库表，避免与现有 `control_log` API 混淆。
+## 3. 关键 span 与事件
+
+| 事件 | 位置 | 内容 |
+| --- | --- | --- |
+| 节点生命周期 | `record_node_span` | 节点、公开工具名、参数哈希、状态、错误码、effect 状态、result_ref |
+| 文档定位 | `tool_metadata.document_selection` | 被盘点/读取的已授权文档与选择理由，不含正文 |
+| 工具候选选择 | `tool_metadata.selection_traces`（办公）或 monitor event（聊天） | `routing_mode`、候选 name/version/score/bootstrap、轮次、最终调用、未调用候选 |
+| 低置信候选 | `TOOL_CANDIDATE_LOW_CONFIDENCE` | 明确工具意图的可能召回漏失；不记录原始请求 |
+| 词法降级 | `lumi_skill_routing_modes_total{mode="lexical_fallback"}` | 语义索引未就绪/失败的占比；需检查 embedding 预热而非把它当随机模型行为 |
+| bootstrap 即将到期 | `BOOTSTRAP_EXPIRING` | 到期前三天审阅候选命中/选择率并修复工具契约 |
+| 副作用恢复 | `EFFECT_UNCERTAIN` | 有 intent 无 confirm，禁止自动重试 |
+| 等待状态 | `waiting_resources` / `waiting_approval` | 挂起原因、超时和恢复时的准入重申请 |
+
+候选选择 trace 用于区分“正确工具没被召回”和“工具已注入但模型没选”，不能用作思维链展示。
+
+## 4. 运维查询
+
+```powershell
+# 任务状态及公开 span（须使用有权限的用户令牌）
+GET /api/v1/agents/jobs/{job_id}
+GET /api/v1/agents/jobs/{job_id}/spans
+
+# Compose 中的结构化日志筛选
+docker compose logs --since=1h api worker | Select-String `
+  'EFFECT_UNCERTAIN|TOOL_CANDIDATE_LOW_CONFIDENCE|waiting_resources|waiting_approval'
+
+# Prometheus 文本指标
+curl http://localhost:8000/metrics
+```
+
+完整部署和恢复验收见 [ORCHESTRATION_DEPLOYMENT_GUIDE.md](ORCHESTRATION_DEPLOYMENT_GUIDE.md)。

@@ -4,27 +4,57 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="切分dag工作流引擎为静态内核和策略">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="优化skill调用">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/lumi_backend.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/lumi_backend.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.pytest_tmp/test_apply_edits_text_ops0/office/u1/b17d3c10a415/buffered.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.pytest_tmp/test_apply_edits_text_ops0/office/u1/b17d3c10a415/meta.json" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.pytest_tmp/test_apply_edits_text_ops0/office/u1/b17d3c10a415/original.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.pytest_tmp/test_extract_doc_text_plain0/plain.doc" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.pytest_tmp/test_extract_doc_text_rtf_masq0/fake.doc" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.pytest_tmp/test_pptx_delete_and_add_slide0/t.pptx" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.pytest_tmp/test_revert_edits_discards_buf0/office/u1/e5e7c3ab510e/meta.json" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.pytest_tmp/test_revert_edits_discards_buf0/office/u1/e5e7c3ab510e/original.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/langchain/chat_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/langchain/chat_graph.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/langchain/tools.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/langchain/tools.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/execution_lineage.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/execution_lineage.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/orchestration/react_runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/react_runner.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/roles/react.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/roles/react.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/base.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/capability.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/capability.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/skills/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/executor.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/skills/loader.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/loader.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/routing.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/routing.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/admin.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/observability.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/observability.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/mcp_bindings.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/mcp_bindings.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend-dev.log" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/AGENT_ORCHESTRATION_MCP.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/AGENT_ORCHESTRATION_MCP.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/API_INTEGRATION.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/API_INTEGRATION.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/ASYNC_TASK_DISPATCH.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/ASYNC_TASK_DISPATCH.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/CONCURRENCY_PERF.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/CONCURRENCY_PERF.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/docs/CURRENT_DAG_ARCHITECTURE.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/CURRENT_DAG_ARCHITECTURE.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/DAG_MCP_PITFALLS.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/DAG_MCP_PITFALLS.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/DEGRADATION.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/DEGRADATION.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/ENGINEERING_PRACTICE.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/ENGINEERING_PRACTICE.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/INTERVIEW_PREP.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/INTERVIEW_PREP.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/LOGICAL_PLAN_ROLLING.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/LOGICAL_PLAN_ROLLING.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/MCP_SKILL_GOVERNANCE.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/MCP_SKILL_GOVERNANCE.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/OFFICE_CAPABILITY_MATRIX.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/OFFICE_CAPABILITY_MATRIX.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/OFFICE_SKILLS.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/OFFICE_SKILLS.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/OPERATIONS.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/OPERATIONS.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/ORCHESTRATION_DEPLOYMENT_GUIDE.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/ORCHESTRATION_DEPLOYMENT_GUIDE.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/ORCHESTRATION_KERNEL_PACKAGE.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/ORCHESTRATION_KERNEL_PACKAGE.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/ORCHESTRATION_MONITORING.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/ORCHESTRATION_MONITORING.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/PRODUCT_DESIGN.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/PRODUCT_DESIGN.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/RAG_DESIGN.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/RAG_DESIGN.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/ROUTING_POLICY_MIGRATION.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/ROUTING_POLICY_MIGRATION.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/SYSTEM_ARCHITECTURE.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/SYSTEM_ARCHITECTURE.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/docs/TOOL_SKILL_EXECUTION_GUIDE.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/TOOL_SKILL_EXECUTION_GUIDE.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/plugins/skills/network/query_knowledge.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/network/query_knowledge.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/plugins/skills/network/web_search.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/network/web_search.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/plugins/skills/office/office_docs.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/office/office_docs.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/plugins/skills/system/system_info.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/system/system_info.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/skills/desktop/open_app.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/skills/desktop/open_app.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tests/test_langgraph_chat.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_langgraph_chat.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_react_runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_react_runner.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_skills.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_skills.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_tool_selection_contract.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_tool_selection_contract.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -422,7 +452,15 @@
       <option name="project" value="LOCAL" />
       <updated>1787472870371</updated>
     </task>
-    <option name="localTasksCounter" value="40" />
+    <task id="LOCAL-00040" summary="优化skill调用">
+      <option name="closed" value="true" />
+      <created>1787475828115</created>
+      <option name="number" value="00040" />
+      <option name="presentableId" value="LOCAL-00040" />
+      <option name="project" value="LOCAL" />
+      <updated>1787475828115</updated>
+    </task>
+    <option name="localTasksCounter" value="41" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -449,7 +487,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="重构优化会话管理" />
     <MESSAGE value="实现短期记忆" />
     <MESSAGE value="新增语音合成和语音转文字，新增docker容器部署" />
     <MESSAGE value="新增流式聊天，新增自动联网搜索工具，新增可插拔提示词模版" />
@@ -474,6 +511,7 @@
     <MESSAGE value="拆分高耦合dag引擎，优化dag链路，优化mcp设计，加入reranker模型" />
     <MESSAGE value="优化提交" />
     <MESSAGE value="切分dag工作流引擎为静态内核和策略" />
-    <option name="LAST_COMMIT_MESSAGE" value="切分dag工作流引擎为静态内核和策略" />
+    <MESSAGE value="优化skill调用" />
+    <option name="LAST_COMMIT_MESSAGE" value="优化skill调用" />
   </component>
 </project>

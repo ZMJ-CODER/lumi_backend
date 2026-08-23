@@ -1,7 +1,6 @@
 """办公技能（office/日程待办）：todo_manager —— 个人日程/待办管理（本地 JSON 存储）."""
 
 import json
-import os
 import time
 import uuid
 from pathlib import Path

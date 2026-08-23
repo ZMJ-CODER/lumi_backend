@@ -4,12 +4,17 @@
 
 | 容器 | 任务 | 语义 | 失败处理 |
 | --- | --- | --- | --- |
-| Temporal | 办公 DAG、清单、审批、暂停/恢复 | 不丢失，工作流历史恢复 | Temporal 重试/心跳/补偿 |
+| 默认 DAG 运行时（`legacy`） | 当前办公 DAG、审批、L3 动态子图、写操作、暂停/恢复 | Redis 快照 + PostgreSQL effect journal + 节点/资源 lease | 有界重试、重规划或明确挂起；写副作用不自动重放 |
+| Temporal（灰度） | 1–6 个静态只读节点，或显式开启的纯读清单试点 | Workflow history + Activity 重试 | Worker 不可达时，仅未提交任务明确回落默认 DAG；已提交任务绝不重复执行 |
 | Celery `durable` | 文档解析、嵌入、索引重建、账户物理删除 | 至少一次 | 数据库幂等领取、Celery 重试、watchdog 重投 |
 | Celery `best_effort` | 记忆抽取、会话摘要、画像重建、记忆触达 | 可延后，必须可补偿 | 有界重试；下次对话或定时重建补偿 |
 | Celery `maintenance` | 清理、聚合、超时文档扫描 | 低优先级 | 幂等重试，不得阻塞前两类 |
 | 进程内 asyncio | SSE、缓存失效、非关键遥测 | 允许丢失 | 无需重试或由下一请求补偿 |
 | Redis Pub/Sub | UI 进度与通知 | 允许丢失 | UI 以 Job/DB 状态查询兜底 |
+
+`legacy` 是历史命名，实际是当前的持久化 asyncio DAG 运行时，不是请求内同步执行。
+Temporal 不应被用作“所有办公任务的默认容器”：L2 审批、L3 动态方法选择和写副作用尚未完成
+完整 Workflow 持久化验收，继续由默认 DAG 运行时承接。
 
 ## Celery 可靠性约束
 

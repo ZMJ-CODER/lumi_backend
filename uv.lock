@@ -10,6 +10,12 @@ supported-markers = [
     "sys_platform == 'win32'",
 ]
 
+[manifest]
+members = [
+    "lumi-backend",
+    "lumi-orchestration",
+]
+
 [[package]]
 name = "accelerate"
 version = "1.14.0"
@@ -1379,6 +1385,7 @@ dependencies = [
     { name = "langchain-openai" },
     { name = "langgraph" },
     { name = "loguru" },
+    { name = "lumi-orchestration" },
     { name = "mcp" },
     { name = "openai-whisper" },
     { name = "openpyxl" },
@@ -1389,11 +1396,11 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pypdf" },
     { name = "pytest" },
-    { name = "pyyaml" },
     { name = "python-docx" },
     { name = "python-jose", extra = ["cryptography"] },
     { name = "python-multipart" },
     { name = "python-pptx" },
+    { name = "pyyaml" },
     { name = "redis" },
     { name = "sentence-transformers" },
     { name = "sentry-sdk" },
@@ -1446,6 +1453,7 @@ requires-dist = [
     { name = "langchain-openai", specifier = ">=0.2.0" },
     { name = "langgraph", specifier = ">=1.0.0" },
     { name = "loguru", specifier = ">=0.7.0" },
+    { name = "lumi-orchestration", editable = "packages/orchestration" },
     { name = "mcp", specifier = ">=1.29.0,<2.0.0" },
     { name = "openai-whisper", specifier = ">=20250625" },
     { name = "openpyxl", specifier = ">=3.1.5" },
@@ -1458,11 +1466,11 @@ requires-dist = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
     { name = "python-docx", specifier = ">=1.2.0" },
     { name = "python-jose", extras = ["cryptography"], specifier = ">=3.3.0" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "python-pptx", specifier = ">=1.0.2" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", specifier = ">=5.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5.0" },
     { name = "sentence-transformers", specifier = ">=5.7.0" },
@@ -1481,6 +1489,32 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
 ]
 provides-extras = ["dev", "rag-eval"]
+
+[[package]]
+name = "lumi-orchestration"
+version = "0.1.0"
+source = { editable = "packages/orchestration" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "pyyaml" },
+]
+
+[package.optional-dependencies]
+langgraph = [
+    { name = "langgraph" },
+]
+redis = [
+    { name = "redis" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.0.0" },
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0.0" },
+]
+provides-extras = ["redis", "langgraph"]
 
 [[package]]
 name = "lxml"

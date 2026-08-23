@@ -24,7 +24,7 @@
 
 1. 先判断已有对话、附件、知识库或模型自身生成是否已足够；足够则直接回答。
 2. 仅在缺少某项外部能力时，先按 `do_not_use_when` 排除不相干或相邻的 Skill，再按 `domain`、`intent_tags`、`use_when`、用户授权与运行时可用性筛选候选。
-3. 优先选择范围最窄、结果最可验证的 Skill：系统时间优先 `get_datetime`；多文档优先 `inspect_document_set/read_document`；天气/行情应优先未来接入的垂直供应商 Skill。
+3. 优先选择范围最窄、结果最可验证的 Skill：精确算术优先 `calculator`（不得让模型口算）；系统时间优先 `get_datetime`；明确打开本机应用优先 `open_app`；多文档优先 `inspect_document_set/read_document`；天气/行情应优先未来接入的垂直供应商 Skill。
 4. 语义相似度只能为候选排序，不能跨越权限、写开关、文档范围或审批边界。
 5. 聊天通道只把当前请求相关的 Top-K（默认最多 5 个）候选 Schema 注入模型；没有支持证据时不暴露任何工具，直接回答。办公 ReAct **每轮**结合最新工具观察和失败工具刷新候选池；聊天保持单请求候选池。无唯一目标、参数不足或不确定时，澄清或说明边界；不通过“多调用一个工具”猜测。
 
@@ -37,9 +37,9 @@
 | Candidate recall | 从合法 Skill 池召回并注入 Top-K | `candidate_recall@K`、错误注入率、低置信告警 |
 | Model selection | 模型在已注入候选中选择或不选择工具 | `selection_accuracy_given_candidates`、不必要调用率 |
 
-选择 trace 仅记录场景、轮次、候选 `name/version/score/bootstrap`、最终调用和未调用候选；不会记录用户原文、提示词、参数、思维链或工具正文。办公 DAG 将它写入 `tool_metadata.selection_traces`，聊天写入监控事件。若请求有明确工具意图（如“联网并给网页来源”“从知识库查”“现在几点”）而候选为空或低于 `SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE`，系统告警并禁止模型伪称已经核验；该告警不会强制调用工具。
+选择 trace 仅记录场景、轮次、`routing_mode`、候选 `name/version/score/bootstrap/availability_hint`、最终调用和未调用候选；不会记录用户原文、提示词、参数、思维链或工具正文。`routing_mode=semantic` 表示索引已就绪，`lexical_fallback` 表示索引未就绪或故障；后者必须由监控统计，不能静默混用。`availability_hint=circuit_breaker` 表示已授权外部 MCP 工具暂时不可用，但仍可被模型看见并得到受控错误，而不是被静默摘除。办公 DAG 将 trace 写入 `tool_metadata.selection_traces`，聊天写入监控事件。若请求有明确工具意图（如“联网并给网页来源”“从知识库查”“现在几点”）而候选为空或低于 `SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE`，系统告警并禁止模型伪称已经核验；该告警不会强制调用工具。
 
-新 Skill 可声明 `bootstrap_intents + bootstrap_until`：仅在有效日期内且命中限定意图时优先进入候选池，绝不全量注入；到期自动回归普通排序。
+新 Skill 可声明 `bootstrap_intents + bootstrap_until`：仅在有效日期内且命中限定意图时优先进入候选池，绝不全量注入；到期自动回归普通排序。到期前三天必须观察候选命中/选择率告警，而不是无条件续期。
 
 ### `web_search` 的特殊规则
 

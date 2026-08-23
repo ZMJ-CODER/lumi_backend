@@ -64,7 +64,7 @@ alembic current/head: 0010_effect_journal
 
 ```powershell
 docker compose logs --since=1h api worker | Select-String `
-  "副作用日志恢复扫描|EFFECT_JOURNAL_UNAVAILABLE|遗留副作用 intent"
+  "副作用日志恢复扫描|EFFECT_JOURNAL_UNAVAILABLE|EFFECT_UNCERTAIN|遗留副作用 intent"
 ```
 
 Dockerfile 使用 `COPY config ./config`，因此上述四份策略文件会进入 API 和 Worker 镜像，无需额外挂载。
@@ -148,6 +148,16 @@ $env:PYTHONPATH = "packages/orchestration/src"
   tests/test_document_targeting.py `
   tests/test_execution_lineage.py `
   tests/test_approval_service.py
+
+# Skill 候选召回、ReAct 工具选择与静态契约
+.\.venv\Scripts\python.exe -m pytest -q `
+  tests/test_tool_selection_contract.py `
+  tests/test_langgraph_chat.py `
+  tests/test_react_runner.py `
+  tests/test_skills.py
+
+# 当前 CI 静态检查
+uvx ruff check app tests
 ```
 
 安装/锁定 workspace 依赖必须在明确需要时执行：

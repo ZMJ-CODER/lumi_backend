@@ -17,6 +17,16 @@ app/.env
 
 # Logs
 logs/
+backend-dev.log
+
+# Local test/lint/package-manager artifacts (safe to regenerate)
+.pytest_tmp/
+.ruff_cache/
+.ruff-cache/
+.uv-cache/
+.uv-cache-codex/
+.uv-tools/
+.uv-tools-codex/
 
 # 运行时数据（嵌入模型缓存 / 用户上传文件），首次运行自动下载，不入库
 data/

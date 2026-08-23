@@ -635,4 +635,5 @@ v1 的回放是前向重做：如果用户所选节点的依赖前缀或该节�
 .\.venv\Scripts\python.exe -m pytest -q tests\test_execution_lineage.py
 ```
 
-旧的 `docs/AGENT_ORCHESTRATION_MCP.md` 仍可作为协议与排障参考，但其中“Temporal 为办公主运行时”的描述不再代表当前 Docker 默认运行态。本文件应作为当前架构审阅的起点。
+`docs/AGENT_ORCHESTRATION_MCP.md` 与 `docs/OFFICE_SKILLS.md` 现为历史兼容入口，只负责
+重定向到当前事实来源；不再包含可执行的架构或部署结论。本文件应作为当前架构审阅的起点。

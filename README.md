@@ -6,7 +6,7 @@
 
 - Python 3.13 / FastAPI / SQLAlchemy(async) + PostgreSQL(pgvector)
 - Redis（缓存 / Celery broker / 短期记忆 / 限流）
-- Temporal（多智能体工作流编排，失败回退自建 DAG）
+- `lumi-orchestration` 内核 + 持久化 DAG（当前办公任务主路径）；Temporal 仅灰度静态只读工作流
 - Celery（异步任务 + Beat 定时调度）
 - MCP 混合架构（服务端技能原生调用，客户端技能经 Electron MCP 直连）
 
@@ -32,6 +32,7 @@ uv run uvicorn app.main:app --reload --port 8000
 
 ```bash
 uv run pytest tests -q            # 测试
+uvx ruff check app tests          # 静态检查
 uv run alembic upgrade head       # 数据库迁移
 uv run alembic revision --autogenerate -m "描述"   # 模型变更生成迁移
 uv run celery -A celery_app.celery_app worker -l info   # 异步 worker
@@ -64,9 +65,11 @@ docker build -f Dockerfile.sandbox -t lumi-python-sandbox:latest .
 
 - [docs/RAG_DESIGN.md](docs/RAG_DESIGN.md) — RAG、知识库、办公附件与记忆的分域检索
 - [docs/MEMORY_DESIGN.md](docs/MEMORY_DESIGN.md) — 长期记忆与隐私
-- [docs/OFFICE_SKILLS.md](docs/OFFICE_SKILLS.md) — 办公模式
-- [docs/AGENT_ORCHESTRATION_MCP.md](docs/AGENT_ORCHESTRATION_MCP.md) — 办公 DAG、TCA/ReAct 与 MCP 运行手册
+- [docs/CURRENT_DAG_ARCHITECTURE.md](docs/CURRENT_DAG_ARCHITECTURE.md) — 当前办公 DAG、运行时、审批、恢复与验收基线
+- [docs/TOOL_SKILL_EXECUTION_GUIDE.md](docs/TOOL_SKILL_EXECUTION_GUIDE.md) — 工具选择、执行门禁与结果回流
+- [docs/MCP_SKILL_GOVERNANCE.md](docs/MCP_SKILL_GOVERNANCE.md) — Skill 生命周期、候选池评测与外部 MCP 准入
 - [docs/DAG_MCP_PITFALLS.md](docs/DAG_MCP_PITFALLS.md) — 办公 DAG/MCP 的故障复盘与排障路线
 - [docs/ROUTING_POLICY_MIGRATION.md](docs/ROUTING_POLICY_MIGRATION.md) — 路由策略与内核边界迁移
 - [docs/ORCHESTRATION_KERNEL_PACKAGE.md](docs/ORCHESTRATION_KERNEL_PACKAGE.md) — 独立编排内核 workspace 包
+- [docs/ORCHESTRATION_DEPLOYMENT_GUIDE.md](docs/ORCHESTRATION_DEPLOYMENT_GUIDE.md) — 编排部署、迁移与回归命令
 - [docs/API_AUTH.md](docs/API_AUTH.md) / [docs/API_INTEGRATION.md](docs/API_INTEGRATION.md) — API 与鉴权

@@ -233,7 +233,13 @@ async def cancel_active_binding_calls(binding_id: str) -> int:
 
 
 async def get_bound_capabilities(user_id: str, scene: str, user_role: str) -> list[ToolCapability]:
-    """Return only enabled, configured, healthy, user-owned MCP capabilities."""
+    """Return enabled, configured, user-owned MCP capabilities.
+
+    A temporary circuit-open state is not an authorization decision. Keep the
+    capability visible so the model can receive a structured unavailable
+    result and explain it; hiding it made a missing candidate indistinguishable
+    from a model deciding not to call the tool.
+    """
     try:
         uid = uuid.UUID(str(user_id))
     except (TypeError, ValueError):
@@ -252,8 +258,9 @@ async def get_bound_capabilities(user_id: str, scene: str, user_role: str) -> li
     for binding in bindings:
         if scene not in set(binding.scenes or []) or not role_allows(binding.permission, user_role):
             continue
-        if _configured_external_server(binding.server_name) is None or not server_is_healthy(binding.server_name):
+        if _configured_external_server(binding.server_name) is None:
             continue
+        availability_hint = "available" if server_is_healthy(binding.server_name) else "circuit_breaker"
         schema = binding.input_schema if isinstance(binding.input_schema, dict) else {"type": "object", "properties": {}}
         capabilities.append(ToolCapability(
             name=f"mcp__{binding.server_name}__{binding.raw_tool_name}",
@@ -282,6 +289,7 @@ async def get_bound_capabilities(user_id: str, scene: str, user_role: str) -> li
                 # 默认值；升级后数据库列始终会有确定值。
                 "daily_call_limit": int(getattr(binding, "daily_call_limit", settings.MCP_EXTERNAL_DEFAULT_DAILY_CALL_LIMIT)),
                 "concurrency_limit": int(getattr(binding, "concurrency_limit", settings.MCP_EXTERNAL_DEFAULT_CONCURRENCY_LIMIT)),
+                "availability_hint": availability_hint,
             },
         ))
     return capabilities

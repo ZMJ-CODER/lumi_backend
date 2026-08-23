@@ -92,6 +92,18 @@ def reload_skill_plugins() -> dict:
     }
 
 
+async def rebuild_skill_semantic_index() -> bool:
+    """Rebuild routing vectors immediately after a plugin reload.
+
+    This function is intentionally async so the API endpoint can await a
+    single coherent registry+index generation rather than leaving an opaque
+    invalidation window behind.
+    """
+    from app.agents.skills.routing import warm_registered_skill_semantic_index
+
+    return await warm_registered_skill_semantic_index()
+
+
 def _safe_module_name(stem: str) -> str:
     """插件文件名 → 合法模块名（仅保留字母/数字/下划线）."""
     cleaned = "".join(ch for ch in stem if ch.isalnum() or ch == "_")

@@ -48,6 +48,7 @@ _http_requests = None
 _http_duration = None
 _agent_jobs = None
 _skill_calls = None
+_skill_routing_modes = None
 _rag_searches = None
 _agent_routes = None
 _agent_replans = None
@@ -63,7 +64,7 @@ _document_pipeline_oldest_age = None
 
 def _ensure_metrics():
     """懒加载 prometheus-client 指标（避免未安装/未启用时阻塞启动）."""
-    global _prometheus, _http_requests, _http_duration, _agent_jobs, _skill_calls, _rag_searches
+    global _prometheus, _http_requests, _http_duration, _agent_jobs, _skill_calls, _skill_routing_modes, _rag_searches
     global _agent_routes, _agent_replans, _plan_cache, _agent_route_duration, _agent_node_duration
     global _agent_channel_wait, _manifest_route_upgrades
     global _celery_queue_ready, _document_pipeline_state, _document_pipeline_oldest_age
@@ -85,6 +86,11 @@ def _ensure_metrics():
         )
         _agent_jobs = Counter("lumi_agent_jobs_total", "多智能体任务结果", ["status"])
         _skill_calls = Counter("lumi_skill_calls_total", "技能调用次数", ["skill", "success"])
+        _skill_routing_modes = Counter(
+            "lumi_skill_routing_modes_total",
+            "Skill 候选路由模式；lexical_fallback 表示语义索引未就绪或不可用",
+            ["scene", "mode"],
+        )
         _rag_searches = Counter(
             "lumi_rag_searches_total", "RAG 检索次数", ["hits"]
         )
@@ -159,6 +165,14 @@ def inc_agent_job(status: str) -> None:
 def inc_skill_call(skill: str, success: bool) -> None:
     if _ensure_metrics():
         _skill_calls.labels(skill=skill or "unknown", success=str(bool(success))).inc()
+
+
+def inc_skill_routing_mode(scene: str, mode: str) -> None:
+    if _ensure_metrics():
+        _skill_routing_modes.labels(
+            scene=(scene or "unknown")[:40],
+            mode=(mode or "unknown")[:40],
+        ).inc()
 
 
 def inc_rag_search(hits: int) -> None:

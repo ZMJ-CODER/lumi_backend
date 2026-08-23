@@ -87,7 +87,7 @@ class ExploreProjectSkill(Skill):
         stacks = [
             name
             for name, hints in _STACK_HINTS.items()
-            if any(f.endswith(h) or any(h in f for h in hints) for f in lower)
+            if any(f.endswith(hint) or hint in f for hint in hints for f in lower)
         ]
         entries = [f for f in files if f.lower() in _ENTRY_HINTS]
         # 目录概览：顶层目录 + 前 N 个文件

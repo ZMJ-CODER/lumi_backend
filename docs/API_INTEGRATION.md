@@ -169,7 +169,8 @@ Authorization: Bearer <access_token>
 
 ## 3. 核心对话链路（重点 ⭐）
 
-> 源码：`app/api/v1/conversations.py` + `app/services/orchestrator.py` + `app/agents/chat_agent.py`
+> 源码：`app/api/v1/conversations.py` + `app/services/orchestrator.py`（兼容门面）+
+> `app/agents/orchestration/`（当前编排服务）+ `packages/orchestration/src/lumi_orch/`（内核）。
 
 ### 3.1 业务流程图：用户消息 → 大模型回复
 
@@ -182,25 +183,25 @@ Authorization: Bearer <access_token>
                                                            ② ③ ④ ⑤
                                                                ▼
                                                         ┌────────────────┐
-                                                        │ Orchestrator   │
-                                                        │ handle_message │
+                                                        │ AgentOrchestrator│
+                                                        │ handle_message   │
                                                         └────────────────┘
                                                           │   │    │    │
-                                           ② 加载场景配置   │   │    │    │
-                                           ③ Redis 上下文  │   │    │    │
-                                           ④ 长期记忆注入   │   │    │    │
-                                           ⑤ RAG 知识检索   │   │    │    │
+                                           ② 加载场景与模型配置 │   │    │
+                                           ③ 路由/候选技能门禁  │   │    │
+                                           ④ Redis/数据库上下文 │   │    │
+                                           ⑤ 按需 RAG 或 DAG    │   │    │
                                                                ▼
                                                         ┌────────────────┐
-                                                        │   LLM Client   │
-                                                        │  (DeepSeek)    │
+                                                        │ LLM/工具网关    │
+                                                        │ (统一模型配置)  │
                                                         └────────────────┘
                                                                │
                                              ⑥ 大模型返回回复文本 │
                                                                ▼
                                                         ┌────────────────┐
-                                                        │ Orchestrator   │
-                                                        │ ⑦ 保存上下文   │
+                                                        │ 编排服务        │
+                                                        │ ⑦ 保存状态/上下文│
                                                         └────────────────┘
                                                                │
                              ⑧ 响应 {message_id, content,      │
@@ -222,7 +223,7 @@ Authorization: Bearer <access_token>
 
 `scene` 可选值：`chat`（闲聊）/ `office`（办公）/ `game`（游戏）
 
-> ⚠️ 当前为占位实现：返回固定的 `conversation_id: "placeholder-conv-id"`，尚未写入数据库。
+会话会写入 PostgreSQL；客户端传入 `client_conversation_id` 时按该 ID 幂等创建。
 
 ### 3.3 发送消息并获取大模型回复 ⭐（核心接口）
 
@@ -235,7 +236,11 @@ Authorization: Bearer <access_token>
 | `content` | string | ✅ | - | 用户发送给大模型的文本消息 |
 | `scene` | string | ❌ | `office` | 场景模式：`chat` / `office` / `game`，决定 System Prompt、知识库检索范围、操控权限 |
 | `local_mode` | bool | ❌ | `false` | 是否本地模式（PC 端已本地处理，仅同步摘要，不调用大模型） |
-| `attachments` | list | ❌ | `[]` | 附件列表（预留） |
+| `attachments` | list | ❌ | `[]` | 附件引用；办公文档可通过 `office_docs` 传入 |
+| `office_docs` | list | ❌ | `[]` | 当前办公会话挂载的文档引用/元数据 |
+| `web_search` | bool | ❌ | `false` | 仅表示允许联网候选，不会强制调用联网工具 |
+| `thinking_mode` | string | ❌ | 配置默认 | 推理档位；沿用用户/环境统一模型配置 |
+| `x-llm-api-key` | header | ❌ | 环境配置 | BYOK 临时密钥；只对本次请求生效，不落库 |
 
 示例请求：
 
@@ -243,7 +248,9 @@ Authorization: Bearer <access_token>
 {
   "content": "帮我写一份周报",
   "scene": "office",
-  "local_mode": false
+  "local_mode": false,
+  "office_docs": [],
+  "web_search": false
 }
 ```
 
@@ -274,12 +281,12 @@ Authorization: Bearer <access_token>
 
 - `local_mode=true` 时：后端不调用大模型，`content` 返回空字符串，`local_mode=true`。
 - 内部处理流程（`orchestrator.handle_message()`）：
-  1. 加载场景配置（System Prompt + 知识库标签）
-  2. 从 Redis 加载会话上下文（最近 N 轮）+ 用户长期记忆
-  3. RAG 检索知识库（按场景空间标签过滤）
-  4. 拼接 messages → 调用大模型
-  5. 保存 user/assistant 消息到 Redis 上下文
-  6. 异步触发记忆提取（预留）
+  1. 解析场景、权限、BYOK/环境模型配置，并建立请求上下文
+  2. 运行快捷/意图/策略路由，注入受控 Top-K 技能候选
+  3. 普通模式按需执行 RAG；办公模式生成并校验 DAG
+  4. 默认由持久化 asyncio DAG 执行；满足安全条件的静态只读任务可灰度到 Temporal
+  5. 节点级超时、资源门禁、审批和 effect journal 保护执行
+  6. 保存 PostgreSQL 会话消息、Redis 任务快照与可审计 citations/steps
 
 ### 3.4 获取会话消息历史
 
@@ -304,7 +311,7 @@ Authorization: Bearer <access_token>
 }
 ```
 
-> ⚠️ 当前为占位实现：`items` 恒为空数组，尚未接通 PostgreSQL。
+消息历史已接通 PostgreSQL，按 `limit` 和 `before_message_id` 游标分页；附件、引用和任务步骤一并返回。
 
 ### 3.5 删除会话
 
@@ -343,7 +350,7 @@ Authorization: Bearer <access_token>
 }
 ```
 
-> ⚠️ 当前为占位实现：`items` 恒为空数组。
+会话列表已接通 PostgreSQL，返回标题、场景、消息数量及更新时间。
 
 ### 3.8 获取所有可用场景
 
@@ -370,24 +377,23 @@ Authorization: Bearer <access_token>
 
 ### 4.1 已实现的真实大模型调用（可复用）
 
-`app/agents/chat_agent.py` 中的 `ChatAgent.execute()` 已打通真实 LLM 调用链：
+普通聊天与办公编排共用同一请求级模型配置；聊天由 `ChatAgent`/LLM gateway 执行，办公任务由编排节点调用同一 gateway：
 
 ```
-ChatAgent.execute() → LLMClient(provider="deepseek").chat() → POST https://api.deepseek.com/v1/chat/completions → 返回回复文本
+请求上下文 → LLM gateway（环境配置或本次 BYOK）→ provider chat/completions → 返回回复/结构化计划
 ```
 
-- 模型：`deepseek-v4-flash`
-- 带短期记忆（session 维度，内存中保留最近 10 轮）
-- 支持 System Prompt 注入（按场景）
-- 需要在 `.env` 中配置 `DEEPSEEK_API_KEY`
+- 具体 provider/model 由 `.env` 或用户选择的 BYOK 配置决定；同一任务全链路保持一致
+- 短期上下文来自 Redis/数据库会话，不再以固定内存 10 轮作为契约
+- 工具候选、路由和执行节点均沿用同一模型配置；密钥异常会转换为可识别的连接/余额错误
 
 ### 4.2 对话接口实现状态（已接通 LLM 链路）
 
 `POST /conversations/{conversation_id}/messages` 内部调用的 `orchestrator.handle_message()`：
 
 - `_call_llm()`：✅ **已接入真实 LLM**。通过 `LLMClient`（按 `.env` 中 `LLM_PROVIDER=deepseek` 配置）调用大模型生成回复，首次调用时懒启动客户端连接
-- `_retrieve_knowledge()`：⚠️ **TODO 占位**，当前返回空引用（RAG 知识库检索未实现）
-- `get_messages` / `list_conversations`：⚠️ **TODO 占位**，尚未接通 PostgreSQL
+- RAG：按请求语义和 scope 按需执行；联网工具是候选技能，不因“实时”等关键词强制调用
+- `get_messages` / `list_conversations`：✅ 已接通 PostgreSQL
 
 ### 4.3 前端联调时需注意
 
@@ -395,10 +401,10 @@ ChatAgent.execute() → LLMClient(provider="deepseek").chat() → POST https://a
 | ---- | -------- | -------- |
 | 验证码/注册/登录/刷新/登出 | ✅ 真实可用 | 正常联调 |
 | 发送消息 | ✅ 已接通真实 LLM | `data.content` 返回大模型真实回复 |
-| 获取历史/会话列表 | ⚠️ 占位 | 返回空数组 |
-| 创建会话 | ⚠️ 占位 | 返回固定 conversation_id |
+| 获取历史/会话列表 | ✅ 真实可用 | PostgreSQL 分页结果 |
+| 创建会话 | ✅ 真实可用 | PostgreSQL 持久化，客户端 ID 幂等 |
 
-> 注意：`send_message` 内部会先保存用户消息到 Redis 上下文（`append_context`），再调用 LLM。若 Redis 未启动或 LLM API Key 无效，接口会抛出异常，需在后端日志查看具体报错。
+> 注意：办公任务的完整状态由 Job/任务仓保存，Redis 主要承载上下文、索引和快照。LLM/供应商余额或连接异常会被统一记录并返回可检查连接的错误，不会静默伪造成功。
 
 ---
 

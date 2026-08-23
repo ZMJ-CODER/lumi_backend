@@ -137,8 +137,10 @@ async def record_node_span(
         "error_code": str(getattr(node, "error_code", "") or "")[:120],
         "effect_status": getattr(node, "effect_status", None),
         "tool_metadata": {
-            "document_selection": tool_metadata.get("document_selection")
-        } if isinstance(tool_metadata, dict) and tool_metadata.get("document_selection") else None,
+            key: tool_metadata.get(key)
+            for key in ("document_selection", "selection_traces")
+            if tool_metadata.get(key)
+        } if isinstance(tool_metadata, dict) and any(tool_metadata.get(key) for key in ("document_selection", "selection_traces")) else None,
     }
     try:
         from app.core.redis import get_redis

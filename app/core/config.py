@@ -241,6 +241,9 @@ class Settings(BaseSettings):
     SKILL_ROUTING_SEMANTIC_WEIGHT: float = 35.0
     SKILL_ROUTING_RELIABILITY_WEIGHT: float = 12.0
     SKILL_ROUTING_COST_WEIGHT: float = 3.0
+    # Candidate-routing observability: below this score a tool-intent request
+    # is considered a possible recall miss and emits a monitor event.
+    SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE: float = 20.0
     # 用户显式绑定的外部 MCP 走独立配额，避免其可用性或成本拖垮内置 Skill。
     # 部署可在 MCP_SERVERS 的单个 server 配置中用 mcp_daily_call_limit /
     # mcp_concurrency_limit 覆盖这些默认值。

@@ -79,9 +79,10 @@ class ReactStepAgent(WorkerAgent):
         return {"success": True, "content": result.content, "output": result.content,
                 "records": result.records, "citations": result.citations,
                 "tool_metadata": {
-                    "document_selection": [
+                "document_selection": [
                         item["document_selection"] for item in result.records
-                        if isinstance(item, dict) and isinstance(item.get("document_selection"), dict)
-                    ],
-                },
+                    if isinstance(item, dict) and isinstance(item.get("document_selection"), dict)
+                ],
+                "selection_traces": result.selection_traces,
+            },
                 "step_title": "动态分析与执行"}

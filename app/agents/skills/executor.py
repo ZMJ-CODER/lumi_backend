@@ -13,6 +13,8 @@ import json
 import re
 import time
 import uuid
+from dataclasses import dataclass
+from datetime import date
 
 from loguru import logger
 
@@ -76,8 +78,8 @@ def is_tool_call_confirmed(
 # 集中语义目录。插件自身声明优先，目录只补齐空字段。后续新 Skill 应直接
 # 在 Skill 类上声明 domain / intent_tags 等字段。
 _OFFICE_REACT_ROUTING_METADATA: dict[str, dict] = {
-    "inspect_document_set": {"domain": "document", "intent_tags": ["多文档", "盘点", "定位", "找文件", "条款", "附件"], "preferred_over": ["office_doc_read"]},
-    "read_document": {"domain": "document", "intent_tags": ["读取", "文档", "附件", "内容", "条款"], "preferred_over": ["office_doc_read"]},
+    "inspect_document_set": {"domain": "document", "intent_tags": ["多文档", "盘点", "定位", "找文件", "条款", "附件"], "preferred_over": ["office_doc_read"], "handoff_to": ["read_document"], "use_when": ["当前任务有两份及以上已授权附件，先定位目标", "用户问哪份文件包含某事实/条款"], "do_not_use_when": ["目标文档已唯一明确时，用 read_document", "需要正文内容时，盘点后用 read_document"], "selection_examples": ["“哪份附件写了付款期限？” → inspect_document_set"]},
+    "read_document": {"domain": "document", "intent_tags": ["读取", "文档", "附件", "内容", "条款"], "preferred_over": ["office_doc_read"], "use_when": ["已有唯一、已授权的 doc_id，需要读取正文"], "do_not_use_when": ["多文档且目标未知时，先用 inspect_document_set", "只需检索长期知识库时，用 query_knowledge"], "selection_examples": ["“读取刚定位到的合同” → read_document"]},
     "office_doc_read": {"domain": "document", "intent_tags": ["阅读", "读取", "文档", "附件", "内容"], "preferred_over": ["document_qa"]},
     "office_doc_analyze": {"domain": "document", "intent_tags": ["分析", "解读", "文档", "表格", "附件"]},
     "office_doc_edit": {"domain": "document", "intent_tags": ["修改", "编辑", "文档", "批注", "修订"]},
@@ -86,8 +88,8 @@ _OFFICE_REACT_ROUTING_METADATA: dict[str, dict] = {
     "extract_info": {"domain": "document", "intent_tags": ["提取", "字段", "金额", "姓名", "信息"]},
     "invoice_parse": {"domain": "document", "intent_tags": ["发票", "报销", "税额", "金额"]},
     "document_qa": {"domain": "research", "intent_tags": ["文档问答", "资料", "回答", "引用"]},
-    "query_knowledge": {"domain": "research", "intent_tags": ["知识库", "检索", "资料", "查询"]},
-    "web_search": {"domain": "research", "intent_tags": ["联网", "搜索", "公开资料", "网页"]},
+    "query_knowledge": {"domain": "research", "intent_tags": ["知识库", "检索", "资料", "查询"], "use_when": ["答案在用户已入库的个人/公共知识库中"], "do_not_use_when": ["用户要求公开网页来源或新闻时，用 web_search", "当前办公附件有明确 doc_id 时，用 read_document"], "selection_examples": ["“根据我的知识库说明报销规则” → query_knowledge"]},
+    "web_search": {"domain": "research", "intent_tags": ["联网", "搜索", "公开资料", "网页"], "use_when": ["明确要求联网、网页来源，或核实公开新闻/政策/外部事实"], "do_not_use_when": ["用户私有任务、对话、附件或知识库内容", "当前时间用 get_datetime；未来天气/行情用垂直数据 Skill", "通用常识且未要求来源时直接回答"], "selection_examples": ["“联网搜索本周 AI 政策并给来源” → web_search"]},
     "competitor_analysis": {"domain": "research", "intent_tags": ["竞品", "对比", "市场", "调研"]},
     "customer_service": {"domain": "research", "intent_tags": ["客服", "客诉", "回复"]},
     "daily_report": {"domain": "research", "intent_tags": ["早报", "晚报", "日报"]},
@@ -106,7 +108,7 @@ _OFFICE_REACT_ROUTING_METADATA: dict[str, dict] = {
     "ps": {"domain": "desktop", "intent_tags": ["进程", "运行中", "状态"]},
     "kill": {"domain": "desktop", "intent_tags": ["结束进程", "关闭进程"]},
     "speech_to_text": {"domain": "document", "intent_tags": ["语音", "转文字", "转写"]},
-    "get_datetime": {"domain": "system", "intent_tags": ["日期", "时间", "几点"]},
+    "get_datetime": {"domain": "system", "intent_tags": ["日期", "时间", "几点"], "use_when": ["询问当前日期、时间、星期"], "do_not_use_when": ["用户自己的今日待办或日程", "天气、汇率、行情等其他实时数据"], "selection_examples": ["“现在几点？” → get_datetime"]},
     "task_memory": {"domain": "memory", "intent_tags": ["上次", "此前", "记忆"]},
     "compliance_check": {"domain": "writing", "intent_tags": ["合规", "敏感词", "审查"]},
 }
@@ -121,6 +123,33 @@ _OFFICE_REACT_DOMAIN_MARKERS = {
     "desktop": ("打开", "启动", "应用", "软件", "网页", "网址", "进程"),
     "system": ("时间", "日期", "几点"),
 }
+
+
+@dataclass(frozen=True)
+class CapabilitySelection:
+    """A safe trace of the candidate-routing decision.
+
+    The trace intentionally contains capability metadata and numeric scores,
+    never the user request, prompts, tool arguments, or tool results.
+    """
+
+    capabilities: list[ToolCapability]
+    candidates: list[dict]
+    scene: str
+    top_score: float = 0.0
+    low_confidence: bool = False
+    reason: str = "ranked"
+
+    def to_metadata(self, *, selection_round: int = 1) -> dict:
+        return {
+            "scene": self.scene,
+            "selection_round": max(1, int(selection_round)),
+            "injected_candidates": self.candidates,
+            "candidate_count": len(self.candidates),
+            "top_score": round(float(self.top_score), 3),
+            "low_confidence": bool(self.low_confidence),
+            "reason": self.reason,
+        }
 
 
 def _skill_is_write(skill: Skill) -> bool:
@@ -156,7 +185,12 @@ def skill_runtime_unavailable(skill: Skill | None) -> tuple[str, str] | None:
     return None
 
 
-def get_skills_for_scene(scene: str, user_role: str = "user") -> list[Skill]:
+def get_skills_for_scene(
+    scene: str,
+    user_role: str = "user",
+    *,
+    include_bootstrap: bool = False,
+) -> list[Skill]:
     """按场景过滤技能（scenes 白名单；空 = 全场景）.
 
     渐进开放写工具：AGENT_TOOL_WRITE_ENABLED=False 时隐藏写操作技能（只读先行）。
@@ -168,7 +202,17 @@ def get_skills_for_scene(scene: str, user_role: str = "user") -> list[Skill]:
         if s.supports_scene(scene)
         and s.status != "disabled"
         and (settings.WEB_SEARCH_TOOL_ENABLED or s.name != "web_search")
-        and (scene != "chat" or s.name in _CHAT_SKILL_ALLOWLIST)
+        and (
+            scene != "chat"
+            or s.name in _CHAT_SKILL_ALLOWLIST
+            # Bootstrap never exposes a tool by itself: the candidate selector
+            # still requires its declared intent and unexpired date below.
+            or (
+                include_bootstrap
+                and bool(s.bootstrap_intents)
+                and _bootstrap_is_active(s.bootstrap_until)
+            )
+        )
         and (allow_write or not _skill_is_write(s))
         and role_allows(s.permission, user_role)
     ]
@@ -177,6 +221,15 @@ def get_skills_for_scene(scene: str, user_role: str = "user") -> list[Skill]:
 def skills_to_tools(scene: str, user_role: str = "user") -> list[dict]:
     """场景内技能 → function calling 工具定义."""
     return [s.to_tool_definition() for s in get_skills_for_scene(scene, user_role)]
+
+
+def _bootstrap_is_active(value: str) -> bool:
+    if not value:
+        return False
+    try:
+        return date.fromisoformat(value) >= date.today()
+    except ValueError:
+        return False
 
 
 def _skill_capability(skill: Skill) -> ToolCapability:
@@ -197,6 +250,13 @@ def _skill_capability(skill: Skill) -> ToolCapability:
         intent_tags=list(getattr(skill, "intent_tags", None) or routing.get("intent_tags") or []),
         conflicts_with=list(getattr(skill, "conflicts_with", None) or routing.get("conflicts_with") or []),
         preferred_over=list(getattr(skill, "preferred_over", None) or routing.get("preferred_over") or []),
+        use_when=list(getattr(skill, "use_when", None) or routing.get("use_when") or []),
+        do_not_use_when=list(getattr(skill, "do_not_use_when", None) or routing.get("do_not_use_when") or []),
+        selection_examples=list(getattr(skill, "selection_examples", None) or routing.get("selection_examples") or []),
+        result_contract=str(getattr(skill, "result_contract", "") or routing.get("result_contract") or ""),
+        handoff_to=list(getattr(skill, "handoff_to", None) or routing.get("handoff_to") or []),
+        bootstrap_intents=list(getattr(skill, "bootstrap_intents", None) or routing.get("bootstrap_intents") or []),
+        bootstrap_until=str(getattr(skill, "bootstrap_until", "") or routing.get("bootstrap_until") or ""),
         parameters=parameters,
         source="skill",
         permission=skill.permission,
@@ -217,11 +277,12 @@ async def get_capabilities_for_scene(
     user_role: str = "user",
     user_id: str = "",
     include_nonstable: bool = False,
+    include_bootstrap: bool = False,
 ) -> list[ToolCapability]:
     """统一能力目录；在暴露给 Planner/Executor 前完成权限和写开关过滤。"""
     capabilities = [
         _skill_capability(s)
-        for s in get_skills_for_scene(scene, user_role)
+        for s in get_skills_for_scene(scene, user_role, include_bootstrap=include_bootstrap)
         if skill_runtime_unavailable(s) is None
         and (include_nonstable or s.status == "stable")
     ]
@@ -269,36 +330,52 @@ def _preferred_domains(text: str) -> set[str]:
     }
 
 
-async def select_capabilities_for_request(
+async def select_capabilities_with_trace(
     request: str,
     scene: str,
     user_role: str = "user",
-    limit: int = 24,
+    limit: int = 8,
     allowed_names: set[str] | None = None,
     allowed_categories: set[str] | None = None,
     denied_names: set[str] | None = None,
     user_id: str = "",
-) -> list[ToolCapability]:
-    """Narrow the planner's tool namespace without changing authorization.
+) -> CapabilitySelection:
+    """Select a legal capability namespace and retain a safe routing trace.
 
     This is a cheap first stage only.  The selected capabilities have already
     passed scene, role, write-toggle and runtime-availability checks.
     """
-    capabilities = await get_capabilities_for_scene(scene, user_role, user_id)
+    capabilities = await get_capabilities_for_scene(
+        scene,
+        user_role,
+        user_id,
+        include_bootstrap=(scene == "chat"),
+    )
     if allowed_names is not None or allowed_categories is not None or denied_names:
         capabilities = [
             capability
             for capability in capabilities
             if (allowed_names is None or capability.name in allowed_names
                 or (allowed_categories is not None and capability.category in allowed_categories))
+            # Chat's fixed allowlist remains the default. A newly registered
+            # tool may temporarily join it only through the scoped bootstrap
+            # mechanism; later selection still requires its declared intent.
+            or (
+                scene == "chat"
+                and _bootstrap_is_active(capability.bootstrap_until)
+                and bool(capability.bootstrap_intents)
+            )
             and capability.name not in (denied_names or set())
         ]
-    if len(capabilities) <= max(1, limit):
-        return capabilities
+    if not capabilities:
+        return CapabilitySelection([], [], scene, reason="no_authorized_capabilities")
     request_terms = _routing_terms(request)
     lower = (request or "").casefold()
     preferred_domains = _preferred_domains(request)
-    preferred: set[str] = {"query_knowledge", "web_search", "get_datetime"}
+    # Do not seed unrelated tools into every request.  The model only sees a
+    # small legal candidate set; semantic/lexical ranking may add a capability
+    # when the request actually supports it.
+    preferred: set[str] = set()
     file_markers = ("文档", "文件", "csv", "xlsx", "docx", "ppt", "pptx", "word", "excel", "pdf", "txt", "表格")
     transform_markers = (
         "转换", "转为", "转成", "导出", "生成文件", "保存为", "另存为", "批量",
@@ -330,7 +407,8 @@ async def select_capabilities_for_request(
         semantic = await semantic_scores(request, capabilities)
     except Exception:  # noqa: BLE001
         semantic = {}
-    ranked = []
+    ranked: list[tuple[float, int, ToolCapability, bool]] = []
+    bootstrap_names: set[str] = set()
     for index, capability in enumerate(capabilities):
         searchable = " ".join([
             capability.name,
@@ -340,9 +418,20 @@ async def select_capabilities_for_request(
         ])
         overlap = len(request_terms & _routing_terms(searchable))
         tag_overlap = len(request_terms & _routing_terms(" ".join(capability.intent_tags)))
-        score = overlap * 10 + tag_overlap * 18 + (30 if capability.name in preferred else 0)
+        boundary_overlap = len(request_terms & _routing_terms(" ".join(capability.use_when)))
+        exclusion_overlap = len(request_terms & _routing_terms(" ".join(capability.do_not_use_when)))
+        score = overlap * 10 + tag_overlap * 18 + boundary_overlap * 14 + (30 if capability.name in preferred else 0)
+        # A matching exclusion is a soft penalty only: authorization and the
+        # explicit `conflicts_with` / `preferred_over` graph remain the hard
+        # boundaries, while this prevents adjacent tools winning on a broad tag.
+        score -= exclusion_overlap * 7
         score += semantic.get(capability.name, 0.0) * float(settings.SKILL_ROUTING_SEMANTIC_WEIGHT)
         metadata = capability.annotations if isinstance(capability.annotations, dict) else {}
+        bootstrap = _bootstrap_is_active(capability.bootstrap_until)
+        if bootstrap and capability.bootstrap_intents:
+            bootstrap = bool(request_terms & _routing_terms(" ".join(capability.bootstrap_intents)))
+        if bootstrap:
+            bootstrap_names.add(capability.name)
         success_rate = metadata.get("success_rate")
         cost_estimate = metadata.get("cost_estimate")
         if isinstance(success_rate, (int, float)):
@@ -358,11 +447,17 @@ async def select_capabilities_for_request(
                 score += 100
             elif capability.name in {"read_file", "write_file", "office_doc_read", "office_doc_analyze"}:
                 score -= 35
-        ranked.append((score, -index, capability))
+        ranked.append((score, -index, capability, bootstrap))
     ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    selected = []
+    selected: list[ToolCapability] = []
     selected_names: set[str] = set()
-    for _, _, capability in ranked:
+    for capability in capabilities:
+        if capability.name in bootstrap_names and capability.name not in selected_names:
+            selected.append(capability)
+            selected_names.add(capability.name)
+            if len(selected) >= max(1, limit):
+                break
+    for _, _, capability, _ in ranked:
         if len(selected) >= max(1, limit):
             break
         # 显式冲突的工具不同时给模型。只有当上位工具不在候选中时才保留它。
@@ -378,7 +473,154 @@ async def select_capabilities_for_request(
         selected_names.add(capability.name)
     # ``ranked`` 已以 score 和原始注册顺序作为稳定 tie-breaker 排序；保留该顺序
     # 才能让优先关系真实影响模型看到的工具排列。
-    return selected
+    scores = {capability.name: score for score, _, capability, _ in ranked}
+    selected_bootstrap = {capability.name for _, _, capability, bootstrap in ranked if bootstrap}
+    candidate_rows = [
+        {
+            "name": capability.name,
+            "version": capability.version,
+            "score": round(float(scores.get(capability.name, 0.0)), 3),
+            "bootstrap": capability.name in selected_bootstrap,
+        }
+        for capability in selected
+    ]
+    top_score = max((row["score"] for row in candidate_rows), default=0.0)
+    return CapabilitySelection(
+        capabilities=selected,
+        candidates=candidate_rows,
+        scene=scene,
+        top_score=top_score,
+        low_confidence=bool(candidate_rows) and top_score < float(settings.SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE),
+        reason="bootstrap" if any(row["bootstrap"] for row in candidate_rows) else "ranked",
+    )
+
+
+async def select_capabilities_for_request(
+    request: str,
+    scene: str,
+    user_role: str = "user",
+    limit: int = 8,
+    allowed_names: set[str] | None = None,
+    allowed_categories: set[str] | None = None,
+    denied_names: set[str] | None = None,
+    user_id: str = "",
+) -> list[ToolCapability]:
+    """Compatibility wrapper for callers that only need the candidate list."""
+    selection = await select_capabilities_with_trace(
+        request,
+        scene,
+        user_role,
+        limit,
+        allowed_names,
+        allowed_categories,
+        denied_names,
+        user_id,
+    )
+    return selection.capabilities
+
+
+def _selection_with_capabilities(selection: CapabilitySelection, capabilities: list[ToolCapability], *, reason: str | None = None) -> CapabilitySelection:
+    names = {item.name for item in capabilities}
+    candidates = [item for item in selection.candidates if item.get("name") in names]
+    top_score = max((float(item.get("score") or 0.0) for item in candidates), default=0.0)
+    return CapabilitySelection(
+        capabilities=capabilities,
+        candidates=candidates,
+        scene=selection.scene,
+        top_score=top_score,
+        low_confidence=bool(candidates) and top_score < float(settings.SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE),
+        reason=reason or selection.reason,
+    )
+
+
+def request_has_explicit_tool_intent(request: str) -> bool:
+    """Conservative signal used only for recall-miss monitoring, not routing."""
+    lower = (request or "").casefold()
+    markers = (
+        "联网", "网页来源", "公开资料", "网上查", "搜索一下", "检索一下",
+        "知识库", "库里查", "现在几点", "当前时间", "今天几号",
+    )
+    return any(marker in lower for marker in markers)
+
+
+def record_candidate_selection(
+    selection: CapabilitySelection,
+    *,
+    request: str,
+    user_id: str = "",
+    job_id: str = "",
+    selection_round: int = 1,
+    model_called: str | None = None,
+) -> dict:
+    """Emit bounded selection telemetry; never stores request text or prompts."""
+    metadata = selection.to_metadata(selection_round=selection_round)
+    names = [str(item.get("name") or "") for item in selection.candidates]
+    metadata["model_called"] = model_called
+    metadata["not_called_candidates"] = [name for name in names if name and name != model_called]
+    try:
+        from app.monitoring.context import MonitorContext
+        from app.monitoring.logger import monitor_logger
+
+        monitor_logger.info(
+            "工具候选池已确定",
+            event_type="tool_candidate_selection",
+            category="tool_selection",
+            code="TOOL_CANDIDATE_SELECTION",
+            context=MonitorContext(job_id=job_id or None, execution_id=job_id or None, user_id=user_id or None, component="skill_router"),
+            metadata=metadata,
+        )
+        if request_has_explicit_tool_intent(request) and (not names or selection.low_confidence):
+            monitor_logger.warning(
+                "明确工具意图的候选池置信度偏低，可能存在召回漏失",
+                event_type="tool_candidate_low_confidence",
+                category="tool_selection",
+                code="TOOL_CANDIDATE_LOW_CONFIDENCE",
+                context=MonitorContext(job_id=job_id or None, execution_id=job_id or None, user_id=user_id or None, component="skill_router"),
+                metadata={**metadata, "explicit_tool_intent": True},
+            )
+    except Exception:  # noqa: BLE001
+        logger.debug("候选池监控记录失败，继续执行")
+    return metadata
+
+
+async def get_chat_capabilities_with_trace(
+    request: str,
+    user_role: str = "user",
+    user_id: str = "",
+    limit: int = 5,
+) -> CapabilitySelection:
+    selection = await select_capabilities_with_trace(
+        request,
+        "chat",
+        user_role,
+        limit=max(1, limit),
+        allowed_names=_CHAT_SKILL_ALLOWLIST,
+        user_id=user_id,
+    )
+    request_terms = _routing_terms(request)
+    supported = [
+        item for item in selection.capabilities
+        if request_terms & _routing_terms(
+            " ".join([
+                item.name,
+                item.domain,
+                *item.intent_tags,
+                *item.use_when,
+                *item.bootstrap_intents,
+            ])
+        )
+    ]
+    return _selection_with_capabilities(selection, supported[:max(1, limit)], reason="supported" if supported else "no_positive_evidence")
+
+
+async def get_chat_capabilities_for_request(
+    request: str,
+    user_role: str = "user",
+    user_id: str = "",
+    limit: int = 5,
+) -> list[ToolCapability]:
+    """Return the smallest chat tool namespace that can satisfy this request."""
+    return (await get_chat_capabilities_with_trace(request, user_role, user_id, limit)).capabilities
 
 
 async def get_office_react_capabilities_for_request(
@@ -394,7 +636,19 @@ async def get_office_react_capabilities_for_request(
     generic filesystem and unrestricted shell tools are absent before the model
     receives its function schemas.
     """
-    capabilities = await select_capabilities_for_request(
+    return (await get_office_react_capabilities_with_trace(
+        request, user_role, limit, excluded_names, user_id
+    )).capabilities
+
+
+async def get_office_react_capabilities_with_trace(
+    request: str,
+    user_role: str = "user",
+    limit: int = 8,
+    excluded_names: set[str] | None = None,
+    user_id: str = "",
+) -> CapabilitySelection:
+    selection = await select_capabilities_with_trace(
         request,
         "office",
         user_role,
@@ -408,6 +662,7 @@ async def get_office_react_capabilities_for_request(
     # should not fill the remaining candidate slots.  Keep knowledge retrieval
     # available for document requests because it is the read-only companion to
     # document analysis; all other domains stay within their declared scope.
+    capabilities = selection.capabilities
     preferred_domains = _preferred_domains(request)
     if preferred_domains:
         allowed_domains = set(preferred_domains)
@@ -417,7 +672,8 @@ async def get_office_react_capabilities_for_request(
         if scoped:
             capabilities = scoped
     excluded_names = excluded_names or set()
-    return [item for item in capabilities if item.name not in excluded_names]
+    capabilities = [item for item in capabilities if item.name not in excluded_names]
+    return _selection_with_capabilities(selection, capabilities, reason="scoped" if preferred_domains else selection.reason)
 
 
 async def get_tools_for_scene(scene: str, user_role: str = "user", user_id: str = "") -> list[dict]:
@@ -975,7 +1231,7 @@ async def _run_skill_loop_legacy(
                 {
                     "role": "tool",
                     "tool_call_id": str(tc.get("id") or ""),
-                    "content": wrap_untrusted_tool_output(result.output or (result.error or "")),
+                    "content": wrap_untrusted_tool_output(_result_for_model(result)),
                 }
             )
     else:
@@ -1016,6 +1272,30 @@ async def _run_skill_loop_legacy(
             on_text(final_text)
 
     return redact_server_text(final_text), records, citations
+
+
+def _result_for_model(result: SkillResult) -> str:
+    """Legacy-loop equivalent of the LangChain model-facing result contract."""
+    if not result.success:
+        code = result.error_code or "EXEC_ERROR"
+        return (
+            f"工具未完成（{code}）：{result.error or '执行失败'}\n"
+            "下一步：修正参数、选择更合适的已授权工具，或向用户说明限制；不得绕过权限或确认。"
+        )
+    signals = result.decision_signals()
+    hints = []
+    if isinstance(signals.get("result_count"), int):
+        hints.append(f"结果数={signals['result_count']}")
+    confidence = signals.get("confidence_hint")
+    if isinstance(confidence, dict):
+        basis = "、".join(str(item)[:80] for item in confidence.get("basis") or [] if str(item).strip())
+        hints.append(f"置信提示={confidence.get('level')}（依据：{basis}）")
+    if signals.get("truncated"):
+        hints.append("结果已截断，请用更具体条件分批查询")
+    if signals.get("refine_suggestion"):
+        hints.append(f"细化建议={signals['refine_suggestion']}")
+    suffix = "\n[决策信号] " + "；".join(hints) if hints else ""
+    return (result.output or "步骤已完成") + suffix
 
 
 async def run_skill_loop(

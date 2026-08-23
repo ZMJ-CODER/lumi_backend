@@ -28,12 +28,19 @@ class InspectDocumentSetSkill(Skill):
     category = "office"
     environment = "server"
     scenes = ["office"]
+    domain = "document"
+    intent_tags = ["多文档", "定位", "盘点", "哪份", "附件", "条款"]
+    use_when = ["有两份及以上已授权附件且目标文档未知", "用户问哪份文件包含某事实或条款"]
+    do_not_use_when = ["目标 doc_id 已唯一明确时，用 read_document", "需要正文细节时，盘点后继续用 read_document"]
+    selection_examples = ["“哪份附件写了付款期限？” → 使用"]
+    result_contract = "返回可读文件卡片和候选 doc_id；候选唯一才进入 read_document。"
+    handoff_to = ["read_document"]
     parameters_schema = {
         "type": "object",
         "properties": {
-            "scope": {"type": "string", "enum": ["office_docs", "doc_ids"], "description": "默认 office_docs"},
-            "doc_ids": {"type": "array", "items": {"type": "string"}, "description": "可选：仅盘点当前授权范围内的这些文档"},
-            "query": {"type": "string", "description": "可选：用户要查找的事实或条款"},
+            "scope": {"type": "string", "enum": ["office_docs", "doc_ids"], "description": "盘点范围：office_docs（默认，全部已授权附件）或 doc_ids（仅下方指定的已授权文件）。"},
+            "doc_ids": {"type": "array", "items": {"type": "string"}, "description": "仅 scope=doc_ids 时使用；只能填写当前任务已授权的 doc_id。"},
+            "query": {"type": "string", "description": "要定位的事实或条款。例如“付款期限和违约责任”。"},
         },
     }
 
@@ -58,7 +65,7 @@ class InspectDocumentSetSkill(Skill):
             f"- {card['filename']} | {card['kind']} | 页数: {card.get('page_count') or '未知'} | 摘要: {card['summary']}"
             for card in cards
         ]
-        return SkillResult(success=True, output="\n".join(lines), metadata={"documents": cards, "document_selection": selection})
+        return SkillResult(success=True, output="\n".join(lines), metadata={"documents": cards, "document_selection": selection, "decision_signals": {"result_count": len(cards), "confidence_hint": {"level": "medium", "basis": ["summary_only", f"document_count={len(cards)}"]}, "more_available": False, "refine_suggestion": "根据摘要选择唯一候选；候选接近时读取多个候选核验或向用户澄清。"}})
 
 
 class ReadDocumentSkill(Skill):
@@ -69,9 +76,15 @@ class ReadDocumentSkill(Skill):
     category = "office"
     environment = "server"
     scenes = ["office"]
+    domain = "document"
+    intent_tags = ["读取", "正文", "文档", "附件", "条款"]
+    use_when = ["已有唯一且已授权的 doc_id，需要读取正文/结构"]
+    do_not_use_when = ["多文档且目标未知时，先用 inspect_document_set", "只需已入库知识库片段时，用 query_knowledge"]
+    selection_examples = ["“读取刚定位到的合同” → 使用"]
+    result_contract = "返回文件名、类型和结构化正文；供后续回答或分析使用。"
     parameters_schema = {
         "type": "object",
-        "properties": {"doc_id": {"type": "string", "description": "inspect_document_set 返回的已授权文档 id"}},
+        "properties": {"doc_id": {"type": "string", "description": "唯一目标的已授权文档 ID；多文档场景应来自 inspect_document_set 的候选结果。"}},
         "required": ["doc_id"],
     }
 
@@ -94,7 +107,7 @@ class ReadDocumentSkill(Skill):
         return SkillResult(
             success=True,
             output=f"文档：{info['filename']}（{info['kind']}）\n\n结构：\n{info['structure'][:60000]}",
-            metadata={"doc_id": doc_id, "kind": info["kind"], "filename": info["filename"], "document_selection": selection},
+            metadata={"doc_id": doc_id, "kind": info["kind"], "filename": info["filename"], "document_selection": selection, "decision_signals": {"result_count": 1, "confidence_hint": {"level": "high", "basis": ["authorized_doc_id", "single_document_read"]}, "more_available": False}},
         )
 
 

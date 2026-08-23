@@ -16,11 +16,25 @@ class WebSearchSkill(Skill):
     scenes = ["chat", "office", "game"]
     domain = "research"
     intent_tags = ["联网", "网页", "公开资料", "新闻", "来源"]
+    use_when = [
+        "用户明确要求联网搜索、网页来源或公开资料",
+        "需要核实公开新闻、政策或外部事实",
+    ]
+    do_not_use_when = [
+        "用户私有任务、对话历史、上传附件或知识库内容",
+        "当前日期时间应使用 get_datetime",
+        "通用常识且用户未要求来源时直接回答",
+    ]
+    selection_examples = [
+        "“联网搜索本周 AI 政策并给来源” → 使用",
+        "“我今天的待办还有哪些？” → 不使用",
+    ]
+    result_contract = "返回 URL、标题、摘录和 citation；无结果时建议收窄公开查询条件。"
     parameters_schema = {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "搜索查询，建议精简为关键词"},
-            "max_results": {"type": "integer", "description": "返回结果条数（默认 5）", "minimum": 1, "maximum": 10},
+            "query": {"type": "string", "description": "公开网页检索关键词：保留核心实体与时间/地域限定，去除口语。例如“最近那个 AI 监管新规”应写为“AI 监管 新规 2026”。"},
+            "max_results": {"type": "integer", "description": "返回结果条数：中间步骤用 3，需横向比较时用 5（默认），最多 10。", "minimum": 1, "maximum": 10},
         },
         "required": ["query"],
     }
@@ -54,6 +68,15 @@ class WebSearchSkill(Skill):
                 "citations": [
                     {"type": "web", "title": r["title"], "content": r["content"][:500], "source": r["url"]}
                     for r in results
-                ]
+                ],
+                "decision_signals": {
+                    "result_count": len(results),
+                    "confidence_hint": {
+                        "level": "medium",
+                        "basis": ["public_web_snippets", f"result_count={len(results)}"],
+                    },
+                    "more_available": len(results) >= max_results,
+                    "refine_suggestion": "若来源不够具体，请增加主体、地域或时间限定词后重试。",
+                },
             },
         )

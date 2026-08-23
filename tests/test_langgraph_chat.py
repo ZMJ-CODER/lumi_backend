@@ -120,6 +120,28 @@ def test_chat_graph_failure_becomes_safe_tool_message_and_max_round_forces_final
     assert len(model.calls) == 2
 
 
+def test_chat_graph_returns_decision_signals_after_a_tool_call():
+    class SignalledSkill(_GraphEchoSkill):
+        async def execute(self, params, context=None):
+            return SkillResult(
+                success=True,
+                output="候选文档 A",
+                metadata={"decision_signals": {"result_count": 1, "confidence_hint": {"level": "high", "basis": ["test_result"]}}},
+            )
+
+    SkillRegistry.register(SignalledSkill())
+    model = _ScriptedModel([
+        AIMessage(content="", tool_calls=[{"name": "get_datetime", "args": {"text": "x"}, "id": "c1"}]),
+        AIMessage(content="完成"),
+    ])
+    answer, _, _ = asyncio.run(LangGraphChatRunner(user_id="u1", chat_model=model).run([
+        {"role": "user", "content": "测试"},
+    ]))
+    assert answer == "完成"
+    assert "决策信号" in str(model.calls[1][-1].content)
+    assert "结果数=1" in str(model.calls[1][-1].content)
+
+
 def test_tool_graph_supports_office_scene_with_serial_progress_events():
     SkillRegistry.register(_OfficeGraphEchoSkill())
     model = _ScriptedModel(

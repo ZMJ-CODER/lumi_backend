@@ -7,8 +7,6 @@ from typing import Any
 
 from lumi_orch.runner import (
     ChannelLimiter as KernelChannelLimiter,
-    CHANNEL_ACQUIRE_SCRIPT as _ACQUIRE,
-    CHANNEL_RENEW_SCRIPT as _RENEW,
 )
 
 from app.core.config import settings

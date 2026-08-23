@@ -60,7 +60,7 @@ def test_office_react_runs_one_tool_per_round(monkeypatch):
         return [ToolCapability(name="react_echo", description="react test echo", category="office")]
 
     monkeypatch.setattr(
-        "app.agents.orchestration.react_runner.get_office_react_capabilities_for_request",
+        "app.agents.orchestration.react_runner.get_office_react_capabilities_with_trace",
         test_capabilities,
     )
     result = asyncio.run(OfficeReactRunner(user_id="u1", job_id="j1").run("完成动态任务"))
@@ -87,7 +87,7 @@ def test_office_react_preserves_reasoning_payload_after_tool_call(monkeypatch):
         return [ToolCapability(name="react_echo", description="react test echo", category="office")]
 
     monkeypatch.setattr(
-        "app.agents.orchestration.react_runner.get_office_react_capabilities_for_request",
+        "app.agents.orchestration.react_runner.get_office_react_capabilities_with_trace",
         capabilities,
     )
     result = asyncio.run(OfficeReactRunner(user_id="u1", job_id="j1").run("完成动态任务"))
@@ -174,7 +174,7 @@ def test_office_react_recomputes_tools_and_excludes_failed_method(monkeypatch):
         return Tool()
 
     monkeypatch.setattr("app.agents.orchestration.react_runner.get_chat_model", lambda **kwargs: asyncio.sleep(0, result=model))
-    monkeypatch.setattr("app.agents.orchestration.react_runner.get_office_react_capabilities_for_request", route)
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_office_react_capabilities_with_trace", route)
     monkeypatch.setattr("app.agents.orchestration.react_runner.make_skill_tool", fake_tool)
     result = asyncio.run(OfficeReactRunner(user_id="u1", job_id="j1").run("尝试不同方法读取文档"))
     assert result.success is True
@@ -182,3 +182,24 @@ def test_office_react_recomputes_tools_and_excludes_failed_method(monkeypatch):
     assert toolsets[0][2] == ["first", "second"]
     assert toolsets[1][1] == {"first"}
     assert toolsets[1][2] == ["second"]
+    assert len(result.selection_traces) == 3
+    assert result.selection_traces[0]["selection_round"] == 1
+    assert result.selection_traces[0]["model_called"] == "first"
+    assert result.selection_traces[1]["model_called"] == "second"
+
+
+def test_office_react_compiles_candidate_boundary_from_registry_contract(monkeypatch):
+    model = _Model([AIMessage(content="不需要工具，直接完成")])
+
+    async def capabilities(*_args, **_kwargs):
+        return [ToolCapability(
+            name="react_echo", category="office", domain="document", version="2.0.0",
+            use_when=["读取已授权测试内容"], do_not_use_when=["无需外部内容时直接回答"],
+        )]
+
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_chat_model", lambda **kwargs: asyncio.sleep(0, result=model))
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_office_react_capabilities_with_trace", capabilities)
+    result = asyncio.run(OfficeReactRunner(user_id="u1", job_id="j1").run("不需要外部内容"))
+    assert result.success is True
+    assert "候选工具选择边界" in str(model.calls[0][0].content)
+    assert "react_echo@2.0.0" in str(model.calls[0][0].content)

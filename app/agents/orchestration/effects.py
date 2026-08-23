@@ -12,7 +12,6 @@ from typing import Any
 
 from lumi_orch.effects import (
     confirm_record,
-    effect_intent_for_node,
     intent_record,
     uncertain_record,
 )

@@ -19,13 +19,19 @@ class QueryKnowledgeSkill(Skill):
     category = "network"
     environment = "server"
     scenes = ["chat", "office", "game"]
+    domain = "research"
+    intent_tags = ["知识库", "个人资料", "已上传资料", "检索", "引用"]
+    use_when = ["用户明确询问已入库的个人/公共知识库资料", "需要从历史上传资料中找事实"]
+    do_not_use_when = ["当前办公附件已有唯一 doc_id 时，用 read_document", "用户要求公开网页新闻或来源时，用 web_search"]
+    selection_examples = ["“根据我的知识库说明报销规则” → 使用", "“联网搜索本周政策” → 不使用"]
+    result_contract = "返回知识片段与 citations；空结果时建议改用更具体的实体或确认资料是否已入库。"
     direct_instruction_field = "query"
     direct_required_fields = ["query"]
     parameters_schema = {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "检索关键词或问题，建议包含关键实体"},
-            "top_k": {"type": "integer", "description": "返回片段数（默认 5）", "minimum": 1, "maximum": 10},
+            "query": {"type": "string", "description": "知识库问题或关键词，必须包含待查实体。例如“报销制度中住宿上限”。"},
+            "top_k": {"type": "integer", "description": "返回片段数：简单事实用 3，需交叉核验用 5（默认），最多 10。", "minimum": 1, "maximum": 10},
         },
         "required": ["query"],
     }
@@ -75,5 +81,5 @@ class QueryKnowledgeSkill(Skill):
         return SkillResult(
             success=True,
             output=rag_context,
-            metadata={"citations": citations},
+            metadata={"citations": citations, "decision_signals": {"result_count": len(citations), "confidence_hint": {"level": "high" if len(citations) >= 2 else "medium", "basis": ["knowledge_base_citations", f"citation_count={len(citations)}"]}, "more_available": False, "refine_suggestion": "可补充文档名称、条款名或业务实体后再次检索。"}},
         )

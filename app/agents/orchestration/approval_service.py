@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus
 from app.agents.orchestration.state import StateStore
-from app.core.config import settings
 
 
 @dataclass(frozen=True, slots=True)

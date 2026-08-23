@@ -39,6 +39,29 @@ class SkillResult(BaseModel):
     retryable: bool = False
     metadata: dict = Field(default_factory=dict)
 
+    def decision_signals(self) -> dict:
+        """Small, model-facing summary for deciding the next tool step."""
+        metadata = self.metadata if isinstance(self.metadata, dict) else {}
+        signals = metadata.get("decision_signals")
+        if isinstance(signals, dict):
+            normalized = dict(signals)
+            hint = normalized.get("confidence_hint")
+            # A confidence label without an observable basis is worse than no
+            # label: it can make the model over-trust an arbitrary string.
+            if not (
+                isinstance(hint, dict)
+                and hint.get("level") in {"low", "medium", "high"}
+                and isinstance(hint.get("basis"), list)
+                and any(str(item).strip() for item in hint["basis"])
+            ):
+                normalized.pop("confidence_hint", None)
+            return normalized
+        return {
+            "result_count": metadata.get("result_count"),
+            "more_available": bool(metadata.get("more_available", False)),
+            "truncated": bool(metadata.get("truncated", False)),
+        }
+
 
 class SkillProgress(BaseModel):
     """跨 MCP、Skill、DAG 与 SSE 的稳定进度事件契约。"""
@@ -110,6 +133,15 @@ class Skill(ABC):
     intent_tags: list[str] = []
     conflicts_with: list[str] = []
     preferred_over: list[str] = []
+    # 面向模型的选择契约：不仅描述“能做什么”，还明确排除相邻能力。
+    use_when: list[str] = []
+    do_not_use_when: list[str] = []
+    selection_examples: list[str] = []
+    result_contract: str = ""
+    # Machine-checkable relationships; prose boundaries remain model-facing.
+    handoff_to: list[str] = []
+    bootstrap_intents: list[str] = []
+    bootstrap_until: str = ""  # ISO date; empty means no bootstrap bypass
     # 参数 JSON Schema（LLM 调用时校验参数用），空 dict 表示无参数
     parameters_schema: dict = Field(default_factory=dict)
     # 直接执行契约：DAG Planner 已选定工具后，执行器可用原子步骤的完整
@@ -177,6 +209,13 @@ class Skill(ABC):
             "intent_tags": list(self.intent_tags),
             "conflicts_with": list(self.conflicts_with),
             "preferred_over": list(self.preferred_over),
+            "use_when": list(self.use_when),
+            "do_not_use_when": list(self.do_not_use_when),
+            "selection_examples": list(self.selection_examples),
+            "result_contract": self.result_contract,
+            "handoff_to": list(self.handoff_to),
+            "bootstrap_intents": list(self.bootstrap_intents),
+            "bootstrap_until": self.bootstrap_until,
             "direct_instruction_field": self.direct_instruction_field,
             "direct_required_fields": list(self.direct_required_fields),
             "direct_input_aliases": dict(self.direct_input_aliases),

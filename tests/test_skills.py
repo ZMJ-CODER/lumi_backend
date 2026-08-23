@@ -246,9 +246,11 @@ def test_office_react_scopes_clear_schedule_request(monkeypatch):
     ]
 
     async def fake_select(*args, **kwargs):
-        return capabilities
+        from app.agents.skills.executor import CapabilitySelection
 
-    monkeypatch.setattr(exec_mod, "select_capabilities_for_request", fake_select)
+        return CapabilitySelection(capabilities=capabilities, candidates=[], scene="office")
+
+    monkeypatch.setattr(exec_mod, "select_capabilities_with_trace", fake_select)
     selected = asyncio.run(get_office_react_capabilities_for_request("列一下当前待办事项"))
     assert {item.name for item in selected} == {"todo_manager", "calendar_manager"}
 

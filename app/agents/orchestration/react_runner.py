@@ -5,14 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Annotated, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from app.agents.langchain.models import get_chat_model
 from app.agents.langchain.tools import make_skill_tool
 from app.agents.skills.base import SkillResult
-from app.agents.skills.executor import get_office_react_capabilities_for_request
+from app.agents.skills.prompting import build_tool_selection_contract
+from app.agents.skills.executor import (
+    get_office_react_capabilities_with_trace,
+    record_candidate_selection,
+)
 from app.core.agent_security import redact_server_text, wrap_untrusted_tool_output
 
 
@@ -30,6 +34,7 @@ class ReactRunResult:
     error_code: str | None = None
     records: list[dict] = field(default_factory=list)
     citations: list[dict] = field(default_factory=list)
+    selection_traces: list[dict] = field(default_factory=list)
 
 
 class OfficeReactRunner:
@@ -57,6 +62,7 @@ class OfficeReactRunner:
         self._results: list[SkillResult] = []
         self._failed_tools: set[str] = set()
         self.toolsets: list[list[str]] = []
+        self.selection_traces: list[dict] = []
 
     def _emit(self, value: str | dict) -> None:
         if self.on_progress:
@@ -89,13 +95,28 @@ class OfficeReactRunner:
                     f"\n已执行工具：{previous_tool}\n最新观察：{observation}"
                     if previous_tool or observation else ""
                 )
-                capabilities = await get_office_react_capabilities_for_request(
+                selection = await get_office_react_capabilities_with_trace(
                     route_text,
                     self.user_role,
                     limit=8,
                     excluded_names=self._failed_tools,
                     user_id=self.user_id,
                 )
+                # Keep the runner friendly to older in-process extensions
+                # which implemented the pre-trace list-only selector.
+                if isinstance(selection, list):
+                    from app.agents.skills.executor import CapabilitySelection
+
+                    selection = CapabilitySelection(
+                        capabilities=selection,
+                        candidates=[
+                            {"name": item.name, "version": item.version, "score": 0.0, "bootstrap": False}
+                            for item in selection
+                        ],
+                        scene="office",
+                        reason="legacy_selector",
+                    )
+                capabilities = selection.capabilities
                 if len(internal_docs) >= 2:
                     # Discovery is an operational prerequisite, not merely a
                     # prompt preference. Keep it visible even when lexical
@@ -107,6 +128,19 @@ class OfficeReactRunner:
                     )
                     if discovery is not None and discovery.name not in {item.name for item in capabilities}:
                         capabilities = [discovery, *capabilities[:7]]
+                        # Discovery was injected as a mandatory prerequisite;
+                        # make that visible in the auditable candidate trace.
+                        selection = type(selection)(
+                            capabilities=capabilities,
+                            candidates=[
+                                {"name": item.name, "version": item.version, "score": 0.0, "bootstrap": False}
+                                for item in capabilities
+                            ],
+                            scene=selection.scene,
+                            top_score=selection.top_score,
+                            low_confidence=selection.low_confidence,
+                            reason="document_discovery_prerequisite",
+                        )
                 tool_pairs = []
                 for capability in capabilities:
                     tool = await make_skill_tool(
@@ -124,7 +158,13 @@ class OfficeReactRunner:
                 allowed = [name for name, _ in tool_pairs]
                 tools = [tool for _, tool in tool_pairs]
                 self.toolsets.append(allowed)
-                reply = await model.bind_tools(tools).ainvoke(state["messages"])
+                # The selection policy is generated from the same registry
+                # fields that shaped the candidate pool; it cannot drift from
+                # a separately hand-maintained prompt table.
+                reply = await model.bind_tools(tools).ainvoke([
+                    SystemMessage(content=build_tool_selection_contract(capabilities)),
+                    *state["messages"],
+                ])
                 if reply.tool_calls:
                     # Keep provider-specific fields such as DeepSeek/Qwen
                     # ``reasoning_content``.  Some thinking-mode OpenAI
@@ -132,6 +172,14 @@ class OfficeReactRunner:
                     # the following tool-result turn.  Reconstructing an
                     # AIMessage here silently discarded it and caused 400s.
                     reply.tool_calls = [reply.tool_calls[0]]
+                self.selection_traces.append(record_candidate_selection(
+                    selection,
+                    request=route_text,
+                    user_id=self.user_id,
+                    job_id=self.job_id,
+                    selection_round=int(state.get("rounds") or 0) + 1,
+                    model_called=(str(reply.tool_calls[0].get("name") or "") if reply.tool_calls else None),
+                ))
                 return {"messages": [reply], "allowed_tools": allowed}
 
             async def before_tool(state: ReactState) -> dict:
@@ -253,7 +301,16 @@ class OfficeReactRunner:
                     break
             if not final and self.records:
                 final = "任务已执行，但模型未生成总结。请查看已完成步骤和产物。"
-            return ReactRunResult(bool(final or self.records), redact_server_text(final), records=self.records, citations=self.citations)
+            for trace, record in zip(self.selection_traces, self.records, strict=False):
+                trace["model_called"] = record.get("skill")
+                trace["not_called_candidates"] = [
+                    item.get("name") for item in trace.get("injected_candidates", [])
+                    if item.get("name") and item.get("name") != record.get("skill")
+                ]
+            return ReactRunResult(
+                bool(final or self.records), redact_server_text(final), records=self.records,
+                citations=self.citations, selection_traces=self.selection_traces,
+            )
         except Exception as exc:  # noqa: BLE001
             try:
                 from app.agents.skills.recovery import classify_model_error
@@ -261,4 +318,7 @@ class OfficeReactRunner:
                 code, message = classify_model_error(exc)
             except Exception:  # noqa: BLE001
                 code, message = "REACT_ERROR", str(exc)[:500] or "ReAct 执行失败"
-            return ReactRunResult(False, error=message, error_code=code, records=self.records, citations=self.citations)
+            return ReactRunResult(
+                False, error=message, error_code=code, records=self.records,
+                citations=self.citations, selection_traces=self.selection_traces,
+            )

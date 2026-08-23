@@ -21,7 +21,12 @@ from langgraph.prebuilt import ToolNode
 from app.agents.langchain.models import get_chat_model
 from app.agents.langchain.tools import make_skill_tool
 from app.agents.skills.base import SkillResult
-from app.agents.skills.executor import get_capabilities_for_scene
+from app.agents.skills.executor import (
+    CapabilitySelection,
+    get_capabilities_for_scene,
+    get_chat_capabilities_with_trace,
+    record_candidate_selection,
+)
 from app.core.agent_security import redact_server_text, wrap_untrusted_tool_output
 
 
@@ -89,7 +94,22 @@ class LangGraphChatRunner:
             if role in {"user", "human"} and isinstance(content, str):
                 current_user_message = content
                 break
-        capabilities = await get_capabilities_for_scene(self.scene, self.user_role, self.user_id)
+        # Office DAG already provides a request-scoped capability namespace.
+        # Chat has a small shared allowlist, but still selects only the useful
+        # candidates so adjacent tools do not compete in every model context.
+        selection = (
+            await get_chat_capabilities_with_trace(
+                current_user_message, self.user_role, self.user_id,
+            )
+            if self.scene == "chat" and self.chat_model is None
+            else CapabilitySelection(
+                capabilities=await get_capabilities_for_scene(self.scene, self.user_role, self.user_id),
+                candidates=[],
+                scene=self.scene,
+                reason="explicit_model_or_nonchat",
+            )
+        )
+        capabilities = selection.capabilities
         tools = []
         for capability in capabilities:
             tool = await make_skill_tool(
@@ -106,6 +126,10 @@ class LangGraphChatRunner:
             if tool is not None:
                 tools.append(tool)
         if not tools:
+            record_candidate_selection(
+                selection, request=current_user_message, user_id=self.user_id,
+                job_id=self.conversation_id, selection_round=1,
+            )
             return "", [], []
 
         model = self.chat_model or await get_chat_model(
@@ -141,6 +165,16 @@ class LangGraphChatRunner:
                 # providers require their additional reasoning payload to be
                 # replayed after tool results on the next model call.
                 reply.tool_calls = [reply.tool_calls[0]]
+            # Chat has one request-level pool (unlike Office ReAct's per-round
+            # refresh). Log what was injected even if the model chose no tool.
+            record_candidate_selection(
+                selection,
+                request=current_user_message,
+                user_id=self.user_id,
+                job_id=self.conversation_id,
+                selection_round=int(state.get("tool_rounds") or 0) + 1,
+                model_called=(str(reply.tool_calls[0].get("name") or "") if reply.tool_calls else None),
+            )
             return {"messages": [reply]}
 
         async def before_tool(state: ChatGraphState) -> dict:

@@ -17,6 +17,13 @@ class ToolCapability(BaseModel):
     intent_tags: list[str] = Field(default_factory=list)
     conflicts_with: list[str] = Field(default_factory=list)
     preferred_over: list[str] = Field(default_factory=list)
+    use_when: list[str] = Field(default_factory=list)
+    do_not_use_when: list[str] = Field(default_factory=list)
+    selection_examples: list[str] = Field(default_factory=list)
+    result_contract: str = ""
+    handoff_to: list[str] = Field(default_factory=list)
+    bootstrap_intents: list[str] = Field(default_factory=list)
+    bootstrap_until: str = ""
     parameters: dict = Field(default_factory=lambda: {"type": "object", "properties": {}})
     source: str = "skill"  # skill / mcp
     server: str | None = None
@@ -38,11 +45,21 @@ class ToolCapability(BaseModel):
         if self.permission != "user":
             flags.append(f"权限：{self.permission}")
         suffix = f"（{'；'.join(flags)}）" if flags else ""
+        selection = []
+        if self.use_when:
+            selection.append("适用：" + "；".join(self.use_when[:3]))
+        if self.do_not_use_when:
+            selection.append("不要用于：" + "；".join(self.do_not_use_when[:3]))
+        if self.selection_examples:
+            selection.append("例：" + "；".join(self.selection_examples[:2]))
+        if self.result_contract:
+            selection.append("返回：" + self.result_contract)
+        guidance = "\n" + "\n".join(selection) if selection else ""
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": f"{self.description}{suffix}",
+                "description": f"{self.description}{suffix}{guidance}",
                 "parameters": self.parameters,
             },
         }

@@ -19,6 +19,7 @@ from pathlib import Path
 from loguru import logger
 
 from app.agents.skills.base import Skill
+from app.agents.skills.contract_lint import lint_skill_contracts
 from app.agents.skills.registry import SkillRegistry
 from app.core.config import settings
 
@@ -55,6 +56,9 @@ def load_skill_plugins() -> int:
             logger.warning("跳过非法插件文件名（需字母/数字/下划线）: {}", path.name)
             continue
         count += _load_module(f"lumi_skill_plugin_{module_name}", path)
+    errors = lint_skill_contracts(SkillRegistry.list())
+    if errors:
+        raise RuntimeError("Skill 契约静态检查失败：" + " | ".join(errors[:8]))
     logger.info("技能插件加载完成: {} 个新技能", count)
     return count
 

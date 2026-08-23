@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from enum import Enum
-
 from lumi_orch.validation import FailureCategory, ValidationOutcome as KernelValidationOutcome
 
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus

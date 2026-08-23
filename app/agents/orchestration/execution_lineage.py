@@ -36,7 +36,11 @@ def _span_key(execution_id: str) -> str:
 
 
 def _ttl() -> int:
-    return max(3600, int(settings.AGENT_JOBS_TTL_SECONDS))
+    return max(
+        3600,
+        int(settings.AGENT_JOBS_TTL_SECONDS),
+        int(settings.AGENT_RESULT_REF_TTL_SECONDS),
+    )
 
 
 def _json(value: Any) -> str:
@@ -116,6 +120,9 @@ async def record_node_span(
     metadata = getattr(node, "metadata", {}) or {}
     params = getattr(node, "params", {}) or {}
     result = getattr(node, "result", {}) or {}
+    tool_metadata = result.get("tool_metadata") if isinstance(result, dict) else None
+    if not isinstance(tool_metadata, dict):
+        tool_metadata = metadata.get("tool_metadata") if isinstance(metadata, dict) else None
     entry = {
         "at": time.time(),
         "execution_id": execution_id,
@@ -129,6 +136,9 @@ async def record_node_span(
         "status": str(getattr(getattr(node, "status", ""), "value", getattr(node, "status", ""))),
         "error_code": str(getattr(node, "error_code", "") or "")[:120],
         "effect_status": getattr(node, "effect_status", None),
+        "tool_metadata": {
+            "document_selection": tool_metadata.get("document_selection")
+        } if isinstance(tool_metadata, dict) and tool_metadata.get("document_selection") else None,
     }
     try:
         from app.core.redis import get_redis

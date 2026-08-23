@@ -124,6 +124,7 @@ async def chat_stream(
                 retrieval_query=req.retrieval_query,
                 attachments=req.attachments,
                 office_docs=req.office_docs,
+                web_search_enabled=req.web_search,
                 llm_api_key=llm_api_key,
                 thinking_mode=req.thinking_mode,
                 reply_style=req.reply_style,

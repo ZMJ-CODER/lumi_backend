@@ -9,36 +9,12 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, Field
+from lumi_orch.plan_dsl import InputRef, OutputContract, PlanStep
 
 from app.agents.orchestration.models import TaskNode
 from app.agents.orchestration.routing_intent import RouteIntent
-
-
-class InputRef(BaseModel):
-    """A typed reference to a previous step's sanitized result."""
-
-    source_step: str
-    field: str = "content"
-
-
-class OutputContract(BaseModel):
-    artifact_type: str
-    fields: list[str] = Field(default_factory=list)
-
-
-class PlanStep(BaseModel):
-    """Planner DSL consumed by the static DAG compiler and audit layer."""
-
-    id: str
-    action: str
-    params: dict[str, Any] = Field(default_factory=dict)
-    input_contract: list[InputRef] = Field(default_factory=list)
-    output_contract: OutputContract
-    risk_level: Literal["read_only", "write", "external_send", "system_command"] = "read_only"
-    depends_on: list[str] = Field(default_factory=list)
 
 
 def _id(prefix: str) -> str:

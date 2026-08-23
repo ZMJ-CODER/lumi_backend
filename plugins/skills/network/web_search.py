@@ -7,12 +7,15 @@ from app.services.web_search import web_search
 class WebSearchSkill(Skill):
     name = "web_search"
     description = (
-        "搜索互联网获取实时信息。当用户问题涉及最新新闻、实时数据、当前事件、"
-        "或本地知识库无法覆盖的信息时使用。返回带来源的搜索结果。"
+        "受控只读网页检索：仅在用户明确要求联网/网页来源，或必须核实公开互联网中的"
+        "新闻、政策和外部事实时使用。不得用于用户私有任务、对话历史、上传附件、知识库"
+        "内容、总结改写、创作或计算；时间词、天气或价格词本身不是调用理由。返回带来源的结果。"
     )
     category = "network"
     environment = "server"
     scenes = ["chat", "office", "game"]
+    domain = "research"
+    intent_tags = ["联网", "网页", "公开资料", "新闻", "来源"]
     parameters_schema = {
         "type": "object",
         "properties": {

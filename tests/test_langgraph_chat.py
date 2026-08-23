@@ -173,6 +173,7 @@ def test_run_skill_loop_routes_office_lumi_client_to_langgraph(monkeypatch):
 
 
 def test_chat_tool_graph_is_intent_gated_and_never_exposes_office_tools():
+    assert _needs_chat_tool_graph("请联网搜索今天的天气并给我来源") is True
     assert _needs_chat_tool_graph("帮我搜索今天的天气") is True
     assert _needs_chat_tool_graph("现在几点") is True
     assert _needs_chat_tool_graph("帮我总结刚上传的文档") is False

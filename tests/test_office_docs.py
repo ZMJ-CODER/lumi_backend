@@ -8,6 +8,38 @@ import pytest
 from app.services import office_docs
 
 
+def test_document_discovery_and_read_skills_cannot_expand_server_document_scope(monkeypatch):
+    from app.agents.skills.base import SkillContext
+    from plugins.skills.office.office_docs import InspectDocumentSetSkill, ReadDocumentSkill
+
+    context = SkillContext(user_id="u1", scene="office", office_doc_ids=("allowed",))
+    forbidden_read = asyncio.run(ReadDocumentSkill().execute({"doc_id": "other"}, context))
+    assert forbidden_read.success is False
+    assert forbidden_read.error_code == "FORBIDDEN"
+
+    captured = {}
+
+    async def fake_compute(fn, user_id, doc_ids, query):
+        captured["doc_ids"] = doc_ids
+        captured["query"] = query
+        return [{
+            "doc_id": "allowed",
+            "filename": "授权文件.pdf",
+            "kind": "pdf",
+            "summary": "付款条款摘要",
+            "page_count": 3,
+        }]
+
+    monkeypatch.setattr("plugins.skills.office.office_docs.run_in_compute", fake_compute)
+    result = asyncio.run(InspectDocumentSetSkill().execute(
+        {"scope": "doc_ids", "doc_ids": ["allowed", "other"], "query": "付款条款"},
+        context,
+    ))
+    assert result.success is True
+    assert captured["doc_ids"] == ["allowed"]
+    assert result.metadata["document_selection"]["candidate_doc_ids"] == ["allowed"]
+
+
 def test_detect_kind():
     assert office_docs.detect_kind("a.docx") == "docx"
     assert office_docs.detect_kind("a.xlsx") == "xlsx"

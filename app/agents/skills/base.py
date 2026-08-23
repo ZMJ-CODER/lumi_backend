@@ -74,6 +74,9 @@ class SkillContext:
     # Executor-only policy.  Never hydrate this from tool arguments, document
     # text or persisted conversation state.
     execution_policy: dict | None = None
+    # Server-injected documents authorized for this single task. Tool
+    # arguments can narrow this set but can never expand it.
+    office_doc_ids: tuple[str, ...] = ()
 
 
 class Skill(ABC):

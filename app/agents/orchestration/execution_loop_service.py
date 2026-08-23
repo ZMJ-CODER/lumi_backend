@@ -23,6 +23,8 @@ class ExecutionLoopService:
             JobStatus.CANCELLED,
             JobStatus.INTERRUPTED,
             JobStatus.WAITING_APPROVAL,
+            JobStatus.WAITING_RESOURCES,
+            JobStatus.PAUSED,
         }
     )
 
@@ -44,6 +46,8 @@ class ExecutionLoopService:
         continue_logical_plan: Callable[[Job], Awaitable[bool]],
         maybe_replan: Callable[[Job, str | None], Awaitable[bool]],
         node_concurrency: int,
+        suspend_capacity: Callable[[Job], Awaitable[None]] | None = None,
+        ensure_active_capacity: Callable[[Job], Awaitable[bool]] | None = None,
     ) -> None:
         self._store = store
         self._workers = workers
@@ -60,6 +64,16 @@ class ExecutionLoopService:
         self._continue_logical_plan = continue_logical_plan
         self._maybe_replan = maybe_replan
         self._node_concurrency = node_concurrency
+        self._suspend_capacity = suspend_capacity or (lambda _job: self._noop())
+        self._ensure_active_capacity = ensure_active_capacity or (lambda _job: self._allow())
+
+    @staticmethod
+    async def _noop() -> None:
+        return None
+
+    @staticmethod
+    async def _allow() -> bool:
+        return True
 
     async def run(self, job_id: str) -> None:
         llm_api_key = self._api_keys.get(job_id)
@@ -79,6 +93,8 @@ class ExecutionLoopService:
                     concurrency=self._node_concurrency,
                     llm_api_key=llm_api_key,
                     llm_config=llm_config,
+                    on_waiting_resources=self._suspend_capacity,
+                    ensure_active_capacity=self._ensure_active_capacity,
                 )
                 job = await self._store.get_job(job_id) or job
                 self._live_jobs[job_id] = job
@@ -116,10 +132,12 @@ class ExecutionLoopService:
         finally:
             self._tasks.pop(job_id, None)
             finished = await self._store.get_job(job_id)
-            waiting_approval = bool(
-                finished and finished.status == JobStatus.WAITING_APPROVAL
-            )
-            if not waiting_approval:
+            suspended = bool(finished and finished.status in {
+                JobStatus.WAITING_APPROVAL, JobStatus.PAUSED,
+            })
+            if suspended:
+                await self._finalizer.suspend_capacity(finished)
+            if not suspended:
                 self._api_keys.pop(job_id, None)
                 self._llm_configs.pop(job_id, None)
                 self._plan_context.pop(job_id, None)

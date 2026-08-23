@@ -106,7 +106,10 @@ async def build_dependency_context_from_refs(
             out[str(dep_id)] = cleaned
             used += size
         else:
-            out[str(dep_id)] = {"summary": "[前序结果引用不可用，需重新执行该前序步骤]"}
+            out[str(dep_id)] = {
+                "summary": "[前序结果引用不可用，需重新执行该前序步骤]",
+                "error_code": "RESULT_REF_EXPIRED",
+            }
     for dep_id in node.depends_on:
         dep = node_by_id.get(dep_id)
         if dep is None:
@@ -118,7 +121,10 @@ async def build_dependency_context_from_refs(
         if not result:
             result = await _resolve_dependency_ref(user_id, (dep.metadata or {}).get("result_ref"))
         if not result:
-            out[dep_id] = {"summary": "[前序结果引用不可用，需重新执行该前序步骤]"}
+            out[dep_id] = {
+                "summary": "[前序结果引用不可用，需重新执行该前序步骤]",
+                "error_code": "RESULT_REF_EXPIRED",
+            }
             continue
         cleaned = sanitize_dependency_result(result)
         size = len(json.dumps(cleaned, ensure_ascii=False, default=str))

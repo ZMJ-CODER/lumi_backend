@@ -111,7 +111,7 @@ class JobMaterializationService:
                     ),
                 }
                 job.nodes = []
-                routing["logical_plan"] = {
+                job.routing["logical_plan"] = {
                     "plan_id": logical_plan["plan_id"],
                     "state": "budget_confirmation",
                     "progress": logical_plan_progress(logical_plan),
@@ -122,7 +122,7 @@ class JobMaterializationService:
                 job.status = JobStatus.FAILED
                 job.error = "任务计划没有可执行前沿，已停止以避免无效调度。"
                 job.nodes = []
-                routing["logical_plan"] = {
+                job.routing["logical_plan"] = {
                     "plan_id": logical_plan["plan_id"],
                     "state": "blocked",
                     "progress": logical_plan_progress(logical_plan),
@@ -130,7 +130,7 @@ class JobMaterializationService:
                 return MaterializedJob(job, terminal=True)
             await save_logical_plan(user_id, logical_plan)
             job.nodes = frontier
-            routing["logical_plan"] = {
+            job.routing["logical_plan"] = {
                 "plan_id": logical_plan["plan_id"],
                 "revision": logical_plan["revision"],
                 "frontier_size": len(frontier),

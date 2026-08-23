@@ -1,0 +1,51 @@
+# Versioned phrase data for the deterministic intent scaffold.
+# This file contains markers only; it cannot define routing, tools or code.
+version: 1
+actions:
+  - id: lookup_history
+    risk_level: read_only
+    markers: [上次, 上回, 之前, 此前, 前面, 前文, 刚才那个, 刚才的结果, 刚才说的, 刚才那份, 当时, 历史记录, 那个结果, 之前的结果, 最后确认]
+  - id: converse
+    risk_level: read_only
+    markers: [你怎么看, 你觉得, 怎么看待, 聊聊, 说说, 谈谈]
+  - id: send
+    risk_level: external_send
+    markers: [发送, 发出, 转发, 发给, 发我, send, email, e-mail, forward]
+  - id: execute
+    risk_level: system_command
+    markers: [打开, 启动, 运行, 执行, 访问, 关闭, 结束进程, 跑起来, 丢给测试环境, run, execute, open]
+  - id: modify
+    risk_level: write
+    markers: [修改, 编辑, 删除, 移除, 更新, 保存, 上传, 下载, 改一下, 修一下, 修好, edit, delete, update, save]
+  - id: transform
+    risk_level: write
+    markers: [转换, 转成, 转为, 改成, 导出, 整理, 清洗, 合并, 拆分, 弄成, 做成, 压缩, translate, 翻译, convert, format, rewrite, 翻成]
+  - id: create
+    risk_level: read_only
+    markers: [创建, 新建, 制作, 生成, 写一份, 写个, 编写, 一份新的, 画个, 存成, create, make, generate, table, markdown table]
+  - id: analyze
+    risk_level: read_only
+    markers: [分析, 判断, 对比, 比较, 比一下, 比一比, 比对, 放一起比, 总结, 概括, 提取, 提炼, 归纳, 判断问题, 问题在哪, 怎么回事, 对不对, 是不是, 有没有问题, 有没有坑, 风险, 哪里不对, 哪儿不对, 标一下, 标出来, 看着不太对, 探索, 规律, summarize, summary, extract, analyze, compare, review]
+  - id: read
+    risk_level: read_only
+    markers: [读取, 阅读, 查看, 解析, 看看, 看下, 看一下, 看一遍, 读完, 过一遍, 过一下, 瞅瞅, 说明内容, read, inspect, look at]
+  - id: query
+    risk_level: read_only
+    markers: [查询, 查一下, 查查, 搜索, 搜一下, 检索, 了解, 解释, 说明, 告诉我, 列出, 找出, 找找, 找一下, 怎么看, 想知道, 会不会, 有没有, 能不能, 帮我确认, 催一下进度, 啥情况, 什么情况, query, search, find out, tell me]
+objects:
+  - id: task_history
+    markers: [上次, 上回, 之前, 此前, 前面, 前文, 刚才那个, 刚才的结果, 刚才说的, 刚才那份, 当时, 历史记录, 那个结果, 最后确认]
+  - id: external_resource
+    markers: [网页, 网址, 网上, 网络, 公开资料, 外部资料, 链接, web, website, online, internet]
+  - id: application
+    markers: [应用, 软件, 程序, 浏览器, 计算器, 进程, 桌面]
+  - id: message
+    markers: [消息, 通知, 收件人, 联系人, message, email, recipient]
+  - id: document
+    markers: [文档, 文件, 附件, 资料, 材料, 表格, document, file, attachment, spreadsheet, .pdf, .docx, .xlsx, .csv, .txt]
+  - id: data
+    markers: [数据, 记录, 内容, 字段, 信息, 东西, data, content, fields, release note]
+  - id: task_result
+    markers: [结果, 日志, 报错, 错误, 异常, 返回, 空的, 乱码, 重复行, 字符串, "401", "404", "500", missing_]
+  - id: project
+    markers: [项目, 代码库, 仓库]

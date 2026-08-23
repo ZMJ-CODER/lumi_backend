@@ -36,9 +36,12 @@ class JobSubmissionService:
         plan_compilation: PlanCompilationService,
         materialization: JobMaterializationService,
         temporal_mode: bool,
+        temporal_static_mode: bool,
         can_run_manifest_temporal: Callable[[Job], bool],
+        can_run_static_temporal: Callable[[Job], bool],
         probe_temporal: Callable[[], Awaitable[bool]],
         manifest_backend: Any,
+        static_backend: Any,
         legacy_backend: Any,
         start_heartbeat: Callable[[str, str], None],
         stop_heartbeat: Callable[[str], Awaitable[None]],
@@ -54,9 +57,12 @@ class JobSubmissionService:
         self._plan_compilation = plan_compilation
         self._materialization = materialization
         self._temporal_mode = temporal_mode
+        self._temporal_static_mode = temporal_static_mode
         self._can_run_manifest_temporal = can_run_manifest_temporal
+        self._can_run_static_temporal = can_run_static_temporal
         self._probe_temporal = probe_temporal
         self._manifest_backend = manifest_backend
+        self._static_backend = static_backend
         self._legacy_backend = legacy_backend
         self._start_heartbeat = start_heartbeat
         self._stop_heartbeat = stop_heartbeat
@@ -203,6 +209,31 @@ class JobSubmissionService:
         await job_admission.promote(admission_token, job.job_id, user_id)
         self._start_heartbeat(job.job_id, user_id)
         try:
+            if (
+                self._temporal_static_mode
+                and self._can_run_static_temporal(job)
+                and await self._probe_temporal()
+            ):
+                try:
+                    await self._static_backend.submit(job, effective_llm.api_key, llm_config)
+                    logger.info(
+                        "静态只读 DAG 已提交(Temporal): {} | agent={} request={}",
+                        job.job_id[:8],
+                        [node.agent for node in job.nodes],
+                        request[:40],
+                    )
+                    return job
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Temporal 静态 DAG 提交失败，回退自建 DAG: {} | {}",
+                        job.job_id[:8],
+                        exc,
+                    )
+                    job.routing = {
+                        **(job.routing or {}),
+                        "runtime": "legacy",
+                        "temporal_submit_error": str(exc)[:200],
+                    }
             if (
                 job.routing.get("manifest")
                 and self._temporal_mode

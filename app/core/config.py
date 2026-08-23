@@ -256,6 +256,25 @@ class Settings(BaseSettings):
     AGENT_NODE_CONCURRENCY: int = 2               # 同时执行的 DAG 节点数（资源协调上限）
     AGENT_NODE_MAX_RETRIES: int = 1               # 单节点失败最大重试次数（React 重试）
     AGENT_NODE_TIMEOUT_SECONDS: int = 120         # 单节点执行超时；避免一次失败拖成数分钟
+    # 0 表示回退到 AGENT_NODE_TIMEOUT_SECONDS；可按通道收紧/放宽硬超时。
+    AGENT_NODE_TIMEOUT_DIRECT_LLM_SECONDS: int = 0
+    AGENT_NODE_TIMEOUT_SCRIPT_SECONDS: int = 0
+    AGENT_NODE_TIMEOUT_RAG_SECONDS: int = 0
+    AGENT_NODE_TIMEOUT_AGENT_SECONDS: int = 0
+    # 可选 JSON，例如 {"send_email":30,"office_doc_read":45}。
+    AGENT_NODE_TOOL_TIMEOUTS_JSON: str = "{}"
+    # 写资源必须由 Redis 证明跨进程所有权；Redis 不可用时任务进入
+    # waiting_resources，绝不退化为仅当前 API 进程可见的锁。
+    AGENT_WRITE_RESOURCE_FAIL_CLOSED: bool = True
+    # A write job waiting for Redis coordination is suspended after this
+    # interval. Suspended/approval jobs do not consume active-job capacity.
+    AGENT_WAITING_RESOURCES_TIMEOUT_SECONDS: int = 1800
+    # Must exceed the longest node timeout plus its lease buffer; only then is
+    # an intent-only row considered orphaned after a process crash.
+    AGENT_EFFECT_INTENT_RECOVERY_GRACE_SECONDS: int = 900
+    AGENT_APPROVAL_TIMEOUT_SECONDS: int = 86400
+    # Result bodies used by fork/replay outlive the short job snapshot TTL.
+    AGENT_RESULT_REF_TTL_SECONDS: int = 604800
     # 办公规划是控制面，只需产出短 JSON。收紧预算和超时，避免简单指令被模型推理占满。
     AGENT_PLANNER_MAX_TOKENS: int = 2048
     AGENT_PLANNER_TIMEOUT_SECONDS: int = 45
@@ -271,7 +290,7 @@ class Settings(BaseSettings):
     AGENT_LOGICAL_PLAN_FRONTIER_SIZE: int = 4
     AGENT_LOGICAL_PLAN_TOKEN_BUDGET: int = 80000
     # 单次普通 DAG 的编译窗口上限；超过时转为逻辑计划/清单，不截断用户动作。
-    AGENT_PLAN_MAX_NODES: int = 8
+    AGENT_PLAN_MAX_NODES: int = 6
     # L3 needs a stateful graph that can mount a validated replacement
     # subgraph. The default remains the persisted DAG runtime until the
     # Temporal manifest workflow has completed its local rollout.
@@ -289,10 +308,20 @@ class Settings(BaseSettings):
     AGENT_SUBMISSION_MAX_INFLIGHT: int = 8
     AGENT_ADMISSION_LEASE_SECONDS: int = 7200
     # ── Temporal 编排（多智能体任务执行引擎）──
-    # legacy is the current default. ``manifest_temporal`` is an explicit,
-    # local-rollout-only runtime for rolling task manifests. The former static
-    # ``temporal`` path is frozen: no new job is submitted to it.
-    AGENT_ORCHESTRATION: str = "legacy"           # legacy / manifest_temporal
+    # legacy remains the default. ``temporal`` moves only static read-only
+    # DAGs to the external worker; dynamic/ReAct/write paths remain legacy.
+    # ``manifest_temporal`` is the rolling task-manifest runtime.
+    AGENT_ORCHESTRATION: str = "legacy"           # legacy / temporal / manifest_temporal
+    # 策略文件按部署版本加载；shadow 仅计算并审计差异，不影响当前路由。
+    AGENT_ROUTING_POLICY_MODE: str = "shadow"     # legacy / shadow / enforce
+    AGENT_ROUTING_POLICY_PATH: str = "config/agent_policies/routing_rules.yaml"
+    # TCA policy can tune only bounded numeric weights/thresholds; patterns
+    # and execution decisions remain code and do not become YAML expressions.
+    AGENT_TCA_POLICY_PATH: str = "config/agent_policies/tca_rules.yaml"
+    # Vocabulary is deployment data with a fixed, schema-validated action and
+    # object set; matching semantics and safety checks stay in application code.
+    AGENT_ROUTING_LEXICON_PATH: str = "config/agent_policies/routing_lexicon.yaml"
+    AGENT_PLANNING_POLICY_PATH: str = "config/agent_policies/planning_rules.yaml"
     TEMPORAL_ADDRESS: str = "localhost:7233"      # Temporal 前端 gRPC 地址
     TEMPORAL_NAMESPACE: str = "default"           # Temporal namespace
     TEMPORAL_TASK_QUEUE: str = "lumi-agents"      # Temporal 任务队列（worker 与客户端必须一致）
@@ -431,6 +460,10 @@ class Settings(BaseSettings):
         "EMBEDDING_CACHE_DIR",
         "PROMPTS_DIR",
         "SKILL_PLUGINS_DIR",
+        "AGENT_ROUTING_POLICY_PATH",
+        "AGENT_TCA_POLICY_PATH",
+        "AGENT_ROUTING_LEXICON_PATH",
+        "AGENT_PLANNING_POLICY_PATH",
         mode="after",
     )
     @classmethod

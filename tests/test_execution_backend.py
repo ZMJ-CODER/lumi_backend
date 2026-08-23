@@ -1,7 +1,8 @@
 import asyncio
 
-from app.agents.orchestration.execution_backend import LegacyDagBackend
-from app.agents.orchestration.models import Job, JobStatus, TaskNode, TaskStatus
+from app.agents.orchestration.execution_backend import LegacyDagBackend, TemporalStaticBackend
+from app.agents.orchestration.models import Job, JobStatus, ResourceClaim, TaskNode, TaskStatus
+from app.agents.orchestration.runtime_gateway import RuntimeGateway
 from app.agents.orchestration.state import InMemoryStateStore
 
 
@@ -73,5 +74,91 @@ def test_legacy_backend_controls_preserve_lifecycle_semantics():
         assert cancelled.release_capacity is True
         assert cancelled.job.status == JobStatus.CANCELLED
         assert cancelled.job.nodes[0].status == TaskStatus.CANCELLED
+
+    asyncio.run(scenario())
+
+
+def test_temporal_static_candidate_gate_keeps_dynamic_and_write_jobs_legacy():
+    candidate = Job(
+        job_id="static-read",
+        user_id="u1",
+        request="summarize",
+        nodes=[TaskNode(id="read", agent="retrieval")],
+    )
+    assert RuntimeGateway.can_run_static(candidate) is True
+
+    assert RuntimeGateway.can_run_static(Job(
+        job_id="react", user_id="u1", request="explore",
+        nodes=[TaskNode(id="react", agent="react_step")],
+    )) is False
+    assert RuntimeGateway.can_run_static(Job(
+        job_id="approval", user_id="u1", request="send",
+        nodes=[TaskNode(id="send", agent="direct_llm", approval=True)],
+    )) is False
+    assert RuntimeGateway.can_run_static(Job(
+        job_id="write", user_id="u1", request="write",
+        nodes=[TaskNode(
+            id="write", agent="direct_llm",
+            resource_claims=[ResourceClaim(key="doc:1", mode="write")],
+        )],
+    )) is False
+
+
+def test_temporal_static_submission_persists_bootstrap_and_frozen_llm_config(monkeypatch):
+    async def scenario():
+        store = InMemoryStateStore()
+        runtime = RuntimeGateway(store=store, temporal_mode=True)
+        captured = {}
+
+        async def store_config(job_id, config):
+            captured["config"] = (job_id, config)
+
+        async def start_workflow(payload, job_id):
+            captured["workflow"] = (payload, job_id)
+
+        monkeypatch.setattr(
+            "app.agents.orchestration.temporal.client.store_job_llm_config", store_config,
+        )
+        monkeypatch.setattr(
+            "app.agents.orchestration.temporal.client.start_agent_workflow", start_workflow,
+        )
+        job = Job(
+            job_id="static-submit",
+            user_id="u1",
+            request="summarize",
+            nodes=[TaskNode(id="read", agent="retrieval")],
+        )
+
+        await runtime.submit_static(job, None, {"api_key": "key", "model": "m"})
+
+        assert job.routing["runtime"] == "temporal_static"
+        assert (await store.get_job(job.job_id)).routing["runtime"] == "temporal_static"
+        assert captured["config"] == (job.job_id, {"api_key": "key", "model": "m"})
+        assert captured["workflow"][0]["config"]["node_concurrency"] > 0
+
+    asyncio.run(scenario())
+
+
+def test_temporal_static_control_does_not_fall_back_to_legacy_when_worker_is_unavailable():
+    async def scenario():
+        store = InMemoryStateStore()
+        runtime = RuntimeGateway(store=store, temporal_mode=False)
+        backend = TemporalStaticBackend(runtime)
+        job = Job(
+            job_id="static-control",
+            user_id="u1",
+            request="summarize",
+            status=JobStatus.RUNNING,
+            routing={"runtime": "temporal_static"},
+            nodes=[TaskNode(id="read", agent="retrieval")],
+        )
+
+        result = await backend.cancel(job)
+
+        assert result is not None
+        assert result.handled is True
+        assert result.release_capacity is False
+        assert result.error and "未送达" in result.error
+        assert job.status == JobStatus.RUNNING
 
     asyncio.run(scenario())

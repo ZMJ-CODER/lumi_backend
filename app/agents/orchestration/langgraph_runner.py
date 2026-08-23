@@ -131,8 +131,12 @@ class LangGraphNodeRunner:
             return {
                 "result": None,
                 "error": f"执行超时（>{self.timeout_seconds}s）",
-                "error_code": "TIMEOUT",
-                "retryable": True,
+                # wait_for cancels the worker coroutine before returning.  A
+                # new attempt could overlap a late external request, so this
+                # is a hard node boundary rather than an ordinary retryable
+                # provider timeout.
+                "error_code": "NODE_TIMEOUT",
+                "retryable": False,
             }
         except Exception as exc:  # noqa: BLE001
             logger.warning(

@@ -6,6 +6,7 @@ import time
 
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus
 from app.agents.orchestration.state import StateStore
+from app.core.config import settings
 
 
 class EscalationService:
@@ -69,6 +70,9 @@ class EscalationService:
                 metadata["awaiting_approval"] = True
                 metadata["approval_tool"] = tool
                 metadata["approval_fingerprint"] = approval_fingerprint
+                metadata["approval_expires_at"] = time.time() + max(
+                    60, int(settings.AGENT_APPROVAL_TIMEOUT_SECONDS)
+                )
                 metadata["escalation"] = signal.model_dump(mode="json")
                 escalated.metadata = metadata
                 escalated.status = TaskStatus.PENDING

@@ -63,6 +63,20 @@ def test_result_reference_is_owner_scoped_and_hash_verified():
     asyncio.run(scenario())
 
 
+def test_missing_result_reference_has_an_explicit_dependency_error_code():
+    async def scenario():
+        from app.agents.orchestration.context import build_dependency_context_from_refs
+
+        node = TaskNode(id="next", agent="test_worker", depends_on=["prior"])
+        prior = _node("prior")
+        prior.result = None
+        prior.metadata["result_ref"] = {"id": "missing", "sha256": "0" * 64}
+        context = await build_dependency_context_from_refs(node, {"prior": prior}, user_id="owner")
+        assert context["prior"]["error_code"] == "RESULT_REF_EXPIRED"
+
+    asyncio.run(scenario())
+
+
 def test_node_spans_are_redacted_lifecycle_metadata_only():
     async def scenario():
         node = _node("span-node")

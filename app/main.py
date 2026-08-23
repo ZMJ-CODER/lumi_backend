@@ -53,6 +53,20 @@ async def lifespan(app: FastAPI):
     # Schema ownership belongs exclusively to Alembic.  Deployment runs
     # ``alembic upgrade head`` before starting an API replica, so application
     # workers never race over DDL or silently patch production tables.
+    # Reconcile only stale two-phase effect reservations. A fresh reservation
+    # may belong to another healthy worker, hence the conservative grace period.
+    try:
+        from app.agents.orchestration.effects import recover_orphaned_effect_intents
+
+        count = await recover_orphaned_effect_intents(
+            settings.AGENT_EFFECT_INTENT_RECOVERY_GRACE_SECONDS
+        )
+        if count:
+            logger.warning("已将 {} 条遗留副作用 intent 标记为不确定，禁止自动重试", count)
+    except Exception as exc:  # noqa: BLE001
+        # Startup remains available during a transient DB outage; every write
+        # node still fails closed until journal access returns.
+        logger.warning("副作用日志恢复扫描跳过: {}", exc)
     # 遥测只是候选排序的辅助信号，启动时预热缓存，绝不让用户工具选择首轮查库。
     try:
         from app.services.skill_telemetry import refresh_success_rate_hints
@@ -62,7 +76,10 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001
         logger.debug("Skill 遥测缓存预热跳过: {}", exc)
     # 多智能体编排：Temporal Worker 随后端进程启动（未开则需独立进程跑 worker）
-    if settings.AGENT_ORCHESTRATION == "manifest_temporal" and settings.TEMPORAL_RUN_WORKER_INPROCESS:
+    if (
+        settings.AGENT_ORCHESTRATION in {"temporal", "manifest_temporal"}
+        and settings.TEMPORAL_RUN_WORKER_INPROCESS
+    ):
         from app.agents.orchestration.temporal.runtime import start_inprocess_worker
 
         await start_inprocess_worker()
@@ -79,7 +96,10 @@ async def lifespan(app: FastAPI):
     yield
 
     # 清理
-    if settings.TEMPORAL_RUN_WORKER_INPROCESS:
+    if (
+        settings.AGENT_ORCHESTRATION in {"temporal", "manifest_temporal"}
+        and settings.TEMPORAL_RUN_WORKER_INPROCESS
+    ):
         from app.agents.orchestration.temporal.runtime import stop_inprocess_worker
 
         await stop_inprocess_worker()

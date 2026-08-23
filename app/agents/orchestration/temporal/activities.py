@@ -6,6 +6,7 @@ worker.execute → 质检 → React 重试（最多 max_retries 次）。
 """
 
 import asyncio
+import hashlib
 import json
 
 from temporalio import activity
@@ -41,20 +42,22 @@ async def _execute_node_activity_inner(payload: dict) -> dict:
     user_role = str(payload.get("user_role") or "user")
     user_request = str(payload.get("user_request") or "")
     cfg = payload.get("config") or {}
-    timeout = int(cfg.get("node_timeout_seconds") or 300)
+    node = TaskNode.model_validate(node_data)
+    from app.agents.orchestration.node_timeouts import node_timeout_seconds
+
+    timeout = node_timeout_seconds(node, int(cfg.get("node_timeout_seconds") or 300))
     max_retries = int(cfg.get("node_max_retries") or 2)
 
-    worker = WORKERS.get(node_data.get("agent"))
+    worker = WORKERS.get(node.agent)
     if worker is None:
         return {
             "status": "failed",
             "result": None,
-            "error": f"未注册的执行 agent: {node_data.get('agent')}",
+            "error": f"未注册的执行 agent: {node.agent}",
             "error_code": "AGENT_NOT_FOUND",
             "retries": 0,
         }
 
-    node = TaskNode.model_validate(node_data)
     node.metadata = dict(node.metadata or {})
     node.metadata.setdefault("tool_index", 0)
     from app.agents.orchestration.context import sanitize_dependency_result
@@ -63,6 +66,10 @@ async def _execute_node_activity_inner(payload: dict) -> dict:
         str(dep_id): sanitize_dependency_result(value)
         for dep_id, value in (payload.get("dependency_results") or {}).items()
     }
+    dependency_bodies = node.metadata["dependency_results"]
+    if dependency_bodies:
+        raw = json.dumps(dependency_bodies, ensure_ascii=False, sort_keys=True, default=str)
+        node.metadata["approval_upstream_sha256"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     review = get_reviewer()
     llm_config = await load_job_llm_config(job_id) if job_id else None
     llm_api_key = (llm_config or {}).get("api_key")
@@ -90,10 +97,12 @@ async def _execute_node_activity_inner(payload: dict) -> dict:
         confirmed_tool_calls=frozenset(
             str(value) for value in ((node.metadata or {}).get("confirmed_tool_calls") or [])
         ),
+        approval_context_sha256=str((node.metadata or {}).get("approval_upstream_sha256") or ""),
         on_output=on_output,
     )
 
     from app.agents.orchestration.langgraph_runner import LangGraphNodeRunner
+    from app.agents.orchestration.safety import is_effectful
 
     try:
         outcome = await LangGraphNodeRunner(
@@ -102,7 +111,8 @@ async def _execute_node_activity_inner(payload: dict) -> dict:
             ctx=ctx,
             review=review,
             timeout_seconds=timeout,
-            max_retries=max_retries,
+            max_retries=0 if is_effectful(node) else max_retries,
+            effectful=is_effectful(node),
         ).run()
     except (asyncio.CancelledError, temporalio.exceptions.CancelledError):
         return {
@@ -145,8 +155,19 @@ async def _execute_node_activity_inner(payload: dict) -> dict:
 @activity.defn
 async def execute_node_activity(payload: dict) -> dict:
     """带资源互斥和副作用幂等保护的节点 Activity。"""
-    from app.agents.orchestration.effects import begin_effect, finish_effect
-    from app.agents.orchestration.resources import resource_coordinator
+    from app.agents.orchestration.effects import (
+        EffectJournalUnavailable,
+        abandon_pending_effect,
+        confirm_effect,
+        effect_intent_for_node,
+        mark_effect_uncertain,
+        record_effect_intent,
+    )
+    from app.agents.orchestration.node_timeouts import node_timeout_seconds
+    from app.agents.orchestration.resources import (
+        WriteResourceCoordinationUnavailable,
+        resource_coordinator,
+    )
     from app.agents.orchestration.safety import is_effectful, prepare_node_safety
 
     node = TaskNode.model_validate(payload.get("node") or {})
@@ -161,10 +182,35 @@ async def execute_node_activity(payload: dict) -> dict:
         cfg = {**cfg, "node_max_retries": 0}
         payload = {**payload, "config": cfg}
 
+    # Fail closed for writes before an effect reservation is recorded. The
+    # workflow reschedules this non-terminal state after a bounded backoff;
+    # read-only claims retain their local fail-open behavior.
+    if not await resource_coordinator.write_coordination_available(node.resource_claims):
+        return {
+            "status": "waiting_resources",
+            "result": None,
+            "error": "写资源协调服务暂不可用，任务将自动等待恢复",
+            "error_code": "RESOURCE_COORDINATION_UNAVAILABLE",
+            "retries": 0,
+        }
+
     if effectful and node.idempotency_key:
-        created, existing = await begin_effect(node.idempotency_key)
+        try:
+            created, existing = await record_effect_intent(
+                node.idempotency_key,
+                effect_intent_for_node(job_id=job_id, node=node),
+            )
+        except EffectJournalUnavailable:
+            return {
+                "status": "failed",
+                "result": None,
+                "error": "副作用安全日志不可用，已阻止执行以避免重复操作",
+                "error_code": "EFFECT_JOURNAL_UNAVAILABLE",
+                "retries": 0,
+                "effect_status": "pending",
+            }
         if not created:
-            if str((existing or {}).get("status")) == "committed":
+            if str((existing or {}).get("status")) in {"committed", "confirmed"}:
                 return {
                     "status": "completed",
                     "result": (existing or {}).get("result"),
@@ -180,7 +226,7 @@ async def execute_node_activity(payload: dict) -> dict:
                 "effect_status": "uncertain",
             }
 
-    timeout = int(cfg.get("node_timeout_seconds") or 300)
+    timeout = node_timeout_seconds(node, int(cfg.get("node_timeout_seconds") or 300))
     try:
         from app.agents.orchestration.channel_limits import channel_limiter
 
@@ -188,17 +234,56 @@ async def execute_node_activity(payload: dict) -> dict:
         async with channel_limiter.claim(channel, lease_seconds=max(60, timeout + 60)):
             async with resource_coordinator.claim(node.resource_claims, ttl=max(60, timeout + 60)):
                 out = await _execute_node_activity_inner(payload)
+    except WriteResourceCoordinationUnavailable:
+        # This race happens while acquiring the lease, before the tool body.
+        # Drop the fresh intent instead of falsely treating it as uncertain.
+        if effectful and node.idempotency_key:
+            try:
+                await abandon_pending_effect(node.idempotency_key)
+            except EffectJournalUnavailable:
+                return {
+                    "status": "failed",
+                    "result": None,
+                    "error": "副作用日志无法清理，已停止自动重试",
+                    "error_code": "EFFECT_JOURNAL_UNAVAILABLE",
+                    "retries": 0,
+                    "effect_status": "uncertain",
+                }
+        return {
+            "status": "waiting_resources",
+            "result": None,
+            "error": "写资源协调服务暂不可用，任务将自动等待恢复",
+            "error_code": "RESOURCE_COORDINATION_UNAVAILABLE",
+            "retries": 0,
+        }
     except BaseException:
         if effectful and node.idempotency_key:
-            await finish_effect(node.idempotency_key, "uncertain")
+            try:
+                await mark_effect_uncertain(node.idempotency_key, "activity_interrupted")
+            except EffectJournalUnavailable:
+                pass
         raise
 
     if effectful and node.idempotency_key:
         if out.get("status") == "completed":
-            await finish_effect(node.idempotency_key, "committed", out.get("result"))
-            out["effect_status"] = "committed"
+            try:
+                await confirm_effect(node.idempotency_key, out.get("result"))
+                out["effect_status"] = "committed"
+            except EffectJournalUnavailable:
+                return {
+                    "status": "failed",
+                    "result": None,
+                    "error": "副作用已执行但安全日志确认失败，已停止自动重试",
+                    "error_code": "EFFECT_JOURNAL_UNAVAILABLE",
+                    "retries": 0,
+                    "effect_status": "uncertain",
+                }
         else:
-            await finish_effect(node.idempotency_key, "uncertain")
+            try:
+                await mark_effect_uncertain(node.idempotency_key, str(out.get("error_code") or "execution_failed"))
+            except EffectJournalUnavailable:
+                out["error_code"] = "EFFECT_JOURNAL_UNAVAILABLE"
+                out["error"] = "副作用执行状态无法写入安全日志，已停止自动重试"
             out["effect_status"] = "uncertain"
     return out
 

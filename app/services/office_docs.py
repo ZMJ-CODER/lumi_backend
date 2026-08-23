@@ -23,6 +23,63 @@ from loguru import logger
 from app.core.config import settings
 
 OFFICE_DIR = Path(settings.UPLOAD_DIR).parent / "office"
+_DOCUMENT_OVERVIEW_CACHE: dict[tuple[str, str, int], dict] = {}
+
+
+def _document_page_count(path: Path, kind: str) -> int | None:
+    """Return a cheap page/sheet/slide count when the format exposes one."""
+    try:
+        if kind == "pdf":
+            from pypdf import PdfReader
+
+            return len(PdfReader(str(path)).pages)
+        if kind == "pptx":
+            from pptx import Presentation
+
+            return len(Presentation(str(path)).slides)
+        if kind == "docx":
+            return None  # Word pagination is renderer-dependent.
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def inspect_document_set(user_id: str, doc_ids: list[str], query: str = "") -> list[dict]:
+    """Build cached, ownership-scoped discovery cards for office documents.
+
+    The compact summary is intentionally deterministic: discovery must not
+    spend an additional LLM call or let untrusted document text influence a
+    control decision.  Full content remains behind ``read_document``.
+    """
+    cards: list[dict] = []
+    normalized_query = " ".join(str(query or "").split())[:500]
+    for raw_doc_id in doc_ids[:32]:
+        doc_id = str(raw_doc_id or "").strip()
+        if not doc_id:
+            continue
+        meta = load_session(user_id, doc_id)
+        path = _content_path(meta)
+        try:
+            revision = int(path.stat().st_mtime_ns)
+        except OSError:
+            revision = 0
+        cache_key = (str(user_id), doc_id, revision)
+        card = _DOCUMENT_OVERVIEW_CACHE.get(cache_key)
+        if card is None:
+            structure = read_structure(user_id, doc_id).get("structure") or ""
+            summary = " ".join(str(structure).split())[:480]
+            card = {
+                "doc_id": doc_id,
+                "filename": str(meta.get("filename") or "")[:500],
+                "kind": str(meta.get("kind") or "")[:32],
+                "summary": summary or "（文档暂无可提取文本）",
+                "page_count": _document_page_count(path, str(meta.get("kind") or "")),
+            }
+            _DOCUMENT_OVERVIEW_CACHE[cache_key] = card
+        # Query is audit-only. Do not imply a lexical match is a relevance
+        # proof; the agent must still inspect/then read the selected document.
+        cards.append({**card, "query": normalized_query} if normalized_query else dict(card))
+    return cards
 
 
 # ── 通用脚本产物（新建文件，无源文档）─────────────────

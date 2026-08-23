@@ -33,6 +33,7 @@ class SubmissionGuard:
         JobStatus.RUNNING,
         JobStatus.PAUSED,
         JobStatus.WAITING_APPROVAL,
+        JobStatus.WAITING_RESOURCES,
     })
 
     def __init__(self, *, store: StateStore) -> None:

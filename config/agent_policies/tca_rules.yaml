@@ -1,0 +1,15 @@
+# TCA v1 tunes only numeric scoring boundaries. It cannot inject patterns,
+# prompts, actions or executable expressions; feature extraction remains code.
+version: 1
+weights:
+  entity_count: 0.18
+  implicitness: 0.20
+  dependency: 0.25
+  ambiguity: 0.25
+  history_dependency: 0.12
+thresholds:
+  explicit_workflow_dependency: 0.35
+  m2_dependency: 0.35
+  m3_ambiguity: 0.65
+  classifier_confidence: 0.70
+  history_dynamic: 0.60

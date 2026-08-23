@@ -1,4 +1,4 @@
-# Local-only Temporal stack for the manifest migration spike.
+# Local Temporal stack for the external static-DAG/manifest worker rollout.
 #
 # Start it with:
 # docker compose -f docker-compose.yml -f docker-compose.temporal.yml --profile temporal up -d
@@ -58,7 +58,9 @@ services:
       DATABASE_ADMIN_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/postgres
       REDIS_URL: redis://redis:6379/0
       TEMPORAL_ADDRESS: temporal:7233
-      AGENT_ORCHESTRATION: manifest_temporal
+      # Keep this separate from .env's default legacy mode. Override with
+      # TEMPORAL_ORCHESTRATION_MODE=manifest_temporal for rolling manifests.
+      AGENT_ORCHESTRATION: "${TEMPORAL_ORCHESTRATION_MODE:-temporal}"
       TEMPORAL_RUN_WORKER_INPROCESS: "false"
     group_add:
       - "${DOCKER_GID:-0}"
@@ -78,7 +80,7 @@ services:
   api:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
-      AGENT_ORCHESTRATION: manifest_temporal
+      AGENT_ORCHESTRATION: "${TEMPORAL_ORCHESTRATION_MODE:-temporal}"
       TEMPORAL_RUN_WORKER_INPROCESS: "false"
     depends_on:
       temporal:

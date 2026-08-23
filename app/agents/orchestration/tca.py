@@ -115,6 +115,11 @@ class TaskComplexityAssessor:
     ) -> ComplexityScore:
         text = (request or "").strip()
         reasons: list[str] = []
+        from app.agents.orchestration.policy.tca import load_tca_policy
+
+        policy = load_tca_policy()
+        weights = policy.weights
+        thresholds = policy.thresholds
         entities = _entity_count(text, office_docs)
         entity_score = _clamp(max(0, entities - 1) / 4)
 
@@ -166,11 +171,11 @@ class TaskComplexityAssessor:
             reasons.append("命中可复用规则流程")
         else:
             total = _clamp(
-                entity_score * 0.18
-                + (1 - explicitness) * 0.2
-                + dependency * 0.25
-                + ambiguity * 0.25
-                + history_dependency * 0.12
+                entity_score * weights.entity_count
+                + (1 - explicitness) * weights.implicitness
+                + dependency * weights.dependency
+                + ambiguity * weights.ambiguity
+                + history_dependency * weights.history_dependency
             )
             # Explicit workflows should stay on the plan/execute path even if
             # they contain conversational fillers such as "看一下" or
@@ -179,20 +184,20 @@ class TaskComplexityAssessor:
             # action DAG into one 120s-bounded node.  ReAct is reserved for
             # genuinely open-ended decisions or history-dependent requests.
             explicit_workflow = bool(
-                dependency >= 0.35
+                dependency >= thresholds.explicit_workflow_dependency
                 and (has_output or has_named_file or entities >= 1)
             )
             if _OPEN_ENDED_RE.search(text) or (
-                ambiguity >= 0.65 and dependency >= 0.4 and not explicit_workflow
+                ambiguity >= thresholds.m3_ambiguity and dependency >= 0.4 and not explicit_workflow
             ):
                 level = ComplexityLevel.M3
                 confidence = 0.82
                 reasons.append("成功标准开放或需根据中间结果动态决策")
-            elif history_dependency >= 0.6:
+            elif history_dependency >= thresholds.history_dynamic:
                 level = ComplexityLevel.M3
                 confidence = 0.78
                 reasons.append("请求依赖跨任务历史上下文")
-            elif dependency >= 0.35 or entities >= 2 or intent.get("task_type") == "semi_structured":
+            elif dependency >= thresholds.m2_dependency or entities >= 2 or intent.get("task_type") == "semi_structured":
                 level = ComplexityLevel.M2
                 confidence = 0.82
                 reasons.append("包含多实体或有依赖的可规划步骤")
@@ -205,7 +210,7 @@ class TaskComplexityAssessor:
                 confidence = 0.58
                 reasons.append("规则无法确定最小充分路径，采用受控规划")
 
-            if confidence < 0.7 and self._fallback_classifier is not None:
+            if confidence < thresholds.classifier_confidence and self._fallback_classifier is not None:
                 payload = {
                     "request": text[:1000],
                     "entity_count": entities,
@@ -242,11 +247,11 @@ class TaskComplexityAssessor:
             )
 
         total = _clamp(
-            entity_score * 0.18
-            + (1 - explicitness) * 0.2
-            + dependency * 0.25
-            + ambiguity * 0.25
-            + history_dependency * 0.12
+            entity_score * weights.entity_count
+            + (1 - explicitness) * weights.implicitness
+            + dependency * weights.dependency
+            + ambiguity * weights.ambiguity
+            + history_dependency * weights.history_dependency
         )
         return ComplexityScore(
             entity_count=entity_score,

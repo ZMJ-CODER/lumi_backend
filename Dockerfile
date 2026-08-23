@@ -69,18 +69,20 @@ COPY pyproject.toml uv.lock ./
 # ``pip install -e .`` 不能在源码缺失时运行：冷构建会因 setuptools 找不到 app 包失败。
 # 因此先复制源码，再用项目清单安装运行时依赖。
 COPY app ./app
+COPY packages/orchestration ./packages/orchestration
 COPY celery_app ./celery_app
 COPY scripts ./scripts
 COPY tools ./tools
 COPY plugins ./plugins
+COPY config ./config
 COPY alembic ./alembic
 COPY alembic.ini ./
 
 # BuildKit 缓存挂载：下载好的 wheel 跨构建持久化。``pip install .`` 会安装
 # pyproject 的完整运行时集合；导入检查让 temporalio / striprtf 遗漏在构建期失败。
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install . \
-    && python -c "import striprtf; import temporalio; import app.main; print('runtime dependency check passed')"
+    pip install ./packages/orchestration . \
+    && python -c "import lumi_orch; import striprtf; import temporalio; import app.main; print('runtime dependency check passed')"
 
 # ── Docling 模型预热（可选，默认关闭）──
 # 默认不预下载：构建期拉取约 1GB 模型容易卡住/失败；首次解析时按需下载。

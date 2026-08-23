@@ -4,6 +4,7 @@ import asyncio
 
 from app.agents.orchestration.planner import RulePlanner
 from app.agents.orchestration.routing_intent import classify_route_with_llm, infer_route_intent
+from app.agents.orchestration.task_routing import RouteChannel, route_atomic_instruction
 
 
 def _plan(
@@ -16,10 +17,10 @@ def _plan(
     ))
 
 
-def test_fresh_query_routes_to_web_research():
-    tree = _plan("查一下今天上海天气")
+def test_explicit_public_web_query_routes_to_web_research():
+    tree = _plan("请联网搜索今天上海天气，并给我网页来源")
     assert [node.agent for node in tree.nodes] == ["web_research"]
-    assert tree.nodes[0].params["query"] == "查一下今天上海天气"
+    assert tree.nodes[0].params["query"] == "请联网搜索今天上海天气，并给我网页来源"
 
 
 def test_multi_action_routes_to_react_without_domain_keywords():
@@ -73,9 +74,9 @@ def test_route_intent_is_domain_neutral():
     assert "contract" not in intent.objects
 
 
-def test_colloquial_fresh_query_routes_to_web():
-    tree = _plan("你帮我看下现在外面什么情况")
-    assert [node.agent for node in tree.nodes] == ["web_research"]
+def test_colloquial_private_time_reference_does_not_route_to_web():
+    tree = _plan("你帮我看下我今天的任务现在什么情况")
+    assert [node.agent for node in tree.nodes] != ["web_research"]
 
 
 def test_colloquial_compare_uses_uploaded_documents_without_react():
@@ -367,3 +368,47 @@ def test_english_compound_request_uses_preset_key_fallback(monkeypatch):
     assert seen == ["preset-key"]
     assert [node.agent for node in tree.nodes] == ["react_step"]
     assert tree.nodes[0].approval is True
+
+
+def test_multi_document_fact_request_uses_fixed_targeting_before_answer():
+    docs = [
+        {"doc_id": f"doc-{index}", "filename": f"供应商资料-{index}.pdf"}
+        for index in range(1, 8)
+    ]
+    tree = _plan(
+        "这几个文件我一时分不清。帮我找出写了付款期限和违约条款的那一份，"
+        "读完确认条件满足后再继续下一步，但别把每份文件都拆成一个任务。",
+        docs,
+    )
+
+    assert [node.agent for node in tree.nodes] == ["document_targeting", "direct_llm"]
+    target, answer = tree.nodes
+    assert target.metadata["route_channel"] == "rag"
+    assert len(target.params["office_docs"]) == 7
+    assert target.metadata["document_discovery_required"] is True
+    assert answer.depends_on == [target.id]
+
+
+def test_multi_document_fact_unit_routes_to_rag_before_agent():
+    decision = route_atomic_instruction(
+        "帮我查一下哪份附件写了交付日期",
+        has_authorized_documents=True,
+        office_document_count=7,
+    )
+    assert decision.channel == RouteChannel.RAG
+
+
+def test_ambiguous_multi_document_targeting_replans_to_bounded_react():
+    docs = [
+        {"doc_id": "a", "filename": "合同一.pdf"},
+        {"doc_id": "b", "filename": "合同二.pdf"},
+    ]
+    tree = asyncio.run(RulePlanner().plan(
+        "u1",
+        "哪份附件写了付款期限？",
+        office_docs=docs,
+        prior_summaries='{"error_code":"DOCUMENT_SELECTION_AMBIGUOUS"}',
+    ))
+    assert [node.agent for node in tree.nodes] == ["react_step"]
+    assert tree.nodes[0].params["max_rounds"] == 4
+    assert tree.nodes[0].metadata["route_channel"] == "agent"

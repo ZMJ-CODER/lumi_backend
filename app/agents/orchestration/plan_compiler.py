@@ -167,7 +167,7 @@ def _validate_plan_step_contract(
         ))
         return
     try:
-        from app.agents.orchestration.route_plan import PlanStep
+        from lumi_orch.plan_dsl import PlanStep
 
         step = PlanStep.model_validate(raw)
     except Exception as exc:  # noqa: BLE001
@@ -311,8 +311,22 @@ async def compile_plan(
     if not compiled_nodes:
         violations.append(PlanViolation(code="EMPTY_PLAN", message="规划没有生成可执行节点"))
     if len(compiled_nodes) > max_nodes:
+        # A logical plan owns the complete graph outside Job.nodes and only
+        # materializes a bounded ready frontier.  Do not ask the LLM to
+        # squeeze a long, valid plan back into the execution window: that
+        # drops coverage and was the reason nine-node office plans stopped
+        # after the feedback replan.  Keep a hard rejection for deployments
+        # that explicitly disable logical plans.
+        logical_enabled = bool(getattr(settings, "AGENT_LOGICAL_PLAN_ENABLED", False))
         violations.append(PlanViolation(
-            code="NODE_LIMIT", message=f"计划包含 {len(compiled_nodes)} 个节点，超过当前窗口上限 {max_nodes}；应改为逻辑计划或任务清单",
+            code="NODE_LIMIT",
+            message=(
+                f"计划包含 {len(compiled_nodes)} 个节点，超过当前窗口上限 {max_nodes}；"
+                "将转为逻辑计划滚动执行"
+                if logical_enabled
+                else f"计划包含 {len(compiled_nodes)} 个节点，超过当前窗口上限 {max_nodes}；应改为逻辑计划或任务清单"
+            ),
+            severity="warning" if logical_enabled else "error",
         ))
     try:
         validate_dag(compiled_nodes)

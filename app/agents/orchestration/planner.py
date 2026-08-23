@@ -83,6 +83,75 @@ class PlannerModelError(RuntimeError):
         self.code = code
 
 
+def _is_multi_document_fact_request(request: str, office_docs: list[dict] | None) -> bool:
+    """Use the governed feature rather than duplicating a Planner lexicon."""
+    from app.agents.orchestration.policy.features import build_routing_features
+
+    authorized = [item for item in office_docs or [] if item.get("doc_id")]
+    return build_routing_features(
+        request,
+        has_authorized_documents=bool(authorized),
+        office_document_count=len(authorized),
+        office_documents=authorized,
+    ).requires_multi_document_targeting
+
+
+def _multi_document_targeting_tree(request: str, office_docs: list[dict]) -> TaskTree:
+    """Fixed inspect → scoped read → answer path; no default ReAct loop."""
+    target_id = f"md{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    answer_id = f"ma{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    docs = [
+        {"doc_id": str(item.get("doc_id")), "filename": str(item.get("filename") or "")}
+        for item in office_docs if item.get("doc_id")
+    ]
+    return TaskTree(
+        nodes=[
+            TaskNode(
+                id=target_id,
+                name="定位并读取相关文档",
+                agent="document_targeting",
+                params={"query": request, "office_docs": docs},
+                metadata={
+                    "route_channel": "rag",
+                    "document_discovery_required": True,
+                    "routing": {"reason": "multi_document_fact_lookup", "strategy": "fixed_targeting"},
+                },
+                depends_on=[],
+            ),
+            TaskNode(
+                id=answer_id,
+                name="基于定位文档回答",
+                agent="direct_llm",
+                params={"instruction": "仅依据前序已定位并读取的文档回答用户问题；资料不足时明确说明，不能猜测。\n用户问题：" + request},
+                metadata={"route_channel": "direct_llm", "routing": {"reason": "scoped_document_answer"}},
+                depends_on=[target_id],
+            ),
+        ],
+        plan_text="先盘点摘要并唯一定位文档；仅在定位明确后读取该文档并作答。摘要无法唯一定位时，升级为受限动态核验。",
+    )
+
+
+def _multi_document_react_tree(request: str, office_docs: list[dict]) -> TaskTree:
+    """Bounded fallback used only when summary-level selection is ambiguous."""
+    return TaskTree(
+        nodes=[TaskNode(
+            id=f"mr{int(time.time())}-{uuid.uuid4().hex[:6]}",
+            name="动态核验多份文档",
+            agent="react_step",
+            params={
+                "instruction": request,
+                "max_rounds": 4,
+                "office_docs": [
+                    {"doc_id": str(item.get("doc_id")), "filename": str(item.get("filename") or "")}
+                    for item in office_docs if item.get("doc_id")
+                ],
+            },
+            metadata={"route_channel": "agent", "document_discovery_required": True, "routing": {"reason": "multi_document_ambiguous_fallback"}},
+        )],
+        plan_text="摘要无法唯一定位目标，使用最多四轮的受限动态核验。",
+    )
+
+
 def _direct_conversion_tree(request: str, conversion: dict) -> TaskTree:
     """为单文件文本转换创建唯一的脚本节点。
 
@@ -375,6 +444,14 @@ class RulePlanner(Planner):
         # 通用意图路由是确定性规划的最后一道边界。旧的办公快捷路径已经在
         # 上面处理；这里不再把所有未知请求伪装成 retrieval，而是按来源和
         # 副作用选择执行形态，低置信度请求直接向用户补问。
+        if _is_multi_document_fact_request(request, office_docs):
+            from app.agents.core.registry import AgentRegistry, ensure_registered
+
+            ensure_registered()
+            if "DOCUMENT_SELECTION_AMBIGUOUS" in prior_summaries and AgentRegistry.get("react_step") is not None:
+                return _multi_document_react_tree(request, office_docs or [])
+            if AgentRegistry.get("document_targeting") is not None and AgentRegistry.get("direct_llm") is not None:
+                return _multi_document_targeting_tree(request, office_docs or [])
         route = infer_route_intent(request, office_docs, prior_summaries=prior_summaries)
         # Rules remain the fast path. A small, strict JSON classifier only fills
         # long-tail gaps; its candidate is merged and still goes through the
@@ -973,6 +1050,13 @@ class LlmPlanner(Planner):
                 )],
                 plan_text=f"按要求生成并校验《{output_contract['expected_output_names'][0]}》。",
             )
+        if _is_multi_document_fact_request(request, office_docs):
+            from app.agents.core.registry import AgentRegistry
+
+            if "DOCUMENT_SELECTION_AMBIGUOUS" in prior_summaries and AgentRegistry.get("react_step") is not None:
+                return _multi_document_react_tree(request, office_docs or [])
+            if AgentRegistry.get("document_targeting") is not None and AgentRegistry.get("direct_llm") is not None:
+                return _multi_document_targeting_tree(request, office_docs or [])
         # 意图分类（规则粗分类）：模板 / 半结构 / 自由
         intent = classify(request, office_docs)
         if intent["task_type"] == "template":

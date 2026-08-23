@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lumi-orchestration"
+version = "0.1.0"
+description = "Deterministic orchestration kernel for Lumi"
+requires-python = "==3.13.*"
+dependencies = [
+    "pydantic>=2.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# Runtime adapters, not kernel requirements.  The app layer chooses Redis and
+# LangGraph implementations, so this package remains testable without either.
+redis = ["redis>=5.0.0"]
+langgraph = ["langgraph>=1.0.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"

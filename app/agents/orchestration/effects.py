@@ -1,71 +1,88 @@
-"""副作用幂等日志：防止节点内部重试和 Temporal Activity 重试重复提交。"""
+"""Application adapter for the durable external-effect journal.
+
+The orchestration kernel owns record state transitions. This adapter owns the
+Postgres persistence choice. There is intentionally no Redis or process-memory
+fallback: when a write cannot reserve durable intent, its tool body must not
+run.
+"""
 
 from __future__ import annotations
 
-import asyncio
-import json
-import time
+from typing import Any
+
+from lumi_orch.effects import (
+    confirm_record,
+    effect_intent_for_node,
+    intent_record,
+    uncertain_record,
+)
+
+from app.repositories.effect_journal_repository import (
+    EffectJournalRepository,
+    EffectJournalUnavailable,
+    PostgresEffectJournalRepository,
+)
 
 
-_memory: dict[str, dict] = {}
-_memory_lock = asyncio.Lock()
+_repository: EffectJournalRepository | None = None
 
 
-def _key(key: str) -> str:
-    return f"agent:effect:{key}"
+def _journal() -> EffectJournalRepository:
+    global _repository
+    if _repository is None:
+        _repository = PostgresEffectJournalRepository()
+    return _repository
 
 
-async def _redis():
-    try:
-        from app.core.redis import get_redis
-
-        return get_redis()
-    except Exception:  # noqa: BLE001
-        return None
+def set_effect_journal_repository_for_tests(repository: EffectJournalRepository | None) -> None:
+    """Install an explicit test double; production never calls this function."""
+    global _repository
+    _repository = repository
 
 
-async def get_effect(key: str) -> dict | None:
-    redis = await _redis()
-    if redis is not None:
-        raw = await redis.get(_key(key))
-        return json.loads(raw) if raw else None
-    async with _memory_lock:
-        return dict(_memory[key]) if key in _memory else None
+async def get_effect(key: str) -> dict[str, Any] | None:
+    return await _journal().get(key)
 
 
-async def begin_effect(key: str) -> tuple[bool, dict | None]:
-    record = {"status": "pending", "updated_at": time.time()}
-    redis = await _redis()
-    if redis is not None:
-        created = await redis.set(_key(key), json.dumps(record), ex=86400 * 7, nx=True)
-        return bool(created), None if created else await get_effect(key)
-    async with _memory_lock:
-        if key in _memory:
-            return False, dict(_memory[key])
-        _memory[key] = record
-        return True, None
+async def record_effect_intent(
+    key: str,
+    intent: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Durably reserve an effect before entering its tool body."""
+    return await _journal().record_intent(key, intent_record(intent).model_dump(exclude_none=True))
 
 
-async def finish_effect(key: str, status: str, result: dict | None = None) -> None:
-    record = {"status": status, "result": result, "updated_at": time.time()}
-    redis = await _redis()
-    if redis is not None:
-        await redis.set(_key(key), json.dumps(record, ensure_ascii=False, default=str), ex=86400 * 7)
+async def confirm_effect(key: str, result: dict[str, Any] | None = None) -> None:
+    previous = await get_effect(key)
+    if previous is None:
+        raise EffectJournalUnavailable("副作用日志记录不存在")
+    await _journal().confirm(key, confirm_record(previous, result).model_dump(exclude_none=True))
+
+
+async def mark_effect_uncertain(key: str, reason: str = "execution_interrupted") -> None:
+    previous = await get_effect(key)
+    if previous is None:
+        raise EffectJournalUnavailable("副作用日志记录不存在")
+    await _journal().mark_uncertain(key, uncertain_record(previous, reason).model_dump(exclude_none=True))
+
+
+# Compatibility shims for independently deployed Temporal workers.
+async def begin_effect(key: str, intent: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any] | None]:
+    return await record_effect_intent(key, intent)
+
+
+async def finish_effect(key: str, status: str, result: dict[str, Any] | None = None) -> None:
+    if status in {"committed", "confirmed"}:
+        await confirm_effect(key, result)
         return
-    async with _memory_lock:
-        _memory[key] = record
+    await mark_effect_uncertain(key, status)
 
 
 async def abandon_pending_effect(key: str) -> None:
-    """Remove a reservation made before a confirmation-gated tool ran.
+    """Remove an intent known to have stopped before its tool body started."""
+    await _journal().abandon_pending(key)
 
-    This is intentionally narrow: callers use it only for an
-    ``approval_required`` escalation, which is guaranteed to occur before the
-    underlying tool body starts. Other failure classes stay durable/uncertain.
-    """
-    redis = await _redis()
-    if redis is not None:
-        await redis.delete(_key(key))
-        return
-    async with _memory_lock:
-        _memory.pop(key, None)
+
+async def recover_orphaned_effect_intents(older_than_seconds: int) -> int:
+    """Mark stale reservation-only records uncertain after a safe grace period."""
+    return await _journal().mark_stale_intents_uncertain(older_than_seconds)

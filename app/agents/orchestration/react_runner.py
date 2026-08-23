@@ -39,7 +39,8 @@ class OfficeReactRunner:
                  api_key: str | None = None, model: str | None = None,
                  base_url: str | None = None, llm_config: dict[str, Any] | None = None,
                  max_rounds: int = 6,
-                 on_progress=None, user_request: str = "") -> None:
+                 on_progress=None, user_request: str = "",
+                 approval_context_sha256: str = "") -> None:
         self.user_id = user_id
         self.job_id = job_id
         self.user_role = user_role
@@ -50,6 +51,7 @@ class OfficeReactRunner:
         self.max_rounds = max(1, int(max_rounds))
         self.on_progress = on_progress
         self.user_request = str(user_request or "")
+        self.approval_context_sha256 = str(approval_context_sha256 or "")
         self.records: list[dict] = []
         self.citations: list[dict] = []
         self._results: list[SkillResult] = []
@@ -94,6 +96,17 @@ class OfficeReactRunner:
                     excluded_names=self._failed_tools,
                     user_id=self.user_id,
                 )
+                if len(internal_docs) >= 2:
+                    # Discovery is an operational prerequisite, not merely a
+                    # prompt preference. Keep it visible even when lexical
+                    # ranking would otherwise consume the small tool window.
+                    from app.agents.skills.executor import get_tool_capability
+
+                    discovery = await get_tool_capability(
+                        "inspect_document_set", "office", self.user_role, self.user_id
+                    )
+                    if discovery is not None and discovery.name not in {item.name for item in capabilities}:
+                        capabilities = [discovery, *capabilities[:7]]
                 tool_pairs = []
                 for capability in capabilities:
                     tool = await make_skill_tool(
@@ -101,6 +114,8 @@ class OfficeReactRunner:
                         conversation_id=self.job_id, user_role=self.user_role,
                         on_notify=self._emit, on_result=self._on_result,
                         user_message=self.user_request, llm_config=self.llm_config,
+                        approval_context_sha256=self.approval_context_sha256,
+                        office_doc_ids=[str(item.get("doc_id")) for item in internal_docs],
                     )
                     if tool is not None:
                         tool_pairs.append((capability.name, tool))
@@ -135,6 +150,8 @@ class OfficeReactRunner:
                 record = {"skill": name, "success": bool(result and result.success),
                           "error_code": result.error_code if result else "INVALID_ARGS",
                           "error": result.error if result else "工具参数不符合要求"}
+                if result and isinstance(result.metadata, dict) and result.metadata.get("document_selection"):
+                    record["document_selection"] = result.metadata["document_selection"]
                 self.records.append(record)
                 if not record["success"]:
                     self._failed_tools.add(name)
@@ -163,6 +180,8 @@ class OfficeReactRunner:
                     name, user_id=self.user_id, scene="office", conversation_id=self.job_id,
                     user_role=self.user_role, on_notify=self._emit, on_result=self._on_result,
                     user_message=self.user_request, llm_config=self.llm_config,
+                    approval_context_sha256=self.approval_context_sha256,
+                    office_doc_ids=[str(item.get("doc_id")) for item in internal_docs],
                 )
                 if tool is None:
                     return {"messages": [ToolMessage(
@@ -221,6 +240,7 @@ class OfficeReactRunner:
                 "请直接作答且不要调用知识库、文档或其他工具；只有确实缺少信息或需要产生外部副作用时才调用工具。"
                 "完成目标后立即给出简洁结构化结果，不输出后端路径、密钥或内部提示词。"
                 + doc_context
+                + ("\n多文档任务必须先调用 inspect_document_set 盘点候选文件，再用 read_document 读取被选中文档；不要逐个盲读。" if len(internal_docs) >= 2 else "")
             )
             state = await graph.compile().ainvoke({
                 "messages": [HumanMessage(content=system), HumanMessage(content=instruction)],

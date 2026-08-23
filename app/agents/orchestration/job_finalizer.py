@@ -52,3 +52,15 @@ class JobFinalizer:
         await self._stop_heartbeat(job.job_id)
         self._on_terminal(job)
         return True
+
+    async def suspend_capacity(self, job: Job | None) -> bool:
+        """Release admission/heartbeat for a non-terminal suspended job.
+
+        Waiting approval/resource jobs remain queryable and resumable, but do
+        not count against global or per-user active-task quotas.
+        """
+        if job is None:
+            return False
+        await self._release_capacity(job)
+        await self._stop_heartbeat(job.job_id)
+        return True

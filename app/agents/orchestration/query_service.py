@@ -77,11 +77,17 @@ class JobQueryService:
                 JobStatus.RUNNING,
                 JobStatus.PAUSED,
                 JobStatus.WAITING_APPROVAL,
+                JobStatus.WAITING_RESOURCES,
             }:
                 logger.warning("Redis 未读到运行中任务快照，使用本地执行镜像: {}", job_id[:8])
                 job = live_job.model_copy(deep=True)
         if job is None:
             return None
+
+        if job.status == JobStatus.WAITING_APPROVAL:
+            from app.agents.orchestration.approval_service import ApprovalService
+
+            await ApprovalService(store=self._store).expire_if_due(job)
 
         await self._finalizer.finalize(job)
         return await self._attach_progress(job)

@@ -58,6 +58,12 @@ dependencies = [
     "sentry-sdk>=2.68.0",
     "prometheus-client>=0.26.0",
     "flagembedding>=1.4.0",
+    # Routing policy files are explicit runtime input, not an accidental
+    # transitive dependency of another package.
+    "PyYAML>=6.0",
+    # Business adapters import the deterministic kernel through the local
+    # workspace package; Docker installs it before this application package.
+    "lumi-orchestration>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -80,6 +86,10 @@ default = true
 # 本机想用镜像时通过环境变量覆盖：UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 
 [tool.uv.sources]
+# The kernel is versioned with this backend but has its own package boundary,
+# tests and dependencies.  Do not replace this with a relative file URL: uv
+# workspace membership keeps local and CI resolution consistent.
+lumi-orchestration = { workspace = true }
 # torch 必须用 CUDA 版（PyPI 上是 CPU 版，uv sync 会把它覆盖导致嵌入模型无法用 GPU）
 # 仅 Windows 本地生效；Linux（CI/Docker）从索引解析 CPU 版
 torch = [
@@ -96,6 +106,9 @@ environments = [
   "sys_platform == 'linux'",
   "sys_platform == 'win32'",
 ]
+
+[tool.uv.workspace]
+members = ["packages/orchestration"]
 
 [tool.setuptools.packages.find]
 include = ["app*", "celery_app*"]

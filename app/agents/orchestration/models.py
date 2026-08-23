@@ -3,6 +3,7 @@
 import time
 from enum import Enum
 
+from lumi_orch.resources import ResourceClaim
 from pydantic import BaseModel, Field
 
 
@@ -33,14 +34,8 @@ class JobStatus(str, Enum):
     INTERRUPTED = "interrupted"  # 用户终止 / 断网超时
     CANCELLED = "cancelled"
     WAITING_APPROVAL = "waiting_approval"  # 等待人工审批
+    WAITING_RESOURCES = "waiting_resources"  # 写资源协调服务暂不可用
     CONTINUING = "continuing"  # 长清单已完成当前批次，正在物化下一批
-
-
-class ResourceClaim(BaseModel):
-    """节点对外部资源的访问声明；同资源 write 与任何访问互斥。"""
-
-    key: str
-    mode: str = "read"  # read / write
 
 
 class TaskNode(BaseModel):

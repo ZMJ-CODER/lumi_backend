@@ -9,44 +9,16 @@
 """
 
 import asyncio
+import hashlib
+import json
 import time
+from collections.abc import Awaitable, Callable, Mapping
+
+from lumi_orch.dag import DagValidationError, decide_next_nodes, validate_dag
+from lumi_orch.ports import JobStateStorePort, NodeWorkerPort, ReviewPort
 
 from app.agents.orchestration.models import Job, JobStatus, TaskNode, TaskStatus
-from app.agents.orchestration.state import StateStore
 from app.core.config import settings
-
-
-class DagValidationError(Exception):
-    """DAG 结构非法（环 / 依赖缺失 / id 重复）."""
-
-
-def validate_dag(nodes: list[TaskNode]) -> None:
-    """校验 DAG：id 唯一、依赖存在、无环（Kahn 拓扑检测）."""
-    ids = {n.id for n in nodes}
-    if len(ids) != len(nodes):
-        raise DagValidationError("任务节点 id 重复")
-    for n in nodes:
-        missing = [d for d in n.depends_on if d not in ids]
-        if missing:
-            raise DagValidationError(f"节点 {n.id} 依赖不存在: {missing}")
-    # Kahn 环检测
-    indegree = {n.id: 0 for n in nodes}
-    children: dict[str, list[str]] = {n.id: [] for n in nodes}
-    for n in nodes:
-        for d in n.depends_on:
-            children[d].append(n.id)
-            indegree[n.id] += 1
-    queue = [nid for nid, deg in indegree.items() if deg == 0]
-    visited = 0
-    while queue:
-        nid = queue.pop()
-        visited += 1
-        for c in children[nid]:
-            indegree[c] -= 1
-            if indegree[c] == 0:
-                queue.append(c)
-    if visited != len(nodes):
-        raise DagValidationError("任务依赖存在环，无法执行")
 
 
 # 各 agent 的必选参数（校验规划结果用）
@@ -60,6 +32,7 @@ _REQUIRED_PARAMS: dict[str, list[str]] = {
     "office_research": ["instruction", "mode"],
     "office_todo": ["action"],
     "retrieval": ["query"],
+    "document_targeting": ["query", "office_docs"],
     "web_research": ["instruction"],
     "code": ["project_id", "instruction"],
     "code_reader": ["project_id", "instruction"],
@@ -101,20 +74,48 @@ def validate_planned_dag(
 
 async def execute_dag(
     job: Job,
-    workers: dict,
-    review,
-    store: StateStore,
+    workers: Mapping[str, NodeWorkerPort],
+    review: ReviewPort,
+    store: JobStateStorePort,
     *,
     concurrency: int | None = None,
     llm_api_key: str | None = None,
     llm_config: dict | None = None,
+    on_waiting_resources: Callable[[Job], Awaitable[None]] | None = None,
+    ensure_active_capacity: Callable[[Job], Awaitable[bool]] | None = None,
 ) -> Job:
     """执行整个 DAG；就地更新 job.nodes 状态并持久化."""
     validate_dag(job.nodes)
     concurrency = concurrency or settings.AGENT_NODE_CONCURRENCY
     sem = asyncio.Semaphore(max(1, concurrency))
-    from app.agents.orchestration.resources import resource_coordinator
+    from app.agents.orchestration.resources import (
+        WriteResourceCoordinationUnavailable,
+        resource_coordinator,
+    )
     from app.agents.orchestration.safety import prepare_node_safety
+    from app.agents.orchestration.node_timeouts import node_timeout_seconds
+
+    def _node_timeout(node: TaskNode) -> int:
+        return node_timeout_seconds(node)
+
+    async def _enter_waiting_resources(node: TaskNode) -> None:
+        """Persist a bounded wait and release active admission capacity once."""
+        node.status = TaskStatus.PENDING
+        node.metadata = dict(node.metadata or {})
+        node.metadata["waiting_resources"] = True
+        node.error = "写资源协调服务暂不可用，任务将自动等待恢复"
+        node.error_code = "RESOURCE_COORDINATION_UNAVAILABLE"
+        job.status = JobStatus.WAITING_RESOURCES
+        job.routing = dict(job.routing or {})
+        job.routing.setdefault("waiting_resources_started_at", time.time())
+        if not job.routing.get("admission_released_while_waiting"):
+            # Mark before the callback: a process crash after release must not
+            # make a resumed job look as if it still owns an active slot.
+            job.routing["admission_released_while_waiting"] = True
+            await store.save_job(job)
+            if on_waiting_resources is not None:
+                await on_waiting_resources(job)
+        await store.save_job(job)
 
     # 以 store 中的任务为权威对象（cancel/pause 由 API 写入 store）；
     # 全程只操作这一个 job 对象，避免"副本节点对象"导致状态写不回去。
@@ -153,8 +154,30 @@ async def execute_dag(
         node.metadata["dependency_results"] = await build_dependency_context_from_refs(
             node, node_by_id, user_id=job.user_id
         )
+        dependency_hashes: list[str] = []
+        for dependency_id in node.depends_on:
+            dependency = node_by_id.get(dependency_id)
+            if dependency is None:
+                continue
+            result_ref = (dependency.metadata or {}).get("result_ref")
+            digest = str((result_ref or {}).get("sha256") or "") if isinstance(result_ref, dict) else ""
+            if not digest and dependency.result:
+                raw = json.dumps(dependency.result, ensure_ascii=False, sort_keys=True, default=str)
+                digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            if digest:
+                dependency_hashes.append(digest)
+        node.metadata["approval_upstream_sha256"] = (
+            hashlib.sha256("|".join(sorted(dependency_hashes)).encode("utf-8")).hexdigest()
+            if dependency_hashes else ""
+        )
 
-        from app.agents.orchestration.effects import begin_effect, finish_effect
+        from app.agents.orchestration.effects import (
+            EffectJournalUnavailable,
+            confirm_effect,
+            effect_intent_for_node,
+            mark_effect_uncertain,
+            record_effect_intent,
+        )
         from app.agents.orchestration.safety import is_effectful
 
         effectful = is_effectful(node)
@@ -162,10 +185,23 @@ async def execute_dag(
         # never be journaled as an uncertain side effect, otherwise the later
         # user approval cannot safely resume the exact same node.
         if effectful and node.idempotency_key:
-            created, existing = await begin_effect(node.idempotency_key)
+            try:
+                created, existing = await record_effect_intent(
+                    node.idempotency_key,
+                    effect_intent_for_node(job_id=job.job_id, node=node),
+                )
+            except EffectJournalUnavailable:
+                # A write must never start without a durable intent record.
+                node.status = TaskStatus.FAILED
+                node.error_code = "EFFECT_JOURNAL_UNAVAILABLE"
+                node.error = "副作用安全日志不可用，已阻止执行以避免重复操作"
+                node.effect_status = "pending"
+                node.completed_at = time.time()
+                await store.save_job(job)
+                return
             if not created:
                 status = str((existing or {}).get("status") or "uncertain")
-                if status == "committed" and isinstance((existing or {}).get("result"), dict):
+                if status in {"committed", "confirmed"} and isinstance((existing or {}).get("result"), dict):
                     node.status = TaskStatus.COMPLETED
                     node.result = (existing or {})["result"]
                     node.effect_status = "committed"
@@ -211,7 +247,7 @@ async def execute_dag(
                 node=node,
                 ctx=_ctx(node),
                 review=review,
-                timeout_seconds=settings.AGENT_NODE_TIMEOUT_SECONDS,
+                timeout_seconds=_node_timeout(node),
                 max_retries=0 if effectful else node.max_retries,
                 effectful=effectful,
                 on_running=on_running,
@@ -223,7 +259,12 @@ async def execute_dag(
             node.error = "任务被中断"
             if effectful and node.idempotency_key:
                 node.effect_status = "uncertain"
-                await finish_effect(node.idempotency_key, "uncertain")
+                try:
+                    await mark_effect_uncertain(node.idempotency_key, "task_cancelled")
+                except EffectJournalUnavailable:
+                    # The durable intent remains; do not turn cancellation into
+                    # a retryable write on the next resume.
+                    node.error_code = "EFFECT_JOURNAL_UNAVAILABLE"
             await store.save_job(job)
             raise
 
@@ -234,8 +275,16 @@ async def execute_dag(
             node.status = TaskStatus.COMPLETED
             node.result = attach_display_result(node, outcome.result or {})
             if effectful and node.idempotency_key:
-                node.effect_status = "committed"
-                await finish_effect(node.idempotency_key, "committed", outcome.result)
+                try:
+                    await confirm_effect(node.idempotency_key, outcome.result)
+                    node.effect_status = "committed"
+                except EffectJournalUnavailable:
+                    # The tool body may already have succeeded. Its pre-write
+                    # intent remains authoritative, so fail closed as uncertain.
+                    node.status = TaskStatus.FAILED
+                    node.error_code = "EFFECT_JOURNAL_UNAVAILABLE"
+                    node.error = "副作用已执行但安全日志确认失败，已停止自动重试"
+                    node.effect_status = "uncertain"
         else:
             node.status = TaskStatus.ESCALATED if outcome.escalation else TaskStatus.FAILED
             # L2 arbitration may need the attempted tool/compact evidence to
@@ -249,19 +298,31 @@ async def execute_dag(
                 node.metadata["recovery"] = outcome.recovery
             if outcome.escalation:
                 node.metadata["escalation"] = outcome.escalation
+            if isinstance(outcome.result, dict) and isinstance(outcome.result.get("tool_metadata"), dict):
+                node.metadata["tool_metadata"] = dict(outcome.result["tool_metadata"])
             if effectful and node.idempotency_key and not (
                 outcome.escalation
                 and str((outcome.escalation or {}).get("reason") or "") == "approval_required"
             ):
                 node.effect_status = "uncertain"
-                await finish_effect(node.idempotency_key, "uncertain")
+                try:
+                    await mark_effect_uncertain(node.idempotency_key, node.error_code or "execution_failed")
+                except EffectJournalUnavailable:
+                    node.error_code = "EFFECT_JOURNAL_UNAVAILABLE"
+                    node.error = "副作用执行状态无法写入安全日志，已停止自动重试"
             elif effectful and node.idempotency_key:
                 from app.agents.orchestration.effects import abandon_pending_effect
 
                 # The reservation was created before the worker discovered a
                 # confirmation requirement; no side effect has run yet.
-                await abandon_pending_effect(node.idempotency_key)
-                node.effect_status = "pending"
+                try:
+                    await abandon_pending_effect(node.idempotency_key)
+                    node.effect_status = "pending"
+                except EffectJournalUnavailable:
+                    node.status = TaskStatus.FAILED
+                    node.error_code = "EFFECT_JOURNAL_UNAVAILABLE"
+                    node.error = "审批前副作用日志无法清理，已停止自动重试"
+                    node.effect_status = "uncertain"
         node.completed_at = time.time()
         try:
             from app.agents.orchestration.execution_lineage import (
@@ -303,6 +364,12 @@ async def execute_dag(
             confirmed_tool_calls=frozenset(
                 str(value) for value in ((node.metadata or {}).get("confirmed_tool_calls") or [])
             ),
+            approval_context_sha256=str((node.metadata or {}).get("approval_upstream_sha256") or ""),
+            office_doc_ids=tuple(
+                str(item.get("doc_id"))
+                for item in (node.params.get("office_docs") or [])
+                if isinstance(item, dict) and item.get("doc_id")
+            ) or tuple(str(value) for value in (node.params.get("doc_ids") or []) if str(value)),
             on_output=on_output,
         )
 
@@ -326,18 +393,30 @@ async def execute_dag(
     running_by_id: dict[str, asyncio.Task] = {}
 
     async def _with_sem(node: TaskNode) -> None:
+        # A write is never allowed to fall back to an in-process lock when the
+        # distributed coordinator is unavailable. Do this before taking the
+        # scarce channel lease (the agent channel has only a few slots).
+        if not await resource_coordinator.write_coordination_available(node.resource_claims):
+            await _enter_waiting_resources(node)
+            return
         async with sem:
             from app.agents.orchestration.channel_limits import channel_limiter
 
             channel = str((node.metadata or {}).get("route_channel") or "agent")
-            async with channel_limiter.claim(
-                channel, lease_seconds=max(60, int(settings.AGENT_NODE_TIMEOUT_SECONDS) + 60)
-            ):
-                async with resource_coordinator.claim(
-                    node.resource_claims,
-                    ttl=max(60, int(settings.AGENT_NODE_TIMEOUT_SECONDS) + 60),
+            timeout = _node_timeout(node)
+            try:
+                async with channel_limiter.claim(
+                    channel, lease_seconds=max(60, timeout + 60)
                 ):
-                    await run_node(node)
+                    async with resource_coordinator.claim(
+                        node.resource_claims,
+                        ttl=max(60, timeout + 60),
+                    ):
+                        await run_node(node)
+            except WriteResourceCoordinationUnavailable:
+                # Redis may fail after the preflight check. No tool body (and
+                # therefore no effect intent) has run at this point.
+                await _enter_waiting_resources(node)
 
     while pending or running_by_id:
         await sync_status()
@@ -377,45 +456,81 @@ async def execute_dag(
             await store.save_job(job)
             return
 
-        # 依赖明确失败的节点无需等待其他分支，立即原子化跳过。
-        changed = False
-        for nid in list(pending):
-            node = node_by_id[nid]
-            if not node.metadata.get("continue_on_dependency_failure") and any(
-                node_by_id[d].status
-                in (
-                    TaskStatus.FAILED,
-                    TaskStatus.SKIPPED,
-                    TaskStatus.CANCELLED,
-                    TaskStatus.INTERRUPTED,
-                    TaskStatus.ESCALATED,
-                )
-                for d in node.depends_on
-            ):
+        # A failed distributed write-lock service pauses only the affected
+        # write nodes. Independent/read-only nodes retain their fail-open
+        # behavior and may continue to completion.
+        waiting_resources = {
+            nid for nid in pending
+            if bool((node_by_id[nid].metadata or {}).get("waiting_resources"))
+        }
+        if job.status == JobStatus.WAITING_RESOURCES and waiting_resources:
+            started_at = float((job.routing or {}).get("waiting_resources_started_at") or time.time())
+            wait_limit = max(60, int(settings.AGENT_WAITING_RESOURCES_TIMEOUT_SECONDS))
+            if time.time() - started_at >= wait_limit:
+                job.status = JobStatus.PAUSED
+                job.error = "写资源协调服务在等待时限内未恢复，任务已暂停，请恢复服务后手动继续。"
+                job.routing = dict(job.routing or {})
+                job.routing["resource_wait_timeout"] = True
+                await store.save_job(job)
+                return job
+            recovered = True
+            for nid in waiting_resources:
+                if not await resource_coordinator.write_coordination_available(
+                    node_by_id[nid].resource_claims
+                ):
+                    recovered = False
+                    break
+            if recovered:
+                if ensure_active_capacity is not None and not await ensure_active_capacity(job):
+                    # The task is no longer admitted.  Do not resume a write
+                    # just because Redis recovered while the user/global pool
+                    # is full; keep it in the suspended wait pool.
+                    await asyncio.sleep(1)
+                    continue
+                for nid in waiting_resources:
+                    node = node_by_id[nid]
+                    node.metadata = dict(node.metadata or {})
+                    node.metadata.pop("waiting_resources", None)
+                    node.error = None
+                    node.error_code = None
+                    node.status = TaskStatus.PENDING
+                job.status = JobStatus.RUNNING
+                job.routing = dict(job.routing or {})
+                job.routing.pop("waiting_resources_started_at", None)
+                await store.save_job(job)
+                waiting_resources = set()
+
+        decision = decide_next_nodes(
+            node_by_id,
+            pending_ids=pending,
+            completed_ids=completed,
+            settled_ids=settled,
+            waiting_resource_ids=waiting_resources,
+        )
+        if decision.skip_ids:
+            for nid in decision.skip_ids:
+                node = node_by_id[nid]
                 node.status = TaskStatus.SKIPPED
                 node.error = "前置依赖失败"
                 node.completed_at = time.time()
                 pending.discard(nid)
-                changed = True
-        if changed:
             await store.save_job(job)
 
         # 调度所有依赖已完成的步骤；它们只受 semaphore 限流，不形成批次屏障。
         # 清单节点显式声明失败可继续，因此以终态而非成功态解除其串行依赖。
-        for nid in list(pending):
+        for nid in decision.ready_ids:
             node = node_by_id[nid]
-            dependency_state = (
-                settled
-                if node.metadata.get("continue_on_dependency_failure")
-                else completed
-            )
-            if all(d in dependency_state for d in node.depends_on):
-                node.status = TaskStatus.READY
-                await store.save_job(job)
-                running_by_id[nid] = asyncio.create_task(_with_sem(node))
-                pending.discard(nid)
+            node.status = TaskStatus.READY
+            await store.save_job(job)
+            running_by_id[nid] = asyncio.create_task(_with_sem(node))
+            pending.discard(nid)
 
         if not running_by_id:
+            if waiting_resources:
+                # Keep the execution loop alive without holding a semaphore or
+                # channel lease. The next iteration probes Redis again.
+                await asyncio.sleep(1)
+                continue
             if pending:
                 for nid in pending:
                     node_by_id[nid].status = TaskStatus.SKIPPED
@@ -440,11 +555,24 @@ async def execute_dag(
                 completed.add(nid)
             if node_by_id[nid].status in terminal_statuses:
                 settled.add(nid)
+            elif (
+                node_by_id[nid].status == TaskStatus.PENDING
+                and bool((node_by_id[nid].metadata or {}).get("waiting_resources"))
+            ):
+                # The node was deliberately unscheduled before a worker or
+                # channel slot was touched. Put the same node back in the
+                # dependency-driven queue for a later coordination probe.
+                pending.add(nid)
 
     # ── 汇总任务状态 ──
     job = await store.get_job(job.job_id) or job
     statuses = [n.status for n in job.nodes]
-    if job.status not in (JobStatus.CANCELLED, JobStatus.INTERRUPTED, JobStatus.PAUSED):
+    if job.status not in (
+        JobStatus.CANCELLED,
+        JobStatus.INTERRUPTED,
+        JobStatus.PAUSED,
+        JobStatus.WAITING_RESOURCES,
+    ):
         if all(s == TaskStatus.COMPLETED for s in statuses):
             job.status = JobStatus.COMPLETED
         elif any(s in (TaskStatus.FAILED, TaskStatus.SKIPPED, TaskStatus.ESCALATED) for s in statuses):

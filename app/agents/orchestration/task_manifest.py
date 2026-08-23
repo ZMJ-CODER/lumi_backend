@@ -15,6 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from lumi_orch.manifest import (
+    advance_cursor,
+    manifest_progress as _kernel_manifest_progress,
+    next_manifest_batch as _kernel_next_manifest_batch,
+)
+
 from app.agents.orchestration.models import TaskNode
 from app.agents.orchestration.task_routing import (
     RouteChannel,
@@ -323,7 +329,9 @@ def new_manifest(
     # parallel, subject to channel/resource limits.
     preserve_order = bool(items) and all(not isinstance(item, dict) for item in items)
     structured = normalize_atomic_items(
-        items, has_authorized_documents=bool((source or {}).get("doc_id"))
+        items,
+        has_authorized_documents=bool((source or {}).get("doc_id")),
+        office_document_count=len((source or {}).get("office_docs") or ([] if not (source or {}).get("doc_id") else [1])),
     )
     return {
         "version": 2,
@@ -346,21 +354,17 @@ def new_manifest(
 
 def manifest_progress(manifest: dict[str, Any]) -> dict[str, int]:
     items = list(manifest.get("items") or [])
-    return {
-        "total": len(items),
-        "completed": sum(1 for item in items if item.get("status") == "completed"),
-        "failed": sum(1 for item in items if item.get("status") == "failed"),
-        "cancelled": sum(1 for item in items if item.get("status") == "cancelled"),
-        "cursor": min(max(int(manifest.get("cursor") or 0), 0), len(items)),
-    }
+    return _kernel_manifest_progress(items, manifest.get("cursor")).as_dict()
 
 
 def next_manifest_batch(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the next pending batch without advancing the persisted cursor."""
     items = list(manifest.get("items") or [])
-    cursor = min(max(int(manifest.get("cursor") or 0), 0), len(items))
-    size = max(1, int(manifest.get("batch_size") or DEFAULT_BATCH_SIZE))
-    return items[cursor: cursor + size]
+    return _kernel_next_manifest_batch(
+        items,
+        cursor=manifest.get("cursor"),
+        batch_size=manifest.get("batch_size") or DEFAULT_BATCH_SIZE,
+    )
 
 
 def _channel_agent(channel: RouteChannel) -> str:
@@ -602,7 +606,11 @@ def materialize_manifest_batch(manifest: dict[str, Any], *, revision: int = 1) -
                 instruction = re.sub(r"\s+", " ", str(raw.get("instruction") or "")).strip()
                 if not instruction:
                     continue
-                decision = route_atomic_instruction(instruction, has_authorized_documents=bool(source_docs))
+                decision = route_atomic_instruction(
+                    instruction,
+                    has_authorized_documents=bool(source_docs),
+                    office_document_count=len(source_docs),
+                )
                 local_dependencies = [local_terminals[value] for value in (raw.get("dependencies") or []) if isinstance(value, int) and value in local_terminals]
                 node_id = f"manifest-{item_id}-s{local_index}"
                 node = _node_for_route(
@@ -686,9 +694,10 @@ def apply_manifest_batch_results(manifest: dict[str, Any], nodes: list[TaskNode]
         # Its replacement changes the outcome, never the checklist position.
         if prior_status == "pending":
             advanced += 1
-    manifest["cursor"] = min(
-        len(manifest.get("items") or []),
-        int(manifest.get("cursor") or 0) + advanced,
+    manifest["cursor"] = advance_cursor(
+        manifest.get("cursor"),
+        total=len(manifest.get("items") or []),
+        settled_items=advanced,
     )
 
 

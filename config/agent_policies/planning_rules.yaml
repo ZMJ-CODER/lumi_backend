@@ -1,0 +1,20 @@
+# Deterministic planning-path vocabulary. This is not a DAG/template language:
+# it cannot define nodes, dependencies, workers, tools, permissions or code.
+version: 1
+template_markers:
+  - name: invoice_filter_flow
+    markers: [发票, 报销, 报销单, 发票筛选]
+  - name: daily_brief_flow
+    markers: [早报, 晚报, 晨报]
+  - name: document_analysis_flow
+    markers: [总结, 分析, 问答, 摘要, 会议纪要, 改写, 根据文档, 根据文件, 这份文档, 这个文件, 文档里, 文件里, 阅读文档, 读一下, 提取, 概括]
+  - name: document_compare_flow
+    markers: [对比, 比较, 异同, 区别, 差异]
+  - name: document_combine_flow
+    markers: [合并, 整合]
+  - name: document_translate_flow
+    markers: [翻译, 译成, 翻译成]
+document_required_templates: [invoice_filter_flow, document_compare_flow, document_combine_flow, document_translate_flow]
+semi_structure_markers: [如果, 超过, 大于, 低于, 小于, 当, 并且, 同时, 还要, 另外, 条件, 才, 否则, 分别, 通知, 汇总, 筛选, 审批]
+script_markers: [转换, 转成, 导出, 生成csv, 生成CSV, 批量, 脚本, 保存为, 另存为, 提取到, 整理, 汇总成]
+multi_topic_markers: [并且, 同时, 分别, 还要, 另外, 最后, 然后, 汇总成, 交叉核对]

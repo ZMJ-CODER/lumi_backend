@@ -5,6 +5,99 @@ from app.core.executors import run_in_compute
 from app.services import office_docs
 
 
+def _authorized_doc_ids(params: dict, context: SkillContext) -> list[str]:
+    requested = params.get("doc_ids") or []
+    if isinstance(requested, str):
+        requested = [requested]
+    allowed = {str(value) for value in (context.office_doc_ids or ()) if str(value)}
+    # ``office_docs`` means this node's server-injected document scope, not a
+    # caller-provided list. An explicit doc_ids list may only narrow that scope.
+    scope = str(params.get("scope") or "office_docs").strip().lower()
+    if scope not in {"office_docs", "doc_ids"}:
+        return []
+    selected = [str(value).strip() for value in requested if str(value).strip()] if requested else sorted(allowed)
+    return [doc_id for doc_id in selected if doc_id in allowed]
+
+
+class InspectDocumentSetSkill(Skill):
+    name = "inspect_document_set"
+    description = (
+        "盘点当前任务已授权的多份办公文档，返回文件名、类型、简短摘要和页数；"
+        "在多文档问题中先用它定位候选文件，再调用 read_document 读取选中的 doc_id。"
+    )
+    category = "office"
+    environment = "server"
+    scenes = ["office"]
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "scope": {"type": "string", "enum": ["office_docs", "doc_ids"], "description": "默认 office_docs"},
+            "doc_ids": {"type": "array", "items": {"type": "string"}, "description": "可选：仅盘点当前授权范围内的这些文档"},
+            "query": {"type": "string", "description": "可选：用户要查找的事实或条款"},
+        },
+    }
+
+    async def execute(self, params: dict, context: SkillContext | None = None) -> SkillResult:
+        if not context or not context.user_id:
+            return SkillResult(success=False, error="需要登录后使用", error_code="INVALID_ARGS", retryable=False)
+        doc_ids = _authorized_doc_ids(params, context)
+        if not doc_ids:
+            return SkillResult(success=False, error="没有可盘点的已授权办公文档", error_code="FORBIDDEN", retryable=False)
+        query = str(params.get("query") or "").strip()
+        try:
+            cards = await run_in_compute(office_docs.inspect_document_set, context.user_id, doc_ids, query)
+        except LookupError as exc:
+            return SkillResult(success=False, error=str(exc), error_code="EXEC_ERROR", retryable=False)
+        selection = {
+            "candidate_doc_ids": doc_ids,
+            "inspected_doc_ids": [str(card.get("doc_id") or "") for card in cards],
+            "query": query[:500],
+            "selection_reason": "多文档事实问题先盘点授权文件，等待后续 read_document 读取具体内容",
+        }
+        lines = [
+            f"- {card['filename']} | {card['kind']} | 页数: {card.get('page_count') or '未知'} | 摘要: {card['summary']}"
+            for card in cards
+        ]
+        return SkillResult(success=True, output="\n".join(lines), metadata={"documents": cards, "document_selection": selection})
+
+
+class ReadDocumentSkill(Skill):
+    """Canonical narrow reader for a document chosen by discovery."""
+
+    name = "read_document"
+    description = "读取当前任务已授权的一份办公文档。多文档问题请先用 inspect_document_set 定位，再传入选中的 doc_id。"
+    category = "office"
+    environment = "server"
+    scenes = ["office"]
+    parameters_schema = {
+        "type": "object",
+        "properties": {"doc_id": {"type": "string", "description": "inspect_document_set 返回的已授权文档 id"}},
+        "required": ["doc_id"],
+    }
+
+    async def execute(self, params: dict, context: SkillContext | None = None) -> SkillResult:
+        if not context or not context.user_id:
+            return SkillResult(success=False, error="需要登录后使用", error_code="INVALID_ARGS", retryable=False)
+        doc_id = str(params.get("doc_id") or "").strip()
+        if not doc_id or doc_id not in {str(value) for value in context.office_doc_ids}:
+            return SkillResult(success=False, error="文档不在当前任务的授权范围内", error_code="FORBIDDEN", retryable=False)
+        try:
+            await office_docs.ensure_session(context.user_id, doc_id)
+            info = await run_in_compute(office_docs.read_structure, context.user_id, doc_id)
+        except LookupError as exc:
+            return SkillResult(success=False, error=str(exc), error_code="EXEC_ERROR", retryable=False)
+        selection = {
+            "selected_doc_id": doc_id,
+            "selected_filename": info["filename"],
+            "selection_reason": "读取 inspect_document_set 盘点后指定的文档",
+        }
+        return SkillResult(
+            success=True,
+            output=f"文档：{info['filename']}（{info['kind']}）\n\n结构：\n{info['structure'][:60000]}",
+            metadata={"doc_id": doc_id, "kind": info["kind"], "filename": info["filename"], "document_selection": selection},
+        )
+
+
 class OfficeDocReadSkill(Skill):
     name = "office_doc_read"
     description = (

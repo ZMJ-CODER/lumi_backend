@@ -7,9 +7,11 @@ import asyncio
 from loguru import logger
 
 from app.agents.orchestration.admission import job_admission
+from app.agents.orchestration.approval_service import ApprovalService
 from app.agents.orchestration.job_error_service import JobErrorService
 from app.agents.orchestration.state import StateStore
 from app.agents.orchestration.models import JobStatus
+from app.agents.orchestration.state_machine.policies import is_terminal
 from app.core.config import settings
 
 
@@ -42,6 +44,14 @@ class AdmissionLeaseMonitor:
             try:
                 while True:
                     await asyncio.sleep(interval)
+                    job = await self._store.get_job(job_id)
+                    if job is None or is_terminal(job.status):
+                        await job_admission.release(job_id=job_id, user_id=user_id)
+                        return
+                    if job.status == JobStatus.WAITING_APPROVAL:
+                        if await ApprovalService(store=self._store).expire_if_due(job):
+                            await job_admission.release(job_id=job_id, user_id=user_id)
+                            return
                     if not await job_admission.renew(job_id, user_id):
                         logger.error("办公任务准入租约丢失，停止任务: {}", job_id[:8])
                         job = await self._store.get_job(job_id)
@@ -50,6 +60,7 @@ class AdmissionLeaseMonitor:
                             JobStatus.RUNNING,
                             JobStatus.PAUSED,
                             JobStatus.WAITING_APPROVAL,
+                            JobStatus.WAITING_RESOURCES,
                             JobStatus.CONTINUING,
                         }:
                             await self._errors.interrupt(

@@ -70,6 +70,7 @@ class ReactStepAgent(WorkerAgent):
             max_rounds=int(node.params.get("max_rounds") or 6),
             on_progress=on_progress,
             user_request=ctx.user_request,
+            approval_context_sha256=ctx.approval_context_sha256,
         ).run(instruction, office_docs=node.params.get("office_docs") or [])
         if not result.success:
             return {"success": False, "error": result.error or "ReAct 任务未完成",
@@ -77,4 +78,10 @@ class ReactStepAgent(WorkerAgent):
                     "records": result.records}
         return {"success": True, "content": result.content, "output": result.content,
                 "records": result.records, "citations": result.citations,
+                "tool_metadata": {
+                    "document_selection": [
+                        item["document_selection"] for item in result.records
+                        if isinstance(item, dict) and isinstance(item.get("document_selection"), dict)
+                    ],
+                },
                 "step_title": "动态分析与执行"}

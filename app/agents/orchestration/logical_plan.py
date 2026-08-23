@@ -13,7 +13,13 @@ import hashlib
 import json
 import time
 import uuid
+from dataclasses import asdict
 from typing import Any
+
+from lumi_orch.logical_plan import (
+    logical_plan_progress as _kernel_logical_plan_progress,
+    select_budgeted_frontier,
+)
 
 from app.agents.orchestration.models import TaskNode, TaskStatus
 from app.agents.orchestration.task_routing import RouteChannel, estimate_tokens
@@ -146,37 +152,7 @@ async def save_logical_plan(user_id: str, plan: dict[str, Any]) -> None:
 
 
 def logical_plan_progress(plan: dict[str, Any]) -> dict[str, int]:
-    records = list((plan.get("nodes") or {}).values())
-    statuses = [str(record.get("status") or "pending") for record in records]
-    return {
-        "total": len(records),
-        "completed": statuses.count("completed"),
-        # ``escalated`` and dependency-driven ``skipped`` records cannot
-        # safely unlock a successor.  Expose them through the same terminal
-        # arbitration counter so the orchestrator can choose L2/L3 instead of
-        # silently treating the logical plan as runnable.
-        "failed": (
-            statuses.count("failed")
-            + statuses.count("escalated")
-            + statuses.count("skipped")
-        ),
-        "cancelled": statuses.count("cancelled"),
-        "pending": statuses.count("pending") + statuses.count("materialized"),
-    }
-
-
-def _ready_ids(plan: dict[str, Any]) -> list[str]:
-    records = plan.get("nodes") or {}
-    ready: list[str] = []
-    for node_id in list(plan.get("order") or []):
-        record = records.get(node_id)
-        if not isinstance(record, dict) or record.get("status") != "pending":
-            continue
-        raw_node = record.get("node") or {}
-        deps = list(raw_node.get("depends_on") or [])
-        if all(str((records.get(dep_id) or {}).get("status") or "") == "completed" for dep_id in deps):
-            ready.append(node_id)
-    return ready
+    return asdict(_kernel_logical_plan_progress(plan.get("nodes") or {}))
 
 
 def materialize_frontier(plan: dict[str, Any], *, limit: int | None = None) -> list[TaskNode]:
@@ -192,13 +168,17 @@ def materialize_frontier(plan: dict[str, Any], *, limit: int | None = None) -> l
     reserved = int(budget.get("reserved") or 0)
     used = int(budget.get("used_estimated") or 0)
     ceiling = int(budget.get("limit") or settings.AGENT_LOGICAL_PLAN_TOKEN_BUDGET)
-    for node_id in _ready_ids(plan):
-        if len(selected) >= size:
-            break
+    selection = select_budgeted_frontier(
+        records,
+        list(plan.get("order") or []),
+        limit=size,
+        reserved=reserved,
+        used=used,
+        ceiling=ceiling,
+    )
+    for node_id in selection.node_ids:
         record = records[node_id]
-        estimate = int(record.get("estimated_tokens") or 0)
-        if used + reserved + estimate > ceiling:
-            break
+        estimate = max(0, int(record.get("estimated_tokens") or 0))
         node = TaskNode.model_validate(record.get("node") or {})
         original_deps = list(node.depends_on)
         refs = {

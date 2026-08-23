@@ -26,6 +26,16 @@ class RetrievalAgent(WorkerAgent):
         if not query:
             return {"success": False, "error": "检索任务缺少 query 参数", "error_code": "INVALID_ARGS"}
         top_k = int(node.params.get("top_k") or 5)
+        # Safety net: even if an upstream phrase classifier missed a
+        # multi-document fact request, never query the unrestricted knowledge
+        # index before narrowing the server-authorized attachment scope.
+        if len(ctx.office_doc_ids) >= 2:
+            from app.agents.roles.knowledge.document_targeting import DocumentTargetingAgent
+
+            targeted = await DocumentTargetingAgent().execute(node, ctx)
+            if targeted.get("success"):
+                targeted["step_title"] = "定位并检索已授权文档"
+            return targeted
         logger.debug("[Agent:retrieval] 检索 query={} top_k={}", query[:60], top_k)
         await _report_progress(ctx.job_id, node.id, "正在检索知识库…")
         result = await self.run_skill(

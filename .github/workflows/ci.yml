@@ -45,14 +45,15 @@ jobs:
       - uses: astral-sh/setup-uv@v5
 
       - name: 安装依赖
-        # --no-sources：跳过 pyproject 里 Windows CUDA torch 的私有源，CI(Linux) 用 PyPI 版本
-        run: uv sync --no-sources
+        # 保留本地 orchestration workspace；仅跳过 Windows CUDA torch 的私有源，
+        # 让 Linux CI 从 PyPI 解析 CPU wheel。
+        run: uv sync --no-sources-package torch --no-sources-package torchvision
 
       - name: 数据库迁移（全新库跑基线）
         run: uv run alembic upgrade head
 
       - name: 单元测试
-        run: uv run pytest tests -q
+        run: uv run pytest tests packages/orchestration/tests -q
 
   lint:
     name: 代码规范（ruff，非阻塞）
@@ -62,7 +63,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - name: Ruff 检查
-        run: uvx ruff check app tests
+        run: uvx ruff check app tests packages/orchestration/src packages/orchestration/tests
 
   docker-build:
     name: 后端镜像构建

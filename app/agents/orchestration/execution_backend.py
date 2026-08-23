@@ -55,6 +55,7 @@ class BackendControlResult:
     job: Job
     handled: bool = True
     release_capacity: bool = False
+    error: str | None = None
 
 
 class LegacyDagBackend:
@@ -248,3 +249,140 @@ class TemporalManifestBackend:
         # pre-authorized by manifest construction. Let the facade use legacy
         # approval handling if a future manifest adds one.
         return None
+
+
+class TemporalStaticBackend:
+    """External worker backend for a deliberately narrow static-DAG subset."""
+
+    name = "temporal_static"
+
+    def __init__(self, runtime: RuntimeGateway) -> None:
+        self._runtime = runtime
+
+    async def submit(self, job: Job, llm_api_key: str | None, llm_config: dict | None = None) -> None:
+        await self._runtime.submit_static(job, llm_api_key, llm_config)
+
+    async def _ready(self, job: Job | None) -> bool:
+        return bool(job and RuntimeGateway.is_static_job(job) and await self._runtime.probe_temporal())
+
+    @staticmethod
+    def _owns(job: Job | None) -> bool:
+        return RuntimeGateway.is_static_job(job)
+
+    async def cancel(
+        self,
+        job: Job | None,
+        keep_completed: bool = True,
+    ) -> BackendControlResult | None:
+        if not self._owns(job):
+            return None
+        assert job is not None
+        if not await self._ready(job):
+            monitor_logger.warning(
+                "Temporal 静态 DAG 取消未发送：运行器不可达",
+                event_type="runtime_control_failure",
+                category="external_service",
+                code="TEMPORAL_STATIC_UNAVAILABLE",
+                context=MonitorContext(job_id=job.job_id, runtime=self.name, component="execution_backend"),
+            )
+            return BackendControlResult(
+                job,
+                error="Temporal Worker 当前不可达，取消请求未送达，请检查连接后重试。",
+            )
+        if job.status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED}:
+            return BackendControlResult(job)
+        try:
+            from app.agents.orchestration.temporal.client import cancel_agent_workflow
+
+            await cancel_agent_workflow(job.job_id, keep_completed)
+            transition(job, JobStatus.CANCELLED)
+            job.updated_at = time.time()
+            await self._runtime.store.save_job(job)
+            return BackendControlResult(job, release_capacity=True)
+        except Exception as exc:  # noqa: BLE001
+            monitor_logger.warning(
+                "Temporal 静态 DAG 取消控制失败，拒绝回退到进程内执行器",
+                event_type="runtime_control_failure",
+                category="external_service",
+                code="TEMPORAL_STATIC_CANCEL_FAILED",
+                context=MonitorContext(job_id=job.job_id, runtime=self.name, component="execution_backend"),
+                metadata={"error": str(exc)},
+            )
+            return BackendControlResult(
+                job,
+                error="Temporal Worker 取消请求失败，任务状态未改变，请检查连接后重试。",
+            )
+
+    async def pause(self, job: Job | None) -> BackendControlResult | None:
+        if not self._owns(job):
+            return None
+        assert job is not None
+        if not await self._ready(job):
+            return BackendControlResult(
+                job,
+                error="Temporal Worker 当前不可达，暂停请求未送达，请检查连接后重试。",
+            )
+        try:
+            if job.status == JobStatus.RUNNING:
+                from app.agents.orchestration.temporal.client import pause_agent_workflow
+
+                await pause_agent_workflow(job.job_id)
+                transition(job, JobStatus.PAUSED)
+                job.updated_at = time.time()
+                await self._runtime.store.save_job(job)
+            return BackendControlResult(job)
+        except Exception as exc:  # noqa: BLE001
+            monitor_logger.warning(
+                "Temporal 静态 DAG 暂停控制失败",
+                event_type="runtime_control_failure",
+                category="external_service",
+                code="TEMPORAL_STATIC_PAUSE_FAILED",
+                context=MonitorContext(job_id=job.job_id, runtime=self.name, component="execution_backend"),
+                metadata={"error": str(exc)},
+            )
+            return BackendControlResult(
+                job,
+                error="Temporal Worker 暂停请求失败，任务状态未改变，请检查连接后重试。",
+            )
+
+    async def resume(self, job: Job | None) -> BackendControlResult | None:
+        if not self._owns(job):
+            return None
+        assert job is not None
+        if not await self._ready(job):
+            return BackendControlResult(
+                job,
+                error="Temporal Worker 当前不可达，恢复请求未送达，请检查连接后重试。",
+            )
+        try:
+            if job.status == JobStatus.PAUSED:
+                from app.agents.orchestration.temporal.client import resume_agent_workflow
+
+                await resume_agent_workflow(job.job_id)
+                transition(job, JobStatus.RUNNING)
+                job.updated_at = time.time()
+                await self._runtime.store.save_job(job)
+            return BackendControlResult(job)
+        except Exception as exc:  # noqa: BLE001
+            monitor_logger.warning(
+                "Temporal 静态 DAG 恢复控制失败",
+                event_type="runtime_control_failure",
+                category="external_service",
+                code="TEMPORAL_STATIC_RESUME_FAILED",
+                context=MonitorContext(job_id=job.job_id, runtime=self.name, component="execution_backend"),
+                metadata={"error": str(exc)},
+            )
+            return BackendControlResult(
+                job,
+                error="Temporal Worker 恢复请求失败，任务状态未改变，请检查连接后重试。",
+            )
+
+    async def approve(
+        self,
+        job: Job,
+        node_id: str,
+        approved: bool,
+    ) -> BackendControlResult | None:
+        # Static candidates exclude approval nodes. Keep this explicit so a
+        # future planner change cannot silently weaken the approval boundary.
+        return BackendControlResult(job) if self._owns(job) else None

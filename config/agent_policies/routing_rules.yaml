@@ -1,0 +1,124 @@
+# Versioned deployment asset.  It is parsed only at process startup; do not
+# add Python expressions, template syntax, dotted import paths or raw prompts.
+version: 1
+rules:
+  # Derived feature owns the legacy OR precedence (multi-step / stateful /
+  # external state). The YAML language remains conjunction-only and cannot
+  # reconstruct that business logic itself.
+  - id: agent_coordination
+    priority: 120
+    when:
+      - feature: requires_agent_coordination
+        op: eq
+        value: true
+    channel: agent
+    reason_code: agent_coordination
+    overrides:
+      - explicit_single_file_conversion
+      - multi_document_factual_targeting
+      - explicit_rag_lookup
+      - authorized_document_lookup
+      - direct_response
+
+  - id: multi_document_factual_targeting
+    priority: 110
+    when:
+      - feature: requires_multi_document_targeting
+        op: eq
+        value: true
+    channel: rag
+    reason_code: multi_document_targeting
+    hooks:
+      - document_targeting
+    overrides:
+      - explicit_single_file_conversion
+      - explicit_rag_lookup
+      - authorized_document_lookup
+      - direct_response
+
+  # Plumbing canary.  This has the same guards and outcome as the legacy
+  # deterministic conversion branch.  In v1 it runs in shadow mode only.
+  - id: explicit_single_file_conversion
+    priority: 100
+    when:
+      - feature: has_explicit_file_operation
+        op: eq
+        value: true
+      - feature: has_multi_operation
+        op: eq
+        value: false
+      - feature: has_external_operation
+        op: eq
+        value: false
+      - feature: has_stateful_reasoning
+        op: eq
+        value: false
+    channel: deterministic_script
+    reason_code: explicit_file_conversion
+
+  # Explicit RAG terminology maps to the existing retrieval route. It is kept
+  # below safety/multi-step guards so the policy never claims an agent task.
+  - id: explicit_rag_lookup
+    priority: 80
+    when:
+      - feature: has_rag_operation
+        op: eq
+        value: true
+      - feature: has_explicit_file_operation
+        op: eq
+        value: false
+      - feature: has_multi_operation
+        op: eq
+        value: false
+      - feature: has_external_operation
+        op: eq
+        value: false
+      - feature: has_stateful_reasoning
+        op: eq
+        value: false
+    channel: rag
+    reason_code: explicit_rag_lookup
+
+  # This is the legacy authorized-document fallback, represented as a single
+  # governed feature rather than exposing raw request text to YAML.
+  - id: authorized_document_lookup
+    priority: 70
+    when:
+      - feature: has_authorized_document_lookup_intent
+        op: eq
+        value: true
+      - feature: has_explicit_file_operation
+        op: eq
+        value: false
+      - feature: has_multi_operation
+        op: eq
+        value: false
+      - feature: has_external_operation
+        op: eq
+        value: false
+      - feature: has_stateful_reasoning
+        op: eq
+        value: false
+    channel: rag
+    reason_code: authorized_document_lookup
+    overrides:
+      - direct_response
+
+  # The final explicit default preserves legacy direct-LLM behavior. It only
+  # applies when all higher external/dependency signals are absent.
+  - id: direct_response
+    priority: 10
+    when:
+      - feature: can_direct_respond
+        op: eq
+        value: true
+    channel: direct_llm
+    reason_code: direct_response
+    # The static linter intentionally does not infer relationships between
+    # derived features, so every higher non-default decision is explicit.
+    overrides:
+      - agent_coordination
+      - multi_document_factual_targeting
+      - explicit_single_file_conversion
+      - explicit_rag_lookup
+      - authorized_document_lookup

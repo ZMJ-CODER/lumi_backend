@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -22,6 +23,17 @@ from app.agents.orchestration.task_manifest import authorize_manifest_source
 from app.agents.orchestration.workers import WORKERS, WorkerContext, list_workers
 from app.agents.roles.atomic import AtomicStepAgent
 from app.core.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _effect_journal_test_double():
+    """DAG unit tests do not require a live Postgres journal."""
+    from app.agents.orchestration.effects import set_effect_journal_repository_for_tests
+    from app.repositories.effect_journal_repository import InMemoryEffectJournalRepository
+
+    set_effect_journal_repository_for_tests(InMemoryEffectJournalRepository())
+    yield
+    set_effect_journal_repository_for_tests(None)
 
 
 def _node(nid, agent="w1", deps=(), **kw):
@@ -78,6 +90,39 @@ def test_resource_lock_renews_redis_lease_while_held(monkeypatch):
     assert resources._RELEASE_SCRIPT in calls
 
 
+def test_write_resource_waits_without_worker_or_channel_then_recovers(monkeypatch):
+    """Write coordination is fail-closed, but recovery reuses the same node."""
+    from app.agents.orchestration import resources
+
+    class RecoveringCoordinator:
+        def __init__(self):
+            self.checks = 0
+
+        async def write_coordination_available(self, _claims):
+            self.checks += 1
+            return self.checks >= 2
+
+        @asynccontextmanager
+        async def claim(self, _claims, ttl=360):
+            yield
+
+    worker = FakeWorker("write-worker")
+    store, job = _make_store_job([
+        _node(
+            "write",
+            agent="worker",
+            resource_claims=[ResourceClaim(key="document:1", mode="write")],
+        )
+    ])
+    monkeypatch.setattr(resources, "resource_coordinator", RecoveringCoordinator())
+
+    asyncio.run(execute_dag(job, {"worker": worker}, NoopReviewer(), store, concurrency=1))
+    saved = asyncio.run(store.get_job(job.job_id))
+    assert worker.calls == 1
+    assert saved.status == JobStatus.COMPLETED
+    assert saved.nodes[0].status == TaskStatus.COMPLETED
+
+
 def test_admission_local_lease_can_only_renew_existing_job(monkeypatch):
     from app.agents.orchestration.admission import JobAdmission
     import app.core.redis as redis_module
@@ -93,6 +138,15 @@ def test_admission_local_lease_can_only_renew_existing_job(monkeypatch):
     monkeypatch.setattr(redis_module, "get_redis", unavailable_redis)
     assert asyncio.run(admission_control.renew("job-1", "u1")) is True
     assert asyncio.run(admission_control.renew("missing", "u1")) is False
+
+
+def test_admission_adapter_reads_runtime_limits(monkeypatch):
+    from app.agents.orchestration.admission import JobAdmission
+
+    monkeypatch.setattr(settings, "AGENT_SUBMISSION_MAX_INFLIGHT", 3)
+    admission_control = JobAdmission()
+
+    assert admission_control.limits().max_inflight == 3
 
 
 def test_job_control_ownership_is_checked_before_mutation(monkeypatch):
@@ -868,6 +922,36 @@ def test_orchestrator_submit_and_cancel():
     assert final.status == JobStatus.CANCELLED
 
 
+def test_oversized_plan_is_rolled_through_logical_frontier():
+    """The real submit path must keep a long plan executable in bounded windows."""
+    class LongPlanner(Planner):
+        async def plan(self, *args, **kwargs):
+            return TaskTree(
+                nodes=[_node(f"step-{index}", agent="w1") for index in range(9)],
+                plan_text="long plan",
+            )
+
+    async def scenario():
+        orch = AgentOrchestrator(
+            store=InMemoryStateStore(),
+            planner=LongPlanner(),
+            workers={"w1": FakeWorker("w1", delay=0.05)},
+            review=NoopReviewer(),
+            temporal_enabled=False,
+        )
+        job = await orch.submit_job("00000000-0000-4000-8000-000000000001", "处理这组长任务")
+        assert len(job.nodes) <= settings.AGENT_LOGICAL_PLAN_FRONTIER_SIZE
+        assert job.routing["logical_plan"]["progress"]["total"] == 9
+        await orch._tasks[job.job_id]
+        final = await orch.get_job(job.job_id)
+        assert final is not None
+        return final
+
+    final = asyncio.run(scenario())
+    assert final.status == JobStatus.COMPLETED
+    assert final.routing["logical_plan"]["progress"]["completed"] == 9
+
+
 def test_retrieval_worker_registered():
     assert "retrieval" in WORKERS
     assert WORKERS["retrieval"].skills == ["query_knowledge"]
@@ -1156,7 +1240,12 @@ def test_long_task_list_records_item_failure_and_continues_next_batch():
     failed = final.routing["manifest"]["items"][3]
     assert failed["status"] == "failed"
     assert failed["error_code"] == "TEST_FAILURE"
-    assert seen == [f"item-{i}" for i in range(1, 12)]
+    # Natural-language manifest items are independent by default and may run
+    # concurrently; preserve_order/dependencies cover explicit sequencing.
+    expected = {f"item-{i}" for i in range(1, 12)}
+    assert set(seen) == expected
+    assert len(seen) == len(expected)
+    assert seen.count("item-4") == 1
 
 
 def test_manifest_next_batch_receives_bounded_prior_results():

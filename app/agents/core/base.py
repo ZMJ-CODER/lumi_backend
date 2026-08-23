@@ -40,6 +40,12 @@ class WorkerContext:
     # normalized tool arguments through ``confirmed_tool_calls`` below.
     confirmed_tools: frozenset[str] = frozenset()
     confirmed_tool_calls: frozenset[str] = frozenset()
+    # Hash of the exact upstream result chain consumed by this node. It binds
+    # a later high-risk approval to the content that will actually be sent.
+    approval_context_sha256: str = ""
+    # Server-injected, ownership-checked office-document scope for a Worker.
+    # A Worker may narrow this set for a Skill call, but can never expand it.
+    office_doc_ids: tuple[str, ...] = ()
 
 
 class WorkerAgent(ABC):
@@ -94,9 +100,11 @@ class WorkerAgent(ABC):
             user_message=ctx.user_request,
             confirmed_tools=ctx.confirmed_tools,
             confirmed_tool_calls=ctx.confirmed_tool_calls,
+            approval_context_sha256=ctx.approval_context_sha256,
             llm_api_key=ctx.llm_api_key,
             llm_config=ctx.llm_config,
             on_output=ctx.on_output,
+            office_doc_ids=ctx.office_doc_ids,
         )
         if not result.success:
             return {

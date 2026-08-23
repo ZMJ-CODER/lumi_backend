@@ -29,6 +29,7 @@ class LogicalPlanContinuationService:
             JobStatus.INTERRUPTED,
             JobStatus.PAUSED,
             JobStatus.WAITING_APPROVAL,
+            JobStatus.WAITING_RESOURCES,
         }:
             return False
 

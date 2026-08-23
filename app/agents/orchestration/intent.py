@@ -15,6 +15,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from app.agents.orchestration.policy.planning import planning_markers
+
 # 模板关键词（值 = 模板名）
 TEMPLATE_KEYWORDS: dict[str, list[str]] = {
     "invoice_filter_flow": ["发票", "报销", "报销单", "发票筛选"],
@@ -402,6 +404,30 @@ DOC_REQUIRED_TEMPLATE_KEYWORDS: dict[str, list[str]] = {
     "document_combine_flow": ["合并", "整合"],
     "document_translate_flow": ["翻译", "译成", "翻译成"],
 }
+
+# The source-compatible constants above are populated from bounded deployment
+# data only after every legacy fallback is defined. Parsing, precedence,
+# attachment authorization and template execution remain ordinary Python so
+# YAML never becomes a second programming language.
+try:
+    (
+        _template_markers,
+        _document_required_templates,
+        _semi_structure_markers,
+        _script_markers,
+        _multi_topic_markers,
+    ) = planning_markers()
+    TEMPLATE_KEYWORDS = {name: list(markers) for name, markers in _template_markers.items()}
+    DOC_REQUIRED_TEMPLATE_KEYWORDS = {
+        name: TEMPLATE_KEYWORDS[name] for name in _document_required_templates
+    }
+    SEMI_KEYWORDS = list(_semi_structure_markers)
+    SCRIPT_KEYWORDS = list(_script_markers)
+    MULTI_TOPIC_KEYWORDS = list(_multi_topic_markers)
+except RuntimeError:
+    # Retain the audited in-code baseline if a deployment forgot to mount the
+    # policy asset. The loader emits a structured configuration failure.
+    pass
 
 
 def classify(request: str, office_docs: list[dict] | None = None) -> dict:

@@ -87,3 +87,36 @@ def test_langgraph_stops_immediately_when_model_balance_is_insufficient():
     assert out.success is False
     assert worker.calls == 1
     assert out.recovery["user_action_required"] is True
+
+
+def test_langgraph_hard_timeout_cancels_worker_without_retry():
+    async def scenario():
+        cancelled = asyncio.Event()
+
+        class Worker:
+            calls = 0
+
+            async def execute(self, node, ctx):
+                self.calls += 1
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+        worker = Worker()
+        outcome = await LangGraphNodeRunner(
+            worker=worker,
+            node=TaskNode(id="slow", name="slow", agent="test", params={}),
+            ctx=WorkerContext(user_id="u1", job_id="j1"),
+            review=NoopReviewer(),
+            timeout_seconds=0.01,
+            max_retries=2,
+        ).run()
+        assert outcome.success is False
+        assert outcome.error_code == "NODE_TIMEOUT"
+        assert outcome.retries == 0
+        assert worker.calls == 1
+        assert cancelled.is_set()
+
+    asyncio.run(scenario())

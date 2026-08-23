@@ -42,6 +42,7 @@ JOB_FAILED = "failed"
 JOB_CANCELLED = "cancelled"
 JOB_INTERRUPTED = "interrupted"
 JOB_WAITING_APPROVAL = "waiting_approval"
+JOB_WAITING_RESOURCES = "waiting_resources"
 
 _NODE_TIMEOUT_DEFAULT = 300
 _NODE_MAX_RETRIES_DEFAULT = 2
@@ -214,14 +215,31 @@ class AgentDagWorkflow:
                 )
                 continue
 
+            waiting_resources = [
+                nid for nid in pending
+                if bool((nodes[nid].get("metadata") or {}).get("waiting_resources"))
+            ]
             ready = [
                 nid
                 for nid in pending
+                if nid not in waiting_resources
                 if all(d in completed for d in nodes[nid].get("depends_on") or [])
             ]
             capacity = max(0, max(1, cfg["node_concurrency"]) - len(running))
             batch = ready[:capacity]
             if not batch and not running:
+                if waiting_resources:
+                    self._job["status"] = JOB_WAITING_RESOURCES
+                    # Activity returns this state before it acquires a channel
+                    # lease or writes an effect intent. A timer is a
+                    # deterministic Temporal backoff.
+                    await workflow.sleep(timedelta(seconds=5))
+                    for nid in waiting_resources:
+                        metadata = dict(nodes[nid].get("metadata") or {})
+                        metadata.pop("waiting_resources", None)
+                        nodes[nid]["metadata"] = metadata
+                    self._job["status"] = JOB_RUNNING
+                    continue
                 # 依赖链断裂：其余节点标记跳过
                 for nid in pending:
                     nodes[nid]["status"] = STATUS_SKIPPED
@@ -293,6 +311,13 @@ class AgentDagWorkflow:
                 await asyncio.gather(task, return_exceptions=True)
                 if nodes[nid].get("status") == STATUS_COMPLETED:
                     completed.add(nid)
+                elif nodes[nid].get("status") == JOB_WAITING_RESOURCES:
+                    nodes[nid]["status"] = STATUS_PENDING
+                    metadata = dict(nodes[nid].get("metadata") or {})
+                    metadata["waiting_resources"] = True
+                    nodes[nid]["metadata"] = metadata
+                    pending.add(nid)
+                    self._job["status"] = JOB_WAITING_RESOURCES
 
             # 审查/测试打回：不合格代码返回给上游 writer 重写（带反馈，最多 MAX_REVIEW_LOOPS 轮）
             for nid in finished:
@@ -475,7 +500,9 @@ class AgentDagWorkflow:
 
     def _finalize(self) -> None:
         statuses = [n.get("status") for n in (self._job.get("nodes") or [])]
-        if self._job.get("status") not in (JOB_CANCELLED, JOB_INTERRUPTED, JOB_PAUSED):
+        if self._job.get("status") not in (
+            JOB_CANCELLED, JOB_INTERRUPTED, JOB_PAUSED, JOB_WAITING_RESOURCES
+        ):
             if statuses and all(s == STATUS_COMPLETED for s in statuses):
                 self._job["status"] = JOB_COMPLETED
             elif any(s in (STATUS_FAILED, STATUS_SKIPPED, STATUS_ESCALATED) for s in statuses):

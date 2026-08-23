@@ -11,6 +11,8 @@ from dataclasses import dataclass, replace
 import re
 from typing import Any
 
+from app.agents.orchestration.policy.lexicon import action_markers, object_markers
+
 
 @dataclass(frozen=True)
 class RoutingConfidence:
@@ -94,8 +96,23 @@ _OBJECT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("project", ("项目", "代码库", "仓库")),
 )
 
-_NETWORK_MARKERS = ("最新", "实时", "今天", "本周", "本月", "latest", "real-time", "today", "this week", "this month")
-_NETWORK_CONTEXT_MARKERS = ("现在外面", "现在几点", "现在时间", "现在天气", "当前股价", "当前版本", "当前天气")
+# The checked-in tuples above remain a compatibility fallback for old
+# deployments that have not mounted policy assets.  Normal deployments load
+# the same bounded vocabulary from YAML at process start; the schema forbids
+# new actions, objects, executable expressions and arbitrary imports.
+try:
+    _ACTION_MARKERS = action_markers()
+    _OBJECT_MARKERS = object_markers()
+except RuntimeError:
+    pass
+
+# 仅识别“公开外部来源/明确联网”意图。时间词、天气、价格等领域词本身
+# 不足以证明需要 Tavily：它们可能指向用户自己的待办、附件或知识库。
+_NETWORK_MARKERS = (
+    "联网", "网上搜", "网页搜索", "搜索网页", "检索公开资料", "查网页", "给我来源",
+    "搜索新闻", "最新新闻", "公开资料", "web search", "search the web", "browse the web",
+)
+_NETWORK_CONTEXT_MARKERS = ("公开网页", "外部网站", "互联网来源", "网页链接")
 _RETRIEVAL_MARKERS = ("知识库", "上传的", "上传内容", "附件中", "资料中", "文档中", "文件中", "根据我的资料", "根据文档", "根据文件")
 _MULTI_CONNECTORS = ("然后", "接着", "之后", "并且", "同时", "另外", "还要", "最后", "再", "以及", "then", "next", "after that", "and then", "finally", "also")
 _VAGUE_REFERENTS = ("那个", "这份", "这个", "该文件", "它", "相关内容", "想要的样子")

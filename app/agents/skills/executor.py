@@ -41,14 +41,21 @@ _CHAT_SKILL_ALLOWLIST = {"web_search", "query_knowledge", "get_datetime"}
 # 一并交给模型。普通办公只保留业务办公、桌面/进程控制、系统信息，以及明确
 # 审核过的检索和隔离脚本能力。开发工具仍可由显式的代码 Worker / M2 计划使用。
 _OFFICE_REACT_ALLOWED_CATEGORIES = {"office", "desktop", "process", "system", "mcp"}
-_OFFICE_REACT_ALLOWED_SKILLS = {"python_exec", "create_office_document", "query_knowledge", "web_search"}
+_OFFICE_REACT_ALLOWED_SKILLS = {
+    "python_exec", "create_office_document", "query_knowledge", "web_search",
+    "inspect_document_set", "read_document",
+}
 _OFFICE_REACT_DENIED_SKILLS = {"env"}
 
 
-def tool_call_fingerprint(tool_name: str, args: dict) -> str:
-    """Return a stable approval identity for one exact tool invocation."""
+def tool_call_fingerprint(tool_name: str, args: dict, upstream_sha256: str = "") -> str:
+    """Return a stable approval identity for tool arguments and upstream data."""
     payload = json.dumps(
-        {"tool": str(tool_name or ""), "args": args if isinstance(args, dict) else {}},
+        {
+            "tool": str(tool_name or ""),
+            "args": args if isinstance(args, dict) else {},
+            "upstream_sha256": str(upstream_sha256 or ""),
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -61,13 +68,16 @@ def is_tool_call_confirmed(
     tool_name: str,
     args: dict,
     confirmed_tool_calls: frozenset[str] | set[str] | None,
+    upstream_sha256: str = "",
 ) -> bool:
-    return tool_call_fingerprint(tool_name, args) in (confirmed_tool_calls or set())
+    return tool_call_fingerprint(tool_name, args, upstream_sha256) in (confirmed_tool_calls or set())
 
 # 历史插件不必一次性逐文件改元数据；这里是普通办公 ReAct 已审核能力的
 # 集中语义目录。插件自身声明优先，目录只补齐空字段。后续新 Skill 应直接
 # 在 Skill 类上声明 domain / intent_tags 等字段。
 _OFFICE_REACT_ROUTING_METADATA: dict[str, dict] = {
+    "inspect_document_set": {"domain": "document", "intent_tags": ["多文档", "盘点", "定位", "找文件", "条款", "附件"], "preferred_over": ["office_doc_read"]},
+    "read_document": {"domain": "document", "intent_tags": ["读取", "文档", "附件", "内容", "条款"], "preferred_over": ["office_doc_read"]},
     "office_doc_read": {"domain": "document", "intent_tags": ["阅读", "读取", "文档", "附件", "内容"], "preferred_over": ["document_qa"]},
     "office_doc_analyze": {"domain": "document", "intent_tags": ["分析", "解读", "文档", "表格", "附件"]},
     "office_doc_edit": {"domain": "document", "intent_tags": ["修改", "编辑", "文档", "批注", "修订"]},
@@ -157,6 +167,7 @@ def get_skills_for_scene(scene: str, user_role: str = "user") -> list[Skill]:
         for s in SkillRegistry.list()
         if s.supports_scene(scene)
         and s.status != "disabled"
+        and (settings.WEB_SEARCH_TOOL_ENABLED or s.name != "web_search")
         and (scene != "chat" or s.name in _CHAT_SKILL_ALLOWLIST)
         and (allow_write or not _skill_is_write(s))
         and role_allows(s.permission, user_role)
@@ -507,6 +518,8 @@ async def execute_tool_call(
     llm_config: dict | None = None,
     confirmed_tools: frozenset[str] | set[str] | None = None,
     confirmed_tool_calls: frozenset[str] | set[str] | None = None,
+    approval_context_sha256: str = "",
+    office_doc_ids: tuple[str, ...] | list[str] | None = None,
     on_output=None,
 ) -> SkillResult:
     """执行一次技能调用：校验 → 高危拦截 → 执行 → 审计."""
@@ -560,7 +573,7 @@ async def execute_tool_call(
         if (
             capability.requires_confirmation
             and capability.confirmation_mode != "client"
-            and not is_tool_call_confirmed(name, args, confirmed_tool_calls)
+            and not is_tool_call_confirmed(name, args, confirmed_tool_calls, approval_context_sha256)
         ):
             return SkillResult(
                 success=False,
@@ -570,7 +583,7 @@ async def execute_tool_call(
                 metadata={
                     "server": server_name,
                     "tool": tool_name,
-                    "approval_fingerprint": tool_call_fingerprint(name, args),
+                    "approval_fingerprint": tool_call_fingerprint(name, args, approval_context_sha256),
                 },
             )
         binding_id = str((capability.annotations or {}).get("binding_id") or "")
@@ -661,7 +674,7 @@ async def execute_tool_call(
         skill.requires_confirmation
         and skill.environment != "client"
         and not explicit_user_delete
-        and not is_tool_call_confirmed(name, args, confirmed_tool_calls)
+        and not is_tool_call_confirmed(name, args, confirmed_tool_calls, approval_context_sha256)
     ):
         result = SkillResult(
             success=False,
@@ -671,7 +684,7 @@ async def execute_tool_call(
             metadata={
                 "skill": name,
                 "params": args,
-                "approval_fingerprint": tool_call_fingerprint(name, args),
+                "approval_fingerprint": tool_call_fingerprint(name, args, approval_context_sha256),
             },
         )
         await _record_skill_log(user_id, skill, args, result)
@@ -692,6 +705,7 @@ async def execute_tool_call(
         on_notify=on_notify,
         on_output=on_output,
         execution_policy=execution_policy,
+        office_doc_ids=tuple(str(value) for value in (office_doc_ids or ()) if str(value).strip()),
     )
     # All registered Skills now pass through the MCP gateway.  The gateway
     # chooses Electron MCP for client capabilities and an in-process adapter

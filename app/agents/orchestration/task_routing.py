@@ -19,6 +19,15 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.agents.orchestration.routing_patterns import (
+    EXTERNAL_OPERATION as _EXTERNAL_OPERATION,
+    FACTUAL_DOCUMENT_QUESTION as _FACTUAL_DOCUMENT_QUESTION,
+    FILE_OPERATION as _FILE_OPERATION,
+    MULTI_OPERATION as _MULTI_OPERATION,
+    RAG_OPERATION as _RAG_OPERATION,
+    STATEFUL_REASONING as _STATEFUL_REASONING,
+)
+
 
 class RouteChannel(str, Enum):
     DIRECT_LLM = "direct_llm"
@@ -47,29 +56,6 @@ class RouteDecision(BaseModel):
     estimated_tokens: int = Field(ge=0)
 
 
-_FILE_OPERATION = re.compile(
-    r"(?iu)(?:转换|转为|转成|导出|另存为|保存为|批量处理|运行脚本|执行脚本)"
-    r".{0,36}(?:文件|附件|文档|表格|\.csv\b|\.tsv\b|\.xlsx\b|\.docx\b|\.pptx\b|\.pdf\b|\.txt\b)"
-)
-_RAG_OPERATION = re.compile(
-    r"(?iu)(?:知识库|资料库|检索|查找|查询).{0,28}(?:资料|文档|信息|内容|记录|知识库)|"
-    r"(?:根据|从).{0,20}(?:知识库|资料|文档).{0,24}(?:回答|说明|找出|查询)"
-)
-_EXTERNAL_OPERATION = re.compile(
-    r"(?iu)(?:打开|启动|发送|删除|修改|编辑|创建|添加|取消|安排|设置)"
-    r".{0,32}(?:应用|软件|浏览器|网页|邮件|日程|日历|待办|数据库|文件|文档)"
-)
-_MULTI_OPERATION = re.compile(
-    r"(?iu)(?:先.+(?:再|然后)|(?:读取|分析|提取).{0,80}(?:并|再|然后).{0,80}"
-    r"(?:核对|检查|发送|写入|修改|导出)|第\s*[一二三四五六七八九十0-9]+\s*步)"
-)
-_STATEFUL_REASONING = re.compile(
-    r"(?iu)(?:核对|校验|验证|审查|合规|审批|比对|排查|诊断).{0,32}"
-    r"(?:系统|规则|要求|标准|条款|记录|数据|状态)|"
-    r"(?:核对|校验|验证|审查|合规|审批|比对|排查|诊断)"
-)
-
-
 def estimate_tokens(instruction: str, channel: RouteChannel) -> int:
     """Conservative pre-execution budget used as a guardrail, never billing."""
     chars = max(1, len((instruction or "").strip()))
@@ -86,6 +72,122 @@ def route_atomic_instruction(
     instruction: str,
     *,
     has_authorized_documents: bool = False,
+    office_document_count: int = 0,
+) -> RouteDecision:
+    """Return the legacy result while policy is in shadow mode.
+
+    The declarative engine is evaluated only after the existing routing result
+    is known.  This makes migration observable without planning or executing a
+    second task.
+    """
+    legacy = _route_atomic_instruction_legacy(
+        instruction,
+        has_authorized_documents=has_authorized_documents,
+        office_document_count=office_document_count,
+    )
+    policy = _load_routing_policy()
+    if policy is None:
+        return legacy
+    try:
+        from app.agents.orchestration.policy.features import build_routing_features
+
+        candidate = policy.evaluate(
+            build_routing_features(
+                instruction,
+                has_authorized_documents=has_authorized_documents,
+                office_document_count=office_document_count,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        # A policy error cannot make a user request unrouteable. The load-time
+        # linter catches configuration defects; this protects future hooks.
+        _record_policy_error(exc)
+        return legacy
+    if candidate is None:
+        return legacy
+    policy_decision = RouteDecision(
+        channel=candidate.channel,
+        reason=_POLICY_REASON_TEXT.get(candidate.reason_code, candidate.reason_code),
+        estimated_tokens=estimate_tokens(instruction, candidate.channel),
+    )
+    mode = _routing_policy_mode()
+    if mode == "enforce":
+        return policy_decision
+    if mode == "shadow":
+        _record_policy_shadow_result(legacy, policy_decision, candidate)
+    return legacy
+
+
+_POLICY_REASON_TEXT = {
+    "explicit_file_conversion": "明确的文件转换或批处理",
+    "multi_document_targeting": "多文档事实问题需要先定位授权附件",
+    "explicit_rag_lookup": "需要从已授权资料检索事实",
+    "authorized_document_lookup": "需要从已授权资料检索事实",
+    "agent_coordination": "需要多步协调或外部状态操作",
+    "direct_response": "无需外部状态的直接内容生成",
+}
+
+
+def _load_routing_policy():
+    from app.agents.orchestration.policy.runtime import load_routing_policy
+
+    return load_routing_policy()
+
+
+def _routing_policy_mode() -> str:
+    from app.agents.orchestration.policy.runtime import routing_policy_mode
+
+    return routing_policy_mode()
+
+
+def _record_policy_shadow_result(
+    legacy: RouteDecision,
+    candidate: RouteDecision,
+    policy_candidate: Any,
+) -> None:
+    from app.monitoring.context import MonitorContext
+    from app.monitoring.logger import monitor_logger
+
+    divergent = candidate.channel != legacy.channel
+    monitor_logger.warning(
+        "路由策略影子结果与旧路由不同" if divergent else "路由策略影子规则命中",
+        event_type="policy_shadow_divergence" if divergent else "policy_shadow_match",
+        category="routing",
+        code="ROUTING_POLICY_SHADOW_DIVERGENCE" if divergent else "ROUTING_POLICY_SHADOW_MATCH",
+        context=MonitorContext(component="task_routing"),
+        metadata={
+            "rule_id": policy_candidate.rule_id,
+            "policy_sha256": policy_candidate.policy_sha256,
+            "legacy_channel": legacy.channel.value,
+            "candidate_channel": candidate.channel.value,
+            "requirements": list(policy_candidate.requirements),
+            "risk_level": policy_candidate.risk_level,
+            "require_clarification": policy_candidate.require_clarification,
+            "audit_metadata": dict(policy_candidate.audit_metadata),
+        },
+    )
+
+
+def _record_policy_error(exc: Exception) -> None:
+    from app.monitoring.context import MonitorContext
+    from app.monitoring.logger import monitor_logger
+
+    monitor_logger.error(
+        "路由策略求值失败，继续使用旧路由",
+        event_type="policy_evaluation_failure",
+        category="routing",
+        code="ROUTING_POLICY_EVALUATION_FAILED",
+        context=MonitorContext(component="task_routing"),
+        metadata={"error": str(exc)[:300]},
+        exc_info=exc,
+    )
+
+
+def _route_atomic_instruction_legacy(
+    instruction: str,
+    *,
+    has_authorized_documents: bool = False,
+    office_document_count: int = 0,
 ) -> RouteDecision:
     """Pick one channel for a *single* atomic request.
 
@@ -97,6 +199,11 @@ def route_atomic_instruction(
     if _MULTI_OPERATION.search(text) or _EXTERNAL_OPERATION.search(text) or _STATEFUL_REASONING.search(text):
         channel = RouteChannel.AGENT
         return RouteDecision(channel=channel, reason="需要多步协调或外部状态操作", estimated_tokens=estimate_tokens(text, channel))
+    # A document-set question cannot safely be answered by a document-agnostic
+    # RAG node: it must first inspect the submitted set and select a document.
+    if office_document_count >= 2 and _FACTUAL_DOCUMENT_QUESTION.search(text):
+        channel = RouteChannel.RAG
+        return RouteDecision(channel=channel, reason="多文档事实问题需要先定位授权附件", estimated_tokens=estimate_tokens(text, channel))
     if _FILE_OPERATION.search(text):
         channel = RouteChannel.DETERMINISTIC_SCRIPT
         return RouteDecision(channel=channel, reason="明确的文件转换或批处理", estimated_tokens=estimate_tokens(text, channel))
@@ -113,6 +220,7 @@ def normalize_atomic_items(
     raw_items: list[str] | list[dict[str, Any]],
     *,
     has_authorized_documents: bool = False,
+    office_document_count: int = 0,
 ) -> list[AtomicWorkItem]:
     """Validate/route externally extracted work items and flatten subgraphs."""
     normalized: list[AtomicWorkItem] = []
@@ -121,7 +229,11 @@ def normalize_atomic_items(
         instruction = re.sub(r"\s+", " ", str(data.get("instruction") or "")).strip()
         if not instruction:
             continue
-        decision = route_atomic_instruction(instruction, has_authorized_documents=has_authorized_documents)
+        decision = route_atomic_instruction(
+            instruction,
+            has_authorized_documents=has_authorized_documents,
+            office_document_count=office_document_count,
+        )
         raw_deps = data.get("dependencies") or []
         dependencies = [
             int(value) for value in raw_deps

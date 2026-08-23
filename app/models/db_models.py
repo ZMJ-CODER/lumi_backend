@@ -313,6 +313,41 @@ class OfficeTaskIndex(Base):
     )
 
 
+# ── 外部副作用两段式日志 ─────────────────────────────────
+
+class EffectJournal(Base):
+    """Durable reservation/confirmation record for one external operation.
+
+    ``intent_payload`` contains only the tool identity and parameter digest;
+    full request bodies stay in normal job state and are never copied here.
+    """
+
+    __tablename__ = "effect_journal"
+
+    idempotency_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    node_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    tool: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    params_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    intent_payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    result_payload: Mapped[dict | None] = mapped_column(JSONB)
+    reason: Mapped[str | None] = mapped_column(String(160))
+    intent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    uncertain_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("status IN ('intent', 'confirmed', 'uncertain')", name="ck_effect_journal_status"),
+        Index("idx_effect_journal_job", "job_id"),
+        Index("idx_effect_journal_status_intent", "status", "intent_at"),
+    )
+
+
 # ── 用户外部 MCP 工具绑定 ────────────────────────────────
 
 class UserMcpToolBinding(Base, UUIDMixin):

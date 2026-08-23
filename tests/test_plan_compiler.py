@@ -68,6 +68,18 @@ def test_compiler_accepts_explicit_three_step_plan(monkeypatch):
     assert result.cost.critical_path_ms > 0
 
 
+def test_compiler_keeps_oversized_plan_for_logical_window(monkeypatch):
+    """A valid long plan is rolled, not rejected or silently truncated."""
+    result = _compile(monkeypatch, [
+        _node(f"step-{index}", ["python_exec", "compliance_check", "open_app"][index % 3])
+        for index in range(9)
+    ])
+
+    assert result.decision == CompileDecision.NORMALIZED
+    assert len(result.nodes) == 9
+    assert any(item.code == "NODE_LIMIT" for item in result.warnings)
+
+
 def test_compiler_rejects_cycle_and_does_not_truncate(monkeypatch):
     result = _compile(monkeypatch, [
         _node("a", "python_exec", deps=["b"]),

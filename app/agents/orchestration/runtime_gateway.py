@@ -48,21 +48,26 @@ class RuntimeGateway:
         return self.temporal_available
 
     async def submit_static(self, job: Job, llm_api_key: str | None, llm_config: dict | None = None) -> None:
-        """Submit the frozen static workflow and persist its bootstrap snapshot."""
+        """Submit a safe, static DAG to the external Temporal worker."""
         from app.agents.orchestration.temporal.client import start_agent_workflow, store_job_llm_config, store_byok_key
 
+        job.routing = {
+            **(job.routing or {}),
+            "runtime": "temporal_static",
+            "runtime_version": 1,
+        }
         payload = job.model_dump()
         payload["config"] = {
             "node_timeout_seconds": settings.AGENT_NODE_TIMEOUT_SECONDS,
             "node_max_retries": settings.AGENT_NODE_MAX_RETRIES,
-            "node_concurrency": 1,
+            "node_concurrency": settings.AGENT_NODE_CONCURRENCY,
         }
+        await self.store.create_job(job)
         if llm_config:
             await store_job_llm_config(job.job_id, llm_config)
         elif llm_api_key:
             await store_byok_key(job.job_id, llm_api_key)
         await start_agent_workflow(payload, job.job_id)
-        await self.store.create_job(job)
 
     async def submit_manifest(self, job: Job, llm_api_key: str | None, llm_config: dict | None = None) -> None:
         """Persist a compact job reference and start the rolling manifest workflow."""
@@ -118,5 +123,30 @@ class RuntimeGateway:
         return True
 
     @staticmethod
+    def can_run_static(job: Job) -> bool:
+        """Return whether a job preserves all semantics in the static worker.
+
+        Dynamic replanning, ReAct, approvals, and writes retain the legacy
+        runtime until their Temporal equivalents are independently durable.
+        """
+        routing = job.routing or {}
+        if routing.get("manifest") or routing.get("logical_plan"):
+            return False
+        nodes = list(job.nodes or [])
+        if not nodes or len(nodes) > settings.AGENT_PLAN_MAX_NODES:
+            return False
+        allowed_agents = {"direct_llm", "retrieval", "web_research"}
+        for node in nodes:
+            if node.agent not in allowed_agents or node.approval:
+                return False
+            if any(str(getattr(claim, "mode", "read")).lower() == "write" for claim in node.resource_claims):
+                return False
+        return True
+
+    @staticmethod
     def is_manifest_job(job: Job | None) -> bool:
         return bool(job and str((job.routing or {}).get("runtime") or "") == "manifest_temporal")
+
+    @staticmethod
+    def is_static_job(job: Job | None) -> bool:
+        return bool(job and str((job.routing or {}).get("runtime") or "") == "temporal_static")

@@ -143,6 +143,7 @@ class JobForkService:
                 JobStatus.RUNNING,
                 JobStatus.PAUSED,
                 JobStatus.WAITING_APPROVAL,
+                JobStatus.WAITING_RESOURCES,
             }
             active_jobs = [
                 job for job in await self._list_jobs(source.user_id, 50)

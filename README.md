@@ -67,4 +67,6 @@ docker build -f Dockerfile.sandbox -t lumi-python-sandbox:latest .
 - [docs/OFFICE_SKILLS.md](docs/OFFICE_SKILLS.md) — 办公模式
 - [docs/AGENT_ORCHESTRATION_MCP.md](docs/AGENT_ORCHESTRATION_MCP.md) — 办公 DAG、TCA/ReAct 与 MCP 运行手册
 - [docs/DAG_MCP_PITFALLS.md](docs/DAG_MCP_PITFALLS.md) — 办公 DAG/MCP 的故障复盘与排障路线
+- [docs/ROUTING_POLICY_MIGRATION.md](docs/ROUTING_POLICY_MIGRATION.md) — 路由策略与内核边界迁移
+- [docs/ORCHESTRATION_KERNEL_PACKAGE.md](docs/ORCHESTRATION_KERNEL_PACKAGE.md) — 独立编排内核 workspace 包
 - [docs/API_AUTH.md](docs/API_AUTH.md) / [docs/API_INTEGRATION.md](docs/API_INTEGRATION.md) — API 与鉴权

@@ -107,6 +107,7 @@ class AtomicStepAgent(WorkerAgent):
             llm_config=ctx.llm_config,
             confirmed_tools=ctx.confirmed_tools,
             confirmed_tool_calls=ctx.confirmed_tool_calls,
+            approval_context_sha256=ctx.approval_context_sha256,
             on_output=ctx.on_output,
         )
         if not result.success:

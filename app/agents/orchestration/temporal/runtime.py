@@ -101,7 +101,7 @@ async def start_inprocess_worker() -> None:
 
     from temporalio.client import Client
 
-    from app.agents.orchestration.temporal.worker import build_manifest_worker
+    from app.agents.orchestration.temporal.worker import build_manifest_worker, build_worker
     from app.agents.skills.registry import SkillRegistry, init_skills
     from app.core import redis as redis_mod
 
@@ -113,13 +113,17 @@ async def start_inprocess_worker() -> None:
     client = await Client.connect(
         settings.TEMPORAL_ADDRESS, namespace=settings.TEMPORAL_NAMESPACE
     )
-    worker = build_manifest_worker(client)
+    static_worker = build_worker(client)
+    manifest_worker = build_manifest_worker(client)
     logger.info(
         "Temporal Worker 已随后端进程启动: {} queue={}",
         settings.TEMPORAL_ADDRESS,
         settings.TEMPORAL_MANIFEST_TASK_QUEUE,
     )
-    _worker_task = asyncio.create_task(worker.run())
+    async def run_workers() -> None:
+        await asyncio.gather(static_worker.run(), manifest_worker.run())
+
+    _worker_task = asyncio.create_task(run_workers())
     _worker_task.add_done_callback(_on_worker_done)
 
 

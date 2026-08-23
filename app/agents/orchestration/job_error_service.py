@@ -70,6 +70,7 @@ class JobErrorService:
             JobStatus.CANCELLED,
             JobStatus.INTERRUPTED,
             JobStatus.WAITING_APPROVAL,
+            JobStatus.WAITING_RESOURCES,
         }:
             transition(job, JobStatus.FAILED)
             job.error = job.error or message[:1000]

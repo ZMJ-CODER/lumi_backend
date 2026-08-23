@@ -37,13 +37,7 @@ from app.services.memory.retrieval import search_user_memories
 from app.services.memory.privacy import resolve_decrypt_candidates
 from app.services.conversation_memory import ConversationRecall, retrieve_conversation_recall
 from app.services.prompts import get_base_system_prompt, get_prompt_content
-from app.services.usage import (
-    CATEGORY_CHAT,
-    CATEGORY_SKILL,
-    CATEGORY_TITLE,
-    CATEGORY_TOOL_DECISION,
-)
-from app.services.web_search import WEB_SEARCH_TOOL, web_search
+from app.services.usage import CATEGORY_CHAT, CATEGORY_SKILL, CATEGORY_TITLE
 
 # Redis Key 模板
 CONTEXT_KEY = "conv:ctx:{conversation_id}"  # 会话上下文 (list of json)
@@ -67,26 +61,33 @@ _MULTIMODAL_KEYWORDS = ("vl", "vision", "4o", "gemini", "llava")
 _MAX_IMAGE_BYTES = 15 * 1024 * 1024  # 单图 ≤ 15MB（base64 后约 20MB，贴近接口上限）
 _MAX_IMAGES_PER_MESSAGE = 10
 _WEB_DECISION_PROMPT = (
-    "你是联网搜索决策助手。判断用户问题是否需要调用 web_search 工具。\n"
-    "只要用户明确要求搜索（如搜一下/搜索/查一下/查查/帮我查）、询问最新新闻、实时数据、"
-    "当前事件，或问题可能需要模型知识之外的最新信息，就必须调用 web_search 工具。\n"
-    "只有纯闲聊、寒暄、情感倾诉这类不需要任何外部信息的请求才不调用。\n"
-    "不确定时倾向调用工具。"
+    "你是受控的联网工具选择器。web_search 只是可选的只读工具，不是所有问题的预处理器。\n"
+    "仅当回答需要核实公开互联网中的外部事实、新闻、政策或用户明确要求搜索/网页来源时才调用。\n"
+    "用户自己的任务状态、对话历史、上传附件、知识库内容、总结、改写、创作、计算和普通问答，绝不调用。\n"
+    "‘今天/当前/实时’等词本身不是充分条件；例如‘我今天的待办’属于私有上下文，不应联网。\n"
+    "不确定时不要调用，改为基于已有上下文回答或向用户澄清。"
 )
 
+# 这些词只用于显式联网意图的快速候选判断，绝不代表后端强制执行搜索。
 _WEB_INTENT_KEYWORDS = (
-    "搜索", "搜一下", "查", "查询", "找", "最新", "新闻", "今天", "昨天", "明天",
-    "天气", "股票", "价格", "汇率", "行情", "实时", "动态", "报道", "热点",
-    "是什么", "怎么回事", "哪里", "什么时候", "谁的", "多少钱", "怎么样",
+    "联网", "网上搜", "网页搜索", "搜索网页", "检索公开资料", "查网页", "给我来源",
+    "搜索新闻", "最新新闻", "公开资料", "web search", "search the web", "browse the web",
 )
 
-# 仅这些意图才需要在普通聊天中先进入受控 ToolNode。避免让一般闲聊、文档
-# 问答、识图或语音转写失去原有逐字流式体验；文档问答已由 RAG 预处理完成。
+# 这些词只决定是否给模型展示受控工具目录，绝不决定是否联网。避免让一般
+# 闲聊、文档问答、识图或语音转写失去原有逐字流式体验；文档问答已由 RAG
+# 预处理完成。
 _CHAT_TOOL_GRAPH_KEYWORDS = (
-    "搜索", "搜一下", "查一下", "查查", "最新", "新闻", "天气", "股票", "价格",
-    "汇率", "行情", "实时", "动态", "报道", "热点", "今天", "昨天", "明天",
+    "搜索", "查一下", "查查", "查找",
+    "联网", "网上搜", "网页搜索", "搜索网页", "检索公开资料", "查网页", "给我来源",
+    "搜索新闻", "最新新闻", "公开资料", "web search", "search the web", "browse the web",
     "现在几点", "当前时间", "当前日期", "几号", "星期几",
 )
+_CHAT_LOCAL_CONTEXT_MARKERS = (
+    "上传的", "刚上传", "附件", "这个文件", "这份文件", "知识库", "我的资料",
+    "会议纪要", "帮我总结", "帮我改写", "润色", "写一篇", "写个",
+)
+_CHAT_SMALLTALK_MARKERS = ("你好", "嗨", "哈喽", "在吗", "谢谢", "再见", "晚安", "早上好")
 
 def _should_retrieve_chat_knowledge(
     content: str, attachments: list | None, retrieval_query: str | None
@@ -101,19 +102,70 @@ def _needs_memory_fact_retrieval(content: str, retrieval_query: str | None) -> b
 
 
 def _looks_like_chitchat(question: str) -> bool:
-    """简单闲聊/寒暄判断：很短且不含搜索意图关键词 → 跳过联网决策（省一次 LLM 调用）."""
+    """仅识别明显寒暄；不能把短的实质问题误判为无需工具。"""
     q = (question or "").strip()
     if not q:
         return True
-    if len(q) > 40:
-        return False
-    return not any(k in q for k in _WEB_INTENT_KEYWORDS)
+    return len(q) <= 12 and any(k in q.casefold() for k in _CHAT_SMALLTALK_MARKERS)
 
 
 def _needs_chat_tool_graph(content: str) -> bool:
-    """普通聊天何时需要非流式 ToolNode 决策。"""
+    """普通聊天的模型工具选择入口。
+
+    这里仅决定是否把有限工具目录交给模型，不决定联网。除寒暄、明确本地
+    文本处理和附件问答外，实质性提问都可以进入受控 ToolNode；模型不调用
+    工具时会直接回复，因而不会产生网络请求。
+    """
     text = (content or "").strip().lower()
-    return bool(text and any(keyword in text for keyword in _CHAT_TOOL_GRAPH_KEYWORDS))
+    if not text or _looks_like_chitchat(text):
+        return False
+    if any(marker in text for marker in _CHAT_LOCAL_CONTEXT_MARKERS):
+        return False
+    if any(keyword in text for keyword in _CHAT_TOOL_GRAPH_KEYWORDS):
+        return True
+    return bool(
+        len(text) >= 16
+        or any(marker in text for marker in ("?", "？", "什么", "为什么", "怎么", "如何", "多少", "吗", "是否"))
+    )
+
+
+def _append_web_search_preference(messages: list[dict]) -> list[dict]:
+    """Expose an explicit UI preference to the model without bypassing ToolNode."""
+    preference = (
+        "\n\n[本轮工具偏好]\n用户已主动开启联网偏好。仅当本次回答确实需要公开网页来源时，"
+        "才调用 web_search；不得因该偏好查询用户私有状态、附件或对话内容。"
+    )
+    enriched = [dict(message) for message in messages]
+    for message in enriched:
+        if message.get("role") == "system" and isinstance(message.get("content"), str):
+            message["content"] += preference
+            return enriched
+    return [{"role": "system", "content": preference.strip()}] + enriched
+
+
+def _append_chat_tool_contract(messages: list[dict], *, web_search_preferred: bool) -> list[dict]:
+    """Add the tool-selection contract to the existing trusted system prompt."""
+    contract = "\n\n[工具选择规则]\n" + _WEB_DECISION_PROMPT
+    if web_search_preferred:
+        contract += (
+            "\n用户已主动开启联网偏好；这只提高公开来源检索的候选优先级，"
+            "不改变上述私有信息和最小调用限制。"
+        )
+    enriched = [dict(message) for message in messages]
+    for message in enriched:
+        if message.get("role") == "system" and isinstance(message.get("content"), str):
+            message["content"] += contract
+            return enriched
+    return [{"role": "system", "content": contract.strip()}] + enriched
+
+
+def _requires_fresh_web_data(content: str) -> bool:
+    """Deprecated compatibility helper; live data is selected by the model/tool gate.
+
+    Kept for third-party imports during the migration, but intentionally never
+    forces a network request based on lexical markers.
+    """
+    return False
 
 
 def _chat_reasoning_effort(thinking_mode: str) -> str | None:
@@ -614,6 +666,7 @@ class Orchestrator:
             reply = await self._call_llm_auto(
                 user_id, prep["messages"], scene, image_uris, content, prep["citations"],
                 conversation_id, llm_api_key, thinking_mode=thinking_mode,
+                force_web_search=web_search_enabled,
             )
             title = await self.get_conversation_title(conversation_id)
             if prep["is_first"] and not title:
@@ -669,6 +722,7 @@ class Orchestrator:
                     conversation_id,
                     llm_api_key,
                     thinking_mode=thinking_mode,
+                    force_web_search=web_search_enabled,
                 )
             )
             title_task = asyncio.create_task(self._generate_title(content, user_id, llm_api_key))
@@ -679,6 +733,7 @@ class Orchestrator:
             reply = await self._call_llm_auto(
                 user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key,
                 thinking_mode=thinking_mode,
+                force_web_search=web_search_enabled,
             )
 
         # 普通模式短句回复：把整段回复切成多条短句（存储时合并为一次交互）
@@ -711,6 +766,7 @@ class Orchestrator:
         retrieval_query: str | None = None,
         attachments: list | None = None,
         office_docs: list[dict] | None = None,
+        web_search_enabled: bool = False,
         llm_api_key: str | None = None,
         thinking_mode: str = "fast",
         reply_style: str | None = None,
@@ -773,6 +829,7 @@ class Orchestrator:
             else self._stream_llm_auto(
                 user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key,
                 thinking_mode=thinking_mode,
+                force_web_search=web_search_enabled,
             )
         )
         async for evt in stream:
@@ -1270,63 +1327,6 @@ class Orchestrator:
             await self._maybe_extract_memories(conversation_id, user_id)
 
     # ── 工具调用与流式回复 ─────────────────────────────
-
-    async def _apply_tool_calls(
-        self,
-        messages: list[dict],
-        user_content: str,
-        citations: list[dict],
-        tool_calls: list[dict],
-    ) -> list[dict]:
-        """执行模型请求的工具（当前仅 web_search），把联网结果并入上下文并追加引用.
-
-        说明：联网决策由 Qwen 完成、主回复由 DeepSeek 生成，跨供应商的 assistant tool_calls
-        消息在 DeepSeek 思考模式下会因缺少 reasoning_content 而 400；
-        因此这里不注入 tool_calls 消息，改为把检索结果作为上下文追加给主模型。
-        """
-        web_blocks: list[str] = []
-        for tc in tool_calls:
-            fn = tc.get("function") or {}
-            name = fn.get("name")
-            if name != "web_search":
-                continue
-            try:
-                args = (
-                    json.loads(fn.get("arguments") or "{}")
-                    if isinstance(fn.get("arguments"), str)
-                    else (fn.get("arguments") or {})
-                )
-            except (ValueError, TypeError):
-                args = {}
-            query = str(args.get("query") or user_content)
-            results = await self._retrieve_web(query)
-            block = "\n".join(
-                f"[{i + 1}] {r['title']}\n{r['url']}\n{r['content'][:800]}"
-                for i, r in enumerate(results)
-            )
-            if block:
-                web_blocks.append(block)
-            citations.extend(
-                {
-                    "type": "web",
-                    "title": r["title"] or r["url"],
-                    "content": r["content"][:500],
-                    "source": r["url"],
-                }
-                for r in results
-            )
-        if web_blocks:
-            messages = list(messages) + [
-                {
-                    "role": "user",
-                    "content": (
-                        "（以下是联网搜索到的资料，请优先基于这些资料回答；资料不足以支撑时明确说明）\n\n"
-                        + "\n\n".join(web_blocks)
-                    ),
-                }
-            ]
-        return messages
-
     async def _call_llm_auto(
         self,
         user_id: str,
@@ -1338,6 +1338,7 @@ class Orchestrator:
         conversation_id: str = "",
         llm_api_key: str | None = None,
         thinking_mode: str = "fast",
+        force_web_search: bool = False,
     ) -> str:
         """阻塞版：技能循环（开启时）或 模型自主联网 + 场景模型回复."""
         # 先确定本次实际使用的模型（快速/思考档覆盖优先），再决定图片直传还是 VL 描述成文本
@@ -1351,15 +1352,22 @@ class Orchestrator:
             else:
                 messages = await self._describe_images_to_text(messages, image_uris, user_id)
 
+        if force_web_search:
+            messages = _append_web_search_preference(messages)
+
         # 普通聊天的可选实时/知识库查询走受控 LangGraph ToolNode；办公自动化
         # 始终由办公 DAG 负责，不能从这里旁路进入。图片、语音和 RAG 已在上方
         # 预处理完成，图只看 chat 场景白名单（web_search/query_knowledge/get_datetime）。
-        if scene == "chat" and settings.AGENT_SKILLS_ENABLED and _needs_chat_tool_graph(user_content):
+        if (
+            scene == "chat"
+            and settings.AGENT_SKILLS_ENABLED
+            and (force_web_search or _needs_chat_tool_graph(user_content))
+        ):
             try:
                 reply, tool_records, tool_citations = await run_skill_loop(
                     self._llm,
                     user_id,
-                    messages,
+                    _append_chat_tool_contract(messages, web_search_preferred=force_web_search),
                     scene="chat",
                     conversation_id=conversation_id,
                     llm_api_key=llm_api_key,
@@ -1412,6 +1420,7 @@ class Orchestrator:
         conversation_id: str = "",
         llm_api_key: str | None = None,
         thinking_mode: str = "fast",
+        force_web_search: bool = False,
     ):
         """流式版：技能循环（开启时）或 模型自主联网，最终回复流式产出."""
         # 先确定本次实际使用的模型（快速/思考档覆盖优先），再决定图片直传还是 VL 描述成文本
@@ -1425,15 +1434,22 @@ class Orchestrator:
             else:
                 messages = await self._describe_images_to_text(messages, image_uris, user_id)
 
+        if force_web_search:
+            messages = _append_web_search_preference(messages)
+
         # LangGraph 的工具调用需要先获得完整模型消息才能安全执行，避免把中间
         # tool_calls 混入 SSE。完成后按原 SSE 协议一次性投递正文；普通闲聊模型
         # 不调用工具时仍会在第一轮直接返回，且不会接触办公能力。
-        if scene == "chat" and settings.AGENT_SKILLS_ENABLED and _needs_chat_tool_graph(user_content):
+        if (
+            scene == "chat"
+            and settings.AGENT_SKILLS_ENABLED
+            and (force_web_search or _needs_chat_tool_graph(user_content))
+        ):
             try:
                 reply, _tool_records, tool_citations = await run_skill_loop(
                     self._llm,
                     user_id,
-                    messages,
+                    _append_chat_tool_contract(messages, web_search_preferred=force_web_search),
                     scene="chat",
                     conversation_id=conversation_id,
                     llm_api_key=llm_api_key,
@@ -1476,56 +1492,6 @@ class Orchestrator:
             reasoning_effort=_chat_reasoning_effort(thinking_mode),
         ):
             yield {"type": "delta", "content": delta}
-
-    async def _maybe_decide_web(
-        self, user_id: str, messages: list[dict], user_content: str, citations: list[dict]
-    ) -> list[dict]:
-        """模型自主决策是否联网：qwen-plus 工具调用；未调用则原样返回."""
-        if not settings.WEB_SEARCH_TOOL_ENABLED:
-            return messages
-        question = self._extract_user_text(messages)
-        if not question:
-            return messages
-        # 快速前置：明显是闲聊/寒暄（短且无搜索意图）→ 不调 qwen 决策，省一次 LLM 调用
-        if _looks_like_chitchat(question):
-            return messages
-        # 决策用独立的轻量提示，避免被对话人格/上下文带偏（只判断是否需要联网）
-        decision_messages = [
-            {"role": "system", "content": _WEB_DECISION_PROMPT},
-            {"role": "user", "content": question},
-        ]
-        try:
-            _, tool_calls = await self._llm.chat_with_tools_qwen(
-                decision_messages,
-                [WEB_SEARCH_TOOL],
-                max_tokens=64,
-                usage_user_id=user_id,
-                usage_category=CATEGORY_TOOL_DECISION,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("联网工具决策调用失败，跳过联网: {}", exc)
-            return messages
-        if tool_calls:
-            return await self._apply_tool_calls(messages, user_content, citations, tool_calls)
-        return messages
-
-    @staticmethod
-    def _extract_user_text(messages: list[dict]) -> str:
-        """取最后一条用户消息的纯文本（多模态 content 列表时取 text 分片）."""
-        for msg in reversed(messages):
-            if msg.get("role") != "user":
-                continue
-            content = msg.get("content")
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                texts = [
-                    p.get("text", "")
-                    for p in content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                ]
-                return "\n".join(t for t in texts if t)
-        return ""
 
     # ── 内部方法 ────────────────────────────────────────
 
@@ -1717,14 +1683,6 @@ class Orchestrator:
             # 检索失败不阻塞对话主流程，仅记录并跳过知识库
             logger.warning("RAG 检索失败，跳过知识库: {}", e)
             return "", []
-
-    async def _retrieve_web(self, query: str) -> list[dict]:
-        """联网搜索（Tavily）；失败不阻塞对话."""
-        try:
-            return await web_search(query)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("联网搜索失败: {}", exc)
-            return []
 
     @staticmethod
     def _is_multimodal_model(model: str) -> bool:

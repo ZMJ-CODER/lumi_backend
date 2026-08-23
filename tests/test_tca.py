@@ -1,6 +1,10 @@
 import asyncio
 
+import yaml
+
 from app.agents.orchestration.tca import ComplexityLevel, TaskComplexityAssessor
+from app.agents.orchestration.policy import tca as tca_policy
+from app.core.config import PROJECT_ROOT, Settings, settings
 
 
 def assess(request, *, docs=None, history="", fallback=None):
@@ -68,3 +72,61 @@ def test_low_confidence_route_uses_optional_classifier():
     assert calls
     assert score.level == ComplexityLevel.M1
     assert score.stage == "classifier"
+
+
+def test_tca_policy_uses_deployment_asset(monkeypatch, tmp_path):
+    policy_file = tmp_path / "tca.yaml"
+    policy_file.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "weights": {
+                    "entity_count": 0.20,
+                    "implicitness": 0.20,
+                    "dependency": 0.20,
+                    "ambiguity": 0.20,
+                    "history_dependency": 0.20,
+                },
+                "thresholds": {
+                    "explicit_workflow_dependency": 0.31,
+                    "m2_dependency": 0.32,
+                    "m3_ambiguity": 0.63,
+                    "classifier_confidence": 0.69,
+                    "history_dynamic": 0.59,
+                },
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "AGENT_TCA_POLICY_PATH", str(policy_file))
+    tca_policy.load_tca_policy.cache_clear()
+
+    try:
+        policy = tca_policy.load_tca_policy()
+        assert policy.weights.entity_count == 0.20
+        assert policy.thresholds.m2_dependency == 0.32
+    finally:
+        tca_policy.load_tca_policy.cache_clear()
+
+
+def test_tca_policy_invalid_asset_logs_and_falls_back(monkeypatch, tmp_path):
+    policy_file = tmp_path / "invalid-tca.yaml"
+    policy_file.write_text("version: 1\nweights: {}\nthresholds: {}\n", encoding="utf-8")
+    events = []
+    monkeypatch.setattr(settings, "AGENT_TCA_POLICY_PATH", str(policy_file))
+    monkeypatch.setattr(tca_policy.monitor_logger, "error", lambda *args, **kwargs: events.append((args, kwargs)))
+    tca_policy.load_tca_policy.cache_clear()
+
+    try:
+        policy = tca_policy.load_tca_policy()
+        assert policy == tca_policy.DEFAULT_TCA_POLICY
+        assert events[0][1]["code"] == "TCA_POLICY_LOAD_FAILED"
+    finally:
+        tca_policy.load_tca_policy.cache_clear()
+
+
+def test_tca_policy_path_is_resolved_from_project_root():
+    configured = Settings(AGENT_TCA_POLICY_PATH="config/agent_policies/tca_rules.yaml")
+
+    assert configured.AGENT_TCA_POLICY_PATH == str(PROJECT_ROOT / "config" / "agent_policies" / "tca_rules.yaml")

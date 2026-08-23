@@ -17,6 +17,7 @@ import json
 from app.agents.orchestration.execution_backend import (
     LegacyDagBackend,
     TemporalManifestBackend,
+    TemporalStaticBackend,
 )
 from app.agents.orchestration.execution_loop_service import ExecutionLoopService
 from app.agents.orchestration.fork_service import JobForkService
@@ -26,6 +27,7 @@ from app.agents.orchestration.escalation_service import EscalationService
 from app.agents.orchestration.approval_service import ApprovalService
 from app.agents.orchestration.control_service import JobControlService
 from app.agents.orchestration.admission_lease import AdmissionLeaseMonitor
+from app.agents.orchestration.admission import AdmissionBackpressureError, job_admission
 from app.agents.orchestration.submission_guard import (
     ActiveConversationJobError,
     AgentBackpressureError,
@@ -75,7 +77,8 @@ class AgentOrchestrator:
     """多智能体协作编排器（单例，全局复用）.
 
     temporal_enabled：None 时按 settings.AGENT_ORCHESTRATION 决定；
-    ``manifest_temporal`` 仅接收显式任务清单，普通办公任务仍走动态 DAG。
+    ``temporal`` 只接收无审批的静态只读 DAG，``manifest_temporal``
+    仅接收显式任务清单，普通办公任务仍走动态 DAG。
     测试/显式场景可传 False 强制走自建 DAG（legacy）。
     """
 
@@ -148,11 +151,13 @@ class AgentOrchestrator:
             max_replans=lambda: settings.AGENT_SUBGRAPH_MAX_REPLANS,
         )
         # ── Temporal 模式 ──
-        self._temporal_mode = (
-            settings.AGENT_ORCHESTRATION == "manifest_temporal"
+        self._orchestration_mode = (
+            settings.AGENT_ORCHESTRATION.strip().lower()
             if temporal_enabled is None
-            else bool(temporal_enabled)
+            else ("temporal" if temporal_enabled else "legacy")
         )
+        self._temporal_mode = self._orchestration_mode in {"temporal", "manifest_temporal"}
+        self._temporal_static_mode = self._orchestration_mode == "temporal"
         self._temporal_available = False
         self._temporal_probe_at = 0.0
         self._temporal_unavailable_until = 0.0
@@ -189,6 +194,7 @@ class AgentOrchestrator:
             run_job=self._run_job,
         )
         self._manifest_backend = TemporalManifestBackend(self._runtime)
+        self._static_backend = TemporalStaticBackend(self._runtime)
         self._submission = JobSubmissionService(
             store=self._store,
             context_service=self._submission_context,
@@ -197,9 +203,12 @@ class AgentOrchestrator:
             plan_compilation=self._plan_compilation,
             materialization=self._job_materialization,
             temporal_mode=self._temporal_mode,
+            temporal_static_mode=self._temporal_static_mode,
             can_run_manifest_temporal=self._can_run_manifest_temporal,
+            can_run_static_temporal=self._can_run_static_temporal,
             probe_temporal=self._probe_temporal,
             manifest_backend=self._manifest_backend,
+            static_backend=self._static_backend,
             legacy_backend=self._legacy_backend,
             start_heartbeat=self._start_admission_heartbeat,
             stop_heartbeat=self._stop_admission_heartbeat,
@@ -238,13 +247,17 @@ class AgentOrchestrator:
             continue_logical_plan=self._continue_logical_plan,
             maybe_replan=self._maybe_replan_failed_job,
             node_concurrency=settings.AGENT_NODE_CONCURRENCY,
+            suspend_capacity=self._finalizer.suspend_capacity,
+            ensure_active_capacity=self._ensure_active_capacity,
         )
         self._control = JobControlService(
             repository=self._store,
             approval=self._approval,
             temporal_backend=self._manifest_backend,
+            static_backend=self._static_backend,
             legacy_backend=self._legacy_backend,
             finalizer=self._finalizer,
+            ensure_active_capacity=self._ensure_active_capacity,
         )
         self._fork = JobForkService(
             repository=self._store,
@@ -303,6 +316,18 @@ class AgentOrchestrator:
 
     async def _stop_admission_heartbeat(self, job_id: str) -> None:
         await self._lease_monitor.stop(job_id)
+
+    async def _ensure_active_capacity(self, job: Job) -> bool:
+        """Re-admit a suspended job before it may execute another node."""
+        try:
+            await job_admission.activate(job.job_id, job.user_id)
+        except AdmissionBackpressureError:
+            return False
+        job.routing = dict(job.routing or {})
+        job.routing.pop("admission_released_while_waiting", None)
+        self._start_admission_heartbeat(job.job_id, job.user_id)
+        await self._store.save_job(job)
+        return True
 
     # Compatibility delegates. Persistence lives in MemoryRepository and
     # attachment filtering remains in OfficeMemoryService; keeping these names
@@ -430,6 +455,10 @@ class AgentOrchestrator:
     @staticmethod
     def _can_run_manifest_temporal(job: Job) -> bool:
         return RuntimeGateway.can_run_manifest(job)
+
+    @staticmethod
+    def _can_run_static_temporal(job: Job) -> bool:
+        return RuntimeGateway.can_run_static(job)
 
     async def _submit_temporal(self, job: Job, llm_api_key: str | None, llm_config: dict | None = None) -> None:
         await self._runtime.submit_static(job, llm_api_key, llm_config)

@@ -14,6 +14,7 @@ from app.core.config import settings
 from loguru import logger
 
 from app.agents.roles.knowledge.retrieval import RetrievalAgent
+from app.agents.roles.knowledge.document_targeting import DocumentTargetingAgent
 from app.agents.roles.knowledge.web_research import WebResearchAgent
 from app.agents.roles.atomic import AtomicStepAgent
 from app.agents.roles.direct_llm import DirectLlmAgent
@@ -44,6 +45,7 @@ def register_all_agents() -> list[WorkerAgent]:
         CollectResultsAgent(),
         ReactStepAgent(),
         RetrievalAgent(),
+        DocumentTargetingAgent(),
         WebResearchAgent(),
         OfficeTextAgent(),
         OfficeResearchAgent(),
@@ -74,6 +76,7 @@ __all__ = [
     "register_all_agents",
     "AtomicStepAgent",
     "RetrievalAgent",
+    "DocumentTargetingAgent",
     "WebResearchAgent",
     "OfficeTextAgent",
     "OfficeResearchAgent",

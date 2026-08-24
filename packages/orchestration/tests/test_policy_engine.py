@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 import pytest
+from pydantic import ValidationError
 
 from lumi_orch.policy.engine import PolicyLoadError, RoutingPolicyEngine
 from lumi_orch.policy.lexicon_models import RoutingLexiconDocument
@@ -85,7 +86,7 @@ def test_tca_policy_rejects_unbalanced_weights():
 
 
 def test_routing_lexicon_contract_rejects_unknown_actions_and_duplicate_markers():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         RoutingLexiconDocument.model_validate({
             "version": 1,
             "actions": [{"id": "invented", "risk_level": "read_only", "markers": ["do"]}],
@@ -94,7 +95,7 @@ def test_routing_lexicon_contract_rejects_unknown_actions_and_duplicate_markers(
 
 
 def test_planning_policy_rejects_unknown_templates_and_duplicate_markers():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         PlanningPolicyDocument.model_validate({
             "version": 1,
             "template_markers": [{"name": "invented_flow", "markers": ["x"]}],

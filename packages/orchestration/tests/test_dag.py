@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass, field
 
 import pytest
+from pydantic import ValidationError
 
 from lumi_orch.dag import DagValidationError, decide_next_nodes, validate_dag
 from lumi_orch.escalation import EscalationLevel, coerce_escalation
@@ -253,7 +254,7 @@ def test_plan_dsl_rejects_an_unbounded_or_invalid_risk_contract():
     })
 
     assert step.risk_level == "read_only"
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         PlanStep.model_validate({
             "id": "unsafe", "action": "send", "risk_level": "anything", "output_contract": {"artifact_type": "text"},
         })

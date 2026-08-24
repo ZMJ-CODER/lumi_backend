@@ -86,9 +86,8 @@ default = true
 # 本机想用镜像时通过环境变量覆盖：UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 
 [tool.uv.sources]
-# The kernel is versioned with this backend but has its own package boundary,
-# tests and dependencies.  Do not replace this with a relative file URL: uv
-# workspace membership keeps local and CI resolution consistent.
+# The kernel is versioned with this backend but has its own package boundary.
+# Workspace membership keeps local and CI resolution consistent.
 lumi-orchestration = { workspace = true }
 # torch 必须用 CUDA 版（PyPI 上是 CPU 版，uv sync 会把它覆盖导致嵌入模型无法用 GPU）
 # 仅 Windows 本地生效；Linux（CI/Docker）从索引解析 CPU 版

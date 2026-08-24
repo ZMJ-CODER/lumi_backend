@@ -45,9 +45,9 @@ jobs:
       - uses: astral-sh/setup-uv@v5
 
       - name: 安装依赖
-        # 保留本地 orchestration workspace；仅跳过 Windows CUDA torch 的私有源，
-        # 让 Linux CI 从 PyPI 解析 CPU wheel。
-        run: uv sync --no-sources-package torch --no-sources-package torchvision
+        # Torch 的私有 CUDA 源仅匹配 Windows；Linux CI 会按 marker 自动使用
+        # 公共索引中的 CPU wheel，同时保留本地 orchestration workspace。
+        run: uv sync --locked
 
       - name: 数据库迁移（全新库跑基线）
         run: uv run alembic upgrade head

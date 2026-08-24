@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any
 
 from lumi_orch.errors import ErrorCategory, ErrorInfo
 

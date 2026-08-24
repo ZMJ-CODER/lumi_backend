@@ -206,8 +206,8 @@ class OfficeReactRunner:
                 # the pool: the model may retry once after using another tool
                 # or receiving fresh context instead of silently losing the
                 # capability for the entire request.
-                if not record["success"] and record["error_code"] in {
-                    "INVALID_ARGS", "SKILL_NOT_FOUND", "FORBIDDEN", "SANDBOX_REQUIRED",
+                if not record["success"] and result is not None and not result.retryable and record["error_code"] not in {
+                    "NEEDS_CONFIRMATION",
                 }:
                     self._failed_tools.add(name)
                 call_id = str(message.tool_call_id or f"react-{len(self.records)}")

@@ -7,6 +7,10 @@ from typing import Any
 from lumi_orch.resources import (
     ResourceClaim,
     ResourceCoordinator as KernelResourceCoordinator,
+    WriteResourceCoordinationUnavailable,  # noqa: F401 - compatibility export
+    _ACQUIRE_SCRIPT,  # noqa: F401 - compatibility export
+    _RELEASE_SCRIPT,  # noqa: F401 - compatibility export
+    _RENEW_SCRIPT,  # noqa: F401 - compatibility export
 )
 
 from app.core.config import settings

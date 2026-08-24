@@ -88,6 +88,11 @@ class SubmissionGuard:
                 return await create_job(token)
             except AdmissionBackpressureError as exc:
                 await job_admission.release(token=token)
+                # The admission kernel can reject during ``promote`` as well
+                # as at the preflight store check. Preserve the public,
+                # user-specific error contract in both paths.
+                if "当前有任务正在进行中" in str(exc):
+                    raise UserJobLimitError(str(exc)) from exc
                 raise AgentBackpressureError(str(exc)) from exc
             except Exception:
                 await job_admission.release(token=token)

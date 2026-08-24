@@ -491,6 +491,20 @@ async def select_capabilities_with_trace(
         for score, _, capability, _ in ranked:
             if capability.name in selected_names:
                 continue
+            # Never let bounded overflow bypass hard replacement/conflict
+            # contracts.  It may soften a score boundary, not widen the tool
+            # namespace with a method already ruled out by a selected one.
+            if any(name in selected_names for name in capability.conflicts_with):
+                continue
+            if any(capability.name in item.conflicts_with for item in selected):
+                continue
+            if any(capability.name in item.preferred_over for item in selected):
+                continue
+            # Zero-evidence candidates are not semantic ties.  Including them
+            # turns a Top-K pool into a generic tool catalogue and hides real
+            # recall misses from observability.
+            if score <= 0:
+                continue
             if last_selected_score - score > float(settings.SKILL_CANDIDATE_TIE_EPSILON):
                 break
             selected.append(capability)

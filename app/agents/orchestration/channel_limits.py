@@ -6,10 +6,18 @@ import asyncio  # noqa: F401 - Backward-compatible test seam for lease timing.
 from typing import Any
 
 from lumi_orch.runner import (
+    CHANNEL_ACQUIRE_SCRIPT,
+    CHANNEL_RENEW_SCRIPT,
     ChannelLimiter as KernelChannelLimiter,
 )
 
 from app.core.config import settings
+
+
+# Compatibility aliases for existing operational tests and integrations.  The
+# scripts themselves remain owned by the backend-neutral kernel runner.
+_ACQUIRE = CHANNEL_ACQUIRE_SCRIPT
+_RENEW = CHANNEL_RENEW_SCRIPT
 
 
 def _limit(channel: str) -> int:

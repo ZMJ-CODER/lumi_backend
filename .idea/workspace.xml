@@ -4,14 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="优化模型选取skill逻辑">
-      <change beforePath="$PROJECT_DIR$/.github/workflows/ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.github/workflows/ci.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/packages/orchestration/src/lumi_orch/policies.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/orchestration/src/lumi_orch/policies.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/packages/orchestration/tests/test_dag.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/orchestration/tests/test_dag.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/packages/orchestration/tests/test_policy_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/orchestration/tests/test_policy_engine.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
-    </list>
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="优化一些问题" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -424,7 +417,15 @@
       <option name="project" value="LOCAL" />
       <updated>1787500811313</updated>
     </task>
-    <option name="localTasksCounter" value="42" />
+    <task id="LOCAL-00042" summary="优化一些问题">
+      <option name="closed" value="true" />
+      <created>1787533000413</created>
+      <option name="number" value="00042" />
+      <option name="presentableId" value="LOCAL-00042" />
+      <option name="project" value="LOCAL" />
+      <updated>1787533000413</updated>
+    </task>
+    <option name="localTasksCounter" value="43" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -451,7 +452,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="新增语音合成和语音转文字，新增docker容器部署" />
     <MESSAGE value="新增流式聊天，新增自动联网搜索工具，新增可插拔提示词模版" />
     <MESSAGE value="继续优化聊天模块，新增各种包括安全性，体验感，后台管理的优化" />
     <MESSAGE value="新增流式输出去下重新生成，优化多端同步逻辑" />
@@ -476,6 +476,7 @@
     <MESSAGE value="切分dag工作流引擎为静态内核和策略" />
     <MESSAGE value="优化skill调用" />
     <MESSAGE value="优化模型选取skill逻辑" />
-    <option name="LAST_COMMIT_MESSAGE" value="优化模型选取skill逻辑" />
+    <MESSAGE value="优化一些问题" />
+    <option name="LAST_COMMIT_MESSAGE" value="优化一些问题" />
   </component>
 </project>

@@ -6,12 +6,7 @@
   <component name="ChangeListManager">
     <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="优化一些问题">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/channel_limits.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/channel_limits.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/effects.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/effects.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/react_runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/react_runner.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/resources.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/resources.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/submission_guard.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/submission_guard.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/executor.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -441,7 +436,15 @@
       <option name="project" value="LOCAL" />
       <updated>1787534095078</updated>
     </task>
-    <option name="localTasksCounter" value="44" />
+    <task id="LOCAL-00044" summary="优化一些问题">
+      <option name="closed" value="true" />
+      <created>1787537206538</created>
+      <option name="number" value="00044" />
+      <option name="presentableId" value="LOCAL-00044" />
+      <option name="project" value="LOCAL" />
+      <updated>1787537206538</updated>
+    </task>
+    <option name="localTasksCounter" value="45" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">

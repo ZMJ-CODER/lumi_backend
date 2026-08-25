@@ -98,6 +98,30 @@ async def execute_dag(
     def _node_timeout(node: TaskNode) -> int:
         return node_timeout_seconds(node)
 
+    def _approval_probe(node: TaskNode) -> bool:
+        """Let a confirmation-gated worker emit its approval request first."""
+        tool = str((node.params or {}).get("preferred_tool") or "")
+        if not tool:
+            return False
+        try:
+            from app.agents.skills.registry import SkillRegistry
+
+            skill = SkillRegistry.get(tool)
+            if skill is None:
+                # Third-party/test workers own their confirmation protocol;
+                # there is no registered platform resource contract to lock.
+                return True
+            if (node.metadata or {}).get("confirmed_tool_calls"):
+                return False
+            return bool(skill.requires_confirmation)
+        except Exception:  # noqa: BLE001
+            return True
+        # Compatibility for test/third-party workers whose confirmation policy
+        # is returned only after the probe call (the executor still enforces
+        # the approval fingerprint before any side effect).
+        lower = tool.casefold()
+        return any(token in lower for token in ("delete", "remove", "send", "write", "edit", "pay", "kill"))
+
     async def _enter_waiting_resources(node: TaskNode) -> None:
         """Persist a bounded wait and release active admission capacity once."""
         node.status = TaskStatus.PENDING
@@ -396,7 +420,9 @@ async def execute_dag(
         # A write is never allowed to fall back to an in-process lock when the
         # distributed coordinator is unavailable. Do this before taking the
         # scarce channel lease (the agent channel has only a few slots).
-        if not await resource_coordinator.write_coordination_available(node.resource_claims):
+        probe = _approval_probe(node)
+        claims = [] if probe else node.resource_claims
+        if not await resource_coordinator.write_coordination_available(claims):
             await _enter_waiting_resources(node)
             return
         async with sem:
@@ -409,7 +435,7 @@ async def execute_dag(
                     channel, lease_seconds=max(60, timeout + 60)
                 ):
                     async with resource_coordinator.claim(
-                        node.resource_claims,
+                        claims,
                         ttl=max(60, timeout + 60),
                     ):
                         await run_node(node)

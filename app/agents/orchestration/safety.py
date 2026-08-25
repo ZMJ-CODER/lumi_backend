@@ -63,7 +63,7 @@ def prepare_node_safety(node: TaskNode, user_id: str, job_id: str) -> None:
     inputs = inputs or {}
     tool = str(params.get("preferred_tool") or "")
     claims = list(node.resource_claims or [])
-    if node.agent == "react_step":
+    if node.agent == "react_step" and not (node.metadata or {}).get("route_worker_fallback"):
         # 动态工具在运行时才确定，先用用户级写锁隔离整个循环。
         claims.append(ResourceClaim(key=f"react:user:{user_id}", mode="write"))
     if node.agent == "office_document":

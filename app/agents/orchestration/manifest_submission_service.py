@@ -37,6 +37,9 @@ class ManifestSubmissionResult:
 class ManifestSubmissionService:
     """Turn an authorized user checklist into a bounded first execution batch."""
 
+    def __init__(self, workers: dict | None = None) -> None:
+        self._workers = workers or {}
+
     async def prepare(
         self,
         *,
@@ -112,36 +115,43 @@ class ManifestSubmissionService:
             )
 
         parsed_items = parse_task_manifest(source_text)
-        try:
-            structured_items = await extract_natural_language_manifest(
-                source_text,
-                user_id=user_id,
-                api_key=llm_api_key,
-                llm_config=llm_config,
-                source_label=source_label,
-            )
-        except Exception as exc:  # noqa: BLE001
-            from app.agents.skills.recovery import (
-                classify_model_error,
-                is_terminal_model_error_code,
-            )
-
-            error_code, user_error = classify_model_error(exc)
-            if is_terminal_model_error_code(error_code) and error_code != "MODEL_UNAVAILABLE":
-                logger.warning("清单模型不可用，办公任务停止: {}", user_error)
-                return ManifestSubmissionResult(
-                    tree=TaskTree(nodes=[], error=user_error, error_code=error_code),
-                    routing={
-                        "llm": routing_model,
-                        "level": "manifest",
-                        "mode": "manifest_model_error",
-                        "cache_hit": False,
-                        "plan_revision": 1,
-                        "manifest_source": manifest_source,
-                    },
-                )
-            logger.info("清单结构化模型不可用，按显式顺序保守执行: {}", exc)
+        if parsed_items:
+            # Numbered/bulleted manifests are already an explicit, authorized
+            # control-plane input.  Do not spend an LLM call rephrasing them:
+            # the deterministic parser remains authoritative and preserves
+            # every item and its written order.
             structured_items = []
+        else:
+            try:
+                structured_items = await extract_natural_language_manifest(
+                    source_text,
+                    user_id=user_id,
+                    api_key=llm_api_key,
+                    llm_config=llm_config,
+                    source_label=source_label,
+                )
+            except Exception as exc:  # noqa: BLE001
+                from app.agents.skills.recovery import (
+                    classify_model_error,
+                    is_terminal_model_error_code,
+                )
+
+                error_code, user_error = classify_model_error(exc)
+                if is_terminal_model_error_code(error_code) and error_code != "MODEL_UNAVAILABLE":
+                    logger.warning("清单模型不可用，办公任务停止: {}", user_error)
+                    return ManifestSubmissionResult(
+                        tree=TaskTree(nodes=[], error=user_error, error_code=error_code),
+                        routing={
+                            "llm": routing_model,
+                            "level": "manifest",
+                            "mode": "manifest_model_error",
+                            "cache_hit": False,
+                            "plan_revision": 1,
+                            "manifest_source": manifest_source,
+                        },
+                    )
+                logger.info("清单结构化模型不可用，按显式顺序保守执行: {}", exc)
+                structured_items = []
 
         manifest_items, manifest_cleaning = reconcile_structured_manifest(
             parsed_items, structured_items
@@ -186,9 +196,17 @@ class ManifestSubmissionService:
                     "manifest_cleaning": manifest_cleaning,
                 },
             )
+        nodes = materialize_manifest_batch(manifest)
+        # Deployments and tests may intentionally expose only the bounded
+        # react worker.  Apply the same compatibility adaptation to the first
+        # rolling window as continuation batches; otherwise routed direct/rag
+        # nodes remain without a worker and the manifest cannot progress.
+        from app.agents.orchestration.plan_normalizer import adapt_unavailable_manifest_workers
+
+        adapt_unavailable_manifest_workers(nodes, self._workers)
         return ManifestSubmissionResult(
             tree=TaskTree(
-                nodes=materialize_manifest_batch(manifest),
+                nodes=nodes,
                 plan_text=(
                     f"已识别 {len(manifest_items)} 项清单；每项将按直接生成、脚本、检索或智能体通道执行，"
                     f"每批 {manifest['batch_size']} 项。"

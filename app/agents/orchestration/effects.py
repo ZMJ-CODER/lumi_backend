@@ -12,7 +12,7 @@ from typing import Any
 
 from lumi_orch.effects import (
     confirm_record,
-    effect_intent_for_node,
+    effect_intent_for_node as _kernel_effect_intent_for_node,
     intent_record,
     uncertain_record,
 )
@@ -25,6 +25,11 @@ from app.repositories.effect_journal_repository import (
 
 
 _repository: EffectJournalRepository | None = None
+
+
+def effect_intent_for_node(*, job_id: str, node: Any, tool: str = "") -> dict[str, str]:
+    """Expose the kernel intent fingerprint through the app adapter."""
+    return _kernel_effect_intent_for_node(job_id=job_id, node=node, tool=tool)
 
 
 def _journal() -> EffectJournalRepository:

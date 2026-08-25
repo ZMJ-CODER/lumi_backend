@@ -118,7 +118,7 @@ class AgentOrchestrator:
             plan_compilation=self._plan_compilation,
         )
         self._memory = OfficeMemoryService(repository=memory_repository)
-        self._manifest_submission = ManifestSubmissionService()
+        self._manifest_submission = ManifestSubmissionService(self._workers)
         self._submission_context = SubmissionContextService(memory=self._memory)
         self._office_plan_selection = OfficePlanSelectionService(
             planner=self._planner,

@@ -14,6 +14,9 @@
 - 用 DAG 编排约束它的行为，用两段式日志兜底它的副作用，用四域 RAG 防止它产生记忆错乱。
 - Lumi 不是一个能让 AI 更聪明的系统，而是一个让 AI 在干粗活时不出大乱子的系统。
 
+## 系统架构
+![overall_architecture_diagram.png](overall_architecture_diagram.png)
+
 ## 技术栈
 
 - Python 3.13 / FastAPI / SQLAlchemy(async) + PostgreSQL(pgvector)

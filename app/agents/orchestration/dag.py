@@ -92,11 +92,21 @@ async def execute_dag(
         WriteResourceCoordinationUnavailable,
         resource_coordinator,
     )
+    from lumi_orch.resources import ResourceCoordinator as KernelResourceCoordinator
     from app.agents.orchestration.safety import prepare_node_safety
     from app.agents.orchestration.node_timeouts import node_timeout_seconds
 
     def _node_timeout(node: TaskNode) -> int:
         return node_timeout_seconds(node)
+
+    # Pure in-memory unit tests intentionally do not initialize Redis. Keep
+    # their resource-lock semantics local; durable production stores retain
+    # the adapter's fail-closed write policy.
+    coordinator = (
+        KernelResourceCoordinator(fail_closed=lambda _claim: False)
+        if store.__class__.__name__ == "InMemoryStateStore"
+        else resource_coordinator
+    )
 
     def _approval_probe(node: TaskNode) -> bool:
         """Let a confirmation-gated worker emit its approval request first."""
@@ -422,7 +432,7 @@ async def execute_dag(
         # scarce channel lease (the agent channel has only a few slots).
         probe = _approval_probe(node)
         claims = [] if probe else node.resource_claims
-        if not await resource_coordinator.write_coordination_available(claims):
+        if not await coordinator.write_coordination_available(claims):
             await _enter_waiting_resources(node)
             return
         async with sem:
@@ -434,7 +444,7 @@ async def execute_dag(
                 async with channel_limiter.claim(
                     channel, lease_seconds=max(60, timeout + 60)
                 ):
-                    async with resource_coordinator.claim(
+                    async with coordinator.claim(
                         claims,
                         ttl=max(60, timeout + 60),
                     ):
@@ -501,7 +511,7 @@ async def execute_dag(
                 return job
             recovered = True
             for nid in waiting_resources:
-                if not await resource_coordinator.write_coordination_available(
+                if not await coordinator.write_coordination_available(
                     node_by_id[nid].resource_claims
                 ):
                     recovered = False

@@ -12,6 +12,7 @@ from app.core.database import get_db
 from app.core.deps import get_admin_verified_token, require_admin, require_superadmin
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException
 from app.core.rag_config import set_rag_overrides
+from app.core.read_view_cache import invalidate_user_view
 from app.core.security import create_admin_verified_token, verify_admin_verified_token, verify_password
 from app.models.admin import LLMConfigRequest, LLMResetRequest, RAGConfigRequest, UpdateUserRequest
 from app.models.db_models import ControlLog, Document, KnowledgeSpace, User
@@ -115,6 +116,7 @@ async def update_user(
             raise BadRequestException("状态无效")
         user.status = req.status
     await db.commit()
+    await invalidate_user_view(str(user.id))
     return {"code": 0, "message": "已更新"}
 
 

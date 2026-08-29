@@ -1,0 +1,18 @@
+# 本机 Locust 压测专用覆盖层。
+#
+# 仅与 docker-compose.yml 一起显式使用；绝不能用于生产部署。
+# 它不构建镜像，也不改动 .env，只让 API 跳过防刷/用户令牌桶，
+# 以便将 Locust 的 429 与真实应用性能问题区分开。
+services:
+  api:
+    # 仅用于测量多进程 API 的扩展性；正式 Compose 保持单 worker。
+    # requests/urllib3 会复用连接；将 keep-alive 拉长，避免客户端恰好复用
+    # Uvicorn 默认 5s 回收的空闲连接，产生少量无业务意义的 HTTP 0。
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 6 --no-access-log --timeout-keep-alive 30
+    environment:
+      RATE_LIMIT_ENABLED: "false"
+      RATE_LIMIT_USER_ENABLED: "false"
+      # 6 个 API 进程共享默认 max_connections=100 的 PostgreSQL。
+      # 每进程最多 8 个连接，API 总上限 48，给 Celery/管理连接保留预算。
+      DB_POOL_SIZE: "6"
+      DB_MAX_OVERFLOW: "2"

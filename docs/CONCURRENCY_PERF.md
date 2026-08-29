@@ -20,7 +20,7 @@
 要上高并发，用多 uvicorn worker 线性扩展（4 worker 下 health 1300+ RPS、DB 接口约 90 RPS），
 关键前提是连接池总数不能超过 Postgres `max_connections`。
 
-## 二、第二轮深挖：为什么设备资源占用不高但吞吐封顶
+## 二、为什么设备资源占用不高但吞吐封顶
 
 测试时 CPU/GPU/内存占用都很低，说明瓶颈不是算力而是**串行等待**。
 逐层定位出两条真正的串行瓶颈：
@@ -142,6 +142,21 @@ Postgres/Redis（host.docker.internal），与 Windows 同脚本、同并发压�
 6. 访问日志：`--no-access-log` 或独立日志进程（见上）。
 7. 设备资源低是正常现象：本架构是"延迟受限"而非"吞吐受限"，瓶颈在事件循环等待与
    连接池锁，不在 CPU/GPU/内存。
+
+### 高频读取缓存（2026-08-28）
+
+受保护的只读接口在重复轮询时会放大连接池排队：`/user/me`、`/conversations`、`/memory`
+都需要用户隔离，但返回数据在数秒内通常不变。因此新增 `app/core/read_view_cache.py`：
+
+- 缓存键为 `api:view:{kind}:{user_id}`；会话列表额外哈希 `scene/limit/offset`，不共享跨用户或跨页响应。
+- TTL 为 `user=5s`、`conversations=10s`、`memory=15s`。Redis 仅作优化，任何连接、序列化或缓存值错误均 fail-open 回退 PostgreSQL。
+- 每个写路径主动失效：会话及消息写入清理全部该用户会话页，记忆和画像写入清理记忆视图，用户资料/角色/状态变化清理用户视图。
+- `/metrics` 同时暴露 `lumi_read_view_cache_total`（hit/miss/error/store）和
+  `lumi_read_view_stage_duration_seconds`（`cache_get`、`db_checkout`、`sql`、`response_build`）。
+
+这不是替代数据库优化。只应在相同 token、相同列表页的热读压测中期待明显收益；首个请求、
+缓存失效后的请求和实际写入仍走数据库。长尾应首先根据分段指标判断是连接池、SQL 还是应用
+CPU，再决定是否扩容 worker、改索引或优化响应体。
 
 ### 外部依赖与办公任务保护（2026-08-19）
 

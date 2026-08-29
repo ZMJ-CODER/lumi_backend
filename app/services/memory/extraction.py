@@ -10,6 +10,7 @@
 import json
 import re
 import uuid
+from datetime import datetime, timezone
 from typing import Literal
 
 from loguru import logger
@@ -21,8 +22,10 @@ from app.core.config import settings
 from app.core.llm import LLMClient
 from app.core.crypto import encrypt_memory_text
 from app.core.redis import get_redis
+from app.core.read_view_cache import invalidate_memory_view
 from app.models.db_models import Memory
 from app.services.content_codec import normalize_content
+from app.services.memory.lifecycle import expire_at_for_memory_type
 from app.services.rag.embeddings import embed_texts
 from app.services.usage import CATEGORY_MEMORY_EXTRACT, CATEGORY_MEMORY_MERGE
 
@@ -303,6 +306,7 @@ async def extract_memories_from_dialog(
         else:
             text_to_store = inject_text
 
+        created_at = datetime.now(timezone.utc)
         mem = Memory(
             user_id=uid,
             fact=text_to_store,
@@ -315,6 +319,8 @@ async def extract_memories_from_dialog(
             confidence=f.confidence,
             source_conversation_id=cid,
             key_version=key_version,
+            created_at=created_at,
+            expire_at=expire_at_for_memory_type(f.memory_type, created_at=created_at),
         )
         session.add(mem)
         if action in ("supplement", "contradiction") and candidate:
@@ -329,5 +335,6 @@ async def extract_memories_from_dialog(
         await r.delete(f"mem:user:{uid}")
     except Exception:  # noqa: BLE001
         pass
+    await invalidate_memory_view(str(uid))
     logger.debug("[Memory] 抽取完成: user={} conv={} new={}", user_id, conversation_id, inserted)
     return inserted

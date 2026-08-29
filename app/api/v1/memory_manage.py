@@ -4,6 +4,7 @@
 用途：让用户"看得见"AI 记住了什么，方便验证/排查记忆链路，也支持主动遗忘。
 """
 
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, Query
@@ -12,10 +13,12 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, NotFoundException
 from app.core.redis import get_redis
+from app.core.read_view_cache import ReadViewTimer, get_read_view, invalidate_memory_view, memory_view_key, set_read_view
 from app.models.db_models import Memory, MemoryProfile
 from app.services.memory.retrieval import search_user_memories
 
@@ -52,33 +55,47 @@ async def _invalidate_profile_cache(uid: uuid.UUID) -> None:
         await r.delete(MEMORY_CACHE_KEY.format(user_id=str(uid)))
     except Exception as exc:  # noqa: BLE001
         logger.debug("清理画像缓存失败: {}", exc)
+    await invalidate_memory_view(str(uid))
 
 
 @router.get("")
 async def get_my_memory(payload: dict = Depends(require_auth), db: AsyncSession = Depends(get_db)):
     """查看我的长期记忆画像 + 活跃事实列表."""
     uid = _uid(payload)
-    profile = await db.get(MemoryProfile, uid)
+    endpoint = "memory_view"
+    timer = ReadViewTimer(endpoint)
+    cache_key = memory_view_key(str(uid))
+    cached = await get_read_view(cache_key, endpoint=endpoint, timer=timer)
+    if cached is not None:
+        return cached
+
+    await timer.checkout(db)
+    profile = await timer.query(db.get(MemoryProfile, uid))
     total = (
-        await db.execute(
-            select(func.count())
-            .select_from(Memory)
-            .where(Memory.user_id == uid, Memory.is_deleted.is_(False))
+        await timer.query(
+            db.execute(
+                select(func.count())
+                .select_from(Memory)
+                .where(Memory.user_id == uid, Memory.is_deleted.is_(False))
+            )
         )
     ).scalar_one()
     facts = (
         (
-            await db.execute(
-                select(Memory)
-                .where(Memory.user_id == uid, Memory.is_deleted.is_(False))
-                .order_by(Memory.importance.desc(), Memory.created_at.desc())
-                .limit(200)
+            await timer.query(
+                db.execute(
+                    select(Memory)
+                    .where(Memory.user_id == uid, Memory.is_deleted.is_(False))
+                    .order_by(Memory.importance.desc(), Memory.created_at.desc())
+                    .limit(200)
+                )
             )
         )
         .scalars()
         .all()
     )
-    return {
+    response_started = time.perf_counter()
+    response = {
         "code": 0,
         "data": {
             "profile": {
@@ -90,6 +107,15 @@ async def get_my_memory(payload: dict = Depends(require_auth), db: AsyncSession 
             "total": total,
         },
     }
+    timer.observe("response_build", response_started)
+    await set_read_view(
+        cache_key,
+        response,
+        endpoint=endpoint,
+        ttl_seconds=settings.READ_VIEW_MEMORY_TTL_SECONDS,
+        timer=timer,
+    )
+    return response
 
 
 @router.get("/search")
@@ -201,6 +227,7 @@ async def run_memory_self_test(
         if not existing:
             try:
                 from app.services.rag.embeddings import embed_texts
+                from app.services.memory.lifecycle import expire_at_for_memory_type
 
                 vec = (await embed_texts([f"用户喜欢的测试语言是 {fact_key}"]))[0]
                 mem = Memory(
@@ -211,9 +238,11 @@ async def run_memory_self_test(
                     embedding=vec,
                     importance=0.8,
                     confidence=0.99,
+                    expire_at=expire_at_for_memory_type("preference"),
                 )
                 db.add(mem)
                 await db.commit()
+                await _invalidate_profile_cache(uid)
                 report.append({"step": "兜底直插", "ok": True, "detail": "抽取未命中，已直插测试事实"})
             except Exception as exc:  # noqa: BLE001
                 report.append({"step": "兜底直插", "ok": False, "detail": str(exc)[:200]})
@@ -273,8 +302,4 @@ async def run_memory_self_test(
             await db.commit()
         except Exception:  # noqa: BLE001
             pass
-        try:
-            r = get_redis()
-            await r.delete(MEMORY_CACHE_KEY.format(user_id=str(uid)))
-        except Exception:  # noqa: BLE001
-            pass
+        await _invalidate_profile_cache(uid)

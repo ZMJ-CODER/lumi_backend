@@ -60,6 +60,8 @@ _manifest_route_upgrades = None
 _celery_queue_ready = None
 _document_pipeline_state = None
 _document_pipeline_oldest_age = None
+_read_view_cache = None
+_read_view_stage_duration = None
 
 
 def _ensure_metrics():
@@ -68,6 +70,7 @@ def _ensure_metrics():
     global _agent_routes, _agent_replans, _plan_cache, _agent_route_duration, _agent_node_duration
     global _agent_channel_wait, _manifest_route_upgrades
     global _celery_queue_ready, _document_pipeline_state, _document_pipeline_oldest_age
+    global _read_view_cache, _read_view_stage_duration
     if _prometheus is not None:
         return True
     if not settings.METRICS_ENABLED:
@@ -140,6 +143,17 @@ def _ensure_metrics():
             "lumi_document_pipeline_oldest_age_seconds",
             "Age of the oldest queued or processing document",
             ["status"],
+        )
+        _read_view_cache = Counter(
+            "lumi_read_view_cache_total",
+            "User-scoped read-view cache events",
+            ["endpoint", "result"],
+        )
+        _read_view_stage_duration = Histogram(
+            "lumi_read_view_stage_duration_seconds",
+            "High-traffic read-view stage duration",
+            ["endpoint", "stage"],
+            buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
         )
         _prometheus = True
         return True
@@ -226,6 +240,20 @@ def inc_manifest_route_upgrade(from_channel: str, to_channel: str, reason: str) 
             to_channel=(to_channel or "unknown")[:80],
             reason=(reason or "unknown")[:80],
         ).inc()
+
+
+def inc_read_view_cache(endpoint: str, result: str) -> None:
+    """Record cache hits, misses and fail-open Redis errors for read views."""
+    if _ensure_metrics():
+        _read_view_cache.labels(endpoint=(endpoint or "unknown")[:80], result=(result or "unknown")[:40]).inc()
+
+
+def observe_read_view_stage(endpoint: str, stage: str, duration: float) -> None:
+    """Expose pool checkout, SQL, cache and response-build latency separately."""
+    if _ensure_metrics():
+        _read_view_stage_duration.labels(
+            endpoint=(endpoint or "unknown")[:80], stage=(stage or "unknown")[:40]
+        ).observe(max(0.0, duration))
 
 
 async def refresh_async_dispatch_metrics() -> None:

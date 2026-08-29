@@ -114,6 +114,70 @@ def test_extract_facts_and_drop_pii():
     assert not any("13800138000" in f for f in facts)
 
 
+def test_extracted_memories_receive_type_specific_expiry():
+    """抽取落库时，有限生命周期记忆写入绝对到期时间。"""
+    extract_payload = [
+        {
+            "fact": "用户姓名是测试用户",
+            "memory_type": "identity",
+            "privacy": "normal",
+            "confidence": 0.95,
+            "importance": 0.8,
+        },
+        {
+            "fact": "用户偏好深色主题",
+            "memory_type": "preference",
+            "privacy": "normal",
+            "confidence": 0.95,
+            "importance": 0.8,
+        },
+        {
+            "fact": "用户上周完成了项目复盘",
+            "memory_type": "experience",
+            "privacy": "normal",
+            "confidence": 0.95,
+            "importance": 0.8,
+        },
+        {
+            "fact": "用户计划在年底前完成认证",
+            "memory_type": "goal",
+            "privacy": "normal",
+            "confidence": 0.95,
+            "importance": 0.8,
+        },
+    ]
+
+    async def run():
+        async with _db() as db:
+            uid = await _make_user(db)
+            try:
+                with (
+                    patch.object(extraction, "_chat_turbo", new=AsyncMock(return_value=json.dumps(extract_payload))),
+                    patch.object(extraction, "embed_texts", new=AsyncMock(return_value=[_vec(0.5)] * len(extract_payload))),
+                ):
+                    count = await extraction.extract_memories_from_dialog(
+                        db,
+                        str(uid),
+                        "self-test-conv",
+                        [{"role": "user", "content": "请记住我的偏好、经历和目标"}],
+                    )
+                rows = (
+                    await db.execute(select(Memory).where(Memory.user_id == uid))
+                ).scalars().all()
+                return count, {row.memory_type: row for row in rows}
+            finally:
+                await _cleanup(db, uid)
+
+    count, memories = asyncio.run(run())
+    assert count == 4
+    assert memories["identity"].expire_at is None
+    for memory_type, days in (("preference", 90), ("experience", 45), ("goal", 180)):
+        memory = memories[memory_type]
+        assert memory.expire_at is not None
+        assert memory.created_at is not None
+        assert abs((memory.expire_at - memory.created_at).total_seconds() - timedelta(days=days).total_seconds()) < 1
+
+
 def test_hybrid_retrieval_and_expiry():
     """混合检索：相关事实命中、无关/过期/已取代的事实不返回."""
 

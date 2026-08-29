@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.llm import LLMClient
 from app.core.redis import get_redis
+from app.core.read_view_cache import invalidate_memory_view
 from app.models.db_models import Memory, MemoryProfile
 from app.services.usage import CATEGORY_MEMORY_PROFILE
 
@@ -106,5 +107,6 @@ async def build_user_profile(session: AsyncSession, user_id: str) -> MemoryProfi
         await r.delete(f"mem:user:{uid}")
     except Exception:  # noqa: BLE001
         pass
+    await invalidate_memory_view(str(uid))
     logger.debug("[Memory] 画像生成完成: user={} version={}", user_id, result.version)
     return result

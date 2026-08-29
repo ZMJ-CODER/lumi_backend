@@ -4,6 +4,7 @@ import logging
 import queue
 import sys
 from logging.handlers import QueueHandler, QueueListener
+from pathlib import Path
 
 from loguru import logger
 
@@ -18,20 +19,28 @@ _access_listener: QueueListener | None = None
 
 
 def setup_logging() -> None:
-    """初始化 loguru 日志."""
+    """初始化 loguru 日志。
+
+    标准错误流是必需 sink；宿主机 bind mount 的日志目录不可写时，文件 sink
+    可以降级，不能因此阻止 API / Worker 启动。
+    """
     logger.remove()
     logger.add(
         sys.stderr,
         level="DEBUG" if settings.DEBUG else "INFO",
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
     )
-    logger.add(
-        "logs/lumi_{time:YYYY-MM-DD}.log",
-        rotation="00:00",
-        retention="30 days",
-        level="INFO",
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-    )
+    try:
+        Path("logs").mkdir(parents=True, exist_ok=True)
+        logger.add(
+            "logs/lumi_{time:YYYY-MM-DD}.log",
+            rotation="00:00",
+            retention="30 days",
+            level="INFO",
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        )
+    except OSError as exc:
+        logger.warning("文件日志不可用，已降级为容器标准输出: {}", exc)
 
 
 def setup_uvicorn_queue_logging() -> None:

@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # ── 数据库连接池（每进程） ──
-    # 默认 10 + 20 溢出 = 30 连接/进程：单进程足够，多 worker 部署也不会打爆
-    # Postgres max_connections（默认 100）。高并发生产环境按需调大。
+    # 默认 10 + 20 溢出 = 30 连接/进程。多 worker 部署必须按
+    # worker 数、Celery 进程和 PostgreSQL max_connections 共同预算，不能直接沿用。
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
     # 取连接时是否先 SELECT 1 探活。本地/局域网稳定环境下关闭可降低每请求 1 次
@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     # ── 可观测性 ──
     SENTRY_DSN: str = ""            # 错误上报；为空则不启用 Sentry
     METRICS_ENABLED: bool = True    # /metrics Prometheus 指标
+
+    # ── 用户高频只读视图缓存（Redis，严格按用户隔离） ──
+    READ_VIEW_CACHE_ENABLED: bool = True
+    READ_VIEW_USER_TTL_SECONDS: int = 5
+    READ_VIEW_MEMORY_TTL_SECONDS: int = 15
+    READ_VIEW_CONVERSATIONS_TTL_SECONDS: int = 10
 
     # ── 安全（全局限流） ──
     RATE_LIMIT_ENABLED: bool = True

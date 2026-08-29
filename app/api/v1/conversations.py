@@ -10,6 +10,7 @@
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -25,6 +26,13 @@ from app.core.database import async_session_factory, get_db
 from app.core.deps import get_current_user, require_auth
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException
 from app.core.redis import get_redis
+from app.core.read_view_cache import (
+    ReadViewTimer,
+    conversation_view_key,
+    get_read_view,
+    invalidate_conversation_views,
+    set_read_view,
+)
 from app.models.conversation import (
     CreateConversationRequest,
     SendMessageRequest,
@@ -226,6 +234,8 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
         await db.rollback()
         return
 
+    await invalidate_conversation_views(str(conv.user_id))
+
     # 旧版本会按 UI 列表长度物理删除原文。分层记忆需要原文作为回捞证据，
     # 默认禁用；仅部署方显式配置正数 hard cap 时保留兼容行为。
     over = 0
@@ -408,6 +418,7 @@ async def create_conversation(
     )
     db.add(conv)
     await db.commit()
+    await invalidate_conversation_views(str(uid))
     return {"code": 0, "data": {"conversation_id": str(conv.id), "title": conv.title, "scene": conv.scene}}
 
 
@@ -423,6 +434,15 @@ async def list_conversations(
     uid = _uid(payload)
     if uid is None:
         raise UnauthorizedException("请先登录")
+
+    endpoint = "conversation_list"
+    timer = ReadViewTimer(endpoint)
+    cache_key = conversation_view_key(str(uid), scene=scene, limit=limit, offset=offset)
+    cached = await get_read_view(cache_key, endpoint=endpoint, timer=timer)
+    if cached is not None:
+        return cached
+
+    await timer.checkout(db)
 
     count_sub = (
         select(func.count(Message.id))
@@ -440,7 +460,7 @@ async def list_conversations(
     if scene and scene != "all":
         stmt = stmt.where(Conversation.scene == scene)
 
-    rows = (await db.execute(stmt)).all()
+    rows = (await timer.query(db.execute(stmt))).all()
     items = [
         {
             "conversation_id": str(c.id),
@@ -453,13 +473,25 @@ async def list_conversations(
         for c, n in rows
     ]
     total = (
-        await db.execute(
+        await timer.query(
+            db.execute(
             select(func.count())
             .select_from(Conversation)
             .where(Conversation.user_id == uid, Conversation.is_deleted == False)  # noqa: E712
+            )
         )
     ).scalar()
-    return {"code": 0, "data": {"items": items, "total": total, "limit": limit, "offset": offset}}
+    response_started = time.perf_counter()
+    response = {"code": 0, "data": {"items": items, "total": total, "limit": limit, "offset": offset}}
+    timer.observe("response_build", response_started)
+    await set_read_view(
+        cache_key,
+        response,
+        endpoint=endpoint,
+        ttl_seconds=settings.READ_VIEW_CONVERSATIONS_TTL_SECONDS,
+        timer=timer,
+    )
+    return response
 
 
 @router.patch("/{conversation_id}")
@@ -475,6 +507,7 @@ async def update_conversation_title(
         raise NotFoundException("会话不存在")
     conv.title = req.title
     await db.commit()
+    await invalidate_conversation_views(str(conv.user_id))
     return {"code": 0, "message": "已更新"}
 
 
@@ -490,6 +523,7 @@ async def delete_conversation(
         raise NotFoundException("会话不存在")
     conv.is_deleted = True
     await db.commit()
+    await invalidate_conversation_views(str(conv.user_id))
     await orchestrator.clear_context(conversation_id)
     return {"code": 0, "message": "已删除"}
 

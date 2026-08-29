@@ -1,6 +1,7 @@
 """用户 API."""
 
 import uuid
+import time
 
 from fastapi import APIRouter, Depends
 from loguru import logger
@@ -10,6 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException
+from app.core.read_view_cache import (
+    ReadViewTimer,
+    get_read_view,
+    invalidate_user_view,
+    set_read_view,
+    user_view_key,
+)
 from app.core.security import hash_password, validate_password_strength, verify_password
 from app.models.db_models import (
     Attachment,
@@ -90,8 +98,27 @@ async def get_current_user_info(
     db: AsyncSession = Depends(get_db),
 ):
     """获取当前用户信息（从数据库查询完整信息）."""
-    user = await _load_user(db, payload)
-    return {"code": 0, "data": _user_dict(user)}
+    endpoint = "user_me"
+    timer = ReadViewTimer(endpoint)
+    user_id = payload.get("sub", "")
+    cache_key = user_view_key(user_id)
+    cached = await get_read_view(cache_key, endpoint=endpoint, timer=timer)
+    if cached is not None:
+        return cached
+
+    await timer.checkout(db)
+    user = await timer.query(_load_user(db, payload))
+    response_started = time.perf_counter()
+    response = {"code": 0, "data": _user_dict(user)}
+    timer.observe("response_build", response_started)
+    await set_read_view(
+        cache_key,
+        response,
+        endpoint=endpoint,
+        ttl_seconds=settings.READ_VIEW_USER_TTL_SECONDS,
+        timer=timer,
+    )
+    return response
 
 
 @router.get("/prompt")
@@ -148,6 +175,7 @@ async def update_profile(
         user.avatar_url = avatar or None
 
     await db.commit()
+    await invalidate_user_view(str(user.id))
     return {"code": 0, "data": _user_dict(user)}
 
 
@@ -169,6 +197,7 @@ async def change_password(
     # 撤销所有已签发的 refresh token，强制其他设备重新登录
     await db.execute(delete(RefreshToken).where(RefreshToken.user_id == user.id))
     await db.commit()
+    await invalidate_user_view(str(user.id))
 
     return {"code": 0, "message": "密码已修改，其他设备已退出，请使用新密码重新登录"}
 
@@ -307,4 +336,5 @@ async def delete_account(
     except Exception:  # noqa: BLE001
         pass
 
+    await invalidate_user_view(str(uid))
     return {"code": 0, "data": {"deleted": True}, "message": "账号已注销"}

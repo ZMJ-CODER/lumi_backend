@@ -4,9 +4,24 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="优化一些问题">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="更新优化">
+      <change beforePath="$PROJECT_DIR$/.env.example" beforeDir="false" afterPath="$PROJECT_DIR$/.env.example" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/dag.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/dag.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/admin.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/conversations.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/conversations.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/memory_manage.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/memory_manage.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/user.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/user.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/logging.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/logging.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/observability.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/observability.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/memory/extraction.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/memory/extraction.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/memory/profile.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/memory/profile.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/CONCURRENCY_PERF.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/CONCURRENCY_PERF.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_memory.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_memory.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -444,7 +459,23 @@
       <option name="project" value="LOCAL" />
       <updated>1787537206538</updated>
     </task>
-    <option name="localTasksCounter" value="45" />
+    <task id="LOCAL-00045" summary="更新文档">
+      <option name="closed" value="true" />
+      <created>1787642378916</created>
+      <option name="number" value="00045" />
+      <option name="presentableId" value="LOCAL-00045" />
+      <option name="project" value="LOCAL" />
+      <updated>1787642378916</updated>
+    </task>
+    <task id="LOCAL-00046" summary="更新优化">
+      <option name="closed" value="true" />
+      <created>1787659013241</created>
+      <option name="number" value="00046" />
+      <option name="presentableId" value="LOCAL-00046" />
+      <option name="project" value="LOCAL" />
+      <updated>1787659013241</updated>
+    </task>
+    <option name="localTasksCounter" value="47" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -471,8 +502,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="新增流式聊天，新增自动联网搜索工具，新增可插拔提示词模版" />
-    <MESSAGE value="继续优化聊天模块，新增各种包括安全性，体验感，后台管理的优化" />
     <MESSAGE value="新增流式输出去下重新生成，优化多端同步逻辑" />
     <MESSAGE value="开始构建skills，先创建一部分skill" />
     <MESSAGE value="新增一部分本地化skills" />
@@ -496,6 +525,8 @@
     <MESSAGE value="优化skill调用" />
     <MESSAGE value="优化模型选取skill逻辑" />
     <MESSAGE value="优化一些问题" />
-    <option name="LAST_COMMIT_MESSAGE" value="优化一些问题" />
+    <MESSAGE value="更新文档" />
+    <MESSAGE value="更新优化" />
+    <option name="LAST_COMMIT_MESSAGE" value="更新优化" />
   </component>
 </project>

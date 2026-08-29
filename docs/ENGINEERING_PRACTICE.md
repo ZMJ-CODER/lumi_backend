@@ -136,7 +136,8 @@ A/B 实测（health）：
 ### 5.2 Docker 镜像
 
 - Dockerfile 支持 CUDA torch：`ENABLE_CUDA_TORCH` 默认 true，`TORCH_INDEX_URL` 默认
-  pytorch cu126；Linux 上解析不到 +cu126 wheel 时自动走 CPU 版（CI 可解析）。
+  pytorch cu126；CI/Linux 构建必须显式传 `--build-arg ENABLE_CUDA_TORCH=false`，避免
+  拉取 CUDA/NVIDIA 运行库耗尽构建机磁盘。
 - **镜像体积告警**：约 20GB（torch 2.13 + 模型依赖），生产可接受但需注意拉取/构建时间；
   可用 BuildKit cache mount（`--mount=type=cache,target=/root/.cache/pip`）复用本地缓存。
 - GPU 使用：容器内 CUDA 可用（RTX 4060 验证通过）；多 worker 每份模型成倍占显存。

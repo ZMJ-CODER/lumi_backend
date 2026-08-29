@@ -47,8 +47,8 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 
-# ── CUDA 版 torch（可选：镜像默认装 CUDA 版；构建时不想要 GPU 可传
-#    --build-arg ENABLE_CUDA_TORCH=false 退回 PyPI CPU 版） ──
+# ── CUDA 版 torch（可选：本地 GPU 镜像默认装 CUDA 版；CI/Linux 无 GPU
+#    时必须传 --build-arg ENABLE_CUDA_TORCH=false，退回 PyPI CPU 版） ──
 # 默认走阿里云 PyTorch 镜像（国内直连官方 download.pytorch.org 会卡死/超时）。
 # 阿里云 pytorch-wheels 是扁平目录（非 PEP 503 simple index），必须用
 # --find-links 而非 --index-url；torch 的 nvidia-cuda-runtime 等依赖由清华源补齐。

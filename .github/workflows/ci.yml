@@ -71,4 +71,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: 构建镜像
-        run: docker build -t lumi-backend:ci .
+        # CI runner 只需验证镜像能构建；Linux CI 不需要 GPU，禁止拉取
+        # CUDA/NVIDIA 运行库（否则很容易耗尽 runner 磁盘）。本地 GPU
+        # 部署仍沿用 Dockerfile 的默认 CUDA 构建路径。
+        run: >-
+          docker build
+          --build-arg ENABLE_CUDA_TORCH=false
+          --build-arg PIP_INDEX_URL=https://pypi.org/simple
+          -t lumi-backend:ci .

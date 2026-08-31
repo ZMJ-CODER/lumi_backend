@@ -30,10 +30,10 @@ class QueryKnowledgeSkill(Skill):
     parameters_schema = {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "知识库问题或关键词，必须包含待查实体。例如“报销制度中住宿上限”。"},
-            "top_k": {"type": "integer", "description": "返回片段数：简单事实用 3，需交叉核验用 5（默认），最多 10。", "minimum": 1, "maximum": 10},
+            "query": {"type": "string", "description": "知识库问题或关键词，必须保留用户给出的待查实体和限定词；不得翻译、扩写或替换实体。例如“报销制度中住宿上限”。"},
+            "top_k": {"type": "integer", "description": "必须显式填写返回片段数：简单事实填 3，需交叉核验或用户未指定时填 5，最多 10。", "minimum": 1, "maximum": 10},
         },
-        "required": ["query"],
+        "required": ["query", "top_k"],
     }
 
     async def execute(self, params: dict, context: SkillContext | None = None) -> SkillResult:

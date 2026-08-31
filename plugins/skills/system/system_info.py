@@ -15,20 +15,21 @@ class GetDatetimeSkill(Skill):
     environment = "server"
     scenes = ["chat", "office", "game"]
     domain = "system"
-    intent_tags = ["当前时间", "日期", "星期", "几点"]
+    intent_tags = ["当前时间", "日期", "星期", "几点", "几号"]
     use_when = ["用户询问当前日期、时间或星期"]
     do_not_use_when = ["用户自己的今日待办或日程", "天气、汇率、行情等实时外部数据", "历史日期换算不必读取系统时钟"]
-    selection_examples = ["“现在几点？” → 使用", "“我今天还有哪些待办？” → 不使用"]
+    selection_examples = ["“现在几点？” → 使用", "“今天是几号？” → 使用", "“我今天还有哪些待办？” → 不使用"]
     result_contract = "返回东八区 ISO 时间和展示文本；结果可直接用于后续日期计算。"
     parameters_schema = {
         "type": "object",
         "properties": {
             "format": {
                 "type": "string",
-                "description": "可选：date（仅日期） / time（仅时间） / datetime（默认，完整）",
+                "description": "必须显式填写：用户只问日期/几号填 date；只问几点/当前时间填 time；同时问日期和时间或星期和几点填 datetime。不要省略后回退默认值。",
                 "enum": ["date", "time", "datetime"],
             }
         },
+        "required": ["format"],
     }
 
     async def execute(self, params: dict, context: SkillContext | None = None) -> SkillResult:

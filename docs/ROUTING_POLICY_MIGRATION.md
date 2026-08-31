@@ -103,3 +103,13 @@ AGENT_PLANNING_POLICY_PATH=config/agent_policies/planning_rules.yaml
 
 该策略加载失败会记录 `PLANNING_POLICY_LOAD_FAILED` 并使用内置基线。新 marker 的
 变更必须附带分类回归，尤其是“多主题不被单一模板劫持”和“无附件不进入文档模板”。
+
+四通道路由的文件处理、资料检索和多步协同短语另由
+`config/agent_policies/route_intent_patterns.yaml` 管理。该词典只提供受限 marker 集合，
+不声明通道、工具、权限或执行器；`routing_patterns.py` 负责固定的匹配算法与安全边界，
+`routing_rules.yaml` 负责基于特征的通道选择。新增同义表达通常只需修改该 YAML 并重启服务，
+同时更新路由回归样本；不应为单个用户句子新增源码分支。
+
+2026-08-30 对 100 项受控回放中暴露的文件批处理、资料检索和协同表达进行了词典扩展，
+并通过 `tests/test_route_intent_patterns.py` 的 100 项完整契约。当前离线判定为四通道各 25 项；
+该结果是回放 fixture 的策略覆盖验证，不代表生产流量比例。

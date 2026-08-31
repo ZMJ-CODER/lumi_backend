@@ -1,0 +1,135 @@
+# Versioned phrase data for four-channel route feature extraction.
+# This file contains bounded markers only; it cannot define a channel,
+# executor, tool, permission, regex, or arbitrary expression.
+version: 1
+file_operation:
+  actions:
+    - 转换
+    - 转为
+    - 转成
+    - 导出
+    - 另存为
+    - 保存为
+    - 批量处理
+    - 处理
+    - 清理
+    - 清洗
+    - 去除
+    - 过滤
+    - 分组
+    - 去重
+    - 查重
+    - 提取
+    - 抽取
+    - 解析
+    - 合并
+    - 汇总
+    - 聚合
+    - 格式化
+    - 规范化
+    - 排序
+    - 筛选
+    - 分列
+    - 删除空白行
+    - 删除
+    - 统计
+    - 拆成
+    - 拆分
+    - 重命名
+    - 压缩文件
+    - 解压
+    - 预览
+    - 统一为
+    - 保留两位
+    - 生成 Markdown
+    - 生成 markdown
+  targets:
+    - 文件
+    - 附件
+    - 文档
+    - 表格
+    - 清单
+    - .csv
+    - .tsv
+    - .xlsx
+    - .docx
+    - .pptx
+    - .pdf
+    - .txt
+    - .json
+    - .yaml
+    - .xml
+    - 图片
+    - 音频
+    - 视频
+    - 数据集
+    - 数据表
+    - 文件夹
+rag_operation:
+  actions:
+    - 查询
+    - 查找
+    - 检索
+    - 找出
+    - 找到
+    - 定位
+    - 说明
+    - 根据
+    - 参考
+    - 查阅
+    - 阅读
+    - 浏览
+  sources:
+    - 知识库
+    - 资料库
+    - 资料
+    - 文档
+    - 手册
+    - 指南
+    - 规范
+    - 产品文档
+    - 项目资料
+    - 团队手册
+    - 运维手册
+    - 开发规范
+    - 服务目录
+    - 上线清单
+    - Wiki
+    - wiki
+    - FAQ
+    - 政策
+    - 制度
+    - 标准
+    - 设计文档
+agent_operation:
+  phrases:
+    - 协调
+    - 编排
+    - 调度
+    - 诊断
+    - 排查
+    - 制定排查步骤
+    - 制定处理计划
+    - 制定修复流程
+    - 安排后续动作
+    - 安排排障顺序
+    - 安排处理顺序
+    - 梳理调查步骤
+    - 梳理处理流程
+    - 列出依赖
+    - 跟进流程
+    - 跟进处理
+    - 决定是否
+    - 决定扩容
+    - 检查并
+    - 分析后
+    - 规划
+    - 根据结果
+    - 根据分析结果
+    - 如果
+    - 若
+    - 先检查再
+    - 创建一个发布任务
+    - 调查步骤
+    - 队列积压并提出缓解计划
+    - 任务状态并制定后续动作

@@ -45,10 +45,10 @@ class CalculatorSkill(Skill):
     environment = "server"
     scenes = ["chat", "office", "game"]
     domain = "system"
-    intent_tags = ["计算", "算一下", "算术", "加减乘除", "百分比", "表达式"]
+    intent_tags = ["计算", "算一下", "帮我算", "算术", "加减乘除", "百分比", "表达式"]
     use_when = ["用户要求精确算术、百分比或括号表达式计算"]
     do_not_use_when = ["仅需解释数学概念", "需要统计附件或表格数据时先读取数据"]
-    selection_examples = ["“帮我算一下 (12873*47-912)/13” → 使用"]
+    selection_examples = ["“帮我算一下 (12873*47-912)/13” → 使用", "“帮我算 (36+14)*3/5” → 使用"]
     result_contract = "返回表达式和确定性计算结果。"
     deterministic = True
     parameters_schema = {
@@ -56,7 +56,7 @@ class CalculatorSkill(Skill):
         "properties": {
             "expression": {
                 "type": "string",
-                "description": "仅含数字、空格、括号和 + - * / // % ** 的表达式；百分号请先转换为小数。",
+                "description": "从用户请求中逐字保留算术表达式（包括空格、括号和运算符），不要改写、翻译或补充计算步骤；仅含数字、空格、括号和 + - * / // % **。",
             },
             "precision": {"type": "integer", "minimum": 0, "maximum": 12, "description": "可选小数位数"},
         },

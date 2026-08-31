@@ -4,14 +4,23 @@ from __future__ import annotations
 
 import re
 
+from app.agents.orchestration.policy.route_intent_patterns import (
+    has_configured_agent_operation,
+    has_configured_file_operation,
+    has_configured_rag_operation,
+)
+
 
 FILE_OPERATION = re.compile(
     r"(?iu)(?:转换|转为|转成|导出|另存为|保存为|批量处理|运行脚本|执行脚本)"
-    r".{0,36}(?:文件|附件|文档|表格|\.csv\b|\.tsv\b|\.xlsx\b|\.docx\b|\.pptx\b|\.pdf\b|\.txt\b)"
+    r".{0,36}(?:文件|附件|文档|表格|\.csv\b|\.tsv\b|\.xlsx\b|\.docx\b|\.pptx\b|\.pdf\b|\.txt\b)|"
+    r"(?:文件|附件|文档|表格|\.csv\b|\.tsv\b|\.xlsx\b|\.docx\b|\.pptx\b|\.pdf\b|\.txt\b)"
+    r".{0,36}(?:转换|转为|转成|导出|另存为|保存为|批量处理|运行脚本|执行脚本)"
 )
 RAG_OPERATION = re.compile(
     r"(?iu)(?:知识库|资料库|检索|查找|查询).{0,28}(?:资料|文档|信息|内容|记录|知识库)|"
-    r"(?:根据|从).{0,20}(?:知识库|资料|文档).{0,24}(?:回答|说明|找出|查询)"
+    r"(?:知识库|资料库|已上传资料|上传资料|附件资料).{0,28}(?:检索|查找|查询|找出)|"
+    r"(?:根据|从|在).{0,20}(?:知识库|资料|文档|附件).{0,24}(?:回答|说明|找出|查询|检索)"
 )
 EXTERNAL_OPERATION = re.compile(
     r"(?iu)(?:打开|启动|发送|删除|修改|编辑|创建|添加|取消|安排|设置)"
@@ -25,7 +34,9 @@ MULTI_OPERATION = re.compile(
 STATEFUL_REASONING = re.compile(
     r"(?iu)(?:核对|校验|验证|审查|合规|审批|比对|排查|诊断).{0,32}"
     r"(?:系统|规则|要求|标准|条款|记录|数据|状态)|"
-    r"(?:核对|校验|验证|审查|合规|审批|比对|排查|诊断)"
+    # ``审批节点`` 常是资料中的一个只读事实，不应因其中的“审批”二字
+    # 被升级为 Agent。实际审批动作通常会带系统/记录等状态对象，由上支捕获。
+    r"(?:核对|校验|验证|审查|合规|比对|排查|诊断)"
 )
 FACTUAL_DOCUMENT_QUESTION = re.compile(
     r"(?iu)(?:哪\s*(?:(?:一|几)?(?:个|份))|哪个|哪份|是否|有没有|包含|提到|写了什么|什么是|多少|几页|"
@@ -33,3 +44,15 @@ FACTUAL_DOCUMENT_QUESTION = re.compile(
     r"\bwhich\s+(?:file|document|one)\b|\bdoes\b.{0,60}\b(?:contain|mention|include|state)\b|"
     r"\b(?:payment\s+terms?|amount|date|deadline|clause|owner)\b).{0,80}"
 )
+
+
+def file_operation_matches(text: str) -> bool:
+    return bool(FILE_OPERATION.search(text or "")) or has_configured_file_operation(text)
+
+
+def rag_operation_matches(text: str) -> bool:
+    return bool(RAG_OPERATION.search(text or "")) or has_configured_rag_operation(text)
+
+
+def agent_operation_matches(text: str) -> bool:
+    return has_configured_agent_operation(text)

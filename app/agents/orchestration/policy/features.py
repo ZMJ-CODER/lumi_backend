@@ -9,10 +9,11 @@ from typing import Any, Literal
 from app.agents.orchestration.routing_patterns import (
     EXTERNAL_OPERATION,
     FACTUAL_DOCUMENT_QUESTION,
-    FILE_OPERATION,
+    file_operation_matches,
     MULTI_OPERATION,
-    RAG_OPERATION,
+    rag_operation_matches,
     STATEFUL_REASONING,
+    agent_operation_matches,
 )
 
 
@@ -115,18 +116,22 @@ def build_routing_features(
         for item in documents
         if str(item.get("kind") or "").strip()
     )
-    has_file_operation = bool(FILE_OPERATION.search(text))
-    has_rag_operation = bool(RAG_OPERATION.search(text))
+    has_file_operation = file_operation_matches(text)
+    has_rag_operation = rag_operation_matches(text)
     has_authorized_document_lookup_intent = bool(
         has_authorized_documents
-        and re.search(r"(?iu)(?:查|找|问答|总结|提取|分析)", text)
+        and re.search(r"(?iu)(?:查|找|问答|总结|提取|分析|检索|回答|说明)", text)
     )
     has_external_operation = bool(EXTERNAL_OPERATION.search(text))
     has_multi_operation = bool(MULTI_OPERATION.search(text))
     has_stateful_reasoning = bool(STATEFUL_REASONING.search(text))
+    has_agent_operation = agent_operation_matches(text)
+    # Plain drafting such as “改成正式通知语气” is a direct response, not a
+    # notification delivery operation.  Delivery/update verbs are covered by
+    # EXTERNAL_OPERATION when their state target (mail/system/etc.) is present.
     has_feedback_repair = bool(re.search(
         r"(?iu)(?:结果.{0,24}(?:不对|错误)|能.{0,12}修|自动修|修复|改正|纠正|重新处理|"
-        r"(?:如果|若).{0,80}(?:否则|不然)|通知|发送|更新|写入)",
+        r"(?:如果|若).{0,80}(?:否则|不然))",
         text,
     ))
     is_factual_document_question = bool(FACTUAL_DOCUMENT_QUESTION.search(text))
@@ -134,6 +139,7 @@ def build_routing_features(
         has_multi_operation,
         has_external_operation,
         has_stateful_reasoning,
+        has_agent_operation,
         has_feedback_repair,
     ))
     # Targeting is a read-only fixed path. A request that also asks to repair,

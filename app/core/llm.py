@@ -218,6 +218,82 @@ class LLMClient:
         await self._record(reply, messages=messages, user_id=usage_user_id, category=usage_category, model=used_model, text=content)
         return content, tool_calls
 
+    async def chat_with_tools_with_usage(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        scene: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout: float | None = None,
+        reasoning_effort: str | None = None,
+        usage_user_id: str | None = None,
+        usage_category: str | None = None,
+        llm_config: dict[str, Any] | None = None,
+        record_usage_event: bool = True,
+        **kwargs: Any,
+    ) -> tuple[str, list[dict], dict[str, Any]]:
+        """Invoke function calling and return provider token usage for offline evaluation.
+
+        Normal product paths should continue to use :meth:`chat_with_tools`.
+        This narrow variant exists for offline, non-executing evaluation: callers
+        can set ``record_usage_event=False`` so a benchmark does not pollute a
+        real user's usage ledger.  It never executes a returned tool call.
+        """
+        if kwargs:
+            logger.debug("忽略 ChatModel 工具调用的 legacy 参数: {}", sorted(kwargs))
+
+        async def invoke(call_base_url: str | None, call_api_key: str | None, call_model: str | None):
+            chat_model, used_model, used_base_url = await self._model(
+                scene=scene, user_id=usage_user_id, api_key=call_api_key, model=call_model, base_url=call_base_url,
+                timeout=timeout, temperature=None, max_tokens=None, reasoning_effort=reasoning_effort,
+                disable_reasoning_effort=False, messages=messages,
+                llm_config=llm_config,
+            )
+            breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
+            bound = chat_model.bind_tools(tools, parallel_tool_calls=False)
+            reply: AIMessage = await breaker.call(lambda: bound.ainvoke(convert_to_messages(messages)))
+            calls = [
+                {"id": str(call.get("id") or ""), "type": "function", "function": {"name": str(call.get("name") or ""), "arguments": call.get("args") or {}}}
+                for call in (reply.tool_calls or [])
+            ]
+            return reply, self._message_text(reply), calls, used_model
+
+        try:
+            reply, content, tool_calls, used_model = await invoke(base_url, api_key, model)
+        except Exception as exc:
+            fallback = self._fallback_cfg()
+            if scene == "office" or llm_config or not (fallback and self._is_retryable_error(exc)):
+                raise
+            logger.warning("LLM 工具调用主供应商失败，切换 {} 重试: {}", fallback["model"], str(exc)[:120])
+            reply, content, tool_calls, used_model = await invoke(fallback["base_url"], fallback["api_key"], fallback["model"])
+
+        prompt_tokens, completion_tokens = self._usage(reply)
+        prompt_source = "provider" if prompt_tokens is not None else "estimated"
+        completion_source = "provider" if completion_tokens is not None else "estimated"
+        prompt_tokens = prompt_tokens if prompt_tokens is not None else sum(
+            estimate_tokens(str(message.get("content") or "")) for message in messages
+        )
+        completion_tokens = completion_tokens if completion_tokens is not None else estimate_tokens(content)
+        if record_usage_event:
+            await record_usage(
+                usage_user_id,
+                usage_category or "chat",
+                used_model,
+                prompt_tokens,
+                completion_tokens,
+            )
+        return content, tool_calls, {
+            "model": used_model,
+            "prompt_tokens": int(prompt_tokens),
+            "completion_tokens": int(completion_tokens),
+            "total_tokens": int(prompt_tokens + completion_tokens),
+            "prompt_token_source": prompt_source,
+            "completion_token_source": completion_source,
+        }
+
     async def chat_with_tools_qwen(
         self,
         messages: list[dict],

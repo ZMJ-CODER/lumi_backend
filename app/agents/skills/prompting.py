@@ -16,6 +16,8 @@ def build_tool_selection_contract(capabilities: Iterable[ToolCapability]) -> str
     lines = [
         "候选工具选择边界（由注册契约生成）：",
         "只在当前候选工具确实满足目标时调用；不要为了试探而调用。",
+        "调用工具时必须填写 JSON Schema 的全部 required 字段。对于 query、expression、name 等文本参数，"
+        "保留用户给出的核心实体、限定词和表达式；不要翻译、扩写或凭空补充条件。",
     ]
     for capability in capabilities:
         lines.append(f"- {capability.name}@{capability.version}：")

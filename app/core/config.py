@@ -335,6 +335,7 @@ class Settings(BaseSettings):
     # Vocabulary is deployment data with a fixed, schema-validated action and
     # object set; matching semantics and safety checks stay in application code.
     AGENT_ROUTING_LEXICON_PATH: str = "config/agent_policies/routing_lexicon.yaml"
+    AGENT_ROUTING_INTENT_PATTERN_PATH: str = "config/agent_policies/route_intent_patterns.yaml"
     AGENT_PLANNING_POLICY_PATH: str = "config/agent_policies/planning_rules.yaml"
     TEMPORAL_ADDRESS: str = "localhost:7233"      # Temporal 前端 gRPC 地址
     TEMPORAL_NAMESPACE: str = "default"           # Temporal namespace
@@ -477,6 +478,7 @@ class Settings(BaseSettings):
         "AGENT_ROUTING_POLICY_PATH",
         "AGENT_TCA_POLICY_PATH",
         "AGENT_ROUTING_LEXICON_PATH",
+        "AGENT_ROUTING_INTENT_PATTERN_PATH",
         "AGENT_PLANNING_POLICY_PATH",
         mode="after",
     )

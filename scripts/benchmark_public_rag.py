@@ -14,22 +14,66 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 import zipfile
 
 import numpy as np
 
 
-def _metrics(ranks: list[int | None], total: int) -> dict[str, float | int]:
+def _metrics(
+    ranks: list[int | None],
+    total: int,
+    *,
+    rankings: list[list[str]] | None = None,
+    qrels: Mapping[str, Mapping[str, float]] | None = None,
+    query_ids: list[str] | None = None,
+) -> dict[str, float | int]:
+    """Report retrieval effectiveness under the BEIR qrels convention.
+
+    ``nDCG@10`` is computed from the complete top-10 ranking and graded qrels,
+    unlike Hit/Recall/MRR which only use the first relevant document.  This is
+    the conventional DCG gain ``(2**rel - 1) / log2(rank + 1)`` normalized by
+    the ideal ranking for the same query.
+    """
     values = [rank for rank in ranks if rank is not None]
-    return {
+    result: dict[str, float | int] = {
         "queries": total,
         "hit@1": round(sum(rank <= 1 for rank in values) / max(1, total), 4),
         "hit@5": round(sum(rank <= 5 for rank in values) / max(1, total), 4),
         "recall@10": round(sum(rank <= 10 for rank in values) / max(1, total), 4),
         "mrr": round(sum(1.0 / rank for rank in values) / max(1, total), 4),
     }
+    if rankings is not None and qrels is not None and query_ids is not None:
+        result["nDCG@10"] = _mean_ndcg_at_k(rankings, qrels, query_ids, k=10)
+    return result
+
+
+def _mean_ndcg_at_k(
+    rankings: list[list[str]],
+    qrels: Mapping[str, Mapping[str, float]],
+    query_ids: list[str],
+    *,
+    k: int,
+) -> float:
+    """Return mean nDCG@k from BEIR-compatible graded qrels."""
+    if len(rankings) != len(query_ids):
+        raise ValueError("rankings 与 query_ids 长度必须一致")
+    scores: list[float] = []
+    for ranking, query_id in zip(rankings, query_ids, strict=True):
+        relevance = qrels.get(query_id, {})
+        dcg = sum(
+            (2.0 ** max(0.0, float(relevance.get(doc_id, 0.0))) - 1.0) / math.log2(rank + 1)
+            for rank, doc_id in enumerate(ranking[:k], start=1)
+        )
+        ideal_relevances = sorted((max(0.0, float(value)) for value in relevance.values()), reverse=True)[:k]
+        idcg = sum(
+            (2.0 ** relevance_value - 1.0) / math.log2(rank + 1)
+            for rank, relevance_value in enumerate(ideal_relevances, start=1)
+        )
+        scores.append(dcg / idcg if idcg else 0.0)
+    return round(sum(scores) / max(1, len(scores)), 4)
 
 
 def _rank_scores(scores: np.ndarray, doc_ids: list[str], relevant: set[str], top_k: int) -> int | None:
@@ -77,6 +121,13 @@ def _rank_fused(scores: dict[str, float], relevant: set[str], top_k: int) -> int
     return None
 
 
+def _ranked_fused_doc_ids(scores: dict[str, float], top_k: int) -> list[str]:
+    return [
+        doc_id
+        for doc_id, _ in sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:top_k]
+    ]
+
+
 def _dense_encode(model: Any, texts: list[str], batch_size: int) -> np.ndarray:
     return np.asarray(
         model.encode(texts, batch_size=batch_size, normalize_embeddings=True, show_progress_bar=True),
@@ -100,14 +151,57 @@ def _sparse_scores(query: dict[str, float], docs: list[dict[str, float]]) -> np.
 
 
 def _load_scifact(data_dir: Path):
-    from beir.datasets.data_loader import GenericDataLoader
+    """Load an already downloaded BEIR SciFact directory without requiring BEIR.
 
-    corpus, queries, qrels = GenericDataLoader(str(data_dir)).load(split="test")
+    SciFact's on-disk format is JSONL corpus/queries plus TSV qrels.  Reading
+    it directly means a failed optional ``uv sync --extra rag-eval`` does not
+    block an evaluation when the public dataset and embedding runtime are
+    already present.  The qrels format and metric protocol remain BEIR's.
+    """
+    corpus_path = data_dir / "corpus.jsonl"
+    queries_path = data_dir / "queries.jsonl"
+    qrels_path = data_dir / "qrels" / "test.tsv"
+    missing = [path for path in (corpus_path, queries_path, qrels_path) if not path.is_file()]
+    if missing:
+        raise RuntimeError("SciFact 数据不完整，缺少: " + ", ".join(str(path) for path in missing))
+
+    corpus: dict[str, dict[str, Any]] = {}
+    for line in corpus_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        doc_id = str(row.get("_id") or "")
+        if doc_id:
+            corpus[doc_id] = row
+    queries: dict[str, str] = {}
+    for line in queries_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        query_id = str(row.get("_id") or "")
+        if query_id:
+            queries[query_id] = str(row.get("text") or "")
+    normalized_qrels: dict[str, dict[str, float]] = {}
+    for line_number, line in enumerate(qrels_path.read_text(encoding="utf-8-sig").splitlines(), start=1):
+        if not line.strip() or line_number == 1:
+            continue
+        try:
+            query_id, doc_id, score_text = line.split("\t")
+            score = float(score_text)
+        except ValueError as exc:
+            raise RuntimeError(f"SciFact qrels 格式错误: {qrels_path}:{line_number}") from exc
+        if score > 0:
+            normalized_qrels.setdefault(str(query_id), {})[str(doc_id)] = score
     doc_ids = list(corpus)
     doc_texts = [f"{corpus[doc_id].get('title', '')}\n{corpus[doc_id].get('text', '')}" for doc_id in doc_ids]
-    examples = [(str(query_id), query, {str(doc_id) for doc_id, score in qrels.get(query_id, {}).items() if score > 0})
-                for query_id, query in queries.items()]
-    return doc_ids, doc_texts, examples
+    examples = [
+        (query_id, query, set(normalized_qrels.get(query_id, {})))
+        for query_id, query in queries.items()
+        if query_id in normalized_qrels
+    ]
+    if not corpus or not examples:
+        raise RuntimeError("SciFact corpus 或带 qrels 的 test queries 为空")
+    return doc_ids, doc_texts, examples, normalized_qrels
 
 
 def _first(row: dict, names: list[str], default=None):
@@ -150,7 +244,8 @@ def _load_crud(args):
         relevant_ids = {str(item) for item in relevant} if isinstance(relevant, list) else set(ids if relevant is None else [str(relevant)])
         examples.append((str(index), query, relevant_ids))
     doc_ids = list(docs)
-    return doc_ids, [docs[doc_id] for doc_id in doc_ids], examples
+    qrels = {query_id: {doc_id: 1.0 for doc_id in relevant_ids} for query_id, _, relevant_ids in examples}
+    return doc_ids, [docs[doc_id] for doc_id in doc_ids], examples, qrels
 
 
 def _load_local_crud(args):
@@ -189,7 +284,8 @@ def _load_local_crud(args):
         examples.append((str(row.get("id", index)) + f"-{index}", query, {doc_id}))
     if not examples:
         raise RuntimeError("CRUD-RAG 中没有可用的 question/news1 对")
-    return list(text_to_id.values()), doc_texts, examples
+    qrels = {query_id: {doc_id: 1.0 for doc_id in relevant_ids} for query_id, _, relevant_ids in examples}
+    return list(text_to_id.values()), doc_texts, examples, qrels
 
 
 def main() -> None:
@@ -293,15 +389,16 @@ def main() -> None:
     print(f"device={device}")
 
     if args.dataset == "scifact":
-        doc_ids, doc_texts, examples = _load_scifact(args.data_dir)
+        doc_ids, doc_texts, examples, qrels = _load_scifact(args.data_dir)
     elif args.crud_path:
-        doc_ids, doc_texts, examples = _load_local_crud(args)
+        doc_ids, doc_texts, examples, qrels = _load_local_crud(args)
     else:
-        doc_ids, doc_texts, examples = _load_crud(args)
+        doc_ids, doc_texts, examples, qrels = _load_crud(args)
     if args.max_docs:
         doc_ids, doc_texts = doc_ids[: args.max_docs], doc_texts[: args.max_docs]
     if args.max_queries:
         examples = examples[: args.max_queries]
+    query_ids = [item[0] for item in examples]
     if args.rrf_candidate_depth < 10:
         raise ValueError("--rrf-candidate-depth 至少应为 10")
     if args.rrf_k < 1:
@@ -324,35 +421,61 @@ def main() -> None:
     query_dense = _dense_encode(dense_model, [item[1] for item in examples], args.batch_size)
     dense_scores = query_dense @ doc_dense.T
     dense_ranks = [_rank_scores(dense_scores[i], doc_ids, item[2], 10) for i, item in enumerate(examples)]
+    dense_rankings = [_top_ranked_doc_ids(dense_scores[i], doc_ids, 10) for i in range(len(examples))]
 
     # lexical overlap 是可复现的关键词代理基线；线上为 pg_trgm，二者不能视为同一实现。
     lexical_scores = []
-    for _, query, relevant in examples:
+    for _, query, _relevant in examples:
         terms = set(query.lower().split())
         scores = np.asarray([sum(text.lower().count(term) for term in terms) for text in doc_texts], dtype=np.float32)
         lexical_scores.append(scores)
     lexical_ranks = [_rank_scores(scores, doc_ids, item[2], 10) for scores, item in zip(lexical_scores, examples, strict=True)]
+    lexical_rankings = [
+        _top_ranked_doc_ids(scores, doc_ids, 10, positive_only=True)
+        for scores in lexical_scores
+    ]
 
     dense_lexical_rrf_ranks = []
+    dense_lexical_rrf_rankings = []
     for index, (_, _, relevant) in enumerate(examples):
         dense_candidates = _top_ranked_doc_ids(dense_scores[index], doc_ids, args.rrf_candidate_depth)
         lexical_candidates = _top_ranked_doc_ids(
             lexical_scores[index], doc_ids, args.rrf_candidate_depth, positive_only=True
         )
-        dense_lexical_rrf_ranks.append(
-            _rank_fused(_rrf_scores(dense_candidates, lexical_candidates, rrf_k=args.rrf_k), relevant, 10)
-        )
+        fused = _rrf_scores(dense_candidates, lexical_candidates, rrf_k=args.rrf_k)
+        dense_lexical_rrf_ranks.append(_rank_fused(fused, relevant, 10))
+        dense_lexical_rrf_rankings.append(_ranked_fused_doc_ids(fused, 10))
 
     result = {
         "dataset": args.dataset,
         "evaluation_mode": "crud_1doc_closed_set_proxy" if args.dataset == "crud-rag" and args.crud_path else "qrels",
         "documents": len(doc_ids),
         "queries": len(examples),
+        "metric_protocol": {
+            "qrels": "BEIR qrels" if args.dataset == "scifact" else "binary qrels derived by the benchmark loader",
+            "cutoff": 10,
+            "ndcg_formula": "sum((2^rel-1)/log2(rank+1)) / ideal_dcg",
+        },
+        "lexical_channel": {
+            "name": "whitespace_term_frequency_proxy",
+            "production_equivalence": False,
+            "note": "This is not PostgreSQL ILIKE or pg_trgm. It is a reproducible public-corpus lexical proxy only.",
+        },
         "rrf": {"candidate_depth": args.rrf_candidate_depth, "k": args.rrf_k},
-        "dense": _metrics(dense_ranks, len(examples)),
-        "lexical_proxy": _metrics(lexical_ranks, len(examples)),
-        "dense_lexical_proxy_rrf": _metrics(dense_lexical_rrf_ranks, len(examples)),
+        "dense": _metrics(dense_ranks, len(examples), rankings=dense_rankings, qrels=qrels, query_ids=query_ids),
+        "lexical_proxy": _metrics(lexical_ranks, len(examples), rankings=lexical_rankings, qrels=qrels, query_ids=query_ids),
+        "dense_lexical_proxy_rrf": _metrics(
+            dense_lexical_rrf_ranks,
+            len(examples),
+            rankings=dense_lexical_rrf_rankings,
+            qrels=qrels,
+            query_ids=query_ids,
+        ),
     }
+
+    def report_metrics(ranks: list[int | None], rankings: list[list[str]]) -> dict[str, float | int]:
+        return _metrics(ranks, len(examples), rankings=rankings, qrels=qrels, query_ids=query_ids)
+
     reranker = None
     if args.rerank_model:
         from sentence_transformers import CrossEncoder
@@ -400,8 +523,9 @@ def main() -> None:
                 lexical_scores[index], doc_ids, args.rrf_candidate_depth, positive_only=True
             )
             dense_lexical_fused.append(_rrf_scores(dense_candidates, lexical_candidates, rrf_k=args.rrf_k))
-        result["dense_lexical_proxy_rrf_rerank"] = _metrics(
-            ranks_from_reranked(rerank_fused_batch(dense_lexical_fused)), len(examples)
+        dense_lexical_reranked = rerank_fused_batch(dense_lexical_fused)
+        result["dense_lexical_proxy_rrf_rerank"] = report_metrics(
+            ranks_from_reranked(dense_lexical_reranked), dense_lexical_reranked
         )
         dense_only_fused = [
             _rrf_scores(
@@ -409,9 +533,8 @@ def main() -> None:
             )
             for index in range(len(examples))
         ]
-        result["dense_rerank"] = _metrics(
-            ranks_from_reranked(rerank_fused_batch(dense_only_fused)), len(examples)
-        )
+        dense_reranked = rerank_fused_batch(dense_only_fused)
+        result["dense_rerank"] = report_metrics(ranks_from_reranked(dense_reranked), dense_reranked)
     try:
         if args.skip_sparse:
             raise RuntimeError("skipped by --skip-sparse")
@@ -427,17 +550,19 @@ def main() -> None:
         query_sparse = _sparse_encode(sparse_model, [item[1] for item in examples])
         sparse_scores = [_sparse_scores(query_sparse[i], doc_sparse) for i in range(len(examples))]
         sparse_ranks = [_rank_scores(scores, doc_ids, item[2], 10) for scores, item in zip(sparse_scores, examples, strict=True)]
-        result["sparse"] = _metrics(sparse_ranks, len(examples))
+        sparse_rankings = [_top_ranked_doc_ids(scores, doc_ids, 10, positive_only=True) for scores in sparse_scores]
+        result["sparse"] = report_metrics(sparse_ranks, sparse_rankings)
         dense_sparse_rrf_ranks = []
+        dense_sparse_rrf_rankings = []
         for index, (_, _, relevant) in enumerate(examples):
             dense_candidates = _top_ranked_doc_ids(dense_scores[index], doc_ids, args.rrf_candidate_depth)
             sparse_candidates = _top_ranked_doc_ids(
                 sparse_scores[index], doc_ids, args.rrf_candidate_depth, positive_only=True
             )
-            dense_sparse_rrf_ranks.append(
-                _rank_fused(_rrf_scores(dense_candidates, sparse_candidates, rrf_k=args.rrf_k), relevant, 10)
-            )
-        result["dense_sparse_rrf"] = _metrics(dense_sparse_rrf_ranks, len(examples))
+            fused = _rrf_scores(dense_candidates, sparse_candidates, rrf_k=args.rrf_k)
+            dense_sparse_rrf_ranks.append(_rank_fused(fused, relevant, 10))
+            dense_sparse_rrf_rankings.append(_ranked_fused_doc_ids(fused, 10))
+        result["dense_sparse_rrf"] = report_metrics(dense_sparse_rrf_ranks, dense_sparse_rrf_rankings)
         if reranker is not None:
             dense_sparse_fused = []
             for index in range(len(examples)):
@@ -446,8 +571,9 @@ def main() -> None:
                     sparse_scores[index], doc_ids, args.rrf_candidate_depth, positive_only=True
                 )
                 dense_sparse_fused.append(_rrf_scores(dense_candidates, sparse_candidates, rrf_k=args.rrf_k))
-            result["dense_sparse_rrf_rerank"] = _metrics(
-                ranks_from_reranked(rerank_fused_batch(dense_sparse_fused)), len(examples)
+            dense_sparse_reranked = rerank_fused_batch(dense_sparse_fused)
+            result["dense_sparse_rrf_rerank"] = report_metrics(
+                ranks_from_reranked(dense_sparse_reranked), dense_sparse_reranked
             )
     except Exception as exc:  # noqa: BLE001
         result["sparse"] = {"status": "unavailable", "error": str(exc)[:240]}

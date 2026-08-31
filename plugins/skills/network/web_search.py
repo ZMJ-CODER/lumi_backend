@@ -33,10 +33,10 @@ class WebSearchSkill(Skill):
     parameters_schema = {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "公开网页检索关键词：保留核心实体与时间/地域限定，去除口语。例如“最近那个 AI 监管新规”应写为“AI 监管 新规 2026”。"},
-            "max_results": {"type": "integer", "description": "返回结果条数：中间步骤用 3，需横向比较时用 5（默认），最多 10。", "minimum": 1, "maximum": 10},
+            "query": {"type": "string", "description": "公开网页检索关键词：保留用户给出的核心实体、时间和地域限定；不得翻译、扩写、替换实体或凭空补充年份。只移除“请搜索/给来源”等请求外壳。例如“最近那个 AI 监管新规”可写为“AI 监管 新规”。"},
+            "max_results": {"type": "integer", "description": "必须显式填写返回条数：用户要求列 N 条时填 N；未指定时填 5；最多 10。", "minimum": 1, "maximum": 10},
         },
-        "required": ["query"],
+        "required": ["query", "max_results"],
     }
 
     async def execute(self, params: dict, context: SkillContext | None = None) -> SkillResult:

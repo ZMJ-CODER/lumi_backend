@@ -57,13 +57,11 @@ class JobControlService:
         if static_result is not None and static_result.handled:
             if static_result.error:
                 raise RuntimeError(static_result.error)
-            if static_result.release_capacity:
-                await self._finalizer.finalize(static_result.job)
+            await self._release_cancelled_capacity(static_result.job, static_result.release_capacity)
             return static_result.job
         temporal_result = await self._temporal.cancel(stored_job, keep_completed)
         if temporal_result is not None and temporal_result.handled:
-            if temporal_result.release_capacity:
-                await self._finalizer.finalize(temporal_result.job)
+            await self._release_cancelled_capacity(temporal_result.job, temporal_result.release_capacity)
             return temporal_result.job
 
         legacy_result = await self._legacy.cancel(
@@ -71,9 +69,23 @@ class JobControlService:
         )
         if legacy_result is None:
             return None
-        if legacy_result.release_capacity:
-            await self._finalizer.finalize(legacy_result.job)
+        await self._release_cancelled_capacity(legacy_result.job, legacy_result.release_capacity)
         return legacy_result.job
+
+    async def _release_cancelled_capacity(self, job: Job | None, release_capacity: bool) -> None:
+        if release_capacity:
+            await self._finalizer.finalize(job)
+        elif job is not None and job.status in {
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.INTERRUPTED,
+        }:
+            # The runner may reach a terminal state just before this cancel
+            # request. Its normal finalizer can then lose the race with the
+            # backend's no-op cancellation response, leaving a live admission
+            # lease. Releasing and stopping the heartbeat are idempotent.
+            await self._finalizer.suspend_capacity(job)
 
     async def approve(self, job_id: str, node_id: str, approved: bool = True) -> None:
         """Resolve the persisted approval gate, then resume the active backend."""

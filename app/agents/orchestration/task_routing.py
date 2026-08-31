@@ -22,9 +22,10 @@ from pydantic import BaseModel, Field
 from app.agents.orchestration.routing_patterns import (
     EXTERNAL_OPERATION as _EXTERNAL_OPERATION,
     FACTUAL_DOCUMENT_QUESTION as _FACTUAL_DOCUMENT_QUESTION,
-    FILE_OPERATION as _FILE_OPERATION,
+    agent_operation_matches as _AGENT_OPERATION_MATCHES,
+    file_operation_matches as _FILE_OPERATION_MATCHES,
     MULTI_OPERATION as _MULTI_OPERATION,
-    RAG_OPERATION as _RAG_OPERATION,
+    rag_operation_matches as _RAG_OPERATION_MATCHES,
     STATEFUL_REASONING as _STATEFUL_REASONING,
 )
 
@@ -43,6 +44,7 @@ class AtomicWorkItem(BaseModel):
     instruction: str
     description: str = ""
     estimated_type: RouteChannel = RouteChannel.AGENT
+    route_reason: str = ""
     dependencies: list[int] = Field(default_factory=list)
     estimated_tokens: int = Field(default=0, ge=0)
     # A decomposer may emit this only for a real mixed request.  It is flattened
@@ -196,7 +198,7 @@ def _route_atomic_instruction_legacy(
     expands it into a local subgraph.
     """
     text = (instruction or "").strip()
-    if _MULTI_OPERATION.search(text) or _EXTERNAL_OPERATION.search(text) or _STATEFUL_REASONING.search(text):
+    if _MULTI_OPERATION.search(text) or _EXTERNAL_OPERATION.search(text) or _STATEFUL_REASONING.search(text) or _AGENT_OPERATION_MATCHES(text):
         channel = RouteChannel.AGENT
         return RouteDecision(channel=channel, reason="需要多步协调或外部状态操作", estimated_tokens=estimate_tokens(text, channel))
     # A document-set question cannot safely be answered by a document-agnostic
@@ -204,10 +206,10 @@ def _route_atomic_instruction_legacy(
     if office_document_count >= 2 and _FACTUAL_DOCUMENT_QUESTION.search(text):
         channel = RouteChannel.RAG
         return RouteDecision(channel=channel, reason="多文档事实问题需要先定位授权附件", estimated_tokens=estimate_tokens(text, channel))
-    if _FILE_OPERATION.search(text):
+    if _FILE_OPERATION_MATCHES(text):
         channel = RouteChannel.DETERMINISTIC_SCRIPT
         return RouteDecision(channel=channel, reason="明确的文件转换或批处理", estimated_tokens=estimate_tokens(text, channel))
-    if _RAG_OPERATION.search(text) or (
+    if _RAG_OPERATION_MATCHES(text) or (
         has_authorized_documents and re.search(r"(?iu)(?:查|找|问答|总结|提取|分析)", text)
     ):
         channel = RouteChannel.RAG
@@ -244,6 +246,7 @@ def normalize_atomic_items(
             instruction=instruction[:2000],
             description=str(data.get("description") or instruction)[:500],
             estimated_type=decision.channel,
+            route_reason=decision.reason,
             dependencies=dependencies,
             estimated_tokens=decision.estimated_tokens,
             subtasks=list(data.get("subtasks") or [])[:12],

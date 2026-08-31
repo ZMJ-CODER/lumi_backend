@@ -10,10 +10,13 @@ when its batch becomes due, while the complete checklist remains persisted in
 from __future__ import annotations
 
 import re
+import json
 from difflib import SequenceMatcher
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from lumi_orch.manifest import (
     advance_cursor,
@@ -158,6 +161,18 @@ def _normalise_filename(value: str) -> str:
     return re.sub(r"[\s_\-]+", "", Path(value or "").name.casefold())
 
 
+def _manifest_control_clause(request: str) -> str:
+    """Return the user instruction that selects a manifest source.
+
+    Task details begin after a colon or newline.  Source selection must not
+    inspect that payload: an ordinary task can legitimately mention a
+    document, a knowledge base, or a file that should not be treated as the
+    manifest source itself.
+    """
+    text = (request or "").strip()
+    return re.split(r"[:：\r\n]", text, maxsplit=1)[0]
+
+
 def _has_execution_authorization(request: str) -> bool:
     text = re.sub(r"\s+", "", request or "")
     has_verb = any(re.search(verb, text) for verb in _EXECUTION_VERBS)
@@ -166,17 +181,19 @@ def _has_execution_authorization(request: str) -> bool:
 
 def _has_document_execution_authorization(request: str) -> bool:
     """Recognize an explicit request to execute tasks in a named attachment."""
-    text = re.sub(r"\s+", "", request or "")
+    clause = _manifest_control_clause(request)
+    text = re.sub(r"\s+", "", clause)
     has_verb = any(re.search(verb, text) for verb in _EXECUTION_VERBS)
-    return has_verb and bool(_FILENAME.findall(request or "")) and any(
+    return has_verb and bool(_FILENAME.findall(clause)) and any(
         word in text for word in _DOCUMENT_WORDS
     )
 
 
 def _mentions_document_manifest(request: str) -> bool:
-    text = request or ""
+    clause = _manifest_control_clause(request)
+    text = re.sub(r"\s+", "", clause)
     return (
-        (_has_execution_authorization(text) or _has_document_execution_authorization(text))
+        (_has_execution_authorization(clause) or _has_document_execution_authorization(clause))
         and any(word in text for word in _DOCUMENT_WORDS)
     )
 
@@ -196,8 +213,9 @@ def authorize_manifest_source(
         document for document in (office_docs or [])
         if str(document.get("doc_id") or "").strip() and str(document.get("filename") or "").strip()
     ]
-    request_folded = (request or "").casefold()
-    has_verb = any(re.search(verb, re.sub(r"\s+", "", request or "")) for verb in _EXECUTION_VERBS)
+    control_clause = _manifest_control_clause(request)
+    request_folded = control_clause.casefold()
+    has_verb = any(re.search(verb, re.sub(r"\s+", "", control_clause)) for verb in _EXECUTION_VERBS)
     # Prefer an exact submitted filename over regex extraction.  This handles
     # natural Chinese phrasing such as “执行任务清单.xlsx里的事项”, where a
     # generic filename regex cannot reliably infer where the verb ends.
@@ -218,7 +236,7 @@ def authorize_manifest_source(
     if not _mentions_document_manifest(request):
         return ManifestAuthorization(source="user_message")
 
-    requested = [_normalise_filename(name) for name in _FILENAME.findall(request or "")]
+    requested = [_normalise_filename(name) for name in _FILENAME.findall(control_clause)]
     requested = [name for name in requested if name]
     if requested:
         selected = [
@@ -333,7 +351,7 @@ def new_manifest(
         has_authorized_documents=bool((source or {}).get("doc_id")),
         office_document_count=len((source or {}).get("office_docs") or ([] if not (source or {}).get("doc_id") else [1])),
     )
-    return {
+    manifest = {
         "version": 2,
         "batch_size": size,
         "cursor": 0,
@@ -350,6 +368,46 @@ def new_manifest(
             for item in structured
         ],
     }
+    return manifest
+
+
+def record_manifest_route_decisions(manifest: dict[str, Any]) -> None:
+    """Emit one content-free route event per admitted atomic item.
+
+    Classification happens while a submission is being prepared, but a route
+    is production telemetry only after admission succeeds.  Keeping this
+    explicit avoids counting manifests that were rejected for capacity before
+    they could become a job.
+    """
+    for item in list(manifest.get("items") or []):
+        route = str(item.get("route") or item.get("estimated_type") or "unknown")
+        payload = {
+            "event": "four_channel_route_decision",
+            "route": route,
+            "reason": str(item.get("route_reason") or "unknown"),
+            "estimated_tokens": int(item.get("estimated_tokens") or 0),
+            "manifest_item_id": str(item.get("id") or ""),
+        }
+        # The ordinary application log is the source of truth for offline
+        # aggregation.  It must be emitted even if optional structured
+        # monitoring is unavailable (for example, during a telemetry outage).
+        logger.info("FOUR_CHANNEL_ROUTE_DECISION {}", json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        from app.monitoring.context import MonitorContext
+        from app.monitoring.logger import monitor_logger
+
+        try:
+            monitor_logger.info(
+                "四通道路由已确定",
+                event_type="four_channel_route_decision",
+                category="routing",
+                code="FOUR_CHANNEL_ROUTE_DECISION",
+                context=MonitorContext(component="task_manifest"),
+                metadata={key: value for key, value in payload.items() if key != "event"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Structured monitoring is additive. Never let it suppress the
+            # content-free application event or block manifest creation.
+            logger.debug("路由结构化遥测写入失败: {}", exc)
 
 
 def manifest_progress(manifest: dict[str, Any]) -> dict[str, int]:

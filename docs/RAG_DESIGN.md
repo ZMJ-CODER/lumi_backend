@@ -276,6 +276,15 @@ SciFact 使用 BEIR 的 `corpus / queries / qrels`。本地 CRUD_RAG 模式读�
 `evaluation_mode=crud_1doc_closed_set_proxy`。sparse 模型不可用时，脚本仍输出
 dense/lexical 基线，并在 `sparse.status` 中报告原因。
 
+自 2026-08-29 起，公共基准脚本还输出 BEIR qrels 驱动的 `nDCG@10`（完整 Top 10 排序、
+graded relevance 与标准 DCG/IDCG 归一化）。2026-08-29 重跑 SciFact 后，Dense 的
+`nDCG@10=0.6437`，而 Dense + lexical proxy RRF 为 `0.4834`；与 Recall@10（0.8000 →
+0.7533）和 MRR（0.6083 → 0.4064）方向一致，因此未启用该公共 proxy 融合路线。词法通道
+仍明确标记为
+`whitespace_term_frequency_proxy`，并在输出中标注 `production_equivalence=false`：它不是生产
+PostgreSQL `ILIKE/pg_trgm`。完整的路由、参数和公共检索评测方法见
+[`ROUTING_AND_RETRIEVAL_EVALUATION.md`](ROUTING_AND_RETRIEVAL_EVALUATION.md)。
+
 ## 9. 接口与异步任务
 
 | 类别 | 接口/任务 | 说明 |

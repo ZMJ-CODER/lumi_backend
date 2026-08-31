@@ -20,6 +20,7 @@ from app.agents.orchestration.plan_compilation_service import PlanCompilationSer
 from app.agents.orchestration.plan_context import PlanRequestContext
 from app.agents.orchestration.submission_context_service import SubmissionContextService
 from app.agents.orchestration.admission import job_admission
+from app.agents.orchestration.task_manifest import record_manifest_route_decisions
 from app.repositories.job_repository import JobRepository
 
 
@@ -207,6 +208,9 @@ class JobSubmissionService:
             return job
 
         await job_admission.promote(admission_token, job.job_id, user_id)
+        manifest = job.routing.get("manifest") if isinstance(job.routing, dict) else None
+        if isinstance(manifest, dict):
+            record_manifest_route_decisions(manifest)
         self._start_heartbeat(job.job_id, user_id)
         try:
             if (

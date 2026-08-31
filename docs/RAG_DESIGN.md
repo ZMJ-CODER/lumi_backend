@@ -204,86 +204,12 @@ query（原问 + 可选扩写）
 
 `.env.example` 与代码默认值一致，但它不是质量调优的依据。部署配置应由评测数据确定，并通过 Redis 动态 RAG 配置的覆盖机制审慎灰度。
 
-## 8. 评测与调参
+## 8. 质量验证
 
-阈值、分块器、reranker 或 embedding 变更前，必须先维护 50-100 条标注用例，包括应命中、必须零命中、文件名/编号、表格、歧义问题和记忆回忆。模板位于 `tests/fixtures/rag_eval_cases.json`。
-
-```powershell
-uv run python scripts/evaluate_rag.py --user-id <uuid> --cases <labelled-cases.json> --thresholds 0.5,0.55,0.6,0.65
-```
-
-脚本输出逐条命中与 aggregate precision/recall。选择能满足业务精度的最低延迟配置，而不是凭经验将阈值设为某个固定值。评测集必须使用隔离测试账号，不能将真实用户资料或私密记忆提交到仓库。
-
-Sparse 阶段 A 评测必须对同一批 chunk 比较 `dense + pg_trgm/ILIKE` 与 `dense + sparse`
-的 Recall@10、Hit@5、MRR，并单独统计术语、编号、连字符和中文短词问题。术语类提升不足
-10 个百分点时不进入生产改造；评测脚本应在隔离账号和显式实验开关下运行。
-
-### 8.1 公共集阶段 A 结果（SciFact / 2026-08-21）
-
-公共集只用于验证通用召回趋势，不能替代私有合同、表格、中文短词和编号的真实标注集。
-在 SciFact test（5,183 篇、300 查询）上，以本地 `BAAI/bge-m3`、CUDA、每路 Top 10、
-RRF `k=60` 运行的结果如下：
-
-| 方案 | Hit@1 | Hit@5 | Recall@10 | MRR |
-| --- | ---: | ---: | ---: | ---: |
-| dense | 0.5100 | 0.7400 | 0.8000 | 0.6083 |
-| dense + lexical proxy RRF | 0.1900 | 0.6567 | 0.7533 | 0.4064 |
-| dense + BGE-M3 sparse RRF | 0.3367 | 0.6867 | 0.7733 | 0.4867 |
-
-其中 `lexical proxy` 是离线脚本使用的空白分词词频基线，不等同于线上 PostgreSQL
-`pg_trgm/ILIKE`。因此该对照不能用来宣称 sparse 已优于线上关键词检索；但 sparse 融合相对
-dense 单路的 Recall@10 下降 2.67 个百分点、MRR 下降 12.16 个百分点，未满足“有明确增益”
-的准入条件。当前决定：**不接入 sparse 线上召回，不新增 sparse 存储列，不回填旧文档。**
-
-结果文件：`data/eval/scifact-rrf-top10-result.json`。后续仅在真实标注集上以实际
-`pg_trgm/ILIKE` 候选做同构对比，且术语类 `Recall@10` 相对现网提升至少 10 个百分点，才可
-进入生产化设计。
-
-### 8.2 公共集补充结果（CRUD_RAG 中文闭集代理 / 2026-08-21）
-
-已使用官方 GitHub 仓库 `IAAR-Shanghai/CRUD_RAG`（下划线）中的 `1doc_QA.json` 完成中文补充
-评测。该数据的问答 `news1` 无法与仓库的 `80000_docs` 新闻库稳定一一对应，因此不能伪造为
-8 万新闻的全库 qrels 评测。这里采用 3,199 个问题及其 3,199 篇唯一 gold 新闻构成的**闭集
-代理**，仅用于观察中文语料中的融合趋势。
-
-本地 `BAAI/bge-m3`、CUDA、每路 Top 10、RRF `k=60` 的结果如下：
-
-| 方案 | Hit@1 | Hit@5 | Recall@10 | MRR |
-| --- | ---: | ---: | ---: | ---: |
-| dense | 0.9422 | 0.9912 | 0.9950 | 0.9642 |
-| dense + lexical proxy RRF | 0.9409 | 0.9906 | 0.9950 | 0.9634 |
-| dense + BGE-M3 sparse RRF | 0.6927 | 0.9825 | 0.9931 | 0.8226 |
-
-该闭集上 sparse 融合相对 dense 单路的 Recall@10 下降 0.19 个百分点，MRR 下降 14.16 个百分点；
-与 SciFact 的方向一致，仍不满足生产准入条件。闭集难度低、且 lexical proxy 不等同于线上
-`pg_trgm/ILIKE`，所以它只能作为负向趋势证据，不能替代真实办公资料的评测。当前决定不变：
-**不接入 sparse 线上召回，不新增 sparse 存储列，不回填旧文档。**
-
-结果文件：`data/eval/crud-rag-1doc-closed-set-result.json`。
-
-公共集评测命令（不写生产数据库）：
-
-```powershell
-uv sync --extra rag-eval
-python -c "from beir import util; util.download_and_unzip('https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip', 'data/eval')"
-python scripts/benchmark_public_rag.py --dataset scifact --data-dir data/eval/scifact --device cuda --rrf-candidate-depth 10 --rrf-k 60 --output data/eval/scifact-rrf-top10-result.json
-git clone git@github.com:IAAR-Shanghai/CRUD_RAG.git
-python scripts/benchmark_public_rag.py --dataset crud-rag --crud-path CRUD_RAG --device cuda --rrf-candidate-depth 10 --rrf-k 60 --output data/eval/crud-rag-1doc-closed-set-result.json
-```
-
-SciFact 使用 BEIR 的 `corpus / queries / qrels`。本地 CRUD_RAG 模式读取官方
-`CRUD_Data.zip` 的 `1doc_QA.json`，并在结果中标记
-`evaluation_mode=crud_1doc_closed_set_proxy`。sparse 模型不可用时，脚本仍输出
-dense/lexical 基线，并在 `sparse.status` 中报告原因。
-
-自 2026-08-29 起，公共基准脚本还输出 BEIR qrels 驱动的 `nDCG@10`（完整 Top 10 排序、
-graded relevance 与标准 DCG/IDCG 归一化）。2026-08-29 重跑 SciFact 后，Dense 的
-`nDCG@10=0.6437`，而 Dense + lexical proxy RRF 为 `0.4834`；与 Recall@10（0.8000 →
-0.7533）和 MRR（0.6083 → 0.4064）方向一致，因此未启用该公共 proxy 融合路线。词法通道
-仍明确标记为
-`whitespace_term_frequency_proxy`，并在输出中标注 `production_equivalence=false`：它不是生产
-PostgreSQL `ILIKE/pg_trgm`。完整的路由、参数和公共检索评测方法见
-[`ROUTING_AND_RETRIEVAL_EVALUATION.md`](ROUTING_AND_RETRIEVAL_EVALUATION.md)。
+检索阈值、分块器、reranker 或 embedding 变更前，应在隔离测试账号的私有标注集上验证应命中、
+必须零命中、文件名/编号、表格和歧义问题。评测数据不得包含真实用户资料或私密记忆，也不得
+提交到仓库。只有在与生产 PostgreSQL `ILIKE/pg_trgm` 同构的检索路径上观察到稳定增益后，才考虑
+调整召回策略或引入额外索引。
 
 ## 9. 接口与异步任务
 
@@ -299,9 +225,9 @@ PostgreSQL `ILIKE/pg_trgm`。完整的路由、参数和公共检索评测方法
 
 ## 10. 后续路线
 
-1. 用真实标注集替换仓库模板用例，并将阈值评测纳入 CI。
+1. 在隔离环境维护私有标注集，并在检索策略变更前完成验证。
 2. 已接住 PDF 页级 provenance；继续接入 Docling 元素的页码/标题树/表格坐标（仅写入实际存在的字段），前端再支持 citation 定位跳转。
 3. 已实现可选 cross-encoder rerank（默认关闭）；用评测数据决定思考档是否灰度开启。
-4. 已提供 BGE-M3 sparse 离线实验适配器（默认关闭）；先比较 Recall/Hit/MRR，再决定是否生产化。
+4. 如需引入 sparse 检索，先在同构测试环境比较 Recall/Hit/MRR，再决定是否生产化。
 5. 已实现 `pg_trgm` GIN 索引优化现有 `ILIKE`，继续用压测决定是否迁移到 sparse/FTS。
 6. 已提供 `POST /office/docs/{doc_id}/promote` 用户确认转存入口；服务端按 SHA-256 + 目标空间去重，不自动晋升。

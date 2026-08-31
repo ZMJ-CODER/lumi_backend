@@ -210,7 +210,10 @@ def _route_atomic_instruction_legacy(
         channel = RouteChannel.DETERMINISTIC_SCRIPT
         return RouteDecision(channel=channel, reason="明确的文件转换或批处理", estimated_tokens=estimate_tokens(text, channel))
     if _RAG_OPERATION_MATCHES(text) or (
-        has_authorized_documents and re.search(r"(?iu)(?:查|找|问答|总结|提取|分析)", text)
+        # Keep the legacy fallback aligned with the governed feature contract:
+        # “根据上传的合同说明违约条款” is a read-only, document-grounded
+        # question even though it does not contain an explicit "查询" verb.
+        has_authorized_documents and re.search(r"(?iu)(?:查|找|问答|总结|提取|分析|检索|回答|说明)", text)
     ):
         channel = RouteChannel.RAG
         return RouteDecision(channel=channel, reason="需要从已授权资料检索事实", estimated_tokens=estimate_tokens(text, channel))

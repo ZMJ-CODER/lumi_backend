@@ -47,19 +47,26 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 
-# ── CUDA 版 torch（可选：本地 GPU 镜像默认装 CUDA 版；CI/Linux 无 GPU
-#    时必须传 --build-arg ENABLE_CUDA_TORCH=false，退回 PyPI CPU 版） ──
+# ── torch 运行时变体（本地 GPU 默认 CUDA；CI 使用官方 CPU wheel） ──
 # 默认走阿里云 PyTorch 镜像（国内直连官方 download.pytorch.org 会卡死/超时）。
 # 阿里云 pytorch-wheels 是扁平目录（非 PEP 503 simple index），必须用
 # --find-links 而非 --index-url；torch 的 nvidia-cuda-runtime 等依赖由清华源补齐。
-# CI/海外可传 --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126
+# CI 的 CPU wheel 必须来自 PyTorch CPU 索引。当前 PyPI 的 Linux torch
+# wheel 会携带 NVIDIA 运行库依赖，即使 ENABLE_CUDA_TORCH=false 也会造成
+# 多 GB 镜像及构建期 ENOSPC。
 ARG ENABLE_CUDA_TORCH=true
 ARG TORCH_INDEX_URL=https://mirrors.aliyun.com/pytorch-wheels/cu126
+ARG TORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN if [ "$ENABLE_CUDA_TORCH" = "true" ]; then \
-        pip install \
+        pip install --no-cache-dir \
             --find-links ${TORCH_INDEX_URL} \
             --index-url ${PIP_INDEX_URL} \
             torch==2.13.0+cu126 torchvision==0.28.0+cu126; \
+    else \
+        pip install --no-cache-dir \
+            --index-url ${TORCH_CPU_INDEX_URL} \
+            --extra-index-url ${PIP_INDEX_URL} \
+            torch==2.13.0+cpu torchvision==0.28.0+cpu; \
     fi
 
 WORKDIR /app
@@ -78,10 +85,12 @@ COPY config ./config
 COPY alembic ./alembic
 COPY alembic.ini ./
 
-# BuildKit 缓存挂载：下载好的 wheel 跨构建持久化。``pip install .`` 会安装
-# pyproject 的完整运行时集合；导入检查让 temporalio / striprtf 遗漏在构建期失败。
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install ./packages/orchestration . \
+# ``pip`` 下载缓存会和安装后的大型运行时依赖（torch/docling）同时占用
+# CI runner 的 Docker 磁盘，导致安装尚未完成即 ENOSPC。这里不保留 wheel
+# 缓存；Docker 层缓存仍会在依赖没有变化时复用完整安装层。
+# ``pip install .`` 会安装 pyproject 的完整运行时集合；导入检查让
+# temporalio / striprtf 遗漏在构建期失败。
+RUN pip install --no-cache-dir ./packages/orchestration . \
     && python -c "import lumi_orch; import striprtf; import temporalio; import app.main; print('runtime dependency check passed')"
 
 # ── Docling 模型预热（可选，默认关闭）──

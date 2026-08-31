@@ -4,24 +4,43 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="更新优化">
-      <change beforePath="$PROJECT_DIR$/.env.example" beforeDir="false" afterPath="$PROJECT_DIR$/.env.example" afterDir="false" />
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="修改日常记忆系统设计优化体验">
       <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/dag.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/dag.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/admin.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/conversations.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/conversations.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/memory_manage.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/memory_manage.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/user.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/user.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/logging.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/logging.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/observability.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/observability.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/memory/extraction.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/memory/extraction.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/memory/profile.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/memory/profile.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/CONCURRENCY_PERF.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/CONCURRENCY_PERF.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_memory.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_memory.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/task_routing.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/task_routing.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/evaluation.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/LOCUST_LOAD_TESTING.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/LOCUST_LOAD_TEST_LIMITING.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/MEMORY_DESIGN.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/MEMORY_DESIGN.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/RAG_DESIGN.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/RAG_DESIGN.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/ROUTING_AND_RETRIEVAL_EVALUATION.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/TOOL_ROUTING_EVALUATION.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/loadtests/locustfile.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/benchmark_api_rps.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/benchmark_deepseek_flash.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/benchmark_local_ollama.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/benchmark_orchestration.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/benchmark_public_rag.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/benchmark_rag.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/evaluate_four_channel_routing.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/evaluate_rag.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/evaluate_tool_routing.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/generate_four_channel_telemetry_manifest.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/seed_loadtest_users.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/submit_four_channel_telemetry.ps1" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/fixtures/four_channel_routing_eval.jsonl" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/fixtures/four_channel_telemetry_manifest_01.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/fixtures/four_channel_telemetry_manifest_02.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/fixtures/four_channel_telemetry_manifest_03.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/fixtures/four_channel_telemetry_manifest_04.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/fixtures/four_channel_telemetry_manifest_05.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/fixtures/llm_pricing.example.json" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/fixtures/tool_routing_eval.jsonl" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_four_channel_routing_evaluation.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_public_rag_benchmark.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_skill_evaluation.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_tool_selection_contract.py" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -106,14 +125,6 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1785559147484</updated>
-    </task>
-    <task id="LOCAL-00001" summary="提交初始项目代码">
-      <option name="closed" value="true" />
-      <created>1785915372786</created>
-      <option name="number" value="00001" />
-      <option name="presentableId" value="LOCAL-00001" />
-      <option name="project" value="LOCAL" />
-      <updated>1785915372787</updated>
     </task>
     <task id="LOCAL-00002" summary="解决agengt不能传递用户消息给大模型的问题">
       <option name="closed" value="true" />
@@ -475,7 +486,39 @@
       <option name="project" value="LOCAL" />
       <updated>1787659013241</updated>
     </task>
-    <option name="localTasksCounter" value="47" />
+    <task id="LOCAL-00047" summary="新增缓存，新增locust测试脚本">
+      <option name="closed" value="true" />
+      <created>1787982174678</created>
+      <option name="number" value="00047" />
+      <option name="presentableId" value="LOCAL-00047" />
+      <option name="project" value="LOCAL" />
+      <updated>1787982174678</updated>
+    </task>
+    <task id="LOCAL-00048" summary="优化镜像依赖文件">
+      <option name="closed" value="true" />
+      <created>1787983188385</created>
+      <option name="number" value="00048" />
+      <option name="presentableId" value="LOCAL-00048" />
+      <option name="project" value="LOCAL" />
+      <updated>1787983188385</updated>
+    </task>
+    <task id="LOCAL-00049" summary="优化编排器路由设计">
+      <option name="closed" value="true" />
+      <created>1788143201400</created>
+      <option name="number" value="00049" />
+      <option name="presentableId" value="LOCAL-00049" />
+      <option name="project" value="LOCAL" />
+      <updated>1788143201400</updated>
+    </task>
+    <task id="LOCAL-00050" summary="修改日常记忆系统设计优化体验">
+      <option name="closed" value="true" />
+      <created>1788161124329</created>
+      <option name="number" value="00050" />
+      <option name="presentableId" value="LOCAL-00050" />
+      <option name="project" value="LOCAL" />
+      <updated>1788161124330</updated>
+    </task>
+    <option name="localTasksCounter" value="51" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -502,10 +545,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="新增流式输出去下重新生成，优化多端同步逻辑" />
-    <MESSAGE value="开始构建skills，先创建一部分skill" />
-    <MESSAGE value="新增一部分本地化skills" />
-    <MESSAGE value="迁移工具，将工具设定为可拆卸插件" />
     <MESSAGE value="定义多agent协作模式，利用轻量dag调度算法实现协同" />
     <MESSAGE value="新增dag下多agent协作，添加一个L1agent和一个L2agent，新增本地模型qwen2.5:3b" />
     <MESSAGE value="更换嵌入模型，添加代码相关agent和skills，优化前后端交互逻辑" />
@@ -527,6 +566,10 @@
     <MESSAGE value="优化一些问题" />
     <MESSAGE value="更新文档" />
     <MESSAGE value="更新优化" />
-    <option name="LAST_COMMIT_MESSAGE" value="更新优化" />
+    <MESSAGE value="新增缓存，新增locust测试脚本" />
+    <MESSAGE value="优化镜像依赖文件" />
+    <MESSAGE value="优化编排器路由设计" />
+    <MESSAGE value="修改日常记忆系统设计优化体验" />
+    <option name="LAST_COMMIT_MESSAGE" value="修改日常记忆系统设计优化体验" />
   </component>
 </project>

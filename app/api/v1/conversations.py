@@ -236,25 +236,8 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
 
     await invalidate_conversation_views(str(conv.user_id))
 
-    # 旧版本会按 UI 列表长度物理删除原文。分层记忆需要原文作为回捞证据，
-    # 默认禁用；仅部署方显式配置正数 hard cap 时保留兼容行为。
-    over = 0
-    if settings.CONVERSATION_MESSAGE_HARD_CAP > 0:
-        over = (
-            await db.execute(
-                select(func.count()).select_from(Message).where(Message.conversation_id == conv.id)
-            )
-        ).scalar_one()
-    if settings.CONVERSATION_MESSAGE_HARD_CAP > 0 and over > settings.CONVERSATION_MESSAGE_HARD_CAP:
-        try:
-            from celery_app.tasks import trim_conversation_messages as trim_task
-
-            trim_task.delay(str(conv.id))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("消息裁剪入队失败: {}", exc)
-
-    # 消息已提交后再维护会话记忆。任务只读取数据库原文，worker 重试也不会
-    # 影响用户已收到的 SSE done 事件。
+    # 消息已提交后再维护会话记忆，并在达到 token 阈值时执行“先摘要、后淘汰”。
+    # 后台任务不在 SSE 路径调用模型；只有已存在 L1 段摘要的旧原文才能物理删除。
     if conv.scene == "chat":
         try:
             from celery_app.tasks import maintain_conversation_memory_task

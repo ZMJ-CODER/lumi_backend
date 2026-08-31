@@ -1,7 +1,5 @@
 """普通聊天分层记忆的纯逻辑回归测试。"""
 
-import asyncio
-
 from app.core.config import settings
 from app.services.conversation_memory import ConversationRecall, needs_historical_recall
 from app.services.orchestrator import Orchestrator
@@ -41,18 +39,31 @@ def test_chat_prompt_injects_only_selected_history(monkeypatch):
         conversation_recall=recall,
     )
 
-    assert seen_budgets == [min(settings.LLM_HISTORY_MAX_TOKENS, settings.CONVERSATION_RECENT_ROUNDS_THINK * 1000)]
+    assert seen_budgets == [settings.LLM_HISTORY_MAX_TOKENS]
     assert "相关此前话题摘要" in messages[0]["content"]
     assert messages[-2]["role"] == "system"
     assert "此前对话原文片段" in messages[-2]["content"]
     assert messages[-1]["content"] == "那个行程还记得吗"
 
 
-def test_message_trim_is_disabled_when_long_history_is_enabled():
-    # 该分支必须在查询数据库之前返回，否则“保留原文”仍可能被定时任务删除。
-    original = settings.CONVERSATION_MESSAGE_HARD_CAP
-    settings.CONVERSATION_MESSAGE_HARD_CAP = 0
-    try:
-        assert asyncio.run(conversation_trim.cleanup_all_conversations(object())) == 0
-    finally:
-        settings.CONVERSATION_MESSAGE_HARD_CAP = original
+def test_token_window_evicts_oldest_prefix_only_after_trigger(monkeypatch):
+    class _Message:
+        def __init__(self, content):
+            self.content = content
+
+    monkeypatch.setattr(settings, "CONVERSATION_SUMMARY_TRIGGER_TOKENS", 8)
+    monkeypatch.setattr(settings, "CONVERSATION_SUMMARY_KEEP_TOKENS", 4)
+    messages = [_Message("aaaa"), _Message("bbbb"), _Message("cccc")]
+    candidates = conversation_trim.select_messages_to_evict(messages)
+    assert candidates == [messages[0], messages[1]]
+
+
+def test_token_window_only_evicts_complete_summarized_segments(monkeypatch):
+    class _Message:
+        def __init__(self, content):
+            self.content = content
+
+    monkeypatch.setattr(settings, "CONVERSATION_SEGMENT_ROUNDS", 2)
+    messages = [_Message(str(index)) for index in range(10)]
+    # 候选前缀有 7 条，但已摘要前缀只允许按 4 条一段删除。
+    assert conversation_trim.select_safe_evictable_messages(messages[:7], 8) == messages[:4]

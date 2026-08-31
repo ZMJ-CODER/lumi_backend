@@ -1,0 +1,9 @@
+{
+  "models": {
+    "default": {
+      "currency": "USD",
+      "input_per_million": 0.0,
+      "output_per_million": 0.0
+    }
+  }
+}

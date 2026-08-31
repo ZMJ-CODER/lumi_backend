@@ -140,7 +140,7 @@ def test_tool_definition_shape():
     tools = skills_to_tools("chat")
     by_name = {t["function"]["name"]: t["function"] for t in tools}
     ws = by_name["web_search"]
-    assert ws["parameters"]["required"] == ["query"]
+    assert ws["parameters"]["required"] == ["query", "max_results"]
     assert "type" in ws["parameters"]
 
 

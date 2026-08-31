@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
-
 import yaml
 from pydantic import BaseModel, Field, ValidationError
 
@@ -97,4 +95,3 @@ def has_configured_rag_operation(text: str) -> bool:
 def has_configured_agent_operation(text: str) -> bool:
     folded = (text or "").casefold()
     return any(phrase.casefold() in folded for phrase in load_route_intent_patterns().agent_phrases)
-

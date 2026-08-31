@@ -203,7 +203,18 @@ async def maintain_conversation_memory(
     ).scalars().all()
     segment_size = max(2, settings.CONVERSATION_SEGMENT_ROUNDS * 2)
     created = 0
+    # processed_message_count 是当前服务端热窗口中、已归纳的连续前缀长度。
+    # 原文滑动淘汰后会同步回拨该游标，不能再用“历史总消息数”推导段序号。
     cursor = min(max(state.processed_message_count, 0), len(messages))
+    next_sequence = (
+        (await session.execute(
+            select(ConversationSegment.sequence)
+            .where(ConversationSegment.conversation_id == cid)
+            .order_by(ConversationSegment.sequence.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        or 0
+    ) + 1
 
     while len(messages) - cursor >= segment_size:
         batch = messages[cursor : cursor + segment_size]
@@ -212,7 +223,6 @@ async def maintain_conversation_memory(
             break
         source = _dialog_text(batch)
         source_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
-        sequence = cursor // segment_size + 1
         vector = None
         try:
             vectors = await embed_texts([result["segment_summary"]])
@@ -221,7 +231,7 @@ async def maintain_conversation_memory(
             logger.debug("会话段摘要向量化失败，保留关键词召回: {}", str(exc)[:160])
         segment = ConversationSegment(
             conversation_id=cid,
-            sequence=sequence,
+            sequence=next_sequence,
             message_ids=[str(item.id) for item in batch],
             summary=result["segment_summary"],
             entities=result["entities"],
@@ -238,6 +248,7 @@ async def maintain_conversation_memory(
         state.mood = result["mood"]
         state.version += 1
         cursor += len(batch)
+        next_sequence += 1
         created += 1
 
     if created:

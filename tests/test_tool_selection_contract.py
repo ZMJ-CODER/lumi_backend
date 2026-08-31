@@ -30,6 +30,7 @@ def _skills():
     ("query", "expected", "must_not_call"),
     [
         ("现在几点？", {"get_datetime"}, {"web_search", "query_knowledge"}),
+        ("今天是几号？", {"get_datetime"}, {"web_search", "query_knowledge"}),
         ("请联网搜索本周 AI 政策并给网页来源", {"web_search"}, {"query_knowledge"}),
         ("根据我的知识库说明报销规则", {"query_knowledge"}, {"web_search"}),
         ("Python 的 GIL 是什么", set(), {"web_search", "query_knowledge", "get_datetime"}),
@@ -88,6 +89,7 @@ def test_selection_trace_keeps_only_safe_routing_metadata():
     ("query", "expected"),
     [
         ("帮我算一下 (12873 × 47 - 912) ÷ 13，保留两位小数", "calculator"),
+        ("帮我算 (36+14)*3/5", "calculator"),
         ("帮我打开记事本", "open_app"),
     ],
 )

@@ -1,0 +1,80 @@
+{"id":"direct-01","instruction":"把这段项目进展改写得更专业：本周完成了接口联调。","expected_route":"direct_llm"}
+{"id":"direct-02","instruction":"给我三个会议开场白，语气简洁专业。","expected_route":"direct_llm"}
+{"id":"direct-03","instruction":"解释一下什么是幂等性。","expected_route":"direct_llm"}
+{"id":"direct-04","instruction":"将“请尽快回复”改得更礼貌。","expected_route":"direct_llm"}
+{"id":"direct-05","instruction":"写一段 80 字的产品发布介绍。","expected_route":"direct_llm"}
+{"id":"direct-06","instruction":"为一个周报拟三个标题。","expected_route":"direct_llm"}
+{"id":"direct-07","instruction":"用通俗语言解释 HTTP 和 HTTPS 的区别。","expected_route":"direct_llm"}
+{"id":"direct-08","instruction":"给我一个代码评审意见的写作模板。","expected_route":"direct_llm"}
+{"id":"direct-09","instruction":"把下面的要点整理成一段总结：需求已确认，排期下周开始。","expected_route":"direct_llm"}
+{"id":"direct-10","instruction":"给出三个提升专注力的建议。","expected_route":"direct_llm"}
+{"id":"direct-11","instruction":"将“项目延期”翻译成英文。","expected_route":"direct_llm"}
+{"id":"direct-12","instruction":"解释 RAG 的基本工作流程。","expected_route":"direct_llm"}
+{"id":"direct-13","instruction":"写一封不超过 100 字的感谢邮件草稿。","expected_route":"direct_llm"}
+{"id":"direct-14","instruction":"把“用户反馈很好”扩写为一条周报表述。","expected_route":"direct_llm"}
+{"id":"direct-15","instruction":"给我一份面试自我介绍的结构。","expected_route":"direct_llm"}
+{"id":"direct-16","instruction":"总结一下敏捷开发的三个核心原则。","expected_route":"direct_llm"}
+{"id":"direct-17","instruction":"为内部培训写一句宣传语。","expected_route":"direct_llm"}
+{"id":"direct-18","instruction":"解释数据库索引为什么能加快查询。","expected_route":"direct_llm"}
+{"id":"direct-19","instruction":"把“下周完成验收”改成正式通知语气。","expected_route":"direct_llm"}
+{"id":"direct-20","instruction":"给我三个产品需求文档的常见章节。","expected_route":"direct_llm"}
+{"id":"script-01","instruction":"将客户名单.xlsx 导出为 csv 文件。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-02","instruction":"把附件 report.docx 转为 pdf 文件。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-03","instruction":"批量处理这批 .csv 文件并另存为 tsv。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":4}
+{"id":"script-04","instruction":"运行脚本清洗 sales.xlsx 表格文件。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-05","instruction":"把会议纪要.txt 转成 docx 文档。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-06","instruction":"将附件数据.xlsx 导出为 .csv。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-07","instruction":"批量处理合同目录中的 pdf 文件。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":8}
+{"id":"script-08","instruction":"将预算表.xlsx 另存为 tsv 文件。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-09","instruction":"执行脚本转换附件中的 csv 文件格式。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":2}
+{"id":"script-10","instruction":"将图片清单.txt 导出为 xlsx 文件。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-11","instruction":"把供应商信息.xlsx 转为 csv。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-12","instruction":"批量处理并导出这 10 个表格文件。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":10}
+{"id":"script-13","instruction":"将附件 invoice.pdf 转成 txt 文件。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-14","instruction":"把原始数据.tsv 转为 xlsx 表格。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-15","instruction":"将日志.txt 导出为 csv 文件。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-16","instruction":"运行脚本批量处理这批附件文档。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":5}
+{"id":"script-17","instruction":"把客户表.xlsx 保存为 csv 文件。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-18","instruction":"将 markdown.txt 转成 pdf 文档。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"script-19","instruction":"批量处理并另存为这批 xlsx 文件。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":6}
+{"id":"script-20","instruction":"将附件数据表.xlsx 导出为 tsv。","expected_route":"deterministic_script","has_authorized_documents":true,"office_document_count":1}
+{"id":"rag-01","instruction":"根据我的知识库查询报销制度中的住宿上限。","expected_route":"rag"}
+{"id":"rag-02","instruction":"从知识库资料中找出合同的付款期限。","expected_route":"rag"}
+{"id":"rag-03","instruction":"根据已上传文档回答验收标准是什么。","expected_route":"rag","has_authorized_documents":true,"office_document_count":1}
+{"id":"rag-04","instruction":"这七份资料里，哪一份写了付款期限？","expected_route":"rag","has_authorized_documents":true,"office_document_count":7}
+{"id":"rag-05","instruction":"查询资料库中员工手册的请假规定。","expected_route":"rag"}
+{"id":"rag-06","instruction":"从项目资料中找出上线日期。","expected_route":"rag","has_authorized_documents":true,"office_document_count":1}
+{"id":"rag-07","instruction":"根据知识库说明采购流程的审批节点。","expected_route":"rag"}
+{"id":"rag-08","instruction":"在已上传资料中检索 SLA 的响应时限。","expected_route":"rag","has_authorized_documents":true,"office_document_count":1}
+{"id":"rag-09","instruction":"查询知识库里的差旅报销凭证要求。","expected_route":"rag"}
+{"id":"rag-10","instruction":"根据附件文档回答负责人是谁。","expected_route":"rag","has_authorized_documents":true,"office_document_count":1}
+{"id":"rag-11","instruction":"从资料库找出项目风险清单。","expected_route":"rag"}
+{"id":"rag-12","instruction":"根据上传的合同说明违约条款。","expected_route":"rag","has_authorized_documents":true,"office_document_count":1}
+{"id":"rag-13","instruction":"在知识库中查询绩效申诉流程。","expected_route":"rag"}
+{"id":"rag-14","instruction":"从资料里检索供应商准入条件。","expected_route":"rag","has_authorized_documents":true,"office_document_count":1}
+{"id":"rag-15","instruction":"查找知识库文档中的数据保留期限。","expected_route":"rag"}
+{"id":"rag-16","instruction":"根据附件回答本次预算金额。","expected_route":"rag","has_authorized_documents":true,"office_document_count":1}
+{"id":"rag-17","instruction":"查询个人资料库中的产品定位说明。","expected_route":"rag"}
+{"id":"rag-18","instruction":"从已上传资料中找出交付日期。","expected_route":"rag","has_authorized_documents":true,"office_document_count":1}
+{"id":"rag-19","instruction":"根据知识库找出信息安全制度的适用范围。","expected_route":"rag"}
+{"id":"rag-20","instruction":"这三份附件中，哪个包含付款条件？","expected_route":"rag","has_authorized_documents":true,"office_document_count":3}
+{"id":"agent-01","instruction":"先找出付款条款，再把结论发邮件给法务。","expected_route":"agent","has_authorized_documents":true,"office_document_count":1}
+{"id":"agent-02","instruction":"打开浏览器并登录供应商系统。","expected_route":"agent"}
+{"id":"agent-03","instruction":"核对这七份附件是否符合付款条款。","expected_route":"agent","has_authorized_documents":true,"office_document_count":7}
+{"id":"agent-04","instruction":"查一下哪份文件写了付款期限，然后更新采购系统。","expected_route":"agent","has_authorized_documents":true,"office_document_count":7}
+{"id":"agent-05","instruction":"先读取附件，再把结论发送给法务。","expected_route":"agent","has_authorized_documents":true,"office_document_count":1}
+{"id":"agent-06","instruction":"安排下周三下午的项目复盘日程。","expected_route":"agent"}
+{"id":"agent-07","instruction":"删除系统里的过期测试记录。","expected_route":"agent"}
+{"id":"agent-08","instruction":"核对当前数据是否符合审批规则。","expected_route":"agent"}
+{"id":"agent-09","instruction":"创建一个新的项目文件夹并上传附件。","expected_route":"agent"}
+{"id":"agent-10","instruction":"先分析销售数据，然后把结果写入 CRM 系统。","expected_route":"agent"}
+{"id":"agent-11","instruction":"检查合同是否符合最新合规要求。","expected_route":"agent","has_authorized_documents":true,"office_document_count":1}
+{"id":"agent-12","instruction":"打开邮件应用，发送今天的日报。","expected_route":"agent"}
+{"id":"agent-13","instruction":"第 1 步读取附件，第 2 步导出汇总表。","expected_route":"agent","has_authorized_documents":true,"office_document_count":1}
+{"id":"agent-14","instruction":"修改供应商系统中的联系人信息。","expected_route":"agent"}
+{"id":"agent-15","instruction":"审查这份文件是否满足内部标准。","expected_route":"agent","has_authorized_documents":true,"office_document_count":1}
+{"id":"agent-16","instruction":"先查询资料，再创建日程提醒。","expected_route":"agent"}
+{"id":"agent-17","instruction":"取消明天的客户会议日程。","expected_route":"agent"}
+{"id":"agent-18","instruction":"比对本月账单和系统记录。","expected_route":"agent"}
+{"id":"agent-19","instruction":"从附件提取金额并更新数据库。","expected_route":"agent","has_authorized_documents":true,"office_document_count":1}
+{"id":"agent-20","instruction":"先检查发布清单，再推送到生产平台。","expected_route":"agent"}

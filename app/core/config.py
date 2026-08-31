@@ -389,23 +389,24 @@ class Settings(BaseSettings):
     }
 
     # ── 会话 ──
-    # Redis 上下文保留条数上限（安全兜底；真正的窗口按 token 预算裁剪）
-    CONVERSATION_CONTEXT_ROUNDS: int = 2000
-    # 普通模式只注入注意力质量窗口；更早原文由段摘要和按需回捞提供。
+    # 0 表示不按轮次数裁剪 Redis 热窗口。陪伴型对话中短句很多，热窗口必须
+    # 以 token 而不是轮次数为准；达到阈值后由后台滑动淘汰。
+    CONVERSATION_CONTEXT_ROUNDS: int = 0
+    # 普通模式每次请求仅注入最近的注意力质量窗口，并不发送整个热窗口。
     LLM_HISTORY_MAX_TOKENS: int = 12000
     # 办公模式短期记忆：只保证当次任务连贯，不需要长窗口
     LLM_HISTORY_MAX_TOKENS_WORK: int = 60000
-    # 已保留给未迁移的语音 Redis 会话兼容路径；普通聊天不再在响应尾部同步摘要。
+    # 普通聊天热窗口：达到 25 万 token 后，摘要并物理淘汰最早部分，
+    # 保留最近约 15 万 token 的服务端原文。客户端本地历史独立留存。
     CONVERSATION_SUMMARY_TRIGGER_TOKENS: int = 250000
     CONVERSATION_SUMMARY_KEEP_TOKENS: int = 150000
-    CONVERSATION_SUMMARY_KEEP_ROUNDS: int = 1000
+    # 仅兼容既有 .env；token 滑动窗口不再使用轮次数上限。
+    CONVERSATION_SUMMARY_KEEP_ROUNDS: int = 0
     CONVERSATION_SUMMARY_CHUNK_TOKENS: int = 30000
     CONVERSATION_SUMMARY_MAX_CHARS: int = 20000
     CONVERSATION_SEGMENT_ROUNDS: int = 8
     CONVERSATION_GLOBAL_SUMMARY_MAX_CHARS: int = 1200
     CONVERSATION_SEGMENT_SUMMARY_MAX_CHARS: int = 600
-    CONVERSATION_RECENT_ROUNDS_FAST: int = 12
-    CONVERSATION_RECENT_ROUNDS_THINK: int = 16
     CONVERSATION_RECALL_SEGMENTS_FAST: int = 2
     CONVERSATION_RECALL_SEGMENTS_THINK: int = 4
     CONVERSATION_RECALL_RAW_MESSAGES_FAST: int = 0
@@ -458,9 +459,9 @@ class Settings(BaseSettings):
     MEMORY_DECRYPT_ENABLED: bool = True            # L1 解密门总开关
     MEMORY_DECRYPT_LLM_CONFIRM_ENABLED: bool = True  # 关键词预筛后 LLM 二次确认
 
-    # ── 聊天记录生命周期（消息上限裁剪，物理删除）──
-    # 0 表示不按条数物理删除。长对话原文是回捞的证据来源，生命周期由用户
-    # 删除会话/账号及后续归档策略管理，不能再以 UI 列表长度为准裁剪。
+    # ── 聊天记录生命周期（旧的条数安全阀）──
+    # token 热窗口负责正常淘汰；以下 0 值禁用旧的 UI 条数裁剪，避免短句聊天
+    # 在达到 25 万 token 前被提前删除。
     CONVERSATION_MESSAGE_KEEP: int = 0
     CONVERSATION_MESSAGE_HARD_CAP: int = 0
 

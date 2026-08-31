@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from loguru import logger
+from sqlalchemy import select
 
 from app.agents.base import AgentContext
 from app.agents.registry import AgentRegistry
@@ -27,6 +28,7 @@ from app.core.database import async_session_factory
 from app.core.llm import LLMClient
 from app.core.llm_config import get_llm_config
 from app.core.redis import get_redis
+from app.models.db_models import Message
 from app.services.speech import speech_to_text
 from app.services.content_codec import normalize_content, serialize_content
 from app.services.rag.query_rewriter import get_retrieval_queries
@@ -261,22 +263,70 @@ class Orchestrator:
     # ── 上下文管理 ──────────────────────────────────────
 
     async def get_context(self, conversation_id: str) -> list[dict]:
-        """从 Redis 获取会话上下文（最近 N 轮）."""
+        """从 Redis 获取热窗口；缓存缺失时从 PostgreSQL 回填。
+
+        Redis 只是一份带 TTL 的热缓存。注册用户的服务端热原文由 PostgreSQL
+        保存到 token 滑动淘汰时为止，因此缓存过期或服务重启不能让最近上下文
+        静默消失。游客/语音会话没有 UUID 持久化来源，保持 Redis-only。
+        """
         r = get_redis()
-        raw = await r.lrange(CONTEXT_KEY.format(conversation_id=conversation_id), 0, -1)
-        return [json.loads(msg) for msg in raw]
+        key = CONTEXT_KEY.format(conversation_id=conversation_id)
+        raw = await r.lrange(key, 0, -1)
+        if raw:
+            return [json.loads(msg) for msg in raw]
+        try:
+            cid = uuid.UUID(str(conversation_id))
+        except (ValueError, TypeError):
+            return []
+        try:
+            async with async_session_factory() as session:
+                rows = (
+                    await session.execute(
+                        select(Message)
+                        .where(Message.conversation_id == cid)
+                        .order_by(Message.created_at.asc(), Message.id.asc())
+                    )
+                ).scalars().all()
+            restored: list[dict] = []
+            used = 0
+            for message in reversed(rows):
+                content = normalize_content(message.content)
+                cost = self._estimate_tokens(content)
+                if restored and used + cost > settings.CONVERSATION_SUMMARY_KEEP_TOKENS:
+                    break
+                restored.append(
+                    {
+                        "role": message.role,
+                        "content": content,
+                        "timestamp": message.created_at.isoformat() if message.created_at else "",
+                    }
+                )
+                used += cost
+            restored.reverse()
+            if restored:
+                await r.rpush(key, *(json.dumps(item, ensure_ascii=False) for item in restored))
+                await r.expire(key, 604800)
+            return restored
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("会话热窗口回填失败，继续空上下文: conv={} err={}", conversation_id, exc)
+            return []
 
     async def append_context(self, conversation_id: str, message: dict) -> None:
-        """追加一条消息到 Redis 上下文，并裁剪至 N 轮."""
+        """追加一条消息到 Redis 热窗口。
+
+        热窗口的实际淘汰由持久化后的后台 token 滑动任务负责。保留可选的
+        轮次数安全阀仅兼容显式部署配置，默认关闭，避免短句聊天被提前截断。
+        """
         r = get_redis()
         key = CONTEXT_KEY.format(conversation_id=conversation_id)
         await r.rpush(key, json.dumps(message, ensure_ascii=False))
 
-        # 裁剪：每轮 = user + assistant，保留最近 N 轮 = 2*N 条消息
-        max_len = settings.CONVERSATION_CONTEXT_ROUNDS * 2
-        current_len = await r.llen(key)
-        if current_len > max_len:
-            await r.ltrim(key, current_len - max_len, -1)
+        # 兼容部署方显式设置的轮次数安全阀；默认以 token 滑动窗口为准。
+        if settings.CONVERSATION_CONTEXT_ROUNDS > 0:
+            max_len = settings.CONVERSATION_CONTEXT_ROUNDS * 2
+            current_len = await r.llen(key)
+            if current_len > max_len:
+                await r.ltrim(key, current_len - max_len, -1)
 
         # 设置过期时间（7天无活动自动清理）
         await r.expire(key, 604800)
@@ -391,11 +441,10 @@ class Orchestrator:
     async def _maybe_summarize_context(
         self, conversation_id: str, user_id: str, scene: str = "chat"
     ) -> None:
-        """普通模式超大滑动窗口：总 token 超过触发阈值后，压缩最早超出的原始对话.
+        """兼容语音会话的 Redis 滑动窗口维护。
 
-        规则：保留最新 KEEP_TOKENS（默认 15 万）token 原始记录 + 全部历史梗概链；
-        超出部分按 10:1 压缩成"剧情梗概"后从原始上下文删除。
-        办公模式同样做窗口滑动（保证当次任务连贯），但不触发长期记忆抽取。
+        普通文本聊天由持久化后的后台任务统一完成“段摘要 → PostgreSQL/Redis
+        同步淘汰”，以保证被删除原文已有 L1 摘要。这里不做数据库删除。
         """
         history = await self.get_context(conversation_id)
         total = sum(self._estimate_tokens(normalize_content(m.get("content") or "")) for m in history)
@@ -403,26 +452,18 @@ class Orchestrator:
             return
 
         keep_tokens = settings.CONVERSATION_SUMMARY_KEEP_TOKENS
-        max_entries = settings.CONVERSATION_SUMMARY_KEEP_ROUNDS * 2
-
-        # 从最新往回累计：保留最新（token 预算为主，条数兜底）
+        # 从最新往回累计保留 token 预算内的消息。
         kept: list[dict] = []
         used = 0
         for msg in reversed(history):
             cost = self._estimate_tokens(normalize_content(msg.get("content") or ""))
-            if kept and (used + cost > keep_tokens or len(kept) >= max_entries):
+            if kept and used + cost > keep_tokens:
                 break
             kept.append(msg)
             used += cost
         if len(kept) == len(history):
             return
         old_msgs = history[: len(history) - len(kept)]
-
-        # 被压缩掉的旧消息若尚未做过记忆抽取 → 先异步抽取（仅普通模式；办公模式无长期记忆）
-        if scene != "office":
-            await self._submit_unextracted(
-                conversation_id, user_id, history, stop=len(history) - len(kept)
-            )
 
         prev_summary = await self.get_conversation_summary(conversation_id)
         summary = await self._generate_summary_chunked(prev_summary, old_msgs, user_id)
@@ -431,7 +472,7 @@ class Orchestrator:
             return
         await self.save_conversation_summary(conversation_id, summary)
 
-        # 裁剪 Redis 上下文：只保留最新 kept 条消息
+        # 语音会话没有 PostgreSQL 原文，保持旧的 Redis-only 压缩行为。
         r = get_redis()
         key = CONTEXT_KEY.format(conversation_id=conversation_id)
         await r.ltrim(key, -len(kept), -1)
@@ -1596,17 +1637,12 @@ class Orchestrator:
 
         messages = [{"role": "system", "content": system_prompt}]
 
-        # 注入最近历史（token 预算内），排除最后一条（当前消息已包含）
-        # 普通模式只保留注意力窗口；更早内容由摘要和按需回捞承担。
+        # 注入最近历史（token 预算内），排除最后一条（当前消息已包含）。
+        # 不以轮次数截断：深度陪伴对话常有短句，token 才是稳定的上下文度量。
         if scene == "office":
             budget = settings.LLM_HISTORY_MAX_TOKENS_WORK
         else:
-            rounds = (
-                settings.CONVERSATION_RECENT_ROUNDS_THINK
-                if thinking_mode == "think"
-                else settings.CONVERSATION_RECENT_ROUNDS_FAST
-            )
-            budget = min(settings.LLM_HISTORY_MAX_TOKENS, max(1, rounds) * 1000)
+            budget = settings.LLM_HISTORY_MAX_TOKENS
         for msg in self._trim_history(history, budget):
             messages.append({"role": msg["role"], "content": normalize_content(msg.get("content") or "")})
 

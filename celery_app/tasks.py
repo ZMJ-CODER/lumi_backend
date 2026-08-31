@@ -28,7 +28,7 @@ from app.services.rag.knowledge import (
 )
 from app.services import conversation_trim
 from app.services.memory.extraction import extract_memories_from_dialog
-from app.services.memory.profile import build_user_profile
+from app.services.memory.profile import build_user_profile as build_user_profile_record
 from app.services.conversation_memory import maintain_conversation_memory
 from app.services.usage import aggregate_daily_stats
 
@@ -84,7 +84,7 @@ def process_document(
             finally:
                 await engine.dispose()
         asyncio.run(_release())
-        raise self.retry(exc=exc, countdown=5)
+        raise self.retry(exc=exc, countdown=5) from exc
 
 
 @celery_app.task(bind=True, max_retries=1)
@@ -117,7 +117,7 @@ def recover_stale_documents(self):
         return len(documents)
     except Exception as exc:  # noqa: BLE001
         logger.error("[Task] recover_stale_documents 失败: {}", exc)
-        raise self.retry(exc=exc, countdown=60)
+        raise self.retry(exc=exc, countdown=60) from exc
 
 
 @celery_app.task(bind=True, max_retries=3)
@@ -138,17 +138,21 @@ def extract_memories(self, user_id: str, conversation_id: str, messages: list[di
         logger.debug("[Task] extract_memories 完成: user={} conv={} new={}", user_id, conversation_id, count)
     except Exception as exc:
         logger.error("[Task] extract_memories 失败: user={} conv={} err={}", user_id, conversation_id, exc)
-        raise self.retry(exc=exc, countdown=10)
+        raise self.retry(exc=exc, countdown=10) from exc
 
 
 @celery_app.task(bind=True, max_retries=3)
 def maintain_conversation_memory_task(self, user_id: str, conversation_id: str):
-    """异步生成普通会话的段摘要和总摘要，绝不占用 SSE 完成路径。"""
+    """异步维护摘要，并在安全前提下执行 token 滑动淘汰。"""
     async def _run() -> int:
         engine, factory = _new_async_session()
         try:
             async with factory() as session:
-                return await maintain_conversation_memory(session, user_id, conversation_id)
+                created = await maintain_conversation_memory(session, user_id, conversation_id)
+                # 只有完整段摘要已提交后才尝试删除旧原文，确保待淘汰前缀已被 L1 覆盖。
+                if created:
+                    await conversation_trim.trim_conversation_messages(session, conversation_id)
+                return created
         finally:
             await engine.dispose()
 
@@ -157,7 +161,7 @@ def maintain_conversation_memory_task(self, user_id: str, conversation_id: str):
         logger.debug("[Task] maintain_conversation_memory 完成: conv={} segments={}", conversation_id, count)
     except Exception as exc:
         logger.error("[Task] maintain_conversation_memory 失败: conv={} err={}", conversation_id, exc)
-        raise self.retry(exc=exc, countdown=10)
+        raise self.retry(exc=exc, countdown=10) from exc
 
 
 @celery_app.task(bind=True, max_retries=3)
@@ -167,7 +171,7 @@ def build_user_profile(self, user_id: str):
         engine, factory = _new_async_session()
         try:
             async with factory() as session:
-                profile = await build_user_profile(session, user_id)
+                profile = await build_user_profile_record(session, user_id)
                 return str(profile.version) if profile else None
         finally:
             await engine.dispose()
@@ -177,7 +181,7 @@ def build_user_profile(self, user_id: str):
         logger.debug("[Task] build_user_profile 完成: user={} version={}", user_id, version)
     except Exception as exc:
         logger.error("[Task] build_user_profile 失败: user={} err={}", user_id, exc)
-        raise self.retry(exc=exc, countdown=10)
+        raise self.retry(exc=exc, countdown=10) from exc
 
 
 @celery_app.task(bind=True, max_retries=2)
@@ -201,7 +205,7 @@ def build_all_user_profiles(self):
         logger.debug("[Task] build_all_user_profiles 入队: users={}", len(uids))
     except Exception as exc:  # noqa: BLE001
         logger.error("[Task] build_all_user_profiles 失败: {}", exc)
-        raise self.retry(exc=exc, countdown=60)
+        raise self.retry(exc=exc, countdown=60) from exc
 
 
 @celery_app.task(bind=True)
@@ -296,7 +300,7 @@ def aggregate_token_stats(self):
 
 @celery_app.task(bind=True, max_retries=3)
 def trim_conversation_messages(self, conversation_id: str):
-    """物理删除超出上限的最旧消息 + 附件文件."""
+    """按 token 滑动窗口物理淘汰已摘要的最旧消息及附件。"""
     async def _run() -> int:
         engine, factory = _new_async_session()
         try:
@@ -310,12 +314,12 @@ def trim_conversation_messages(self, conversation_id: str):
         logger.debug("[Task] trim_conversation_messages 完成: conv={} removed={}", conversation_id, removed)
     except Exception as exc:  # noqa: BLE001
         logger.error("[Task] trim_conversation_messages 失败: conv={} err={}", conversation_id, exc)
-        raise self.retry(exc=exc, countdown=10)
+        raise self.retry(exc=exc, countdown=10) from exc
 
 
 @celery_app.task(bind=True)
 def cleanup_conversations(self):
-    """每日兜底：扫描所有超过硬上限的会话并裁剪（兼容漏触发与历史数据）."""
+    """每日兜底：扫描普通会话，补偿失败重试后的 token 窗口淘汰。"""
     async def _run() -> int:
         engine, factory = _new_async_session()
         try:

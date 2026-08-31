@@ -1,0 +1,60 @@
+{"id":"calc-01","scene":"chat","query":"请精确计算 12873*47-912","expected_tool":"calculator","expected_params":{"expression":"12873*47-912"},"notes":"精确算术应使用确定性计算器"}
+{"id":"calc-02","scene":"chat","query":"帮我算 (36+14)*3/5","expected_tool":"calculator","expected_params":{"expression":"(36+14)*3/5"}}
+{"id":"calc-03","scene":"chat","query":"精确算一下 1000*0.085","expected_tool":"calculator","expected_params":{"expression":"1000*0.085"}}
+{"id":"calc-04","scene":"chat","query":"计算 2**10 + 7","expected_tool":"calculator","expected_params":{"expression":"2**10 + 7"}}
+{"id":"calc-05","scene":"chat","query":"请计算 (520-120)/8","expected_tool":"calculator","expected_params":{"expression":"(520-120)/8"}}
+{"id":"calc-06","scene":"chat","query":"算一下 17%3","expected_tool":"calculator","expected_params":{"expression":"17%3"}}
+{"id":"calc-07","scene":"chat","query":"帮我精确计算 999//7","expected_tool":"calculator","expected_params":{"expression":"999//7"}}
+{"id":"calc-08","scene":"chat","query":"计算 -12.5*8","expected_tool":"calculator","expected_params":{"expression":"-12.5*8"}}
+{"id":"datetime-01","scene":"chat","query":"现在几点？","expected_tool":"get_datetime","expected_params":{"format":"time"},"notes":"时间敏感信息不能由模型猜测"}
+{"id":"datetime-02","scene":"chat","query":"今天是几号？","expected_tool":"get_datetime","expected_params":{"format":"date"}}
+{"id":"datetime-03","scene":"chat","query":"请告诉我当前日期","expected_tool":"get_datetime","expected_params":{"format":"date"}}
+{"id":"datetime-04","scene":"chat","query":"现在的准确时间是多少？","expected_tool":"get_datetime","expected_params":{"format":"time"}}
+{"id":"datetime-05","scene":"chat","query":"此刻是星期几和几点？","expected_tool":"get_datetime","expected_params":{"format":"datetime"}}
+{"id":"datetime-06","scene":"chat","query":"获取当前东八区日期时间","expected_tool":"get_datetime","expected_params":{"format":"datetime"}}
+{"id":"datetime-07","scene":"chat","query":"帮我查看今天的日期","expected_tool":"get_datetime","expected_params":{"format":"date"}}
+{"id":"datetime-08","scene":"chat","query":"我需要系统当前时间","expected_tool":"get_datetime","expected_params":{"format":"time"}}
+{"id":"web-01","scene":"chat","query":"请联网搜索 2026 年中国人工智能监管政策，并给我来源","expected_tool":"web_search","expected_params":{"query":"2026 年中国人工智能监管政策","max_results":5},"notes":"明确要求公开网页来源"}
+{"id":"web-02","scene":"chat","query":"联网查一下本周 OpenAI 的公开新闻，列 5 条来源","expected_tool":"web_search","expected_params":{"query":"OpenAI 公开新闻 本周","max_results":5}}
+{"id":"web-03","scene":"chat","query":"帮我从网页搜索北京今天的空气质量来源","expected_tool":"web_search","expected_params":{"query":"北京 今天 空气质量","max_results":5}}
+{"id":"web-04","scene":"chat","query":"搜索公开网页资料：欧盟 AI Act 最新执行时间，给我来源","expected_tool":"web_search","expected_params":{"query":"欧盟 AI Act 最新执行时间","max_results":5}}
+{"id":"web-05","scene":"chat","query":"请联网搜索 Python 3.13 官方发布说明并附来源","expected_tool":"web_search","expected_params":{"query":"Python 3.13 官方发布说明","max_results":5}}
+{"id":"web-06","scene":"chat","query":"从公开网页检索 NVIDIA 最近财报，并给 5 个来源","expected_tool":"web_search","expected_params":{"query":"NVIDIA 最近财报","max_results":5}}
+{"id":"web-07","scene":"chat","query":"联网搜索上海本周末天气预报并给来源","expected_tool":"web_search","expected_params":{"query":"上海 本周末 天气预报","max_results":5}}
+{"id":"web-08","scene":"chat","query":"请搜索网页来源，核实最新 WHO 传染病通报","expected_tool":"web_search","expected_params":{"query":"最新 WHO 传染病通报","max_results":5}}
+{"id":"knowledge-01","scene":"chat","query":"根据我的知识库查询报销制度中住宿上限","expected_tool":"query_knowledge","expected_params":{"query":"报销制度中住宿上限","top_k":5},"notes":"私有知识库而非公网"}
+{"id":"knowledge-02","scene":"chat","query":"在已上传资料里检索合同的付款期限","expected_tool":"query_knowledge","expected_params":{"query":"合同的付款期限","top_k":5}}
+{"id":"knowledge-03","scene":"chat","query":"帮我从个人知识库找员工手册的请假规定","expected_tool":"query_knowledge","expected_params":{"query":"员工手册的请假规定","top_k":5}}
+{"id":"knowledge-04","scene":"chat","query":"查询我的知识库：采购流程的审批节点","expected_tool":"query_knowledge","expected_params":{"query":"采购流程的审批节点","top_k":5}}
+{"id":"knowledge-05","scene":"chat","query":"检索我上传的项目资料里关于验收标准的内容","expected_tool":"query_knowledge","expected_params":{"query":"项目资料里关于验收标准的内容","top_k":5}}
+{"id":"knowledge-06","scene":"chat","query":"从个人资料库查询差旅报销需要哪些凭证","expected_tool":"query_knowledge","expected_params":{"query":"差旅报销需要哪些凭证","top_k":5}}
+{"id":"knowledge-07","scene":"chat","query":"在知识库中找 SLA 的响应时限并引用","expected_tool":"query_knowledge","expected_params":{"query":"SLA 的响应时限","top_k":5}}
+{"id":"knowledge-08","scene":"chat","query":"根据已入库的公司制度检索绩效申诉流程","expected_tool":"query_knowledge","expected_params":{"query":"公司制度的绩效申诉流程","top_k":5}}
+{"id":"app-01","scene":"chat","query":"帮我打开记事本","expected_tool":"open_app","expected_params":{"name":"记事本"},"notes":"只选择，不触发客户端打开操作"}
+{"id":"app-02","scene":"chat","query":"启动 Chrome 浏览器","expected_tool":"open_app","expected_params":{"name":"Chrome"}}
+{"id":"app-03","scene":"chat","query":"请打开微信","expected_tool":"open_app","expected_params":{"name":"微信"}}
+{"id":"app-04","scene":"chat","query":"帮我启动 Outlook","expected_tool":"open_app","expected_params":{"name":"Outlook"}}
+{"id":"app-05","scene":"chat","query":"打开 WPS","expected_tool":"open_app","expected_params":{"name":"WPS"}}
+{"id":"app-06","scene":"chat","query":"启动 Visual Studio Code","expected_tool":"open_app","expected_params":{"name":"Visual Studio Code"}}
+{"id":"app-07","scene":"chat","query":"请打开计算器应用","expected_tool":"open_app","expected_params":{"name":"计算器"}}
+{"id":"app-08","scene":"chat","query":"打开 Spotify 软件","expected_tool":"open_app","expected_params":{"name":"Spotify"}}
+{"id":"negative-01","scene":"chat","query":"你好，简单介绍一下你能做什么","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-02","scene":"chat","query":"用通俗的话解释什么是机器学习","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-03","scene":"chat","query":"帮我把这句话改得更礼貌：请尽快回复","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-04","scene":"chat","query":"写一段 80 字的春天描写","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-05","scene":"chat","query":"解释一下 HTTP 和 HTTPS 的区别","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-06","scene":"chat","query":"给我三个时间管理建议","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-07","scene":"chat","query":"把“项目推进顺利”翻译成英文","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-08","scene":"chat","query":"什么是数据库索引？","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-09","scene":"chat","query":"写一个会议开场白，语气专业","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-10","scene":"chat","query":"解释 Python 里的生成器概念","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-11","scene":"chat","query":"给我一个面试自我介绍的结构","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-12","scene":"chat","query":"为什么天空看起来是蓝色的？","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-13","scene":"chat","query":"把这段话压缩成一句：我们将在下周完成验收并提交报告","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-14","scene":"chat","query":"什么是幂等性？","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-15","scene":"chat","query":"推荐一个学习英语的日常计划","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-16","scene":"chat","query":"解释一下 RAG 的基本工作流程","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-17","scene":"chat","query":"帮我拟三个产品发布会标题","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-18","scene":"chat","query":"请给我一个 JSON Schema 的简单示例","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-19","scene":"chat","query":"怎么理解软件中的熔断器？","expected_tool":null,"expected_params":{},"must_not_call":true}
+{"id":"negative-20","scene":"chat","query":"用三点说明代码评审的价值","expected_tool":null,"expected_params":{},"must_not_call":true}

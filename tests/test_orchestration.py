@@ -1006,6 +1006,24 @@ def test_manifest_source_binds_only_user_named_attachment():
     assert "明确" in ambiguous.clarification
 
 
+def test_manifest_source_ignores_document_words_and_filenames_in_task_payload():
+    docs = [{"doc_id": "report-1", "filename": "演练报表.xlsx", "kind": "xlsx"}]
+
+    natural = authorize_manifest_source(
+        "请执行以下任务清单：为复盘文档写摘要；从知识库查询发布流程。",
+        docs,
+    )
+    assert natural is not None
+    assert natural.source == "user_message"
+
+    file_task = authorize_manifest_source(
+        "请执行以下任务清单：将演练报表.xlsx 转为 csv；整理转换结果。",
+        docs,
+    )
+    assert file_task is not None
+    assert file_task.source == "user_message"
+
+
 def test_unauthorized_numbered_document_text_uses_normal_planner():
     class PlannerOnly(Planner):
         calls = 0

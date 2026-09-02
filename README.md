@@ -2,17 +2,6 @@
 
 多模态 AI 助手后端：聊天（流式 SSE）、RAG 知识库、长期记忆（加密）、办公模式（文档编辑/脚本执行/多智能体编排）、语音（TTS/ASR）。
 
-## 项目背景
-- 在折腾大模型应用的过程中，我越来越感到一种割裂感：现有的 AI 助手在“闲聊”时表现惊艳，
-- 但一旦让它们真正接手办公任务（比如“帮我改一下这份 50 页的合同并给客户发封邮件”），
-- 它们往往会变成灾难——要么读两页文档就忘了前面的设定，要么胡乱调用工具导致重复发邮件，
-- 甚至被文档里的“忽略安全规则”一句话就给越狱了。
-
-- 我意识到，将 LLM 落地到真实生产环境，缺的不是一个更聪明的模型，而是一个能管住它的工程底座。
-
-- Lumi 就是我对这个问题的回答。我不想再做一个套壳的聊天框，而是试图打造一个“任务级控制面”：
-- 用 DAG 编排约束它的行为，用两段式日志兜底它的副作用，用四域 RAG 防止它产生记忆错乱。
-- Lumi 不是一个能让 AI 更聪明的系统，而是一个让 AI 在干粗活时不出大乱子的系统。
 
 ## 系统架构
 ![overall_architecture_diagram.png](overall_architecture_diagram.png)
@@ -88,3 +77,7 @@ docker build -f Dockerfile.sandbox -t lumi-python-sandbox:latest .
 - [docs/ORCHESTRATION_KERNEL_PACKAGE.md](docs/ORCHESTRATION_KERNEL_PACKAGE.md) — 独立编排内核 workspace 包
 - [docs/ORCHESTRATION_DEPLOYMENT_GUIDE.md](docs/ORCHESTRATION_DEPLOYMENT_GUIDE.md) — 编排部署、迁移与回归命令
 - [docs/API_AUTH.md](docs/API_AUTH.md) / [docs/API_INTEGRATION.md](docs/API_INTEGRATION.md) — API 与鉴权
+
+
+## 作者有话说
+- 个人项目，第一次开源，都是边学边做的，技术上有什么做的不好的地方还请见谅，不要试图抨击我

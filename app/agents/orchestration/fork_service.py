@@ -1,4 +1,4 @@
-"""Create safe replay branches from completed orchestration jobs."""
+"""从已完成编排任务创建安全的回放分支。"""
 
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ class JobForkService:
         prefix = self._ancestor_ids(source.nodes, node_id)
         rerun_ids = self._descendant_ids(source.nodes, node_id)
         from app.agents.orchestration.safety import is_effectful, prepare_node_safety
-        from app.agents.orchestration.execution_lineage import ensure_node_result_ref, resolve_result_ref
+        from app.agents.orchestration.execution.lineage import ensure_node_result_ref, resolve_result_ref
 
         retained_ids = {node.id for node in source.nodes if node.id not in rerun_ids}
         committed_prefix_effects = [
@@ -216,7 +216,15 @@ class JobForkService:
             )
             for node in job.nodes:
                 prepare_node_safety(node, job.user_id, job.job_id)
-            from app.agents.orchestration.dag import validate_planned_dag
+                if node.id in retained_ids:
+                    # The fork intentionally removes the body from the branch
+                    # snapshot. Preserve the owner-scoped reference so the
+                    # execution context can resolve the reused prefix.
+                    source_node = by_id[node.id]
+                    source_ref = (source_node.metadata or {}).get("result_ref")
+                    if source_ref:
+                        node.metadata["result_ref"] = source_ref
+            from app.agents.orchestration.execution.validation import validate_planned_dag
 
             errors = validate_planned_dag(job.nodes, self._workers)
             if errors:

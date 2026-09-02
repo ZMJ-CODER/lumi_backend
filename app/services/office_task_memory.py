@@ -1,8 +1,7 @@
-"""Persistent, conservative recall for recent office tasks.
+"""近期办公任务的持久化、保守召回。
 
-This is deliberately not a second task state store.  The DAG Job remains the
-source of truth while it is live; this index only lets a later explicit user
-reference locate a completed task and its user-scoped artifact metadata.
+这刻意不是第二个任务状态存储。任务运行期间 DAG Job 仍是唯一事实来源；本
+索引仅让用户后续明确提及时可定位已完成任务及其用户范围内的产物元数据。
 """
 
 from __future__ import annotations

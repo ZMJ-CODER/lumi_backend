@@ -1,4 +1,4 @@
-"""Lumi presentation adapter for the kernel error taxonomy."""
+"""内核错误分类在 Lumi 中的呈现适配器。"""
 
 from __future__ import annotations
 

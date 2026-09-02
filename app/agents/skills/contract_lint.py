@@ -1,4 +1,4 @@
-"""Static integrity checks for model-facing Skill selection contracts."""
+"""面向模型的 Skill 选择契约静态完整性检查。"""
 
 from __future__ import annotations
 

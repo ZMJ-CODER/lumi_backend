@@ -20,6 +20,7 @@ from app.core.exceptions import (
 )
 from app.models.agent import (
     ApproveAgentJobRequest,
+    AppendPlanPatchRequest,
     CancelAgentJobRequest,
     CreateAgentJobRequest,
     ForkAgentJobRequest,
@@ -114,7 +115,7 @@ async def get_agent_job_spans(
 ):
     """Return redacted node lifecycle spans for diagnosis and branch comparison."""
     job = await _get_owned_job(job_id, payload["sub"])
-    from app.agents.orchestration.execution_lineage import list_node_spans
+    from app.agents.orchestration.execution.lineage import list_node_spans
 
     return {
         "code": 0,
@@ -221,3 +222,38 @@ async def resume_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     if not job:
         raise NotFoundException("任务不存在")
     return {"code": 0, "data": job.model_dump(), "message": "任务已恢复"}
+
+
+@router.post("/jobs/{job_id}/plan-patches")
+async def append_agent_plan_patch(
+    job_id: str,
+    req: AppendPlanPatchRequest,
+    payload: dict = Depends(require_auth),
+):
+    """向已就绪的计划插槽追加通过校验的运行期节点。"""
+    await _get_owned_job(job_id, payload["sub"])
+    try:
+        outcome = await orchestrator.append_plan_patch(
+            job_id,
+            payload["sub"],
+            req.as_external_patch(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        from lumi_orch import PlanPatchConflict
+
+        if isinstance(exc, PlanPatchConflict):
+            raise ConflictException(str(exc), error_code="PLAN_PATCH_CONFLICT") from exc
+        raise
+    return {
+        "code": 0,
+        "data": {
+            "job": outcome.job.model_dump(),
+            "patch": {
+                "patch_id": outcome.patch_id,
+                "slot_id": outcome.slot_id,
+                "revision": outcome.revision,
+                "replayed": outcome.replayed,
+                "temporal_signaled": outcome.temporal_signaled,
+            },
+        },
+    }

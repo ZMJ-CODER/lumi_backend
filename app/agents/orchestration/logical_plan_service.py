@@ -1,8 +1,7 @@
-"""Continuation service for rolling logical plans.
+"""滚动逻辑计划的续执行服务。
 
-The service owns the durable-plan/frontier handshake.  It intentionally does
-not decide whether a failed frontier should be replanned; that arbitration is
-kept in the orchestrator's replan policy path.
+本服务负责持久化计划与执行前沿之间的衔接。它刻意不决定失败前沿是否需要重
+规划；该裁决保留在编排器的重规划策略路径中。
 """
 
 from __future__ import annotations
@@ -18,6 +17,37 @@ class LogicalPlanContinuationService:
 
     def __init__(self, *, store: StateStore) -> None:
         self._store = store
+
+    @staticmethod
+    async def _single_terminal_answer(user_id: str, plan: dict) -> str:
+        """Return the sole terminal node's output without copying all plan results.
+
+        A rolling plan keeps completed node bodies outside ``Job.nodes``. Once
+        the plan converges, a single terminal node is already the user-facing
+        answer, so restore just that referenced result into the job snapshot.
+        Multiple terminal branches use the normal final-answer synthesis path.
+        """
+        records = plan.get("nodes") or {}
+        order = [str(node_id) for node_id in (plan.get("order") or [])]
+        depended_on = {
+            str(dependency)
+            for record in records.values()
+            if isinstance(record, dict)
+            for dependency in ((record.get("node") or {}).get("depends_on") or [])
+        }
+        terminal_ids = [node_id for node_id in order if node_id not in depended_on]
+        if len(terminal_ids) != 1:
+            return ""
+
+        record = records.get(terminal_ids[0]) or {}
+        if str(record.get("status") or "") != "completed":
+            return ""
+        from app.agents.orchestration.execution.lineage import resolve_result_ref
+
+        result = await resolve_result_ref(user_id, record.get("result_ref"))
+        if not isinstance(result, dict):
+            return ""
+        return str(result.get("content") or result.get("output") or "").strip()
 
     async def continue_job(self, job: Job) -> bool:
         """Return ``True`` when the caller should execute a fresh frontier."""
@@ -40,6 +70,7 @@ class LogicalPlanContinuationService:
             materialize_frontier,
             save_logical_plan,
         )
+        from app.agents.orchestration.scheduling.plan_patches import ready_slots
 
         plan = await load_logical_plan(job.user_id, str(pointer["plan_id"]))
         if not plan:
@@ -64,6 +95,20 @@ class LogicalPlanContinuationService:
             return False
 
         if progress["completed"] >= progress["total"]:
+            slots = ready_slots(plan)
+            if slots:
+                # 插槽不是普通节点，不能因为当前图已清空就提前完成。使用
+                # PAUSED 复用现有恢复控制，但标记来源以区分用户手动暂停。
+                job.status = JobStatus.PAUSED
+                job.error = None
+                job.updated_at = time.time()
+                job.routing["scheduler_waiting_slots"] = [slot.id for slot in slots]
+                await save_logical_plan(job.user_id, plan)
+                await self._store.save_job(job)
+                return False
+            final_answer = await self._single_terminal_answer(job.user_id, plan)
+            if final_answer:
+                job.result = {"final_answer": final_answer}
             job.status = JobStatus.COMPLETED
             job.error = None
             job.updated_at = time.time()

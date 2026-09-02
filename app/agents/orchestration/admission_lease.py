@@ -1,4 +1,4 @@
-"""Admission lease heartbeat isolated from the orchestration facade."""
+"""从编排门面分离的准入租约心跳。"""
 
 from __future__ import annotations
 

@@ -1,8 +1,7 @@
-"""Short-lived text stream for office task output.
+"""办公任务输出的短生命周期文本流。
 
-Node status remains the authoritative job state in Redis.  This module only
-buffers presentation deltas so a long writing/summary response can reach the
-chat SSE connection before the DAG node finishes.
+节点状态仍是 Redis 中唯一权威的任务状态。本模块仅缓冲呈现增量，使长篇写作或
+总结响应可在 DAG 节点结束前先抵达聊天 SSE 连接。
 """
 
 from __future__ import annotations

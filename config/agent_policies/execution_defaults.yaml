@@ -1,0 +1,17 @@
+# 引擎负责的可靠性默认值；业务节点只提供事实声明。
+version: 1
+defaults:
+  io_bound:
+    timeout_seconds: 60
+    retry: {max_attempts: 3, backoff: exponential_jitter, budget_seconds: 30}
+  cpu_bound:
+    timeout_seconds: 120
+    retry: {max_attempts: 2, backoff: exponential_jitter, budget_seconds: 45}
+  external_dependency:
+    timeout_seconds: 45
+    retry: {max_attempts: 3, backoff: exponential_jitter, budget_seconds: 30}
+concurrency:
+  direct_llm: 32
+  deterministic_script: 20
+  rag: 12
+  agent: 2

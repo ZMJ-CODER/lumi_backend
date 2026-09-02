@@ -1,4 +1,4 @@
-"""Task Complexity Assessment for office-mode orchestration.
+"""办公模式编排的任务复杂度评估。
 
 The evaluator deliberately scores task shape instead of business domain.  Its
 fast rules cover high-confidence requests without an LLM round trip; an

@@ -1,9 +1,8 @@
-"""Retrieval scope routing.
+"""检索范围路由。
 
-The vector infrastructure is shared, but personal memories, long-lived
-knowledge and office attachments must not be retrieved as one corpus.  This
-module contains only deterministic, explainable routing rules so the fast chat
-path never pays for a classifier call before its first model request.
+向量基础设施可以共享，但个人记忆、长期知识与办公附件不能混作一个语料库。本
+模块只包含确定且可解释的路由规则，使快速对话路径在第一次模型请求前无需承担
+分类器调用成本。
 """
 
 from __future__ import annotations

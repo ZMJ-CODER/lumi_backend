@@ -1,4 +1,4 @@
-"""办公任务记忆边界。
+"""办公任务的记忆边界。
 
 This service owns conversation summaries, recent-task indexing and the small
 amount of presentation preference data that is allowed into office delivery.

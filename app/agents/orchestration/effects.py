@@ -1,4 +1,4 @@
-"""Application adapter for the durable external-effect journal.
+"""持久化外部副作用日志的应用适配器。
 
 The orchestration kernel owns record state transitions. This adapter owns the
 Postgres persistence choice. There is intentionally no Redis or process-memory
@@ -16,6 +16,7 @@ from lumi_orch.effects import (
     intent_record,
     uncertain_record,
 )
+from lumi_execution import EffectGuard
 
 from app.repositories.effect_journal_repository import (
     EffectJournalRepository,
@@ -25,6 +26,25 @@ from app.repositories.effect_journal_repository import (
 
 
 _repository: EffectJournalRepository | None = None
+
+
+class ApplicationEffectJournal:
+    """Adapt the durable repository to the execution package port."""
+
+    async def reserve(self, key: str, intent: dict[str, Any] | None = None):
+        return await record_effect_intent(key, intent)
+
+    async def confirm(self, key: str, result: dict[str, Any] | None = None) -> None:
+        await confirm_effect(key, result)
+
+    async def mark_uncertain(self, key: str, reason: str = "execution_interrupted") -> None:
+        await mark_effect_uncertain(key, reason)
+
+    async def abandon_pending(self, key: str) -> None:
+        await abandon_pending_effect(key)
+
+
+effect_guard = EffectGuard(ApplicationEffectJournal())
 
 
 def effect_intent_for_node(*, job_id: str, node: Any, tool: str = "") -> dict[str, str]:

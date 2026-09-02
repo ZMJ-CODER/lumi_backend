@@ -1,4 +1,4 @@
-"""Backend-neutral validation outcome contract."""
+"""后端无关的校验结果契约。"""
 
 from __future__ import annotations
 

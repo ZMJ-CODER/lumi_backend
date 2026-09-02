@@ -1,4 +1,4 @@
-"""Rolling task-manifest continuation service."""
+"""滚动任务清单续执行服务。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from collections.abc import Callable
 from loguru import logger
 
 from app.agents.orchestration.models import Job, JobStatus
-from app.agents.orchestration.plan_normalizer import adapt_unavailable_manifest_workers
+from app.agents.orchestration.planning.normalizer import adapt_unavailable_manifest_workers
 from app.agents.orchestration.state import StateStore
 from app.core.config import settings
 

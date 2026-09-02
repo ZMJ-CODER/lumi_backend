@@ -1,4 +1,4 @@
-"""Read-side orchestration service.
+"""编排任务的查询侧服务。
 
 The write/execution coordinator should not also own Temporal query fallback,
 task indexing and progress hydration.  This service centralizes those read and
@@ -49,7 +49,11 @@ class JobQueryService:
         job = await self._store.get_job(job_id)
         if (
             job is not None
-            and str((job.routing or {}).get("runtime") or "") == "temporal_static"
+            and str((job.routing or {}).get("runtime") or "")
+            # Logical-plan Workflows intentionally keep only a job reference
+            # and lifecycle flags in History; Redis is their authoritative
+            # query snapshot.  ``get_job`` exists only on the static Workflow.
+            == "temporal_static"
             and await self._probe_temporal()
         ):
             try:

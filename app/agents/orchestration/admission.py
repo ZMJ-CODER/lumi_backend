@@ -1,4 +1,4 @@
-"""Lumi Redis/settings adapter for the orchestration admission kernel."""
+"""编排准入内核的 Lumi Redis/配置适配器。"""
 
 from __future__ import annotations
 

@@ -3,6 +3,7 @@
 import time
 from enum import Enum
 
+from lumi_orch.job_spec import NodeExecutionSpec
 from lumi_orch.resources import ResourceClaim
 from pydantic import BaseModel, Field
 
@@ -62,6 +63,8 @@ class TaskNode(BaseModel):
     # 审批门控：高风险写操作（发邮件/改系统/付款等）需人工确认后才执行
     approval: bool = False
     approval_note: str = ""
+    # Business-owned reliability facts consumed by the execution engine.
+    execution: NodeExecutionSpec = Field(default_factory=NodeExecutionSpec)
 
 
 class Job(BaseModel):

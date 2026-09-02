@@ -1,8 +1,7 @@
-"""Deterministic renderer for newly created office documents.
+"""新建办公文档的确定性渲染器。
 
-The model is allowed to describe content, not to execute code or choose a
-filesystem location.  This module validates that small document specification
-and writes a reviewable artifact into the caller-provided output directory.
+模型只允许描述内容，不能执行代码或选择文件系统路径。本模块校验精简的文档
+规格，并将可复核产物写入调用方提供的输出目录。
 """
 
 from __future__ import annotations

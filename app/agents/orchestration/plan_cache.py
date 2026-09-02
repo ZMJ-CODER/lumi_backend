@@ -1,4 +1,4 @@
-"""User-isolated, parameterized cache for successful office task plans."""
+"""按用户隔离、支持参数化的成功办公任务计划缓存。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ from loguru import logger
 from app.agents.orchestration.models import TaskNode
 
 
-_VERSION = 1
+# The cache contains executable planning decisions. Bump this whenever a
+# planner-policy change could make an earlier DAG unsafe or semantically stale.
+_VERSION = 2
 _TTL_SECONDS = 7 * 86400
 _FILE_TOKEN_RE = re.compile(
     r"(?iu)([a-z0-9_\-\u4e00-\u9fff][a-z0-9_.\-\u4e00-\u9fff]*\.[a-z0-9]{1,10})"

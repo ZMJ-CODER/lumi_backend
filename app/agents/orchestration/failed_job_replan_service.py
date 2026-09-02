@@ -1,4 +1,4 @@
-"""Replacement-subgraph service for failed office jobs.
+"""为失败办公任务生成替代子图的服务。
 
 The orchestrator owns the policy decision to replan.  Once that decision has
 been made, this service creates a planner prompt from durable execution facts,
@@ -16,8 +16,8 @@ from typing import Any
 from loguru import logger
 
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus
-from app.agents.orchestration.plan_compilation_service import PlanCompilationService
-from app.agents.orchestration.plan_context import PlanRequestContext
+from app.agents.orchestration.planning.compilation import PlanCompilationService
+from app.agents.orchestration.planning.context import PlanRequestContext
 from app.agents.orchestration.tca import ComplexityLevel
 from app.repositories.job_repository import JobRepository
 
@@ -137,7 +137,7 @@ class FailedJobReplanService:
             ],
         }
         self._plan_compilation.normalize_for_replan(tree.nodes, job.request)
-        from app.agents.orchestration.dag import validate_planned_dag
+        from app.agents.orchestration.execution.validation import validate_planned_dag
         from app.agents.orchestration.presentation import attach_display_plan
         from app.agents.orchestration.safety import prepare_node_safety
 

@@ -1,8 +1,7 @@
-"""Job persistence boundary.
+"""任务的持久化边界。
 
-The first implementation is an adapter around the existing ``StateStore``.
-Keeping the adapter small lets orchestration code depend on a repository
-contract while Redis/InMemory behavior remains unchanged during migration.
+首个实现围绕既有 ``StateStore`` 建立适配器。保持适配器精简，使编排代码
+依赖仓储契约，同时在迁移期间不改变 Redis/InMemory 的既有行为。
 """
 
 from __future__ import annotations

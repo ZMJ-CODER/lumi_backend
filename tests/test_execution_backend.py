@@ -1,6 +1,7 @@
 import asyncio
 
-from app.agents.orchestration.execution_backend import LegacyDagBackend, TemporalStaticBackend
+from app.agents.orchestration.backends.legacy import LegacyDagBackend
+from app.agents.orchestration.backends.temporal_static import TemporalStaticBackend
 from app.agents.orchestration.models import Job, JobStatus, ResourceClaim, TaskNode, TaskStatus
 from app.agents.orchestration.runtime_gateway import RuntimeGateway
 from app.agents.orchestration.state import InMemoryStateStore
@@ -104,6 +105,88 @@ def test_temporal_static_candidate_gate_keeps_dynamic_and_write_jobs_legacy():
     )) is False
 
 
+def test_temporal_static_gate_accepts_reviewed_read_only_agents_and_uses_its_own_limit(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_MAX_NODES", 12)
+    job = Job(
+        job_id="static-expanded",
+        user_id="u1",
+        request="分析材料",
+        nodes=[
+            TaskNode(id="read", agent="office_doc", params={"mode": "read"}),
+            TaskNode(id="research", agent="office_research"),
+            TaskNode(id="target", agent="document_targeting"),
+            TaskNode(id="write", agent="office_text"),
+            TaskNode(id="answer", agent="direct_llm"),
+            TaskNode(id="web", agent="web_research"),
+            TaskNode(id="rag", agent="retrieval"),
+        ],
+    )
+
+    decision = RuntimeGateway.static_eligibility(job)
+    assert decision.eligible is True
+    assert decision.code == "eligible"
+
+    job.nodes[0].params["mode"] = "edit"
+    assert RuntimeGateway.static_eligibility(job).code == "mode_not_allowlisted"
+
+    job.nodes[0].params["mode"] = "read"
+    job.nodes[0].idempotency_key = "effect-key"
+    assert RuntimeGateway.static_eligibility(job).code == "effectful"
+
+
+def test_temporal_long_dag_accepts_only_pure_read_nodes(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_MAX_NODES", 2)
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_LONG_DAG_ENABLED", True)
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_LONG_DAG_MAX_NODES", 64)
+    read_job = Job(
+        job_id="long-read",
+        user_id="u1",
+        request="批量总结",
+        nodes=[TaskNode(id=f"read-{index}", agent="retrieval") for index in range(50)],
+    )
+    assert RuntimeGateway.static_eligibility(read_job).eligible is True
+    assert RuntimeGateway.is_long_static_job(read_job) is True
+
+    read_job.nodes[7].approval = True
+    read_job.nodes[7].idempotency_key = "write-effect"
+    decision = RuntimeGateway.static_eligibility(read_job)
+    assert decision.eligible is False
+    assert decision.code == "long_dag_not_pure_read"
+
+
+def test_temporal_long_dag_respects_dedicated_node_limit(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_MAX_NODES", 2)
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_LONG_DAG_ENABLED", True)
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_LONG_DAG_MAX_NODES", 50)
+    job = Job(
+        job_id="too-long-read",
+        user_id="u1",
+        request="批量总结",
+        nodes=[TaskNode(id=f"read-{index}", agent="retrieval") for index in range(51)],
+    )
+    assert RuntimeGateway.static_eligibility(job).code == "node_limit"
+
+
+def test_temporal_static_gate_explains_dynamic_plan_rejection():
+    job = Job(
+        job_id="rolling",
+        user_id="u1",
+        request="长任务",
+        routing={"logical_plan": {"plan_id": "p1"}},
+        nodes=[TaskNode(id="read", agent="retrieval")],
+    )
+
+    decision = RuntimeGateway.static_eligibility(job)
+    assert decision.eligible is False
+    assert decision.code == "rolling_plan"
+
+
 def test_temporal_static_submission_persists_bootstrap_and_frozen_llm_config(monkeypatch):
     async def scenario():
         store = InMemoryStateStore()
@@ -116,11 +199,17 @@ def test_temporal_static_submission_persists_bootstrap_and_frozen_llm_config(mon
         async def start_workflow(payload, job_id):
             captured["workflow"] = (payload, job_id)
 
+        async def store_replan_context(job_id, context):
+            captured["replan_context"] = (job_id, context)
+
         monkeypatch.setattr(
             "app.agents.orchestration.temporal.client.store_job_llm_config", store_config,
         )
         monkeypatch.setattr(
             "app.agents.orchestration.temporal.client.start_agent_workflow", start_workflow,
+        )
+        monkeypatch.setattr(
+            "app.agents.orchestration.temporal.client.store_temporal_replan_context", store_replan_context,
         )
         job = Job(
             job_id="static-submit",
@@ -135,8 +224,36 @@ def test_temporal_static_submission_persists_bootstrap_and_frozen_llm_config(mon
         assert (await store.get_job(job.job_id)).routing["runtime"] == "temporal_static"
         assert captured["config"] == (job.job_id, {"api_key": "key", "model": "m"})
         assert captured["workflow"][0]["config"]["node_concurrency"] > 0
+        assert captured["workflow"][0]["config"]["long_dag"] is False
+        assert captured["workflow"][0]["execution_spec"]["fingerprint"]
+        assert captured["workflow"][0]["execution_spec"]["nodes"][0]["id"] == "read"
+        assert captured["replan_context"][0] == job.job_id
 
     asyncio.run(scenario())
+
+
+def test_temporal_static_rollout_is_stable_and_honors_allowlist(monkeypatch):
+    from app.core.config import settings
+
+    job = Job(
+        job_id="fixed-rollout-bucket",
+        user_id="user-1",
+        request="摘要",
+        nodes=[TaskNode(id="read", agent="retrieval")],
+    )
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_PERCENTAGE", 0)
+    assert RuntimeGateway.static_rollout_eligibility(job).code == "rollout_disabled"
+
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_ALLOWLIST", "user-1")
+    assert RuntimeGateway.static_rollout_eligibility(job).eligible is True
+
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_ALLOWLIST", "")
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_PERCENTAGE", 100)
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_TASK_TYPES", "retrieval")
+    assert RuntimeGateway.static_rollout_eligibility(job).eligible is True
+
+    monkeypatch.setattr(settings, "TEMPORAL_STATIC_TASK_TYPES", "rag")
+    assert RuntimeGateway.static_rollout_eligibility(job).code == "rollout_task_type"
 
 
 def test_temporal_static_control_does_not_fall_back_to_legacy_when_worker_is_unavailable():

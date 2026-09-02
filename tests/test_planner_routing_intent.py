@@ -227,6 +227,29 @@ def test_long_tail_classifier_fills_missing_action_without_bypassing_compiler(mo
     assert [node.agent for node in tree.nodes] == ["office_script"]
 
 
+def test_llm_confidence_is_retained_as_hint_without_raising_deterministic_confidence(monkeypatch):
+    async def fake_classifier(prompt, *, user_id, api_key, max_tokens):
+        return {
+            "actions": ["query"],
+            "objects": ["data"],
+            "requires_dynamic": False,
+            "needs_clarification": False,
+            "confidence_hint": 0.99,
+        }
+
+    monkeypatch.setattr("app.agents.langchain.planning.invoke_json_object", fake_classifier)
+    base = infer_route_intent("这段话比较长，帮我从里面找出关键数据并解释一下变化原因")
+    candidate = asyncio.run(classify_route_with_llm(
+        "这段话比较长，帮我从里面找出关键数据并解释一下变化原因",
+        user_id="u1", api_key="test-key",
+    ))
+    assert candidate["confidence_hint"] == 0.99
+    from app.agents.orchestration.routing_intent import merge_llm_route_intent
+    merged = merge_llm_route_intent(base, candidate, "这段话比较长，帮我从里面找出关键数据并解释一下变化原因")
+    assert merged.classifier_confidence_hint == 0.99
+    assert merged.confidence == base.confidence
+
+
 def test_long_tail_classifier_cannot_send_without_a_target(monkeypatch):
     async def fake_classifier(prompt, *, user_id, api_key, max_tokens):
         return {

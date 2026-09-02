@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 from app.agents.orchestration import plan_compiler
 from app.agents.orchestration.models import TaskNode
-from app.agents.orchestration.plan_compilation_service import PlanCompilationService
-from app.agents.orchestration.plan_context import PlanRequestContext
+from app.agents.orchestration.planning.compilation import PlanCompilationService
+from app.agents.orchestration.planning.context import PlanRequestContext
 from app.agents.orchestration.plan_compiler import (
     CapabilitySnapshot,
     CompileDecision,

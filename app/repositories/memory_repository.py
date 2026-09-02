@@ -1,4 +1,4 @@
-"""Persistence boundary for office conversation memory."""
+"""办公会话记忆的持久化边界。"""
 
 from __future__ import annotations
 

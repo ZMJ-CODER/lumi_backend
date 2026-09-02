@@ -45,7 +45,7 @@ def test_effect_intent_is_idempotent_and_confirmation_is_durable_contract():
 
 
 def test_effectful_node_fails_closed_without_executing_worker_when_journal_is_unavailable(monkeypatch):
-    from app.agents.orchestration.dag import execute_dag
+    from app.agents.orchestration.execution.validation import execute_dag
     from app.agents.orchestration import resources
 
     class UnavailableJournal:

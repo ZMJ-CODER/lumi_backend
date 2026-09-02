@@ -17,3 +17,13 @@ def test_deployment_patterns_cover_coordination_synonyms():
     assert route_atomic_instruction("协调模拟团队处理跨系统数据不一致").channel == RouteChannel.AGENT
     assert route_atomic_instruction("分析测试接口失败并安排排障顺序").channel == RouteChannel.AGENT
 
+
+def test_route_pattern_document_exposes_configurable_windows():
+    route_intent_patterns.load_route_intent_patterns.cache_clear()
+    patterns = route_intent_patterns.load_route_intent_patterns()
+
+    assert patterns.file_max_gap == 36
+    assert patterns.rag_max_gap == 28
+    assert patterns.multi_max_gap == 80
+    assert "排查" in patterns.agent_phrases
+    assert "which file" in patterns.factual_markers

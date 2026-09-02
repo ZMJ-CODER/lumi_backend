@@ -6,6 +6,7 @@ import httpx
 from langchain_core.messages import AIMessage
 
 from app.core import llm as llm_mod
+from app.core.config import settings
 from app.core.llm import LLMClient
 
 
@@ -78,3 +79,49 @@ def test_chat_falls_back_to_backup_provider(monkeypatch):
     assert len(calls) == 2  # 主失败 → 备用成功
     assert calls[1]["model"] == "qwen-plus"
     assert captured["model"] == "qwen-plus"  # 用量按实际模型记录
+
+
+def test_embedding_reuses_llm_proxy_and_normalizes_deepseek_endpoint(monkeypatch):
+    """向量通道不能绕过聊天模型使用的代理与官方地址规范化。"""
+    captured = {}
+
+    async def fake_config(scene, provider):
+        return {
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "test-key",
+            "timeout": 12,
+        }
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"embedding": [0.1, 0.2]}]}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, path, json):
+            captured["path"] = path
+            captured["body"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(llm_mod, "get_llm_config", fake_config)
+    monkeypatch.setattr(llm_mod, "AsyncClient", FakeClient)
+    monkeypatch.setattr(llm_mod, "resolve_http_proxy", lambda explicit=None: "http://127.0.0.1:7890")
+    monkeypatch.setattr(settings, "LLM_HTTP_PROXY", "")
+
+    result = asyncio.run(LLMClient().embed(["一段文本"], model="embedding-model"))
+
+    assert result == [[0.1, 0.2]]
+    assert str(captured["base_url"]) == "https://api.deepseek.com"
+    assert captured["proxy"] == "http://127.0.0.1:7890"
+    assert captured["path"] == "/embeddings"

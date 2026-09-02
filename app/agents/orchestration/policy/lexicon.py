@@ -1,4 +1,4 @@
-"""Load the bounded intent lexicon used by the application router."""
+"""加载应用路由器使用的受限意图词典。"""
 
 from __future__ import annotations
 
@@ -38,3 +38,27 @@ def action_markers() -> tuple[tuple[str, tuple[str, ...]], ...]:
 
 def object_markers() -> tuple[tuple[str, tuple[str, ...]], ...]:
     return tuple((entry.id, entry.markers) for entry in load_routing_lexicon().objects)
+
+
+def intent_markers() -> dict[str, tuple[str, ...]]:
+    """Return bounded intent marker groups as immutable tuples.
+
+    The router owns matching semantics; this loader only exposes validated
+    data from the policy document.
+    """
+    patterns = load_routing_lexicon().intent_patterns
+    values = {
+        "network": tuple(patterns.network.get("explicit", ())),
+        "network_context": tuple(patterns.network.get("context", ())),
+        "retrieval": patterns.retrieval,
+        "multiple_connectors": patterns.multiple_connectors,
+        "vague_referents": patterns.vague_referents,
+        "vague_actions": patterns.vague_actions,
+        "bare_query_commands": patterns.bare_query_commands,
+        "greetings": patterns.greetings,
+        "feedback": patterns.feedback,
+        "implicit_history": patterns.implicit_history,
+        "dynamic": patterns.dynamic,
+        "conditional": patterns.conditional,
+    }
+    return {name: tuple(values) for name, values in values.items()}

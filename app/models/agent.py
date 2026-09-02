@@ -1,6 +1,7 @@
 """多智能体协作 API 模型."""
 
 from pydantic import BaseModel, Field
+from lumi_orch import ExpansionSlot, NodeSpec, PlanPatch
 
 
 class CreateAgentJobRequest(BaseModel):
@@ -48,3 +49,23 @@ class ForkAgentJobRequest(BaseModel):
     node_id: str = Field(..., min_length=1, max_length=200, description="新分支开始执行的节点 id")
     params: dict | None = Field(default=None, description="合并到该节点的受控参数覆盖")
     instruction: str | None = Field(default=None, max_length=4000, description="替换该节点的原子指令")
+
+
+class AppendPlanPatchRequest(BaseModel):
+    """外部系统向已就绪骨架插槽追加受限节点。"""
+
+    patch_id: str = Field(..., min_length=1, max_length=160)
+    slot_id: str = Field(..., min_length=1, max_length=160)
+    base_revision: int = Field(..., ge=1)
+    nodes: list[NodeSpec] = Field(default_factory=list, max_length=64)
+    slots: list[ExpansionSlot] = Field(default_factory=list, max_length=16)
+
+    def as_external_patch(self) -> PlanPatch:
+        return PlanPatch(
+            patch_id=self.patch_id,
+            slot_id=self.slot_id,
+            base_revision=self.base_revision,
+            source="external",
+            nodes=tuple(self.nodes),
+            slots=tuple(self.slots),
+        )

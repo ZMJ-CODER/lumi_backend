@@ -1,4 +1,4 @@
-"""Monitoring metrics facade; delegates to the existing Prometheus module."""
+"""监控指标门面，委托给既有 Prometheus 模块。"""
 
 from __future__ import annotations
 

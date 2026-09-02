@@ -1,4 +1,4 @@
-"""Deterministic safety gates for bounded replacement planning."""
+"""有界替代规划使用的确定性安全门。"""
 
 from __future__ import annotations
 

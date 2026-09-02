@@ -1,9 +1,9 @@
-"""Planning dispatch for TCA execution levels."""
+"""按 TCA 执行等级分派规划。"""
 
 from __future__ import annotations
 
 from app.agents.orchestration.tca import ComplexityLevel
-from app.agents.orchestration.plan_context import PlanRequestContext
+from app.agents.orchestration.planning.context import PlanRequestContext
 
 
 async def plan_for_level(

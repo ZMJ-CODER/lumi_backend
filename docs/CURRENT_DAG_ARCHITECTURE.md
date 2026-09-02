@@ -31,10 +31,22 @@ AGENT_DYNAMIC_SUBGRAPH_ENABLED=true
 - L3 替代子图挂载；
 - Redis 状态快照、限流、资源锁和任务恢复。
 
-Temporal 已作为可灰度的外部运行器：`temporal` 模式只接收无审批、只读、静态的小 DAG，
-让 API 进程只负责提交、查询与 SSE；动态 ReAct、写操作、审批和 L3 重规划仍由当前持久化
-DAG 运行器负责。`manifest_temporal` 继续专用于滚动清单。这样先消除可证明安全的 API 内执行，
-而不把尚未等价迁移的安全语义强行搬过去。
+Temporal 已作为可灰度的外部运行器：`temporal` 模式接收静态、完全物化的小 DAG，
+包括纯读节点，以及已纳入白名单、带幂等键并明确要求人工审批的受控副作用节点。
+API 进程只负责提交、查询与 SSE；动态 ReAct、动态重规划和未审批写操作仍由当前持久化
+DAG 运行器负责。`manifest_temporal` 继续专用于滚动清单。Temporal 审批通过
+`approve_task` Signal 传递，Activity 仍复用 effect-journal、资源锁和工具确认指纹。
+
+对于滚动逻辑计划，运行时进一步分为两条独立试点：`temporal_logical_read` 仅接受完整计划
+均为纯读的节点；`temporal_logical_effects` 仅接受至少一个规划时已声明的、带审批和幂等键的
+写节点。两者均由单独的允许列表、比例和 Task Queue 控制，默认关闭。副作用路径不运行
+ReAct 或自动重规划；审批决定先落 Redis Job 快照，再由 Signal 唤醒 Activity，Activity
+继续通过 effect-journal 的 `intent → confirm` 和资源锁保证重试幂等。纯读计划不会被副作用
+路径抢占，任何未命中或不通过准入的计划仍保持 Legacy。
+
+副作用逻辑计划等待审批时使用 Workflow Timer 触发 Activity 再读 Redis 的到期时间；只有
+Activity 可以读取墙钟并持久化 `APPROVAL_TIMEOUT`，Workflow 不直接读取时间或数据库。逻辑计划
+的可见状态以 Redis Job 快照为准，静态 Workflow 才通过 Temporal Query 返回完整任务快照。
 
 ### 2.1 内核与业务适配边界
 
@@ -49,6 +61,9 @@ DAG 运行器负责。`manifest_temporal` 继续专用于滚动清单。这样�
 新增一条路由策略通常改 `config/agent_policies/` 或业务 Hook；新增存储/Worker 实现不会
 改动内核的锁、状态机或 DAG 语义。完整包边界和本地开发命令见
 [ORCHESTRATION_KERNEL_PACKAGE.md](ORCHESTRATION_KERNEL_PACKAGE.md)。
+
+节点可靠性声明和引擎默认策略见 [NODE_EXECUTION_POLICY.md](NODE_EXECUTION_POLICY.md)。
+意图 marker 统一由 `config/agent_policies/routing_lexicon.yaml` 管理，Python 代码不再维护生产词表。
 
 ## 3. 全链路
 
@@ -274,6 +289,43 @@ Planner 在生成后必须经过静态校验：节点 ID 唯一、依赖存在�
 这与清单滚动类似，但普通 DAG 的前沿按 Planner 依赖图生成，而不是按清单固定批次生成。L3 重规划只能由编排器替换外置计划中尚未完成的尾部；
 完成前缀不会重跑。若前缀包含已提交或结果不确定的副作用，自动重规划被阻止。详细协议见 [LOGICAL_PLAN_ROLLING.md](LOGICAL_PLAN_ROLLING.md)。
 
+### 5.1.1 运行期扩图插槽
+
+对于需要依据上游结果决定后续数量的任务，Planner 可在 `TaskTree.expansion_slots`
+显式声明骨架插槽。插槽包含上游依赖、最大新增节点数、允许的 Worker 白名单和是否允许
+副作用；未声明插槽的任务保持原有“完整 DAG 完成即结束”的行为。
+
+```text
+Planner 骨架 DAG + ExpansionSlot
+  -> 当前前沿执行并提交结果引用
+  -> 插槽依赖完成：Job 进入 scheduler_waiting_slots（不是 completed）
+  -> 外部系统或内部 LangGraph 产生 PlanPatch
+  -> 调度层校验 revision / slot / Worker / 依赖 / 审批与幂等字段
+  -> Redis 持久化计划补丁
+  -> Temporal Signal 仅唤醒 Workflow；下一轮 Activity 从 Redis 读取补丁
+  -> 执行引擎物化新增前沿并执行
+```
+
+补图只能命中已就绪的预置插槽，使用 `patch_id + base_revision` 幂等地更新计划。节点定义和
+插槽结构纳入执行指纹；节点结果、预算和插槽状态不纳入，避免正常进度推进导致指纹失效。
+外部入口 `POST /api/v1/agents/jobs/{job_id}/plan-patches` 只接受 `source=external`，不允许
+客户端伪装内部规划来源。实际副作用仍须经过资源锁、审批、幂等键和 effect-journal。
+
+LangGraph `Send` 仅适合把候选事项 fan-out 为多个内部**候选准备**单元；它不拥有持久化
+计划、任务状态或副作用执行权，不能绕过上述补图校验和执行引擎。实现位于
+`scheduling/langgraph_send.py`，流程固定为：
+
+```text
+上游结果 -> Send(prepare_plan_patch_candidate) x N
+         -> 收敛并生成一份 source=langgraph 的 PlanPatch
+         -> PlanPatchScheduler.append_langgraph()
+         -> 持久化、审批/幂等校验、Temporal Signal、执行前沿
+```
+
+一个插槽只接受一个版本绑定的 `PlanPatch`，因此动态数量的节点应先在 LangGraph 内收敛到
+同一个补丁，而不是让多个 `Send` 分支并发写同一个插槽。这样能保持 `patch_id` 幂等、
+`base_revision` 乐观并发检查和完整 DAG 校验的语义。
+
 ### 5.2 显式任务清单
 
 任务清单是独立的控制路径，不能把一百项任务一次性交给模型生成脆弱的大 JSON。
@@ -407,6 +459,12 @@ Worker 和副作用 intent 之前进入 `waiting_resources`，保留原节点并
 `AGENT_WAITING_RESOURCES_TIMEOUT_SECONDS`（默认 30 分钟）后转 `paused` 并提示用户。恢复 Redis
 或用户恢复任务前必须重新获取准入槽，满载则继续挂起而不绕过配额。
 
+除资源声明外，DAG Worker 在实际发起工具请求时还会取得 Job 内的
+`tool-execution:<tool_name>` 互斥租约。该租约只覆盖工具体，不覆盖 Planner、
+参数提取或模型选择：同一工具在两个并行节点间串行，不同工具可同时执行。普通聊天
+不使用 Job 级租约；一次模型响应也仍只放行一个工具调用，不开启供应商的并行
+function calling。
+
 ### 8.2 准入与限流
 
 | 控制点 | 默认值 | 作用 |
@@ -420,8 +478,14 @@ Worker 和副作用 intent 之前进入 `waiting_resources`，保留原节点并
 ### 8.3 运行器灰度
 
 `AGENT_ORCHESTRATION` 的默认值仍是 `legacy`。部署独立 Temporal Worker 后可设为 `temporal`：
-只有 1-6 个 `direct_llm`、`retrieval` 或 `web_research` 节点，且没有写资源声明、审批、清单或
-逻辑计划的任务才会离开 API 进程。任一条件不满足或 Temporal 不可用时，任务明确记录为
+静态、完全物化且经过 `temporal_policy` 审核的任务才能离开 API 进程；其中副作用节点还必须是
+白名单 agent、显式审批和幂等键三者同时满足。提交前应用会把可执行计划冻结为后端无关的
+`JobSpec`（包含 `NodeSpec`、资源声明、审批与幂等信息）并计算指纹；Legacy、Manifest 与
+Temporal Backend 都接收同一规格，Temporal Workflow 会在调度前校验指纹。
+
+灰度由 `TEMPORAL_STATIC_ALLOWLIST`、`TEMPORAL_STATIC_PERCENTAGE` 和
+`TEMPORAL_STATIC_TASK_TYPES` 控制：白名单非空时只允许其中用户；否则按稳定的 `job_id` 哈希
+分桶，重试不会改变运行器。任一条件不满足或 Temporal 不可用时，任务明确记录为
 `runtime=legacy` 并走原有运行器；不会把已提交的外部 Worker 任务错误地回退到进程内重复执行。
 
 启动本地 Worker：
@@ -434,8 +498,14 @@ docker compose -f docker-compose.yml -f docker-compose.temporal.yml --profile te
 `$env:TEMPORAL_ORCHESTRATION_MODE = "manifest_temporal"`；该 overlay 变量不会被
 `.env` 里的默认 `AGENT_ORCHESTRATION=legacy` 覆盖。
 
-动态任务运行器的完全外置仍是后续工作，必须先补齐 L3 动态子图的持久化语义，不能用 Celery
-替代，因为 Celery 不承担审批等待和可恢复 DAG 的工作流职责。
+当前 Temporal Workflow 已只保留确定性依赖、并发窗口、状态、重试和控制 Signal；LLM、
+数据库/Redis、文件、MCP、OCR/Embedding 均位于 Activity。对于静态纯读任务，节点返回
+`replan_required` 后，Workflow 会调用 Replan Activity；Activity 从短 TTL 上下文桥接读取规划
+输入，返回带指纹的新 `JobSpec`，Workflow 验证后才挂载替代节点。该路径最多一次，拒绝审批、
+幂等副作用和 ReAct 节点。完整动态任务外置仍是后续工作：50+ 节点将使用 Child Workflow 与
+Continue-As-New 控制 history。已审批逻辑计划的写 Activity 同样沿用这个边界，但不做自动
+重规划；批准/拒绝先由控制面持久化，再用 Signal 唤醒，防止 Activity 因收到陈旧信号而替用户
+授权。不能用 Celery 替代，因为 Celery 不承担审批等待和可恢复 DAG 的工作流职责。
 
 任务准入使用 Redis ZSET 租约并有心跳续租。通道 lease 同样有 owner 续租循环；现阶段仍强制
 `lease = 节点硬超时 + 60 秒`，使硬超时先于 lease 释放，并作为 Redis 短暂异常时的保守回收上限。
@@ -571,7 +641,7 @@ v1 的回放是前向重做：如果用户所选节点的依赖前缀或该节�
 
 | 优先级 | 问题 | 影响 | 建议 |
 | --- | --- | --- | --- |
-| P0 | 动态 DAG 仍在 API 进程中运行 | 静态只读 DAG 已可交给独立 Temporal Worker；含 ReAct、写、审批或 L3 的运行中协程仍无法被其他实例接管 | 补齐 Temporal 的动态子图持久化后再迁移，不能用 Celery 代替工作流 |
+| P0 | 动态 DAG 的 Temporal 验收尚未完成 | 纯读动态逻辑计划和预声明审批副作用逻辑计划已有默认关闭的独立 Worker 路径；ReAct、L3 动态替代和未审批写操作仍由 API 进程处理 | 在隔离环境完成审批、重试、重启、intent-only 和资源锁故障演练后，再小比例灰度；不能用 Celery 代替工作流 |
 | P0 | 进程死亡的预发布 lease 演练尚缺 | 内核已覆盖续租失败取消持有节点；真实 Redis TTL 回收仍需容器级证据 | 在预发布环境杀掉持锁 Worker，等待 TTL，验证后继节点不会与旧节点重叠执行 |
 | P0 | 副作用 journal 的恢复故障演练尚缺 | journal 已落 PostgreSQL 并 fail-closed，但尚未做真实容器 kill/restart 演练 | 在预发布环境制造 intent-only 记录与数据库短断，确认扫描标记不确定且写工具不重放 |
 | P0 | 多文档覆盖策略需预发布样本校准 | 固定路径已对弱相关次高候选做受限二次读取，接近候选升级 ReAct | 用真实附件集观察二次核验比例、错误澄清率和 citation 可解释性，再调整阈值 |
@@ -584,6 +654,13 @@ v1 的回放是前向重做：如果用户所选节点的依赖前缀或该节�
 | P2 | MCP 取消属于 best effort | 底层桌面应用不支持 `AbortSignal` 时动作仍可能继续 | 客户端工具实现可取消句柄，长操作提供查询/补偿动作 |
 | P2 | 编号清单默认串行 | 安全但会降低独立任务的吞吐 | 让用户或清单清洗器显式标记独立项，经过依赖审查后有限并行 |
 
+2026-09-01 已在 Windows 本机 Temporal 开发服务完成验收：纯读/副作用队列 Activity 调度、
+审批拒绝、审批超时、暂停恢复、取消、Worker 重启后 Signal 恢复、PostgreSQL stale intent
+标记为 `uncertain`，以及 Redis 同资源写锁互斥均通过。受控本地 `todo_manager(add)` 还验证了
+`ApprovalService.resolve → Signal → Activity`、`intent → confirmed` 与相同幂等键的重复投递
+不生成第二条待办。该验收不替代外部 MCP 写工具：其业务副作用、Activity 中断后的
+`intent-only → uncertain` 收敛和补偿均须按工具单独验证后，才可开启灰度。
+
 ### 12.1 已记录的下一步
 
 以下事项按依赖顺序推进。当前 `temporal` 灰度只覆盖无审批的静态只读 DAG；在每项
@@ -591,14 +668,14 @@ v1 的回放是前向重做：如果用户所选节点的依赖前缀或该节�
 
 | 阶段 | 事项 | 验收条件 |
 | --- | --- | --- |
-| 上线前 | 静态 Temporal Worker 灰度与可观测性 | 以 `temporal_static` 完成只读摘要/检索任务；Worker 不可达时，新任务明确回退 `legacy`，已提交任务的控制请求明确报未送达且不重复执行；监控能按 runtime、节点超时、`EFFECT_UNCERTAIN` 查看数量。 |
+| 上线前 | 静态 Temporal Worker 灰度与可观测性 | 以 `temporal_static` 完成已审核的纯读 DAG；普通上限 12 节点，50+ 节点仅走纯读长 DAG（Child Workflow + 结果引用 + Continue-As-New，默认关闭至服务级验收）；入口记录 `temporal_static_eligibility` 拒绝原因；Worker 不可达时，新任务明确回退 `legacy`，已提交任务的控制请求明确报未送达且不重复执行。 |
 | 上线前 | 多文档办公冒烟 | 唯一摘要命中时生成 `document_targeting → direct_llm`，不占 agent 池；歧义时才升级最多 4 轮 ReAct。两条路径都先 `inspect_document_set`，只读授权范围，span 有 `document_selection`，回答含可验证 citation。 |
 | 上线前 | 前端任务图窗口语义 | 普通计划在提交时仍不超过 `AGENT_PLAN_MAX_NODES`；逻辑计划/长清单只展示当前执行窗口与总进度，提供翻页或摘要，不把数百个事项一次渲染成 DAG 节点。 |
 | P0 | Lease 进程死亡演练 | 内核回归已验证 owner 续租失败取消；预发布杀掉持锁 Worker 后等待 TTL，验证后继节点不与旧节点重叠执行。 |
 | P0 | Effect journal 恢复演练 | 制造 intent-only 记录后重启 API/Worker；超过 grace 的记录必须转 `EFFECT_UNCERTAIN`，Redis 不可用时写工具必须在工具体前失败。 |
 | P0 | 多文档覆盖阈值校准 | 固定路径对弱相关次高候选二次读取、接近候选升级 ReAct；用真实附件集观察误澄清率与 citation 可解释性。 |
 | P0 | 挂起任务容量回归 | `waiting_resources` 30 分钟后暂停、`waiting_approval` 24 小时后失败；两者均释放准入槽，恢复前重新申请并遵守全局/单用户上限。 |
-| P1 | 动态 DAG 外置前置能力 | 将 L3 替代子图、审批等待、写操作的状态和 effect journal 以可恢复方式持久化到 Temporal；完成故障恢复、审批失效、重规划三类端到端用例后，才迁移动态任务。 |
+| P1 | 动态 DAG 外置后续范围 | 已有纯读动态计划的一次受限重规划，以及预声明审批写节点的独立路径；ReAct 和 L3 动态替代尚未迁移 | 完成故障恢复、审批失效、重规划三类端到端用例后，再评估扩展范围。 |
 | P1 | 路由与检索真实评测 | 固化口语化复合意图、多文档、指代消解的回归 fixture；建立内部标注集后再决定 sparse 召回、reranker 阈值和检索漏斗大小。 |
 | P1 | 垂直实时工具首批落地 | 接入 `get_weather` 并覆盖成功、空数据、过期数据、限流/额度耗尽和供应商宕机用例；“当前天气”优先命中该工具，Tavily 只用于天气资讯或背景资料。 |
 | P1 | 工具候选线上校准 | 以候选 trace 分别观察 recall@K 与 given-candidate 选择率；新 Skill bootstrap 到期前审阅真实选择率，调整 intent_tags/边界而非扩大全量工具池。 |
@@ -625,7 +702,7 @@ v1 的回放是前向重做：如果用户所选节点的依赖前缀或该节�
 | TCA | `app/agents/orchestration/tca.py` |
 | 任务清单与四通道路由 | `app/agents/orchestration/task_manifest.py`、`task_routing.py` |
 | 失败升级协议 | `app/agents/orchestration/escalation.py` |
-| 执行谱系、结果引用与节点 span | `execution_lineage.py`、`orchestrator.py::fork_job` |
+| 执行谱系、结果引用与节点 span | `execution/lineage.py`、`orchestrator.py::fork_job` |
 | 准入、通道限流、资源锁 | `admission.py`、`channel_limits.py`、`resources.py` |
 | 统一 Skill/MCP Gateway | `app/agents/skills/executor.py`、`app/agents/mcp/manager.py` |
 

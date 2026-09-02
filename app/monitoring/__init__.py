@@ -1,4 +1,4 @@
-"""Structured monitoring contracts used by API and orchestration layers."""
+"""API 与编排层共用的结构化监控契约。"""
 
 from app.monitoring.context import MonitorContext
 from app.monitoring.events import MonitorEvent

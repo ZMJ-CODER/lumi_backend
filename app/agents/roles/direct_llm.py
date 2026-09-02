@@ -1,4 +1,4 @@
-"""Direct-generation worker used inside a routed task manifest."""
+"""在已路由任务清单中使用的直接生成工作节点。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from app.services.office_skill_utils import office_llm
 
 
 class DirectLlmAgent(WorkerAgent):
-    """A no-tool worker for atomic content generation.
+    """用于原子内容生成的无工具工作节点。
 
     It is deliberately separate from ``react_step``: no tool namespace is
     exposed and no extra planning loop can turn a writing/list item into an
@@ -25,6 +25,14 @@ class DirectLlmAgent(WorkerAgent):
         instruction = str(node.params.get("instruction") or node.name or "").strip()
         if not instruction:
             return {"success": False, "error": "直接生成步骤缺少 instruction", "error_code": "INVALID_ARGS"}
+        try:
+            max_tokens = int(node.params.get("max_tokens", 4000))
+        except (TypeError, ValueError):
+            max_tokens = 4000
+        # The compiler may attach a tighter output contract for bounded
+        # read-only stages.  Keep the existing worker default for all other
+        # callers, while rejecting malformed or excessive values.
+        max_tokens = max(64, min(max_tokens, 4000))
         await set_progress(ctx.job_id, node.id, "正在按要求生成内容…")
         dependencies = (node.metadata or {}).get("dependency_results") or {}
         evidence = []
@@ -48,6 +56,7 @@ class DirectLlmAgent(WorkerAgent):
             "若完成当前任务必须读取用户私有资料、已上传文档或知识库，而当前输入和依赖结果没有"
             "提供该事实，只输出精确标记 [[ROUTE_UPGRADE_RAG]]，不要猜测、不要解释。",
             prompt,
+            max_tokens=max_tokens,
             stream=True,
         )
         if content.strip() == "[[ROUTE_UPGRADE_RAG]]":

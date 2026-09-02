@@ -1,4 +1,4 @@
-"""Centralized Job error convergence for all execution runtimes."""
+"""所有执行运行时的 Job 错误统一收敛。"""
 
 from __future__ import annotations
 

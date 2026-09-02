@@ -92,16 +92,9 @@ async def resolve_effective_llm_config(
 def _env_fallback(scene: str | None = None, provider: str | None = None) -> dict:
     """.env 兜底配置（普通聊天默认轻量文本模型，视觉请求显式选 VL）。"""
     provider = provider or settings.LLM_PROVIDER
-    # 普通文本聊天不应为视觉能力支付额外首 token 延迟。图片由编排层
-    # 显式切到 QWEN_VL_MODEL，或先转写为文本后再交给此处的文本模型。
-    if scene == "chat":
-        return {
-            "base_url": settings.QWEN_BASE_URL,
-            "api_key": settings.QWEN_API_KEY,
-            "model": settings.QWEN_MODEL,
-            "timeout": 120,
-            "source": "env",
-        }
+    # ``chat`` 与 ``office`` 都应遵从 LLM_PROVIDER。视觉能力由编排层显式
+    # 切换到 QWEN_VL_MODEL；不能因为场景是聊天就隐式把 DeepSeek/BYOK 改为
+    # 千问，否则界面配置和实际出网端点不一致。
     if provider == "qwen":
         return {
             "base_url": settings.QWEN_BASE_URL,

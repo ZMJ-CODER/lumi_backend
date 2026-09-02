@@ -1,6 +1,11 @@
 # ── 排除本地数据/日志/缓存 ──
 data
 logs
+artifacts
+loadtests
+secrets
+tools/temporal
+*.log
 *.pyc
 __pycache__/
 *.pyo

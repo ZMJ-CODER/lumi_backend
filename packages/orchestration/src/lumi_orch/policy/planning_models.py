@@ -1,4 +1,4 @@
-"""Bounded data contract for deterministic planning-path classification."""
+"""确定性规划路径分类的受限数据契约。"""
 
 from __future__ import annotations
 

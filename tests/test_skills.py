@@ -60,6 +60,54 @@ def test_project_skills_metadata():
     assert rp.requires_confirmation is False
 
 
+def test_todo_confirmation_and_write_policy_are_action_scoped():
+    todo = SkillRegistry.get("todo_manager")
+    assert todo is not None
+    assert todo.requires_confirmation_for({"action": "list"}) is False
+    assert todo.is_write_operation({"action": "list"}) is False
+    for action in ("add", "complete", "delete"):
+        assert todo.requires_confirmation_for({"action": action}) is True
+        assert todo.is_write_operation({"action": action}) is True
+
+
+def test_todo_list_does_not_enter_confirmation_gate(monkeypatch):
+    import app.agents.mcp.manager as manager
+    import app.agents.skills.executor as executor
+
+    async def fake_call_skill(*_args, **_kwargs):
+        return {"success": True, "content": "（暂无待办）", "metadata": {}, "is_error": False}
+
+    async def noop_log(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(manager, "call_skill", fake_call_skill)
+    monkeypatch.setattr(executor, "_record_skill_log", noop_log)
+    result = asyncio.run(execute_tool_call(
+        {"function": {"name": "todo_manager", "arguments": {"action": "list"}}},
+        "u1", "office",
+    ))
+    assert result.success is True
+    assert result.error_code is None
+
+
+def test_todo_list_is_not_marked_effectful_by_dag_safety():
+    from app.agents.orchestration.models import TaskNode
+    from app.agents.orchestration.safety import is_effectful, prepare_node_safety
+
+    node = TaskNode(
+        id="todo-list",
+        agent="atomic_step",
+        params={
+            "instruction": "查看我的待办",
+            "preferred_tool": "todo_manager",
+            "inputs": {"action": "list"},
+        },
+    )
+    prepare_node_safety(node, "u1", "job1")
+    assert is_effectful(node) is False
+    assert node.idempotency_key is None
+
+
 def test_skill_lifecycle_is_exposed_and_experimental_is_not_auto_routable():
     class _ExperimentalSkill(Skill):
         name = "experimental_lifecycle_test"
@@ -273,6 +321,78 @@ def test_semantic_score_is_only_a_legal_pool_tiebreaker(monkeypatch):
     monkeypatch.setattr("app.agents.skills.routing.semantic_scores", fake_semantic)
     selected = asyncio.run(select_capabilities_for_request("无关表达", "office", limit=1))
     assert [item.name for item in selected] == ["legal"]
+
+
+def test_candidate_trace_records_margin_and_marks_near_tie(monkeypatch):
+    import app.agents.skills.executor as exec_mod
+
+    capabilities = [
+        ToolCapability(name="first", description="查询资料", category="office"),
+        ToolCapability(name="second", description="查询资料", category="office"),
+    ]
+
+    async def fake_capabilities(*_args, **_kwargs):
+        return capabilities
+
+    async def fake_semantic(*_args, **_kwargs):
+        return {"first": 0.90, "second": 0.89}
+
+    monkeypatch.setattr(exec_mod, "get_capabilities_for_scene", fake_capabilities)
+    monkeypatch.setattr("app.agents.skills.routing.semantic_scores", fake_semantic)
+    selection = asyncio.run(exec_mod.select_capabilities_with_trace("查询资料", "office", limit=2))
+
+    assert selection.top_score > selection.second_score
+    assert selection.score_margin == selection.top_score - selection.second_score
+    assert selection.ambiguous is True
+    assert selection.low_confidence is True
+    metadata = selection.to_metadata()
+    assert metadata["ambiguous"] is True
+    assert metadata["second_score"] == selection.second_score
+
+
+def test_candidate_margin_uses_runner_up_even_when_limit_is_one(monkeypatch):
+    import app.agents.skills.executor as exec_mod
+
+    capabilities = [
+        ToolCapability(name="first", description="查询资料", category="office"),
+        ToolCapability(name="second", description="查询资料", category="office"),
+    ]
+
+    async def fake_capabilities(*_args, **_kwargs):
+        return capabilities
+
+    async def fake_semantic(*_args, **_kwargs):
+        return {"first": 0.90, "second": 0.89}
+
+    monkeypatch.setattr(exec_mod, "get_capabilities_for_scene", fake_capabilities)
+    monkeypatch.setattr("app.agents.skills.routing.semantic_scores", fake_semantic)
+    selection = asyncio.run(exec_mod.select_capabilities_with_trace("查询资料", "office", limit=1))
+
+    assert 1 <= len(selection.capabilities) <= 2
+    assert selection.second_score > 0
+    assert selection.ambiguous is True
+
+
+def test_ambiguous_write_candidate_requires_escalation_without_keyword():
+    import app.agents.skills.executor as exec_mod
+
+    selection = exec_mod.CapabilitySelection(
+        capabilities=[
+            ToolCapability(name="send_email", domain="communication", requires_confirmation=True),
+            ToolCapability(name="compose_email", domain="writing"),
+        ],
+        candidates=[
+            {"name": "send_email", "score": 10.0},
+            {"name": "compose_email", "score": 9.5},
+        ],
+        scene="office",
+        top_score=10.0,
+        second_score=9.5,
+        score_margin=0.5,
+        ambiguous=True,
+        low_confidence=True,
+    )
+    assert exec_mod.selection_requires_escalation(selection, "帮我处理一下邮件") is True
 
 
 class _EchoSkill(Skill):

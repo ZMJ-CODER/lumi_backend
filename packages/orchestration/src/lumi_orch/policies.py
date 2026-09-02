@@ -1,4 +1,4 @@
-"""Pure retry, terminal-state and escalation decisions."""
+"""纯重试、终态与升级决策。"""
 
 from __future__ import annotations
 

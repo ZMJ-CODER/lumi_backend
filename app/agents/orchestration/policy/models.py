@@ -1,4 +1,4 @@
-"""Compatibility exports for the standalone orchestration kernel policy DSL."""
+"""独立编排内核策略 DSL 的类型导出。"""
 
 from lumi_orch.policy.models import PolicyCondition, RoutingPolicyDocument, RoutingPolicyRule
 

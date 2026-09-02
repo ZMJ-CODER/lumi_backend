@@ -1,4 +1,4 @@
-"""Lumi compatibility exports for the kernel lifecycle contract."""
+"""编排内核生命周期契约在 Lumi 中的直接导出。"""
 
 from __future__ import annotations
 

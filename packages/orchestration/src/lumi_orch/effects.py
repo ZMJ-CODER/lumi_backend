@@ -1,4 +1,4 @@
-"""Pure state transitions for durable external-effect journals."""
+"""持久化外部副作用日志的纯状态转换。"""
 
 from __future__ import annotations
 

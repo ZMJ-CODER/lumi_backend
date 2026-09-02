@@ -1,4 +1,4 @@
-"""Lumi enum adapters for the kernel's deterministic replan safety policy."""
+"""内核确定性重规划安全策略的 Lumi 枚举适配器。"""
 
 from __future__ import annotations
 

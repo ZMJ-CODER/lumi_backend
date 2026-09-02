@@ -1,4 +1,4 @@
-"""Build bounded, redacted execution evidence for replanning prompts."""
+"""为重规划提示词构建有界、脱敏的执行证据。"""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class ReplanEvidenceService:
         self, *, user_id: str, plan: dict, prior_summaries: str
     ) -> tuple[list[dict], str]:
         """Return failed evidence and a bounded planner continuation prompt."""
-        from app.agents.orchestration.execution_lineage import resolve_result_ref
+        from app.agents.orchestration.execution.lineage import resolve_result_ref
 
         completed: list[dict] = []
         failed: list[dict] = []

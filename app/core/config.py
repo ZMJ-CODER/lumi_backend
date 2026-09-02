@@ -112,8 +112,10 @@ class Settings(BaseSettings):
 
     # ── LLM: DeepSeek ──
     DEEPSEEK_API_KEY: str = ""
-    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
-    # 办公/通用文本默认模型。V4 Flash / Pro 使用同一 DeepSeek 兼容接口和密钥。
+    # DeepSeek V4 官方 Chat Completions 客户端以根地址为 base_url，SDK 会自行
+    # 拼接 ``/chat/completions``；不能沿用部分兼容网关的 ``/v1`` 前缀。
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
+    # 办公/通用文本默认模型。V4 Flash / Pro 使用同一官方接口和密钥。
     DEEPSEEK_MODEL: str = "deepseek-v4-flash"
     # ── LLM: DS Flash（普通模式"快速"档 + 语音通话回复模型；支持 1M 上下文）──
     # 云端调用，省钱省时；空值自动复用 DEEPSEEK_* 配置
@@ -137,6 +139,9 @@ class Settings(BaseSettings):
     # 纯文本默认走 DeepSeek V4 Flash；本地 Ollama 的 qwen2.5vl 仅用于图像转文字。
     LLM_PROVIDER: str = "deepseek"  # qwen / deepseek
     LLM_FALLBACK_PROVIDER: str = ""  # 主供应商失败时自动切换（deepseek/qwen；空=不降级）
+    # Python/OpenAI 客户端使用的显式 HTTP(S) 代理；为空时沿用系统环境变量。
+    # 浏览器能访问而后端进程不能访问时，可填 http://127.0.0.1:端口。
+    LLM_HTTP_PROXY: str = ""
     # 仅向明确验证过的 OpenAI-compatible 模型透传 reasoning_effort。
     # 多数兼容网关会拒绝未知字段；默认留空，格式为逗号分隔的模型 ID。
     LLM_REASONING_EFFORT_MODELS: str = ""
@@ -251,6 +256,8 @@ class Settings(BaseSettings):
     # Candidate-routing observability: below this score a tool-intent request
     # is considered a possible recall miss and emits a monitor event.
     SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE: float = 20.0
+    # L2 混合分数的歧义门槛；分数差小于该值时视为近似并列，不能仅凭首名放行。
+    SKILL_CANDIDATE_MARGIN_THRESHOLD: float = 3.0
     # Top-K 最后一名与下一名分数接近时允许有限溢出，降低措辞微调造成的 5/6 名跳变。
     SKILL_CANDIDATE_TIE_EPSILON: float = 3.0
     SKILL_CANDIDATE_MAX_OVERFLOW: int = 1
@@ -326,6 +333,38 @@ class Settings(BaseSettings):
     # DAGs to the external worker; dynamic/ReAct/write paths remain legacy.
     # ``manifest_temporal`` is the rolling task-manifest runtime.
     AGENT_ORCHESTRATION: str = "legacy"           # legacy / temporal / manifest_temporal
+    # Frozen read-only DAGs have a separate Temporal limit. It does not alter
+    # the generic planning window or cause dynamic/rolling plans to migrate.
+    TEMPORAL_STATIC_MAX_NODES: int = 12
+    # 超过普通静态窗口的 DAG 只允许进入长 DAG 专用路径：必须完全只读，
+    # 以 Child Workflow 调度节点并周期性 Continue-As-New 控制 History。
+    # 服务级演练通过前默认关闭；开启后仍只接纳资格策略明确判定的纯读 DAG。
+    TEMPORAL_STATIC_LONG_DAG_ENABLED: bool = False
+    TEMPORAL_STATIC_LONG_DAG_MAX_NODES: int = 64
+    TEMPORAL_STATIC_CONTINUE_AS_NEW_AFTER_NODES: int = 20
+    TEMPORAL_STATIC_CHILD_WORKFLOW_ENABLED: bool = True
+    # 静态 Temporal 灰度：用户白名单非空时优先于比例；类型使用 agent 名或
+    # route_channel，逗号分隔。默认 100 保持 temporal 模式的既有全量语义。
+    TEMPORAL_STATIC_ALLOWLIST: str = ""
+    TEMPORAL_STATIC_PERCENTAGE: int = 100
+    TEMPORAL_STATIC_TASK_TYPES: str = ""
+    TEMPORAL_STATIC_MAX_REPLANS: int = 1
+    # 滚动逻辑计划另走独立纯读 Runtime；默认关闭，避免尚未服务级验收的
+    # Redis 前沿推进改变现有 Legacy 语义。
+    TEMPORAL_LOGICAL_READ_ENABLED: bool = False
+    TEMPORAL_LOGICAL_READ_ALLOWLIST: str = ""
+    TEMPORAL_LOGICAL_READ_PERCENTAGE: int = 0
+    TEMPORAL_LOGICAL_READ_TASK_TYPES: str = ""
+    TEMPORAL_LOGICAL_READ_TASK_QUEUE: str = "lumi-logical-read"
+    TEMPORAL_LOGICAL_READ_CONTINUE_AFTER_FRONTIERS: int = 20
+    TEMPORAL_LOGICAL_READ_MAX_REPLANS: int = 1
+    # 已审批副作用逻辑计划使用另一条 Runtime；默认关闭，且禁止自动重规划。
+    TEMPORAL_LOGICAL_EFFECTS_ENABLED: bool = False
+    TEMPORAL_LOGICAL_EFFECTS_ALLOWLIST: str = ""
+    TEMPORAL_LOGICAL_EFFECTS_PERCENTAGE: int = 0
+    TEMPORAL_LOGICAL_EFFECTS_TASK_TYPES: str = ""
+    TEMPORAL_LOGICAL_EFFECTS_TASK_QUEUE: str = "lumi-logical-effects"
+    TEMPORAL_LOGICAL_EFFECTS_CONTINUE_AFTER_FRONTIERS: int = 20
     # 策略文件按部署版本加载；shadow 仅计算并审计差异，不影响当前路由。
     AGENT_ROUTING_POLICY_MODE: str = "shadow"     # legacy / shadow / enforce
     AGENT_ROUTING_POLICY_PATH: str = "config/agent_policies/routing_rules.yaml"
@@ -335,6 +374,7 @@ class Settings(BaseSettings):
     # Vocabulary is deployment data with a fixed, schema-validated action and
     # object set; matching semantics and safety checks stay in application code.
     AGENT_ROUTING_LEXICON_PATH: str = "config/agent_policies/routing_lexicon.yaml"
+    AGENT_EXECUTION_DEFAULTS_PATH: str = "config/agent_policies/execution_defaults.yaml"
     AGENT_ROUTING_INTENT_PATTERN_PATH: str = "config/agent_policies/route_intent_patterns.yaml"
     AGENT_PLANNING_POLICY_PATH: str = "config/agent_policies/planning_rules.yaml"
     TEMPORAL_ADDRESS: str = "localhost:7233"      # Temporal 前端 gRPC 地址
@@ -479,6 +519,7 @@ class Settings(BaseSettings):
         "AGENT_ROUTING_POLICY_PATH",
         "AGENT_TCA_POLICY_PATH",
         "AGENT_ROUTING_LEXICON_PATH",
+        "AGENT_EXECUTION_DEFAULTS_PATH",
         "AGENT_ROUTING_INTENT_PATTERN_PATH",
         "AGENT_PLANNING_POLICY_PATH",
         mode="after",

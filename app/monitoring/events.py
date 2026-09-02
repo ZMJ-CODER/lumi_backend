@@ -1,4 +1,4 @@
-"""Serializable monitoring event schema."""
+"""可序列化的监控事件数据结构。"""
 
 from __future__ import annotations
 

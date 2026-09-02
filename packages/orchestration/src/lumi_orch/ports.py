@@ -1,4 +1,4 @@
-"""Stable execution ports implemented by the application layer."""
+"""由应用层实现的稳定执行端口。"""
 
 from __future__ import annotations
 

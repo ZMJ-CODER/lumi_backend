@@ -1,16 +1,15 @@
-"""Deterministic compilation of an LLM-produced execution plan.
+"""对 LLM 生成执行计划的确定性编译。
 
-The planner may propose a graph, but it is not an execution authority.  This
-module is the boundary where a plan is checked against the workers and the
-currently authorized Skill/MCP namespace before it reaches the DAG runner.
-Compilation is deliberately conservative: optional fallbacks may be removed
-when unavailable, but required work is never silently deleted or merged.
+规划器可以提出图，但它不是执行授权方。本模块是计划到达 DAG 运行器前的边界：
+在这里依据工作节点与当前授权的 Skill/MCP 命名空间校验计划。编译刻意保守：
+可选回退在不可用时可移除，但必需工作绝不会被静默删除或合并。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from enum import Enum
 from typing import Any
 
@@ -212,6 +211,27 @@ _REQUEST_REQUIREMENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("send", ("发送", "发给", "转发", "send", "email", "e-mail", "forward")),
 )
 
+_TODO_WRITE_REQUEST = re.compile(
+    r"(?:添加|新建|创建|加入|加进|加到|放入|放进|放到|记入)"
+    r".{0,20}(?:我的|当前用户的)?(?:待办|任务清单|提醒)",
+    re.IGNORECASE,
+)
+
+
+def _plan_has_todo_add(nodes: list[TaskNode]) -> bool:
+    """Check the executable capability, not copied words in the prompt."""
+    for node in nodes:
+        params = node.params or {}
+        inputs = params.get("inputs") if isinstance(params.get("inputs"), dict) else params
+        if (
+            str(params.get("preferred_tool") or "") == "todo_manager"
+            and str((inputs or {}).get("action") or "").lower() == "add"
+        ):
+            return True
+        if node.agent == "office_todo" and str(params.get("action") or "").lower() == "add":
+            return True
+    return False
+
 
 def validate_request_coverage(request: str, nodes: list[TaskNode]) -> list[PlanViolation]:
     """Reject an accepted plan that silently drops an explicit second action.
@@ -228,16 +248,27 @@ def validate_request_coverage(request: str, nodes: list[TaskNode]) -> list[PlanV
         for name, markers in _REQUEST_REQUIREMENTS
         if any(marker.casefold() in request_text for marker in markers)
     ]
-    if len(requested) < 2 or not nodes:
+    if not nodes:
         return []
     node_text = "\n".join(
         json.dumps(node.model_dump(mode="json"), ensure_ascii=False, default=str)
         for node in nodes
     ).casefold()
+    # A single deliverable is intentionally left to the planner/worker. The
+    # compiler's coverage guard exists to catch dropped *compound* actions;
+    # enforcing a lexical marker for a one-step request rejects valid plans
+    # whose worker name or instruction uses different wording.
     missing = [
         name for name, markers in requested
-        if not any(marker.casefold() in node_text for marker in markers)
+        if len(requested) >= 2 and not any(marker.casefold() in node_text for marker in markers)
     ]
+    # Do not treat the phrase "加入待办" copied into a summarizer instruction
+    # as evidence that a persistent write will happen.  This closes the exact
+    # template-collapse failure caught by live acceptance testing.
+    if _TODO_WRITE_REQUEST.search(request) and not _plan_has_todo_add(nodes):
+        missing.append("待办写入")
+    if len(requested) < 2 and not missing:
+        return []
     return [
         PlanViolation(
             code="PLAN_COVERAGE",
@@ -296,7 +327,7 @@ async def compile_plan(
     max_nodes: int | None = None,
 ) -> CompiledPlan:
     """Validate and cost a proposed plan without executing any side effect."""
-    from app.agents.orchestration.dag import DagValidationError, validate_dag
+    from app.agents.orchestration.execution.validation import DagValidationError, validate_dag
     from app.core.config import settings
 
     max_nodes = max_nodes or int(getattr(settings, "AGENT_PLAN_MAX_NODES", 8))

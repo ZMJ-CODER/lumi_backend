@@ -158,7 +158,7 @@ def test_channel_limiter_renews_redis_slot_while_task_is_active(monkeypatch):
 def test_manifest_activity_stops_before_controller_after_concurrent_cancel(monkeypatch):
     """A late cancel must prevent cursor advancement and final synthesis."""
     from app.agents.orchestration.temporal import manifest_activities
-    import app.agents.orchestration.dag as dag_module
+    import app.agents.orchestration.execution.validation as dag_module
 
     running = Job(
         job_id="cancel-race",

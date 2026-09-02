@@ -1,9 +1,8 @@
-"""Prepare the immutable context shared by planning and execution.
+"""准备规划与执行共用的不可变上下文。
 
-Submission code needs one trusted attachment view, one bounded office-memory
-view, and one frozen effective model configuration.  Centralizing this prevents
-different submission branches from resolving a different model or trusting
-different client attachment metadata.
+提交代码需要唯一可信的附件视图、有界办公记忆视图以及冻结后的有效模型配置。
+集中在这里处理，可避免不同提交分支解析出不同模型或信任不同的客户端附件元
+数据。
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.agents.orchestration.memory_service import OfficeMemoryService
-from app.agents.orchestration.plan_context import PlanRequestContext
+from app.agents.orchestration.planning.context import PlanRequestContext
 from app.core.llm_config import EffectiveLLMConfig, resolve_effective_llm_config
 
 

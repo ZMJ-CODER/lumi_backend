@@ -1,4 +1,4 @@
-"""Turn a compiled plan into a validated execution-window Job."""
+"""将已编译计划物化为通过校验的执行窗口 Job。"""
 
 from __future__ import annotations
 
@@ -21,8 +21,9 @@ class MaterializedJob:
 class JobMaterializationService:
     """Own Job construction, static validation, and logical-plan windowing."""
 
-    def __init__(self, *, workers: dict) -> None:
+    def __init__(self, *, workers: dict, temporal_static_mode: bool = False) -> None:
         self._workers = workers
+        self._temporal_static_mode = temporal_static_mode
 
     async def materialize(
         self,
@@ -68,7 +69,7 @@ class JobMaterializationService:
             logger.warning("办公任务规划已停止: {} | {}", job.job_id[:8], tree.error)
             return MaterializedJob(job, terminal=True)
 
-        from app.agents.orchestration.dag import validate_planned_dag
+        from app.agents.orchestration.execution.validation import validate_planned_dag
         from app.agents.orchestration.safety import prepare_node_safety
 
         for node in job.nodes:
@@ -87,11 +88,20 @@ class JobMaterializationService:
             }
             return MaterializedJob(job, terminal=True)
 
+        static_temporal_candidate = False
+        if self._temporal_static_mode and scene == "office":
+            from app.agents.orchestration.runtime_gateway import RuntimeGateway
+
+            static_temporal_candidate = RuntimeGateway.can_run_static(job)
         if (
             scene == "office"
             and settings.AGENT_LOGICAL_PLAN_ENABLED
             and not routing.get("manifest")
-            and len(job.nodes) >= settings.AGENT_LOGICAL_PLAN_MIN_NODES
+            and (
+                len(job.nodes) >= settings.AGENT_LOGICAL_PLAN_MIN_NODES
+                or bool(getattr(tree, "expansion_slots", []) or [])
+            )
+            and not static_temporal_candidate
         ):
             from app.agents.orchestration.logical_plan import (
                 create_logical_plan,
@@ -100,7 +110,11 @@ class JobMaterializationService:
                 save_logical_plan,
             )
 
-            logical_plan = await create_logical_plan(user_id, job.nodes)
+            logical_plan = await create_logical_plan(
+                user_id,
+                job.nodes,
+                slots=list(getattr(tree, "expansion_slots", []) or []),
+            )
             if logical_plan["budget"]["estimated_total"] > logical_plan["budget"]["limit"]:
                 job.status = JobStatus.COMPLETED
                 job.result = {
@@ -136,6 +150,7 @@ class JobMaterializationService:
                 "frontier_size": len(frontier),
                 "progress": logical_plan_progress(logical_plan),
                 "estimated_tokens": logical_plan["budget"]["estimated_total"],
+                "slot_count": len(logical_plan.get("slots") or {}),
             }
         if tree.clarification and not tree.nodes:
             job.status = JobStatus.COMPLETED

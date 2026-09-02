@@ -1,4 +1,4 @@
-"""Constrained data contract for task-complexity policy tuning."""
+"""任务复杂度策略调优的受限数据契约。"""
 
 from __future__ import annotations
 

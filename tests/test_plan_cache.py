@@ -29,6 +29,15 @@ def test_plan_cache_key_is_stable_and_contains_no_raw_identity():
     assert "doc-secret" not in first
 
 
+def test_old_cache_payload_is_rejected_after_planning_policy_version_change():
+    old_payload = {
+        "version": 1,
+        "nodes": [{"id": "n1", "agent": "direct_llm", "params": {"instruction": "旧计划"}}],
+    }
+
+    assert decode_plan(old_payload, []) is None
+
+
 def test_cached_document_ids_are_rebound_for_current_request():
     nodes = [
         TaskNode(

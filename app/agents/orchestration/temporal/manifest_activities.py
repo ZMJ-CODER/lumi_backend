@@ -1,8 +1,7 @@
-"""Activities for the rolling manifest Temporal workflow.
+"""滚动任务清单 Temporal 工作流使用的活动。
 
-One activity owns one persisted batch.  It reuses the existing DAG node
-runtime, locks and effect journal, while Temporal provides process isolation,
-heartbeat recovery and history compaction through Continue-As-New.
+一个 Activity 负责一个持久化批次。它复用既有 DAG 节点运行时、锁与副作用日
+志；Temporal 则通过 Continue-As-New 提供进程隔离、心跳恢复与历史压缩。
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ async def run_manifest_batch_activity(payload: dict) -> dict:
         return {"terminal": True, "status": "failed", "error": "missing job_id"}
 
     from app.agents.orchestration.admission import job_admission
-    from app.agents.orchestration.dag import execute_dag
+    from app.agents.orchestration.execution.validation import execute_dag
     from app.agents.orchestration.orchestrator import AgentOrchestrator
     from app.agents.orchestration.review import get_reviewer
     from app.agents.orchestration.temporal.client import load_job_llm_config

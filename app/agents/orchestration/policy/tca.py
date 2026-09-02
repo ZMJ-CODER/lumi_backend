@@ -1,4 +1,4 @@
-"""Process-start loading for the constrained TCA threshold policy."""
+"""进程启动时加载受限 TCA 阈值策略。"""
 
 from __future__ import annotations
 

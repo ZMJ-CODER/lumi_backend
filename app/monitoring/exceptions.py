@@ -1,4 +1,4 @@
-"""Exception classes intended for monitorable operational failures."""
+"""可被监控的运行故障异常类型。"""
 
 from __future__ import annotations
 

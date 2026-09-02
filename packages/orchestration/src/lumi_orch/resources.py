@@ -1,4 +1,4 @@
-"""Resource-claim coordination with pluggable distributed storage."""
+"""支持可插拔分布式存储的资源声明协调机制。"""
 
 from __future__ import annotations
 

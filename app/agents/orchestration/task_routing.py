@@ -1,14 +1,12 @@
-"""Four-channel routing for office work units.
+"""办公工作单元的四通道路由。
 
-The scheduler deliberately classifies *execution requirements*, not document
-genres.  A task list is first compiled into JSON-safe atomic work units and
-then each unit independently selects the cheapest sufficient channel:
+调度器刻意分类的是**执行需求**而非文档类别。任务清单先被编译为 JSON 安全的
+原子工作单元，再由各单元独立选择成本最低且足够的通道：
 
 ``direct_llm`` -> ``deterministic_script`` -> ``rag`` -> ``agent``.
 
-This module is intentionally usable without an LLM.  A planner may enrich the
-same schema later, but all routing decisions are validated here before a DAG
-sees them.
+本模块刻意可在没有 LLM 时使用。规划器可在后续补充同一规格，但所有路由决策
+均会在 DAG 接收前于此处校验。
 """
 
 from __future__ import annotations

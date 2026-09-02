@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lumi-execution"
+version = "0.1.0"
+description = "Backend-neutral node execution engine for Lumi"
+requires-python = "==3.13.*"
+dependencies = [
+    "pydantic>=2.0",
+    "lumi-orchestration>=0.1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-p no:cacheprovider"

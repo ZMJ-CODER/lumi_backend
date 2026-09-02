@@ -1,10 +1,8 @@
-"""Rolling execution manifests for explicit long office task lists.
+"""面向显式长办公任务清单的滚动执行清单。
 
-The manifest is deliberately parsed without an LLM.  A long checklist is an
-execution-control problem, not a reason to ask one model call to emit hundreds
-of fragile JSON nodes.  Each item is materialized as a bounded ReAct node only
-when its batch becomes due, while the complete checklist remains persisted in
-``Job.routing`` for resume and audit.
+清单刻意不通过 LLM 解析。长清单是执行控制问题，不应为此要求一次模型调用生
+成数百个脆弱 JSON 节点。每一项只在对应批次到期时才物化为受限 ReAct 节点，而
+完整清单始终保存在 ``Job.routing`` 中，用于恢复和审计。
 """
 
 from __future__ import annotations

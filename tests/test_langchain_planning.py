@@ -64,6 +64,35 @@ def test_pure_writing_is_not_an_office_execution_request():
     assert requires_office_execution("生成一份季度报告并导出为 Word 文档")
 
 
+def test_common_read_only_tool_phrases_enter_office_execution():
+    from app.agents.orchestration.intent import requires_office_execution
+
+    assert requires_office_execution("现在几点")
+    assert requires_office_execution("帮我查一下天气")
+    assert requires_office_execution("请计算 12*7")
+    assert requires_office_execution("查询知识库里的报销规则")
+    assert not requires_office_execution("为什么不能查询")
+
+
+def test_rule_planner_compiles_common_read_only_tools_without_llm():
+    async def scenario():
+        from app.agents.orchestration.planner import RulePlanner
+
+        planner = RulePlanner()
+        for query, agent, tool in (
+            ("帮我查一下天气", "web_research", None),
+            ("请计算 12*7", "atomic_step", "calculator"),
+            ("查询知识库里的报销规则", "retrieval", None),
+        ):
+            tree = await planner.plan("u1", query, scene="office")
+            assert len(tree.nodes) == 1
+            assert tree.nodes[0].agent == agent
+            if tool:
+                assert tree.nodes[0].params["preferred_tool"] == tool
+
+    asyncio.run(scenario())
+
+
 def test_office_stream_logging_uses_skill_context_correlation_id(monkeypatch):
     """Streaming a skill must not assume WorkerContext fields on SkillContext."""
     from app.agents.skills.base import SkillContext

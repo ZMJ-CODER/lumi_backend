@@ -1,4 +1,4 @@
-"""Pure orchestration state-machine contracts.
+"""纯编排状态机契约。
 
 The runtime adapters still own persistence and side effects.  This package
 owns only the rules for deciding whether a Job transition is valid.

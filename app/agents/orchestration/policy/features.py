@@ -1,4 +1,4 @@
-"""Closed routing feature set and its single point of computation."""
+"""封闭路由特征集合及其唯一计算入口。"""
 
 from __future__ import annotations
 

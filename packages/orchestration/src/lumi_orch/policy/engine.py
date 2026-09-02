@@ -1,4 +1,4 @@
-"""Validated YAML policy matcher with no application imports."""
+"""不依赖应用层导入、经过校验的 YAML 策略匹配器。"""
 
 from __future__ import annotations
 

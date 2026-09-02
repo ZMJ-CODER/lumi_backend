@@ -1,6 +1,6 @@
 import asyncio
 
-from app.agents.orchestration.plan_context import PlanRequestContext
+from app.agents.orchestration.planning.context import PlanRequestContext
 from app.agents.orchestration.planner import Planner, TaskTree
 
 

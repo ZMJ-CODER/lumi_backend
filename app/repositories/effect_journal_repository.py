@@ -1,8 +1,7 @@
-"""Durable persistence boundary for external-effect journals.
+"""外部副作用日志的持久化边界。
 
-The effect journal deliberately lives in Postgres rather than Redis.  Redis is
-an excellent coordinator, but losing a Redis key after a process crash must
-never make an externally-visible operation eligible for an automatic retry.
+副作用日志刻意存放在 PostgreSQL 而非 Redis：Redis 适合协调，但进程崩溃后
+丢失 Redis 键绝不能让一个已对外可见的操作再次自动重试。
 """
 
 from __future__ import annotations

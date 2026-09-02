@@ -1,4 +1,4 @@
-"""Legacy DAG execution loop and terminal convergence."""
+"""进程内 DAG 执行循环与终态收敛。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.agents.orchestration.dag import DagValidationError, execute_dag
+from app.agents.orchestration.execution.validation import DagValidationError
 from app.agents.orchestration.models import Job, JobStatus
 from app.agents.orchestration.state_machine.errors import classify_error
 
@@ -48,6 +48,7 @@ class ExecutionLoopService:
         node_concurrency: int,
         suspend_capacity: Callable[[Job], Awaitable[None]] | None = None,
         ensure_active_capacity: Callable[[Job], Awaitable[bool]] | None = None,
+        task_execution_service: Any,
     ) -> None:
         self._store = store
         self._workers = workers
@@ -66,6 +67,7 @@ class ExecutionLoopService:
         self._node_concurrency = node_concurrency
         self._suspend_capacity = suspend_capacity or (lambda _job: self._noop())
         self._ensure_active_capacity = ensure_active_capacity or (lambda _job: self._allow())
+        self._task_execution_service = task_execution_service
 
     @staticmethod
     async def _noop() -> None:
@@ -85,11 +87,8 @@ class ExecutionLoopService:
             if job is None:
                 return
             while True:
-                await execute_dag(
+                await self._task_execution_service.execute(
                     job,
-                    self._workers,
-                    self._review,
-                    self._store,
                     concurrency=self._node_concurrency,
                     llm_api_key=llm_api_key,
                     llm_config=llm_config,

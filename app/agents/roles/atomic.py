@@ -109,6 +109,7 @@ class AtomicStepAgent(WorkerAgent):
             confirmed_tool_calls=ctx.confirmed_tool_calls,
             approval_context_sha256=ctx.approval_context_sha256,
             on_output=ctx.on_output,
+            execution_scope=ctx.job_id,
         )
         if not result.success:
             decision = decide_failure(

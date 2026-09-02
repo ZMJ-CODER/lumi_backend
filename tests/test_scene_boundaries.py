@@ -298,6 +298,84 @@ def test_office_stream_emits_plan_revision_step(monkeypatch):
     assert event["step"]["output"] == "读取方法失败，改用脚本导出。"
 
 
+def test_office_stream_keeps_completed_steps_after_rolling_frontier_replacement(monkeypatch):
+    """滚动窗口替换后，SSE 仍需展示已经提交的逻辑节点终态。"""
+    from app.agents.orchestration import orchestrator as agent_orchestrator
+
+    orch = Orchestrator.__new__(Orchestrator)
+    current = SimpleNamespace(
+        job_id="rolling-job",
+        status=JobStatus.RUNNING,
+        nodes=[SimpleNamespace(
+            id="C", name="汇总", agent="direct_llm", params={}, result=None,
+            status="running", error=None, depends_on=["A", "B"], resource_claims=[],
+            effect_status=None, started_at=None, completed_at=None,
+        )],
+        routing={"logical_plan": {"plan_id": "plan-1"}},
+        result=None,
+        error=None,
+        created_at=1.0,
+    )
+    terminal = SimpleNamespace(
+        job_id="rolling-job",
+        status=JobStatus.COMPLETED,
+        nodes=[SimpleNamespace(
+            id="D", name="输出", agent="direct_llm", params={}, result={"content": "完成"},
+            status="completed", error=None, depends_on=["C"], resource_claims=[],
+            effect_status=None, started_at=None, completed_at=None,
+        )],
+        routing={"logical_plan": {"plan_id": "plan-1"}},
+        result={"final_answer": "完成"},
+        error=None,
+        created_at=1.0,
+    )
+
+    def record(node_id, name, depends_on, status):
+        return {
+            "node": {"id": node_id, "name": name, "agent": "direct_llm", "params": {},
+                     "depends_on": depends_on},
+            "status": status,
+            "error": "",
+            "error_code": "",
+            "effect_status": None,
+        }
+
+    plan = {
+        "order": ["A", "B", "C", "D"],
+        "nodes": {
+            "A": record("A", "分析一", [], "completed"),
+            "B": record("B", "分析二", [], "completed"),
+            "C": record("C", "汇总", ["A", "B"], "completed"),
+            "D": record("D", "输出", ["C"], "completed"),
+        },
+    }
+
+    async def submit(*args, **kwargs):
+        return current
+
+    async def get_job(*args, **kwargs):
+        return terminal
+
+    async def load_plan(*args, **kwargs):
+        return plan
+
+    async def no_sleep(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent_orchestrator, "submit_job", submit)
+    monkeypatch.setattr(agent_orchestrator, "get_job", get_job)
+    monkeypatch.setattr("app.agents.orchestration.logical_plan.load_logical_plan", load_plan)
+    monkeypatch.setattr("app.services.orchestrator.asyncio.sleep", no_sleep)
+
+    async def scenario():
+        return [event async for event in orch._stream_office_job("u1", "c1", "task", [], None, [])]
+
+    events = asyncio.run(scenario())
+    steps = {event["step"]["id"]: event["step"] for event in events if event["type"] == "step"}
+    assert set(steps) >= {"A", "B", "C", "D"}
+    assert all(steps[node_id]["status"] == "completed" for node_id in ("A", "B", "C", "D"))
+
+
 def test_office_stream_finishes_with_explicit_error_when_job_snapshot_disappears(monkeypatch):
     """SSE 已交付 job_id 后 Redis 丢快照时，不能无限等待再让前端显示中断。"""
     from app.agents.orchestration import orchestrator as agent_orchestrator

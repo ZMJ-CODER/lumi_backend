@@ -3,6 +3,7 @@
 # executor, tool, permission, regex, or arbitrary expression.
 version: 1
 file_operation:
+  max_gap: 36
   actions:
     - 转换
     - 转为
@@ -66,6 +67,7 @@ file_operation:
     - 数据表
     - 文件夹
 rag_operation:
+  max_gap: 28
   actions:
     - 查询
     - 查找
@@ -133,3 +135,22 @@ agent_operation:
     - 调查步骤
     - 队列积压并提出缓解计划
     - 任务状态并制定后续动作
+
+# 以下结构规则只保存词汇和边界；匹配、否定处理和风险裁决仍由通用求值器实现。
+external_operation:
+  actions: [打开, 启动, 发送, 删除, 修改, 编辑, 创建, 添加, 取消, 安排, 设置]
+  targets: [应用, 软件, 浏览器, 网页, 邮件, 日程, 日历, 待办, 数据库, 系统, 文件, 文档, 平台, 服务]
+  followup_actions: [更新, 同步, 提交, 推送, 发布, 写入]
+  max_gap: 32
+multi_operation:
+  actions: [读取, 分析, 提取, 先]
+  connectors: [并, 再, 然后]
+  followup_actions: [核对, 检查, 发送, 写入, 修改, 导出]
+  max_gap: 80
+stateful_reasoning:
+  actions: [核对, 校验, 验证, 审查, 合规, 审批, 比对, 排查, 诊断]
+  targets: [系统, 规则, 要求, 标准, 条款, 记录, 数据, 状态]
+  max_gap: 32
+factual_document_question:
+  actions: [哪个, 哪份, 是否, 有没有, 包含, 提到, 写了什么, 什么是, 多少, 几页, 条款, 条件, 金额, 日期, 负责人, 找出, 定位, 查一下, 看看, which file, which document, which one, contain, mention, include, state, payment terms, amount, date, deadline, clause, owner]
+  max_gap: 80

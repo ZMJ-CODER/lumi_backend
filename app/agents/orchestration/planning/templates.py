@@ -1,8 +1,4 @@
-"""办公流程模板库：高频办公场景的预定义 DAG 模板.
-
-规划器只做"意图分类 + 参数抽取"，由模板构造器生成确定性 DAG，
-避免 LLM 从零写 DAG 的高出错率（如漏掉文档读取节点）。
-"""
+"""规划阶段的办公流程模板库。"""
 
 from __future__ import annotations
 
@@ -345,3 +341,17 @@ def template_catalog_text() -> str:
                 "  参数：" + "；".join(f"{k}={v}" for k, v in t.parameters_schema.items())
             )
     return "\n".join(lines)
+
+
+__all__ = [
+    "FlowTemplate",
+    "DocumentAnalysisFlow",
+    "InvoiceFilterFlow",
+    "DailyBriefFlow",
+    "DocumentCompareFlow",
+    "DocumentCombineFlow",
+    "DocumentTranslateFlow",
+    "TEMPLATES",
+    "get_template",
+    "template_catalog_text",
+]

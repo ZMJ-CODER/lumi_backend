@@ -57,16 +57,19 @@ class WebSearchSkill(Skill):
                 error_code="EXEC_ERROR",
                 retryable=True,
             )
-        output = "\n\n".join(
-            f"[{i + 1}] {r['title']}\n{r['url']}\n{r['content'][:800]}"
-            for i, r in enumerate(results)
-        )
+        # output 是回填模型上下文的摘要，不承载网页全文；完整抓取内容仅用于
+        # 服务端审计与按需引用，避免模型把搜索结果逐字复制到最终回复。
+        output_parts = []
+        for i, item in enumerate(results):
+            summary = " ".join(item["content"].split())[:240]
+            output_parts.append(f"[{i + 1}] {item['title']}\n{item['url']}\n{summary}")
+        output = "\n\n".join(output_parts)
         return SkillResult(
             success=True,
             output=output,
             metadata={
                 "citations": [
-                    {"type": "web", "title": r["title"], "content": r["content"][:500], "source": r["url"]}
+                    {"type": "web", "title": r["title"], "content": " ".join(r["content"].split())[:240], "source": r["url"]}
                     for r in results
                 ],
                 "decision_signals": {

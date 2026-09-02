@@ -1,4 +1,4 @@
-"""Select a normal office plan through assessment, cache, and planner routing."""
+"""通过评估、缓存和规划路由选择普通办公计划。"""
 
 from __future__ import annotations
 
@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.agents.orchestration.plan_cache import PlanCache, build_plan_cache_key
-from app.agents.orchestration.plan_context import PlanRequestContext
+from app.agents.orchestration.planning.context import PlanRequestContext
 from app.agents.orchestration.tca import ComplexityLevel, TaskComplexityAssessor
+from app.agents.orchestration.planning.read_only_dag import build_explicit_read_only_dag
 
 
 @dataclass(slots=True)
@@ -82,12 +83,17 @@ class OfficePlanSelectionService:
         capability_signature = hashlib.sha256(
             "|".join(capability_parts).encode("utf-8")
         ).hexdigest()[:16]
+        # This DAG deliberately carries execution-shape metadata that is not
+        # persisted by the generic plan cache. Replanning is deterministic and
+        # cheap, while caching it could erase its parallel dependency contract.
+        explicit_read_only_dag = build_explicit_read_only_dag(request)
         cache_allowed = (
             level in {ComplexityLevel.M1, ComplexityLevel.M2}
             and not project_id
             and not project_ids
             and not clarification_answer
             and not prior_summaries
+            and explicit_read_only_dag is None
         )
         cache_key = ""
         cache_hit = False
@@ -132,6 +138,13 @@ class OfficePlanSelectionService:
                 context=planning_context,
             )
         routing["cache_hit"] = cache_hit
+        # A deliberately declared parallel, read-only DAG is safe to retain.
+        # Other legacy planner output keeps the compatibility serialisation
+        # policy until it explicitly opts in through node metadata.
+        routing["preserve_dependencies"] = any(
+            bool((node.metadata or {}).get("preserve_dependencies"))
+            for node in (tree.nodes or [])
+        )
         duration = time.perf_counter() - started
         routing["route_latency_ms"] = int(duration * 1000)
         try:

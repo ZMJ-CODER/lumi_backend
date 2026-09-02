@@ -64,6 +64,7 @@ dependencies = [
     # Business adapters import the deterministic kernel through the local
     # workspace package; Docker installs it before this application package.
     "lumi-orchestration>=0.1.0",
+    "lumi-execution>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -90,6 +91,7 @@ default = true
 # The kernel is versioned with this backend but has its own package boundary.
 # Workspace membership keeps local and CI resolution consistent.
 lumi-orchestration = { workspace = true }
+lumi-execution = { workspace = true }
 # torch 必须用 CUDA 版（PyPI 上是 CPU 版，uv sync 会把它覆盖导致嵌入模型无法用 GPU）
 # 仅 Windows 本地生效；Linux（CI/Docker）从索引解析 CPU 版
 torch = [
@@ -108,7 +110,7 @@ environments = [
 ]
 
 [tool.uv.workspace]
-members = ["packages/orchestration"]
+members = ["packages/orchestration", "packages/execution"]
 
 [tool.setuptools.packages.find]
 include = ["app*", "celery_app*"]

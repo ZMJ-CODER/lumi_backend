@@ -4,6 +4,8 @@
     <content url="file://$MODULE_DIR$">
       <sourceFolder url="file://$MODULE_DIR$/packages/orchestration" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/packages/orchestration/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/packages/execution" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/packages/execution/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
     </content>
     <orderEntry type="jdk" jdkName="uv (lumi_backend)" jdkType="Python SDK" />

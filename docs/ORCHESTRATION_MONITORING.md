@@ -3,7 +3,7 @@
 > 更新：2026-08-23
 
 监控位于 `app/monitoring/`，编排执行谱系位于
-`app/agents/orchestration/execution_lineage.py`。两者都只记录排障所需的结构化元数据，
+`app/agents/orchestration/execution/lineage.py`。两者都只记录排障所需的结构化元数据，
 不会持久化完整 prompt、工具正文、附件内容或密钥。
 
 ## 1. 目录与职责
@@ -17,7 +17,7 @@ app/monitoring/
   exceptions.py  # 可管理的异常分类
 
 app/agents/orchestration/
-  execution_lineage.py  # 节点生命周期 span、result_ref
+  execution/lineage.py  # 节点生命周期 span、result_ref
   effects.py            # effect journal 恢复扫描
   admission_lease.py    # 准入/等待状态 lease 维护
 ```

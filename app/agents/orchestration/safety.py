@@ -14,7 +14,7 @@ _WRITE_HINTS = (
 )
 
 
-def _tool_is_write(tool: str) -> bool:
+def _tool_is_write(tool: str, params: dict | None = None) -> bool:
     if not tool:
         return False
     if tool.startswith("mcp__"):
@@ -25,7 +25,15 @@ def _tool_is_write(tool: str) -> bool:
 
         skill = SkillRegistry.get(tool)
         if skill is not None:
-            return bool(skill.write_op or skill.requires_confirmation)
+            if params is not None and hasattr(skill, "is_write_operation"):
+                return bool(skill.is_write_operation(params))
+            if skill.write_op:
+                return True
+            # A mixed read/write skill (for example todo_manager) determines
+            # its safety policy from the concrete invocation parameters.
+            if hasattr(skill, "requires_confirmation_for"):
+                return bool(skill.requires_confirmation_for(params or {}))
+            return bool(skill.requires_confirmation)
     except Exception:  # noqa: BLE001
         pass
     lower = tool.lower()
@@ -80,7 +88,7 @@ def prepare_node_safety(node: TaskNode, user_id: str, job_id: str) -> None:
                     key = _render_resource_template(template, inputs)
                     if key:
                         claims.append(
-                            ResourceClaim(key=key, mode="write" if _tool_is_write(tool) else "read")
+                            ResourceClaim(key=key, mode="write" if _tool_is_write(tool, inputs) else "read")
                         )
         except Exception:  # noqa: BLE001
             pass
@@ -107,10 +115,10 @@ def prepare_node_safety(node: TaskNode, user_id: str, job_id: str) -> None:
     ).replace("\\", "/")
     if project_id:
         key = f"project:{project_id}" + (f":file:{path}" if path else "")
-        mode = "write" if node.agent in {"code", "code_writer"} or _tool_is_write(tool) else "read"
+        mode = "write" if node.agent in {"code", "code_writer"} or _tool_is_write(tool, inputs) else "read"
         claims.append(ResourceClaim(key=key, mode=mode))
 
-    if tool in {"todo_manager"}:
+    if tool in {"todo_manager"} and _tool_is_write(tool, inputs):
         claims.append(ResourceClaim(key="todo", mode="write"))
     if tool in {"calendar_manager"}:
         claims.append(ResourceClaim(key="calendar", mode="write"))
@@ -118,7 +126,7 @@ def prepare_node_safety(node: TaskNode, user_id: str, job_id: str) -> None:
         server = tool.split("__", 2)[1] if "__" in tool else "unknown"
         claims.append(ResourceClaim(key=f"mcp-server:{server}", mode="write"))
 
-    is_write = any(c.mode == "write" for c in claims) or _tool_is_write(tool)
+    is_write = any(c.mode == "write" for c in claims) or _tool_is_write(tool, inputs)
     if is_write and not claims:
         claims.append(ResourceClaim(key=f"tool:{tool or node.agent}", mode="write"))
     node.resource_claims = _normalize_claims(claims, user_id)

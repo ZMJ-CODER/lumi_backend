@@ -1,4 +1,4 @@
-"""Pure cursor and progress semantics for rolling task manifests."""
+"""滚动任务清单的纯游标计算与进度语义。"""
 
 from __future__ import annotations
 

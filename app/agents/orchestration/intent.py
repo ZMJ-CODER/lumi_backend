@@ -371,6 +371,16 @@ _STATEFUL_OFFICE_ACTION_RE = re.compile(
 _SCHEDULE_OR_TODO_ACTION_RE = re.compile(
     r"(?iu)(?:新建|创建|添加|删除|取消|修改|安排|设置).{0,20}(?:日程|日历|会议|待办|提醒)"
 )
+# 办公场景下的只读查询也必须进入受控工具/DAG 入口。客户端默认把工作区
+# 请求标成 ``scene=office``；若这里只检查文件或系统副作用，“现在几点”“查
+# 一下知识库”就会被误送到普通 LLM，模型随后只能声称没有查询能力。
+_READ_ONLY_TOOL_QUERY_RE = re.compile(
+    r"(?iu)(?:现在几点|当前(?:日期|时间)|今天(?:几号|日期|是几月几日)|"
+    r"(?:查询|查询下|查一下|查下|查查|搜索|搜一下|搜下|检索|找一下|查阅|看看|了解|核实).{0,40}"
+    r"(?:天气|新闻|汇率|行情|网页|网上|网络|公开资料|知识库|资料库|资料|文档|手册|"
+    r"政策|制度|标准|日期|时间|几点|状态|信息|内容|结果|数据|项目|记录|进度|服务|接口)|"
+    r"(?:计算|算一下|帮我算|算出).{0,80}[0-9０-９+\-*/×÷%（）()])"
+)
 
 
 def requires_office_execution(request: str, office_docs: list[dict] | None = None) -> bool:
@@ -385,6 +395,20 @@ def requires_office_execution(request: str, office_docs: list[dict] | None = Non
     text = (request or "").strip()
     if not text:
         return False
+    # “为什么不能查询/提示不能查询”是故障咨询，不是一次查询请求；交给
+    # 普通回答路径解释原因，避免把错误描述本身再次提交给检索工具。
+    if re.search(r"(?iu)(?:为什么|为何|怎么|无法|不能|不可|不支持).{0,8}(?:查询|搜索|检索)", text):
+        return False
+    # A user may explicitly describe a bounded, dependency-aware, read-only
+    # workflow.  Although its individual nodes only generate text, it still
+    # needs the execution runtime to preserve A/B parallelism and C/D
+    # dependencies.  Keep this narrow parser ahead of generic text handling;
+    # ordinary multi-paragraph writing remains on the direct chat path.
+    if "并行" in text:
+        from app.agents.orchestration.planning.read_only_dag import build_explicit_read_only_dag
+
+        if build_explicit_read_only_dag(text) is not None:
+            return True
     # An attachment is an explicit external source.  Its contents must be read
     # through the document capability rather than guessed from message text.
     if office_docs:
@@ -394,6 +418,10 @@ def requires_office_execution(request: str, office_docs: list[dict] | None = Non
     if extract_output_contract(text).get("requires_artifact"):
         return True
     if _STATEFUL_OFFICE_ACTION_RE.search(text):
+        return True
+    # 明确的只读工具意图（时间、精确计算、知识库/网页查询）同样需要
+    # 受控执行层；否则办公客户端会直接走无工具的普通聊天路径。
+    if _READ_ONLY_TOOL_QUERY_RE.search(text):
         return True
     return bool(_SCHEDULE_OR_TODO_ACTION_RE.search(text))
 

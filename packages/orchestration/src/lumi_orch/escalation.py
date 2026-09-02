@@ -1,4 +1,4 @@
-"""Typed escalation protocol between bounded workers and a DAG supervisor."""
+"""受限工作节点与 DAG 监督器之间的类型化升级协议。"""
 
 from __future__ import annotations
 

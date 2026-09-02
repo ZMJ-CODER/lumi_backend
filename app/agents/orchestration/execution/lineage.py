@@ -1,4 +1,4 @@
-"""Execution lineage, compact node-result references, and audit spans.
+"""执行谱系、紧凑节点结果引用与审计范围。
 
 The Job snapshot is intentionally not used as a replay payload.  A forked
 execution retains only a result reference (opaque id + content hash) for its

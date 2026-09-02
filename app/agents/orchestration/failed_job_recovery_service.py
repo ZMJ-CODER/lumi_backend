@@ -1,4 +1,4 @@
-"""Policy-preserving recovery coordinator for ordinary failed office jobs."""
+"""保留策略语义的普通办公失败任务恢复协调器。"""
 
 from __future__ import annotations
 

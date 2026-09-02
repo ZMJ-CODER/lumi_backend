@@ -1,4 +1,4 @@
-"""Lumi task validation adapter over the kernel outcome contract."""
+"""基于编排内核结果契约的 Lumi 任务校验适配器。"""
 
 from __future__ import annotations
 

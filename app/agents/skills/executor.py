@@ -13,6 +13,7 @@ import json
 import re
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -26,6 +27,7 @@ from app.core.agent_security import redact_server_text, sanitize_server_result, 
 from app.core.database import async_session_factory
 from app.models.db_models import ControlLog
 from app.services import client_tools
+from app.services.tool_output_projection import project_tool_output
 from app.services.usage import CATEGORY_CHAT, CATEGORY_SKILL
 
 
@@ -51,6 +53,52 @@ _OFFICE_REACT_ALLOWED_SKILLS = {
 }
 _OFFICE_REACT_DENIED_SKILLS = {"env"}
 _bootstrap_expiry_alerts: set[tuple[str, str]] = set()
+
+
+class ToolExecutionCoordinationUnavailable(RuntimeError):
+    """节点工具调用无法取得可靠互斥租约。"""
+
+
+@asynccontextmanager
+async def _claim_tool_execution(tool_name: str, execution_scope: str):
+    """在一个 DAG Job 内串行化同名工具的真实执行阶段。
+
+    规划、参数提取和工具选择不应占用锁；只有已经通过权限与确认检查的
+    ``call_skill`` / MCP 请求进入临界区。资源协调器同时使用进程内条件变量
+    与 Redis 租约，因此不同节点可并发调用不同工具，而恢复/重试不会让同一
+    Job 的两个节点同时驱动同一个工具实例。
+    """
+    if not execution_scope:
+        yield
+        return
+
+    from app.agents.orchestration.resources import (
+        ResourceClaim,
+        WriteResourceCoordinationUnavailable,
+        resource_coordinator,
+    )
+
+    claim = ResourceClaim(
+        key=f"global:tool-execution:job:{execution_scope}:tool:{tool_name}",
+        mode="write",
+    )
+    if not await resource_coordinator.write_coordination_available([claim]):
+        raise ToolExecutionCoordinationUnavailable("工具执行互斥协调服务不可用")
+    try:
+        async with resource_coordinator.claim([claim]):
+            yield
+    except WriteResourceCoordinationUnavailable as exc:
+        raise ToolExecutionCoordinationUnavailable("工具执行互斥协调服务不可用") from exc
+
+
+def _tool_coordination_failure(tool_name: str) -> SkillResult:
+    return SkillResult(
+        success=False,
+        error="工具执行互斥协调服务暂不可用，已阻止并发执行",
+        error_code="TOOL_EXECUTION_COORDINATION_UNAVAILABLE",
+        retryable=True,
+        metadata={"tool": tool_name},
+    )
 
 
 def tool_call_fingerprint(tool_name: str, args: dict, upstream_sha256: str = "") -> str:
@@ -141,6 +189,9 @@ class CapabilitySelection:
     candidates: list[dict]
     scene: str
     top_score: float = 0.0
+    second_score: float = 0.0
+    score_margin: float = 0.0
+    ambiguous: bool = False
     low_confidence: bool = False
     reason: str = "ranked"
     routing_mode: str = "lexical_fallback"
@@ -152,14 +203,22 @@ class CapabilitySelection:
             "injected_candidates": self.candidates,
             "candidate_count": len(self.candidates),
             "top_score": round(float(self.top_score), 3),
+            "second_score": round(float(self.second_score), 3),
+            "score_margin": round(float(self.score_margin), 3),
+            "ambiguous": bool(self.ambiguous),
             "low_confidence": bool(self.low_confidence),
             "reason": self.reason,
             "routing_mode": self.routing_mode,
         }
 
 
-def _skill_is_write(skill: Skill) -> bool:
+def _skill_is_write(skill: Skill, params: dict | None = None) -> bool:
     name = str(skill.name or "").lower()
+    # Mixed-action skills may be read-only for the current invocation (or when
+    # exposing their namespace to the planner).  Their override takes
+    # precedence over the coarse class-level write_op flag.
+    if params is not None and hasattr(skill, "is_write_operation"):
+        return bool(skill.is_write_operation(params))
     return bool(
         skill.write_op
         or skill.requires_confirmation
@@ -525,13 +584,37 @@ async def select_capabilities_with_trace(
         }
         for capability in selected
     ]
-    top_score = max((row["score"] for row in candidate_rows), default=0.0)
+    # Compute the runner-up from the legal ranked pool, not only the injected
+    # Top-K rows. This keeps margin meaningful when a caller asks for limit=1.
+    ordered_scores = sorted((float(row["score"]) for row in candidate_rows), reverse=True)
+    top_score = ordered_scores[0] if ordered_scores else 0.0
+    if len(ordered_scores) > 1:
+        second_score = ordered_scores[1]
+    elif candidate_rows:
+        top_name = str(candidate_rows[0].get("name") or "")
+        second_score = max(
+            (float(score) for score, _, capability, _ in ranked
+             if capability.name != top_name and float(score) > 0),
+            default=0.0,
+        )
+    else:
+        second_score = 0.0
+    score_margin = top_score - second_score
+    ambiguous = (
+        len(ordered_scores) > 1
+        and score_margin < float(settings.SKILL_CANDIDATE_MARGIN_THRESHOLD)
+    )
     return CapabilitySelection(
         capabilities=selected,
         candidates=candidate_rows,
         scene=scene,
         top_score=top_score,
-        low_confidence=bool(candidate_rows) and top_score < float(settings.SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE),
+        second_score=second_score,
+        score_margin=score_margin,
+        ambiguous=ambiguous,
+        low_confidence=bool(candidate_rows) and (
+            top_score < float(settings.SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE) or ambiguous
+        ),
         reason="bootstrap" if any(row["bootstrap"] for row in candidate_rows) else "ranked",
         routing_mode=routing_mode,
     )
@@ -564,13 +647,25 @@ async def select_capabilities_for_request(
 def _selection_with_capabilities(selection: CapabilitySelection, capabilities: list[ToolCapability], *, reason: str | None = None) -> CapabilitySelection:
     names = {item.name for item in capabilities}
     candidates = [item for item in selection.candidates if item.get("name") in names]
-    top_score = max((float(item.get("score") or 0.0) for item in candidates), default=0.0)
+    ordered_scores = sorted((float(item.get("score") or 0.0) for item in candidates), reverse=True)
+    top_score = ordered_scores[0] if ordered_scores else 0.0
+    second_score = ordered_scores[1] if len(ordered_scores) > 1 else 0.0
+    score_margin = top_score - second_score
+    ambiguous = (
+        len(ordered_scores) > 1
+        and score_margin < float(settings.SKILL_CANDIDATE_MARGIN_THRESHOLD)
+    )
     return CapabilitySelection(
         capabilities=capabilities,
         candidates=candidates,
         scene=selection.scene,
         top_score=top_score,
-        low_confidence=bool(candidates) and top_score < float(settings.SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE),
+        second_score=second_score,
+        score_margin=score_margin,
+        ambiguous=ambiguous,
+        low_confidence=bool(candidates) and (
+            top_score < float(settings.SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE) or ambiguous
+        ),
         reason=reason or selection.reason,
         routing_mode=selection.routing_mode,
     )
@@ -585,6 +680,27 @@ def request_has_explicit_tool_intent(request: str) -> bool:
         "算一下", "计算", "打开", "启动",
     )
     return any(marker in lower for marker in markers)
+
+
+def selection_requires_escalation(selection: CapabilitySelection, request: str) -> bool:
+    """Return whether an ambiguous tool pool must stop before model selection.
+
+    Margin is a safety gate only when the user explicitly requests an external
+    capability. Broad conversational requests may keep their bounded pool so
+    the model can answer without a needless clarification round.
+    """
+    if not selection.ambiguous:
+        return False
+    if request_has_explicit_tool_intent(request):
+        return True
+    # Ambiguous write/external candidates must not be left to an uncalibrated
+    # model choice even when the request wording does not contain a known
+    # trigger phrase. Read-only ties may continue through the bounded pool.
+    return any(
+        capability.write_op or capability.requires_confirmation
+        or capability.domain in {"communication", "desktop", "process"}
+        for capability in selection.capabilities
+    )
 
 
 def record_candidate_selection(
@@ -851,8 +967,13 @@ async def execute_tool_call(
     approval_context_sha256: str = "",
     office_doc_ids: tuple[str, ...] | list[str] | None = None,
     on_output=None,
+    execution_scope: str = "",
 ) -> SkillResult:
-    """执行一次技能调用：校验 → 高危拦截 → 执行 → 审计."""
+    """执行一次技能调用：校验 → 高危拦截 → 执行 → 审计。
+
+    ``execution_scope`` 仅由 DAG 节点执行器注入。它将同一 Job 中的同名工具
+    调用串行化，而不会影响普通聊天会话或不同工具的节点级并发。
+    """
     fn = tool_call.get("function") or {}
     name = str(fn.get("name") or "")
     args = _parse_arguments(fn.get("arguments"))
@@ -937,13 +1058,16 @@ async def execute_tool_call(
         if quota_acquired:
             register_active_binding_call(binding_id, active_task_id)
         try:
-            raw = await call_tool(
-                server_name,
-                tool_name,
-                args,
-                task_id=conversation_id or None,
-                on_progress=on_notify,
-            )
+            async with _claim_tool_execution(name, execution_scope):
+                raw = await call_tool(
+                    server_name,
+                    tool_name,
+                    args,
+                    task_id=conversation_id or None,
+                    on_progress=on_notify,
+                )
+        except ToolExecutionCoordinationUnavailable:
+            return _tool_coordination_failure(name)
         finally:
             if quota_acquired:
                 unregister_active_binding_call(binding_id, active_task_id)
@@ -1001,7 +1125,7 @@ async def execute_tool_call(
     # 删除同一目标时由已有窄范围策略放行。client 技能仍由用户端确认。
     # client 技能由用户端弹窗确认（执行体内部处理），不在此拦截
     if (
-        skill.requires_confirmation
+        skill.requires_confirmation_for(args)
         and skill.environment != "client"
         and not explicit_user_delete
         and not is_tool_call_confirmed(name, args, confirmed_tool_calls, approval_context_sha256)
@@ -1043,14 +1167,18 @@ async def execute_tool_call(
     from app.agents.mcp.manager import call_skill
 
     started_at = time.perf_counter()
-    raw = await call_skill(
-        skill,
-        args,
-        context=context,
-        task_id=conversation_id or None,
-        on_progress=on_notify,
-        execution_policy=execution_policy,
-    )
+    try:
+        async with _claim_tool_execution(name, execution_scope):
+            raw = await call_skill(
+                skill,
+                args,
+                context=context,
+                task_id=conversation_id or None,
+                on_progress=on_notify,
+                execution_policy=execution_policy,
+            )
+    except ToolExecutionCoordinationUnavailable:
+        return _tool_coordination_failure(name)
     result = SkillResult(
         success=bool(raw.get("success")) and not bool(raw.get("is_error")),
         output=str(raw.get("content") or "") if not raw.get("is_error") else "",
@@ -1350,26 +1478,7 @@ async def _run_skill_loop_legacy(
 
 def _result_for_model(result: SkillResult) -> str:
     """Legacy-loop equivalent of the LangChain model-facing result contract."""
-    if not result.success:
-        code = result.error_code or "EXEC_ERROR"
-        return (
-            f"工具未完成（{code}）：{result.error or '执行失败'}\n"
-            "下一步：修正参数、选择更合适的已授权工具，或向用户说明限制；不得绕过权限或确认。"
-        )
-    signals = result.decision_signals()
-    hints = []
-    if isinstance(signals.get("result_count"), int):
-        hints.append(f"结果数={signals['result_count']}")
-    confidence = signals.get("confidence_hint")
-    if isinstance(confidence, dict):
-        basis = "、".join(str(item)[:80] for item in confidence.get("basis") or [] if str(item).strip())
-        hints.append(f"置信提示={confidence.get('level')}（依据：{basis}）")
-    if signals.get("truncated"):
-        hints.append("结果已截断，请用更具体条件分批查询")
-    if signals.get("refine_suggestion"):
-        hints.append(f"细化建议={signals['refine_suggestion']}")
-    suffix = "\n[决策信号] " + "；".join(hints) if hints else ""
-    return (result.output or "步骤已完成") + suffix
+    return project_tool_output(result)
 
 
 async def run_skill_loop(
@@ -1395,7 +1504,7 @@ async def run_skill_loop(
     """
     from app.core.llm import LLMClient
 
-    # 办公 DAG 的原子节点仍由 LangGraphNodeRunner 编排；这里覆盖的是所有
+    # 办公 DAG 的原子节点仍由 NodeExecutionRunner 编排；这里覆盖的是所有
     # "模型自主调用多工具" 的循环。无论场景，实际能力都继续由 scene/role
     # 白名单和 execute_tool_call 的审计、资源与用户隔离裁决。
     use_graph = llm is None or isinstance(llm, LLMClient)

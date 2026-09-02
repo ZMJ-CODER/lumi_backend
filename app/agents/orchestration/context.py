@@ -137,6 +137,6 @@ async def build_dependency_context_from_refs(
 
 
 async def _resolve_dependency_ref(user_id: str, result_ref: dict | None) -> dict | None:
-    from app.agents.orchestration.execution_lineage import resolve_result_ref
+    from app.agents.orchestration.execution.lineage import resolve_result_ref
 
     return await resolve_result_ref(user_id, result_ref)

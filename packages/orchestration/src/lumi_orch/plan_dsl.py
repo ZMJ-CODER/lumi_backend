@@ -1,4 +1,4 @@
-"""Typed, backend-neutral static-plan DSL."""
+"""类型化、与运行时后端无关的静态计划领域语言。"""
 
 from __future__ import annotations
 

@@ -36,6 +36,37 @@ def test_approval_service_binds_confirmation_and_resumes_node():
     asyncio.run(scenario())
 
 
+def test_approval_service_allows_retrying_the_same_persisted_temporal_approval():
+    async def scenario():
+        store = InMemoryStateStore()
+        job = Job(
+            job_id="approval-retry",
+            user_id="u1",
+            request="编辑文档",
+            status=JobStatus.RUNNING,
+            nodes=[TaskNode(
+                id="n1",
+                agent="office_doc",
+                status=TaskStatus.PENDING,
+                approval=True,
+                metadata={
+                    "approval_tool": "office_doc_edit",
+                    "approval_fingerprint": "fp-1",
+                    "confirmed_tools": ["office_doc_edit"],
+                    "confirmed_tool_calls": ["fp-1"],
+                },
+            )],
+        )
+        await store.create_job(job)
+
+        result = await ApprovalService(store=store).resolve("approval-retry", "n1", True)
+
+        assert result.approved is True
+        assert result.job.nodes[0].metadata["confirmed_tool_calls"] == ["fp-1"]
+
+    asyncio.run(scenario())
+
+
 def test_approval_fingerprint_changes_when_upstream_content_changes():
     args = {"to": "alice@example.com", "body": "report"}
     assert tool_call_fingerprint("send_email", args, "result-v1") != tool_call_fingerprint(

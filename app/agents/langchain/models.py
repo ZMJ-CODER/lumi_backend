@@ -1,4 +1,4 @@
-"""LangChain ChatModel 工厂：复用 Lumi 的动态模型配置与 BYOK 边界。"""
+"""LangChain 对话模型工厂：复用 Lumi 的动态模型配置与 BYOK 边界。"""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.llm_config import get_llm_config
+from app.core.model_catalog import normalize_provider_base_url
+from app.core.network import resolve_http_proxy
 
 
 class CompatibleChatOpenAI(ChatOpenAI):
@@ -50,6 +52,8 @@ class CompatibleChatOpenAI(ChatOpenAI):
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        # ``extra_body`` 必须保持为 OpenAI SDK 约定的嵌套字段。不能把其中的
+        # ``thinking`` 展平到顶层，否则当前 SDK 会报 unexpected keyword argument。
         try:
             messages = convert_to_messages(input_)
             request_messages = payload.get("messages") or []
@@ -78,6 +82,15 @@ def _supports_reasoning_effort(model: str | None) -> bool:
     return str(model or "").strip().casefold() in enabled
 
 
+def _is_official_deepseek_v4(model: str | None, base_url: str) -> bool:
+    """判断是否为需遵循 DeepSeek 官方 V4 请求约定的端点。"""
+    parsed = urlparse(base_url)
+    return (
+        (parsed.hostname or "").casefold() == "api.deepseek.com"
+        and str(model or "").strip().casefold().startswith("deepseek-v4-")
+    )
+
+
 async def get_chat_model(
     *,
     scene: str | None,
@@ -96,10 +109,15 @@ async def get_chat_model(
     from app.core.model_catalog import normalize_model_id
 
     selected_model = normalize_model_id(model or cfg.get("model"))
-    options = {}
-    if reasoning_effort and _supports_reasoning_effort(selected_model):
+    selected_base_url = normalize_provider_base_url(base_url or cfg.get("base_url") or "")
+    options: dict[str, Any] = {}
+    if reasoning_effort and _is_official_deepseek_v4(selected_model, selected_base_url):
+        # 对齐 DeepSeek V4 官方示例：reasoning_effort 决定强度，thinking 显式
+        # 开启思考。仅限官方域名，避免把非标准字段传给第三方兼容网关。
         options["reasoning_effort"] = reasoning_effort
-    selected_base_url = (base_url or cfg.get("base_url") or "").rstrip("/")
+        options["extra_body"] = {"thinking": {"type": "enabled"}}
+    elif reasoning_effort and _supports_reasoning_effort(selected_model):
+        options["reasoning_effort"] = reasoning_effort
     if scene == "office":
         # 仅记录定位兼容接口问题所需的非敏感信息；不能记录 API key、完整
         # URL path 或用户输入。该行同时可作为容器是否已加载当前镜像的探针。
@@ -113,6 +131,7 @@ async def get_chat_model(
         model=selected_model,
         base_url=selected_base_url,
         api_key=api_key or cfg.get("api_key") or "",
+        openai_proxy=resolve_http_proxy(settings.LLM_HTTP_PROXY),
         timeout=float(timeout or cfg.get("timeout") or 120),
         temperature=temperature,
         max_completion_tokens=max_tokens,

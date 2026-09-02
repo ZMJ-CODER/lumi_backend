@@ -10,6 +10,7 @@ from app.core.model_catalog import (
     get_model_catalog,
     normalize_model_id,
     normalize_byok_base_url,
+    normalize_provider_base_url,
 )
 from app.services.orchestrator import (
     _chat_model_override,
@@ -94,6 +95,12 @@ def test_byok_endpoint_validation_rejects_private_or_credentials():
             raise AssertionError(f"expected invalid endpoint: {value}")
 
 
+def test_deepseek_official_endpoint_normalizes_legacy_v1_suffix():
+    assert normalize_provider_base_url("https://api.deepseek.com/v1/") == "https://api.deepseek.com"
+    assert normalize_byok_base_url("https://api.deepseek.com/v1") == "https://api.deepseek.com"
+    assert normalize_provider_base_url("https://gateway.example.com/v1") == "https://gateway.example.com/v1"
+
+
 def test_resolve_user_cfg_server_key():
     cfg = asyncio.run(
         _resolve_user_cfg(
@@ -121,8 +128,8 @@ def test_get_llm_config_prefers_user_layer(monkeypatch):
     assert cfg["base_url"] == settings.DEEPSEEK_BASE_URL
 
 
-def test_chat_env_fallback_uses_text_model():
-    assert _env_fallback(scene="chat")["model"] == settings.QWEN_MODEL
+def test_chat_env_fallback_uses_configured_provider():
+    assert _env_fallback(scene="chat")["model"] == settings.DEEPSEEK_MODEL
 
 
 def test_chat_knowledge_retrieval_is_on_demand():
@@ -147,16 +154,15 @@ def test_user_selected_chat_model_is_not_overridden(monkeypatch):
     assert asyncio.run(_get_chat_model_override("chat", "fast", None, "u-123")) is None
 
 
-def test_server_chat_override_uses_qwen_without_byok(monkeypatch):
-    monkeypatch.setattr(settings, "QWEN_MODEL", "qwen-turbo")
-    monkeypatch.setattr(settings, "QWEN_BASE_URL", "https://qwen.example/v1")
-    monkeypatch.setattr(settings, "QWEN_API_KEY", "qwen-key")
-    monkeypatch.setattr(settings, "DEEPSEEK_MODEL", "deepseek-chat")
+def test_chat_override_only_uses_explicit_thinking_triple(monkeypatch):
+    monkeypatch.setattr(settings, "CHAT_THINK_MODEL", "thinking-model")
+    monkeypatch.setattr(settings, "CHAT_THINK_BASE_URL", "https://thinking.example/v1")
+    monkeypatch.setattr(settings, "CHAT_THINK_API_KEY", "thinking-key")
 
     fast = _chat_model_override("chat", "fast", None)
     think = _chat_model_override("chat", "think", None)
 
-    assert fast and fast["model"] == "qwen-turbo"
-    assert fast["base_url"] == "https://qwen.example/v1"
-    assert think and think["model"] == "qwen-turbo"
+    assert fast is None
+    assert think and think["model"] == "thinking-model"
+    assert think["base_url"] == "https://thinking.example/v1"
     assert _chat_model_override("chat", "fast", "byok-key") is None

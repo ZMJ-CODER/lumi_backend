@@ -203,3 +203,43 @@ def test_chat_tool_graph_is_intent_gated_and_never_exposes_office_tools():
     names = {item["function"]["name"] for item in asyncio.run(get_tools_for_scene("chat"))}
     assert names <= {"web_search", "query_knowledge", "get_datetime", "calculator", "open_app"}
     assert "python_exec" not in names
+
+
+def test_stream_chat_forwards_tool_progress_as_sse_steps(monkeypatch):
+    """流式聊天不能在工具实际执行后把步骤信息丢失。"""
+    import app.services.orchestrator as orchestrator_module
+
+    orch = orchestrator_module.Orchestrator.__new__(orchestrator_module.Orchestrator)
+    orch._llm = object()
+    monkeypatch.setattr(orchestrator_module.settings, "AGENT_SKILLS_ENABLED", True)
+
+    async def no_override(*args, **kwargs):
+        return None
+
+    async def fake_skill_loop(*args, **kwargs):
+        progress = kwargs["on_progress"]
+        progress({"type": "step", "id": "calculator-1", "title": "calculator", "status": "running", "tool": "calculator"})
+        await asyncio.sleep(0)
+        progress({"type": "step", "id": "calculator-1", "title": "calculator", "status": "completed", "tool": "calculator", "output": "42"})
+        return "结果是 42", [{"skill": "calculator", "success": True}], []
+
+    monkeypatch.setattr(orchestrator_module, "_get_chat_model_override", no_override)
+    monkeypatch.setattr(orchestrator_module, "run_skill_loop", fake_skill_loop)
+
+    async def scenario():
+        return [
+            event
+            async for event in orch._stream_llm_auto(
+                "u1",
+                [{"role": "user", "content": "请用计算器计算"}],
+                "chat",
+                [],
+                "请用计算器计算",
+                [],
+            )
+        ]
+
+    events = asyncio.run(scenario())
+    steps = [event["step"] for event in events if event["type"] == "step"]
+    assert [step["status"] for step in steps] == ["running", "completed"]
+    assert events[-1] == {"type": "delta", "content": "结果是 42"}

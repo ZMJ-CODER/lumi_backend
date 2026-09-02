@@ -1,7 +1,7 @@
-"""Persistence boundaries used by orchestration services.
+"""编排服务使用的持久化边界。
 
-Repositories deliberately expose application-shaped operations instead of
-leaking Redis clients or SQLAlchemy sessions into planning code.
+仓储刻意暴露贴合应用的操作，而非将 Redis 客户端或 SQLAlchemy 会话泄漏给
+规划代码。
 """
 
 from app.repositories.job_repository import JobRepository, StateStoreJobRepository

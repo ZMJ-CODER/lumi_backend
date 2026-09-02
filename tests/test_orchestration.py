@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from app.agents.orchestration.dag import DagValidationError, execute_dag, validate_dag
+from app.agents.orchestration.execution.validation import DagValidationError, execute_dag, validate_dag
 from app.agents.orchestration.models import Job, JobStatus, ResourceClaim, TaskNode, TaskStatus
 from app.agents.orchestration.orchestrator import (
     ActiveConversationJobError,
@@ -16,7 +16,7 @@ from app.agents.orchestration.orchestrator import (
 )
 from app.agents.orchestration import admission
 from app.agents.orchestration.planner import Planner, TaskTree
-from app.agents.orchestration.plan_compilation_service import PlanCompilationService
+from app.agents.orchestration.planning.compilation import PlanCompilationService
 from app.agents.orchestration.review import NoopReviewer
 from app.agents.orchestration.state import InMemoryStateStore
 from app.agents.orchestration.task_manifest import authorize_manifest_source

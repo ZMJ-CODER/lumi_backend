@@ -27,6 +27,7 @@ from app.agents.skills.executor import (
     get_capabilities_for_scene,
     get_chat_capabilities_with_trace,
     record_candidate_selection,
+    selection_requires_escalation,
 )
 from app.core.agent_security import redact_server_text, wrap_untrusted_tool_output
 
@@ -111,6 +112,12 @@ class LangGraphChatRunner:
             )
         )
         capabilities = selection.capabilities
+        if selection_requires_escalation(selection, current_user_message):
+            record_candidate_selection(
+                selection, request=current_user_message, user_id=self.user_id,
+                job_id=self.conversation_id, selection_round=1,
+            )
+            return "当前有多个候选工具无法区分，请明确要使用哪类能力后再继续。", [], []
         tools = []
         for capability in capabilities:
             tool = await make_skill_tool(

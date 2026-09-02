@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 import re
 from typing import Any
 
-from app.agents.orchestration.policy.lexicon import action_markers, object_markers
+from app.agents.orchestration.policy.lexicon import action_markers, intent_markers, object_markers
 
 
 @dataclass(frozen=True)
@@ -57,6 +57,8 @@ class RouteIntent:
     resolution_notes: tuple[str, ...] = ()
     risk_level: str = "read_only"
     requires_dynamic: bool = False
+    # L3 模型自报值仅作观测提示，不参与确定性置信度计算。
+    classifier_confidence_hint: float = 0.0
 
 
 _ROUTE_ACTIONS = {
@@ -69,32 +71,8 @@ _ROUTE_OBJECTS = {
 }
 
 
-_ACTION_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("lookup_history", ("上次", "上回", "之前", "此前", "前面", "前文", "刚才那个", "刚才的结果", "刚才说的", "刚才那份", "当时", "历史记录", "那个结果", "之前的结果", "最后确认")),
-    ("converse", ("你怎么看", "你觉得", "怎么看待", "聊聊", "说说", "谈谈")),
-    ("send", ("发送", "发出", "转发", "发给", "发我", "send", "email", "e-mail", "forward")),
-    # Keep the bare verb useful for commands, but exclude common nouns such as
-    # “执行难度/执行成本”; substring matching must not turn analysis criteria
-    # into a system-command risk.
-    ("execute", ("打开", "启动", "运行", "执行", "访问", "关闭", "结束进程", "跑起来", "丢给测试环境", "run", "execute", "open")),
-    ("modify", ("修改", "编辑", "删除", "移除", "更新", "保存", "上传", "下载", "改一下", "修一下", "修好", "edit", "delete", "update", "save")),
-    ("transform", ("转换", "转成", "转为", "改成", "导出", "整理", "清洗", "合并", "拆分", "弄成", "做成", "压缩", "translate", "翻译", "convert", "format", "rewrite", "翻成")),
-    ("create", ("创建", "新建", "制作", "生成", "写一份", "写个", "编写", "一份新的", "画个", "存成", "create", "make", "generate", "table", "markdown table")),
-    ("analyze", ("分析", "判断", "对比", "比较", "比一下", "比一比", "比对", "放一起比", "总结", "概括", "提取", "提炼", "归纳", "判断问题", "问题在哪", "怎么回事", "对不对", "是不是", "有没有问题", "有没有坑", "风险", "哪里不对", "哪儿不对", "标一下", "标出来", "看着不太对", "探索", "规律", "summarize", "summary", "extract", "analyze", "compare", "review")),
-    ("read", ("读取", "阅读", "查看", "解析", "看看", "看下", "看一下", "看一遍", "读完", "过一遍", "过一下", "瞅瞅", "说明内容", "read", "inspect", "look at")),
-    ("query", ("查询", "查一下", "查查", "搜索", "搜一下", "检索", "了解", "解释", "说明", "告诉我", "列出", "找出", "找找", "找一下", "怎么看", "想知道", "会不会", "有没有", "能不能", "帮我确认", "催一下进度", "啥情况", "什么情况", "query", "search", "find out", "tell me")),
-)
-
-_OBJECT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("task_history", ("上次", "上回", "之前", "此前", "前面", "前文", "刚才那个", "刚才的结果", "刚才说的", "刚才那份", "当时", "历史记录", "那个结果", "最后确认")),
-    ("external_resource", ("网页", "网址", "网上", "网络", "公开资料", "外部资料", "链接", "web", "website", "online", "internet")),
-    ("application", ("应用", "软件", "程序", "浏览器", "计算器", "进程", "桌面")),
-    ("message", ("消息", "通知", "收件人", "联系人", "message", "email", "recipient")),
-    ("document", ("文档", "文件", "附件", "资料", "材料", "表格", "document", "file", "attachment", "spreadsheet", ".pdf", ".docx", ".xlsx", ".csv", ".txt")),
-    ("data", ("数据", "记录", "内容", "字段", "信息", "东西", "data", "content", "fields", "release note")),
-    ("task_result", ("结果", "日志", "报错", "错误", "异常", "返回", "空的", "乱码", "重复行", "字符串", "401", "404", "500", "missing_")),
-    ("project", ("项目", "代码库", "仓库")),
-)
+_ACTION_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = ()
+_OBJECT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 # The checked-in tuples above remain a compatibility fallback for old
 # deployments that have not mounted policy assets.  Normal deployments load
@@ -104,36 +82,29 @@ try:
     _ACTION_MARKERS = action_markers()
     _OBJECT_MARKERS = object_markers()
 except RuntimeError:
-    pass
+    # Fail closed: without a validated policy, no lexical capability is enabled.
+    _ACTION_MARKERS = ()
+    _OBJECT_MARKERS = ()
 
-# 仅识别“公开外部来源/明确联网”意图。时间词、天气、价格等领域词本身
-# 不足以证明需要 Tavily：它们可能指向用户自己的待办、附件或知识库。
-_NETWORK_MARKERS = (
-    "联网", "网上搜", "网页搜索", "搜索网页", "检索公开资料", "查网页", "给我来源",
-    "搜索新闻", "最新新闻", "公开资料", "web search", "search the web", "browse the web",
-)
-_NETWORK_CONTEXT_MARKERS = ("公开网页", "外部网站", "互联网来源", "网页链接")
-_RETRIEVAL_MARKERS = ("知识库", "上传的", "上传内容", "附件中", "资料中", "文档中", "文件中", "根据我的资料", "根据文档", "根据文件")
-_MULTI_CONNECTORS = ("然后", "接着", "之后", "并且", "同时", "另外", "还要", "最后", "再", "以及", "then", "next", "after that", "and then", "finally", "also")
-_VAGUE_REFERENTS = ("那个", "这份", "这个", "该文件", "它", "相关内容", "想要的样子")
-_VAGUE_ACTIONS = ("处理一下", "处理下", "整理一下", "弄一下", "做成我想要的样子", "帮我处理")
-_BARE_QUERY_COMMANDS = ("查询", "搜索", "检索")
-_GREETING_MARKERS = ("你好", "嗨", "哈喽", "早上好", "晚上好", "在吗")
-_FEEDBACK_MARKERS = (
-    "结果不对", "跑出来不对", "又错了", "有问题", "乱码", "异常", "报错", "错误", "数字不对",
-    "output is garbled", "garbled output", "wrong result", "something went wrong", "what went wrong",
-    "error", "failed", "failure", "bug", "incorrect",
-)
-_IMPLICIT_HISTORY_MARKERS = ("也发给", "再发给", "同样发给", "改成", "它怎么", "它又", "图表里")
-_DYNAMIC_MARKERS = (
-    "探索一下", "探索", "根据结果", "能修就修", "按这个思路继续", "继续做下去",
-    "try to fix", "try a low-risk fix", "if possible fix", "diagnose and fix",
-    "figure out what went wrong", "determine what went wrong", "根据分析结果",
-)
-_CONDITIONAL_MARKERS = (
-    "如果", "若", "要是", "否则", "不然", "根据结果", "满足条件", "超过", "低于", "达到",
-    "if ", "unless ", "otherwise", "depending on", "when ", "exceeds", "below",
-)
+# These are policy data, not executable routing logic.  A failed load leaves
+# the groups empty so high-risk requests cannot silently acquire capabilities.
+try:
+    _INTENT_MARKERS = intent_markers()
+except RuntimeError:
+    _INTENT_MARKERS = {}
+
+_NETWORK_MARKERS = _INTENT_MARKERS.get("network", ())
+_NETWORK_CONTEXT_MARKERS = _INTENT_MARKERS.get("network_context", ())
+_RETRIEVAL_MARKERS = _INTENT_MARKERS.get("retrieval", ())
+_MULTI_CONNECTORS = _INTENT_MARKERS.get("multiple_connectors", ())
+_VAGUE_REFERENTS = _INTENT_MARKERS.get("vague_referents", ())
+_VAGUE_ACTIONS = _INTENT_MARKERS.get("vague_actions", ())
+_BARE_QUERY_COMMANDS = _INTENT_MARKERS.get("bare_query_commands", ())
+_GREETING_MARKERS = _INTENT_MARKERS.get("greetings", ())
+_FEEDBACK_MARKERS = _INTENT_MARKERS.get("feedback", ())
+_IMPLICIT_HISTORY_MARKERS = _INTENT_MARKERS.get("implicit_history", ())
+_DYNAMIC_MARKERS = _INTENT_MARKERS.get("dynamic", ())
+_CONDITIONAL_MARKERS = _INTENT_MARKERS.get("conditional", ())
 
 
 def _matches(text: str, markers: tuple[str, ...]) -> bool:
@@ -172,7 +143,7 @@ def _action_steps(text: str, actions: list[str], objects: list[str]) -> tuple[Ac
         ]
         if marker_positions:
             position = min(marker_positions)
-        elif action == "lookup_history" and any(token in text for token in ("也发给", "再发给", "同样发给", "继续")):
+        elif action == "lookup_history" and (_matches(text, _IMPLICIT_HISTORY_MARKERS) or "继续" in text):
             position = 0
         else:
             position = len(text) + len(positions)
@@ -192,14 +163,14 @@ def _resolve_references(
     notes: list[str] = []
     resolved = text
     has_context = bool(docs or prior_summaries.strip())
-    if "也发给" in text or "再发给" in text or "同样发给" in text:
+    if _matches(text, _IMPLICIT_HISTORY_MARKERS[:3]):
         if has_context:
             notes.append("send_target_inherited_from_recent_context")
         else:
             notes.append("send_target_context_missing")
     if "改成" in text and has_context:
         notes.append("transform_input_inherited_from_recent_context")
-    if any(marker in text for marker in ("它怎么", "它又", "图表里")):
+    if _matches(text, _IMPLICIT_HISTORY_MARKERS[4:]):
         if has_context:
             notes.append("feedback_subject_inherited_from_recent_context")
         else:
@@ -238,9 +209,9 @@ def infer_route_intent(
             actions.append(action)
     if _matches(text, _GREETING_MARKERS) and "converse" not in actions:
         actions.append("converse")
-    if any(marker in text for marker in ("也发给", "再发给", "同样发给")) and has_context and "lookup_history" not in actions:
+    if _matches(text, _IMPLICIT_HISTORY_MARKERS[:3]) and has_context and "lookup_history" not in actions:
         actions.append("lookup_history")
-    if any(marker in text for marker in ("按这个思路继续", "继续做下去", "继续")) and has_context and "lookup_history" not in actions:
+    if (_matches(text, _DYNAMIC_MARKERS[:2]) or "继续" in text) and has_context and "lookup_history" not in actions:
         actions.append("lookup_history")
     objects: list[str] = []
     for obj, markers in _OBJECT_MARKERS:
@@ -425,7 +396,7 @@ async def classify_route_with_llm(
         "needs_clarification 仅在缺少关键对象/收件人/目标时为 true。"
         "不要因为不知道行业实体就澄清，行业实体属于对象内容而非路由类别。\n"
         "JSON 字段：actions(list), objects(list), requires_dynamic(bool), "
-        "needs_clarification(bool), confidence(0到1数字), reason(短字符串)。\n"
+        "needs_clarification(bool), confidence_hint(0到1数字，仅作观测提示), reason(短字符串)。\n"
         f"用户请求：{request[:4000]}\n"
         f"近期文件：{', '.join(doc_names[:8]) or '无'}\n"
         f"近期上下文（仅供指代消解）：{prior_summaries[:1200] or '无'}"
@@ -454,7 +425,7 @@ async def classify_route_with_llm(
     if not actions and not objects:
         return None
     try:
-        confidence = max(0.0, min(1.0, float(value.get("confidence", 0.0))))
+        confidence = max(0.0, min(1.0, float(value.get("confidence_hint", value.get("confidence", 0.0)))))
     except (TypeError, ValueError):
         confidence = 0.0
     return {
@@ -462,7 +433,7 @@ async def classify_route_with_llm(
         "objects": tuple(dict.fromkeys(objects)),
         "requires_dynamic": bool(value.get("requires_dynamic")),
         "needs_clarification": bool(value.get("needs_clarification")),
-        "confidence": confidence,
+        "confidence_hint": confidence,
         "reason": str(value.get("reason") or "长尾语言由轻量分类器识别"),
     }
 
@@ -484,7 +455,7 @@ def merge_llm_route_intent(intent: RouteIntent, candidate: dict[str, Any], reque
         "write" if any(action in actions for action in ("modify", "transform")) else
         intent.risk_level
     )
-    model_confidence = float(candidate.get("confidence") or 0.0)
+    model_confidence_hint = float(candidate.get("confidence_hint") or candidate.get("confidence") or 0.0)
     base_confidence = intent.confidence_detail or RoutingConfidence(0.2, 0.45, 0.35, 0.55, "unknown")
     newly_side_effectful = side_effect and not intent.requires_side_effect
     missing_send_target = (
@@ -502,8 +473,11 @@ def merge_llm_route_intent(intent: RouteIntent, candidate: dict[str, Any], reque
     )
     confidence_detail = replace(
         base_confidence,
-        intent=max(intent.confidence_detail.intent if intent.confidence_detail else 0.2, model_confidence),
-        object=max(base_confidence.object, model_confidence) if objects else base_confidence.object,
+        # The LLM value is deliberately not merged into deterministic
+        # confidence. It is an uncalibrated self-report and remains telemetry
+        # only until a labelled calibration set supplies a validated mapping.
+        intent=base_confidence.intent,
+        object=base_confidence.object,
         safety=safety,
         state="ambiguous" if intent.needs_clarification or candidate.get("needs_clarification") or missing_send_target or missing_execute_target else "known",
     )
@@ -530,6 +504,7 @@ def merge_llm_route_intent(intent: RouteIntent, candidate: dict[str, Any], reque
         reason=reason,
         action_steps=action_steps,
         confidence_detail=confidence_detail,
+        classifier_confidence_hint=max(0.0, min(1.0, model_confidence_hint)),
         risk_level=risk_level,
         requires_dynamic=dynamic,
     )

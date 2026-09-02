@@ -1,4 +1,4 @@
-"""Deterministic first-pass targeting for questions over a document set."""
+"""面向文档集合问答的确定性首轮定位。"""
 
 from __future__ import annotations
 

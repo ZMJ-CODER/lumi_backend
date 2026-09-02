@@ -1,4 +1,4 @@
-"""Lumi settings/metrics adapter for kernel channel concurrency leases."""
+"""内核通道并发租约的 Lumi 配置与指标适配器。"""
 
 from __future__ import annotations
 

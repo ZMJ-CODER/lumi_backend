@@ -1,4 +1,4 @@
-"""Pure rolling-plan progress and bounded frontier selection."""
+"""纯滚动计划进度计算与有界前沿选择。"""
 
 from __future__ import annotations
 

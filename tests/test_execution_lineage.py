@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from app.agents.core.base import WorkerAgent, WorkerContext
-from app.agents.orchestration.execution_lineage import (
+from app.agents.orchestration.execution.lineage import (
     list_node_spans,
     persist_result_ref,
     record_node_span,

@@ -105,6 +105,7 @@ class WorkerAgent(ABC):
             llm_config=ctx.llm_config,
             on_output=ctx.on_output,
             office_doc_ids=ctx.office_doc_ids,
+            execution_scope=ctx.job_id,
         )
         if not result.success:
             return {

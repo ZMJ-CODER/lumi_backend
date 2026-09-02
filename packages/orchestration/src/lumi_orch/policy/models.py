@@ -1,4 +1,4 @@
-"""Pydantic contract for the intentionally small policy language."""
+"""刻意保持精简的策略语言的 Pydantic 数据契约。"""
 
 from __future__ import annotations
 

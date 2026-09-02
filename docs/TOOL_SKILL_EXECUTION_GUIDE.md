@@ -37,6 +37,8 @@
 | Candidate recall | 从合法 Skill 池召回并注入 Top-K | `candidate_recall@K`、错误注入率、低置信告警 |
 | Model selection | 模型在已注入候选中选择或不选择工具 | `selection_accuracy_given_candidates`、不必要调用率 |
 
+候选 trace 还记录 `top_score`、`second_score`、`score_margin` 和 `ambiguous`。margin 使用过滤后的合法候选分数计算；即使只注入一个候选，也会从合法池保留第二名用于歧义评估。`SKILL_CANDIDATE_MARGIN_THRESHOLD` 以下视为近似并列：只读请求保留受限候选并记录告警，明确工具意图或涉及写入/外部系统时停止工具调用并要求澄清。
+
 选择 trace 仅记录场景、轮次、`routing_mode`、候选 `name/version/score/bootstrap/availability_hint`、最终调用和未调用候选；不会记录用户原文、提示词、参数、思维链或工具正文。`routing_mode=semantic` 表示索引已就绪，`lexical_fallback` 表示索引未就绪或故障；后者必须由监控统计，不能静默混用。`availability_hint=circuit_breaker` 表示已授权外部 MCP 工具暂时不可用，但仍可被模型看见并得到受控错误，而不是被静默摘除。办公 DAG 将 trace 写入 `tool_metadata.selection_traces`，聊天写入监控事件。若请求有明确工具意图（如“联网并给网页来源”“从知识库查”“现在几点”）而候选为空或低于 `SKILL_CANDIDATE_LOW_CONFIDENCE_SCORE`，系统告警并禁止模型伪称已经核验；该告警不会强制调用工具。
 
 新 Skill 可声明 `bootstrap_intents + bootstrap_until`：仅在有效日期内且命中限定意图时优先进入候选池，绝不全量注入；到期自动回归普通排序。到期前三天必须观察候选命中/选择率告警，而不是无条件续期。

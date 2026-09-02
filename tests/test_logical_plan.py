@@ -66,6 +66,69 @@ def test_logical_plan_does_not_materialize_when_budget_is_exhausted():
     asyncio.run(scenario())
 
 
+def test_logical_plan_collect_node_keeps_result_references_without_copying_bodies():
+    async def scenario():
+        source = _node("source")
+        collect = TaskNode(
+            id="collect",
+            name="汇总结果",
+            agent="collect_results",
+            params={"items": ["source"]},
+            depends_on=["source"],
+        )
+        plan = await create_logical_plan("collect-owner", [source, collect])
+        first = materialize_frontier(plan, limit=1)
+        first[0].status = TaskStatus.COMPLETED
+        first[0].result = {"success": True, "content": "only in result storage"}
+        await commit_frontier_results("collect-owner", plan, first)
+
+        second = materialize_frontier(plan, limit=1)
+        assert [node.id for node in second] == ["collect"]
+        assert second[0].params["items"] == ["source"]
+        refs = second[0].metadata["logical_collection_refs"]
+        assert refs[0]["node_id"] == "source"
+        assert set(refs[0]["result_ref"]) == {"id", "sha256"}
+        assert "only in result storage" not in str(second[0].metadata)
+        # 物化汇总节点不能改写已完成前序节点的逻辑状态。
+        assert plan["nodes"]["source"]["status"] == "completed"
+        assert plan["nodes"]["collect"]["status"] == "materialized"
+
+    asyncio.run(scenario())
+
+
+def test_logical_plan_three_windows_commit_every_node_without_regressing_dependencies():
+    """汇总窗口不能把第二个已完成节点回退成 materialized。"""
+    async def scenario():
+        first = _node("first")
+        second = _node("second", depends_on=["first"])
+        collect = TaskNode(
+            id="collect",
+            name="汇总结果",
+            agent="collect_results",
+            params={"items": ["first", "second"]},
+            depends_on=["second"],
+        )
+        plan = await create_logical_plan("three-window-owner", [first, second, collect])
+
+        for expected_id in ("first", "second", "collect"):
+            window = materialize_frontier(plan, limit=1)
+            assert [node.id for node in window] == [expected_id]
+            window[0].status = TaskStatus.COMPLETED
+            window[0].result = {"success": True, "content": f"{expected_id} output"}
+            await commit_frontier_results("three-window-owner", plan, window)
+
+        assert logical_plan_progress(plan) == {
+            "total": 3,
+            "completed": 3,
+            "failed": 0,
+            "cancelled": 0,
+            "pending": 0,
+        }
+        assert all(record["status"] == "completed" for record in plan["nodes"].values())
+
+    asyncio.run(scenario())
+
+
 def test_logical_plan_replan_replaces_only_unfinished_tail():
     class ReplacementPlanner(Planner):
         async def plan(self, *args, **kwargs):

@@ -19,6 +19,8 @@ from loguru import logger
 from app.agents.langchain.models import get_chat_model
 from app.core.config import settings
 from app.core.llm_config import get_llm_config
+from app.core.model_catalog import normalize_provider_base_url
+from app.core.network import resolve_http_proxy
 from app.core.resilience import get_breaker, is_transient_dependency_error
 from app.services.usage import estimate_tokens, record_usage
 
@@ -83,7 +85,10 @@ class LLMClient:
         llm_config: dict[str, Any] | None = None,
     ):
         cfg = dict(llm_config or await get_llm_config(scene, self.provider, user_id=user_id))
-        selected_base_url = (base_url or cfg.get("base_url") or "").rstrip("/")
+        # 所有入口（.env、Redis 动态配置、用户 BYOK）在真正创建客户端前走
+        # 同一套地址规范化。否则历史 DeepSeek ``/v1`` 配置会在断路器、日志
+        # 与实际请求之间产生不一致，也不利于定位连接问题。
+        selected_base_url = normalize_provider_base_url(base_url or cfg.get("base_url") or "")
         selected_api_key = api_key or cfg.get("api_key") or ""
         selected_model = model or cfg.get("model") or settings.DEEPSEEK_MODEL
         selected_timeout = float(timeout or cfg.get("timeout") or 120.0)
@@ -414,10 +419,16 @@ class LLMClient:
     async def embed(self, texts: list[str], *, scene: str | None = None, model: str | None = None) -> list[list[float]]:
         """Embedding 专用 OpenAI-compatible 调用（不属于 ChatModel 迁移范围）。"""
         cfg = await get_llm_config(scene, self.provider)
-        async with AsyncClient(
-            base_url=(cfg.get("base_url") or "").rstrip("/"), headers={"Authorization": f"Bearer {cfg.get('api_key') or ''}"},
-            timeout=float(cfg.get("timeout") or 120.0),
-        ) as client:
+        client_options: dict[str, Any] = {
+            "base_url": normalize_provider_base_url(cfg.get("base_url") or ""),
+            "headers": {"Authorization": f"Bearer {cfg.get('api_key') or ''}"},
+            "timeout": float(cfg.get("timeout") or 120.0),
+        }
+        # ChatModel 与 embedding 必须使用同一网络出口。此前仅前者读取
+        # ``LLM_HTTP_PROXY``，会造成对话可用而 RAG/记忆写入持续连接失败。
+        if proxy := resolve_http_proxy(settings.LLM_HTTP_PROXY):
+            client_options["proxy"] = proxy
+        async with AsyncClient(**client_options) as client:
             response = await client.post("/embeddings", json={"model": model or settings.EMBEDDING_MODEL, "input": texts})
             response.raise_for_status()
             return [item["embedding"] for item in response.json()["data"]]

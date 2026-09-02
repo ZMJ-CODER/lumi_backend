@@ -1,4 +1,4 @@
-"""Approval-gate state updates for orchestration control plane."""
+"""编排控制面的审批门状态更新。"""
 
 from __future__ import annotations
 
@@ -46,7 +46,28 @@ class ApprovalService:
         if job is None:
             raise RuntimeError("任务不存在")
         node = next((item for item in job.nodes if item.id == node_id), None)
-        if node is None or not (node.metadata or {}).get("awaiting_approval"):
+        if node is None:
+            raise RuntimeError("该任务节点当前不在等待审批")
+        metadata = dict(node.metadata or {})
+        if not metadata.get("awaiting_approval"):
+            # A Temporal signal may fail after the durable approval decision
+            # has been written.  Preserve retryability: the control plane can
+            # resend the same immutable decision without manufacturing a new
+            # confirmation credential or falling back to Legacy.
+            if (
+                approved
+                and node.status == TaskStatus.PENDING
+                and metadata.get("approval_tool")
+                and metadata.get("approval_fingerprint")
+                and metadata.get("confirmed_tool_calls")
+            ):
+                return ApprovalResult(job=job, approved=True, node_id=node_id)
+            if (
+                not approved
+                and node.status == TaskStatus.SKIPPED
+                and node.error == "用户拒绝审批"
+            ):
+                return ApprovalResult(job=job, approved=False, node_id=node_id)
             raise RuntimeError("该任务节点当前不在等待审批")
         if await self.expire_if_due(job):
             raise RuntimeError("审批等待已超时，任务已停止")
@@ -57,7 +78,6 @@ class ApprovalService:
             job.status = JobStatus.FAILED
             job.error = "用户拒绝了高风险步骤的执行"
         else:
-            metadata = dict(node.metadata or {})
             tool = str(metadata.get("approval_tool") or "")
             fingerprint = str(metadata.get("approval_fingerprint") or "")
             if not tool or not fingerprint:

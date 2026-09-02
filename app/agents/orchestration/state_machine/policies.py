@@ -1,4 +1,4 @@
-"""Lumi enum compatibility exports for kernel orchestration policies."""
+"""编排内核策略枚举在 Lumi 中的直接导出。"""
 
 from __future__ import annotations
 

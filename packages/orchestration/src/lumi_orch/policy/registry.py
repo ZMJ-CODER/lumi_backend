@@ -1,4 +1,4 @@
-"""Controlled hook interfaces; the app owns concrete hook implementations."""
+"""受控策略钩子接口；具体钩子实现由应用层持有。"""
 
 from __future__ import annotations
 

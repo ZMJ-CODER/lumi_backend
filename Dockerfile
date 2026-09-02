@@ -71,12 +71,24 @@ RUN if [ "$ENABLE_CUDA_TORCH" = "true" ]; then \
 
 WORKDIR /app
 
-# 先复制依赖清单，Docker 会据此识别依赖变化。
+# 先复制依赖清单与两个本地包的元数据。依赖安装层只受这些清单影响；
+# 普通业务代码改动不会重新下载 torch、docling 等大型依赖。
 COPY pyproject.toml uv.lock ./
-# ``pip install -e .`` 不能在源码缺失时运行：冷构建会因 setuptools 找不到 app 包失败。
-# 因此先复制源码，再用项目清单安装运行时依赖。
+COPY packages/orchestration/pyproject.toml ./packages/orchestration/pyproject.toml
+COPY packages/execution/pyproject.toml ./packages/execution/pyproject.toml
+
+# ``pip install .`` 必须在源码存在时构建本项目；先根据项目清单安装第三方
+# 运行时依赖，再在复制源码后以 --no-deps 安装本地包。这样保留 pip 解析语义，
+# 同时把昂贵依赖置于稳定 Docker 缓存层。两个 lumi-* 包由后续本地安装提供，
+# 不能向远端索引解析。
+RUN python -c "import tomllib; deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']; open('/tmp/runtime-requirements.txt', 'w', encoding='utf-8').write('\\n'.join(item for item in deps if not item.startswith(('lumi-orchestration', 'lumi-execution'))))" \
+    && pip install --no-cache-dir -r /tmp/runtime-requirements.txt \
+    && rm -f /tmp/runtime-requirements.txt
+
+# 复制实际运行源码。测试、文档、运行数据和本地密钥已由 .dockerignore 排除。
 COPY app ./app
 COPY packages/orchestration ./packages/orchestration
+COPY packages/execution ./packages/execution
 COPY celery_app ./celery_app
 COPY scripts ./scripts
 COPY tools ./tools
@@ -85,12 +97,8 @@ COPY config ./config
 COPY alembic ./alembic
 COPY alembic.ini ./
 
-# ``pip`` 下载缓存会和安装后的大型运行时依赖（torch/docling）同时占用
-# CI runner 的 Docker 磁盘，导致安装尚未完成即 ENOSPC。这里不保留 wheel
-# 缓存；Docker 层缓存仍会在依赖没有变化时复用完整安装层。
-# ``pip install .`` 会安装 pyproject 的完整运行时集合；导入检查让
-# temporalio / striprtf 遗漏在构建期失败。
-RUN pip install --no-cache-dir ./packages/orchestration . \
+# 本地包不再次触发依赖解析；完整依赖已在上一稳定层安装。
+RUN pip install --no-cache-dir --no-deps ./packages/orchestration ./packages/execution . \
     && python -c "import lumi_orch; import striprtf; import temporalio; import app.main; print('runtime dependency check passed')"
 
 # ── Docling 模型预热（可选，默认关闭）──

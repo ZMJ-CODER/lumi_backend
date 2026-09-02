@@ -172,6 +172,19 @@ class Skill(ABC):
             return True
         return scene in self.scenes
 
+    def requires_confirmation_for(self, params: dict | None = None) -> bool:
+        """Return whether this invocation needs confirmation.
+
+        Most skills have a fixed confirmation policy.  Skills exposing both
+        read and write actions can override this method so the policy follows
+        the concrete action instead of blocking harmless reads.
+        """
+        return bool(self.requires_confirmation)
+
+    def is_write_operation(self, params: dict | None = None) -> bool:
+        """Return whether this concrete invocation can change external state."""
+        return bool(self.write_op)
+
     def to_tool_definition(self) -> dict:
         """转成 OpenAI/Qwen 兼容的 function calling 工具定义."""
         desc = self.description

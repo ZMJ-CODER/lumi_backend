@@ -1,4 +1,4 @@
-"""Backend-neutral node timeout selection."""
+"""与运行时后端无关的节点超时选择逻辑。"""
 
 from __future__ import annotations
 

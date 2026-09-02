@@ -1,4 +1,4 @@
-"""Shared terminal-job side effects for every execution runtime."""
+"""各执行运行时共用的终态任务副作用。"""
 
 from __future__ import annotations
 

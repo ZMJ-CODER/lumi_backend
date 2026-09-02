@@ -46,10 +46,15 @@ class TodoManagerSkill(Skill):
     name = "todo_manager"
     description = (
         "个人日程/待办管理：新增、查看、完成、删除待办事项（按用户隔离，保存在本地）。"
-        "动作 action=add/list/complete/delete"
+        "动作 action=add/list/complete/delete；add、complete、delete 会修改待办并需确认，list 只读无需确认"
     )
     category = "office"
     environment = "server"
+    # 待办工具同时提供只读 list 和有副作用的 add/complete/delete。
+    # 确认策略按 action 判断，避免查看待办也被错误拦截。
+    # 这是一个混合读写工具，具体确认策略由 requires_confirmation_for()
+    # 按 action 决定；不能用类级 True 误导只读 list 调用。
+    requires_confirmation = False
     write_op = True
     scenes = ["office", "chat"]
     parameters_schema = {
@@ -62,6 +67,14 @@ class TodoManagerSkill(Skill):
         },
         "required": ["action"],
     }
+
+    def requires_confirmation_for(self, params: dict | None = None) -> bool:
+        action = str((params or {}).get("action") or "").strip().lower()
+        return action in {"add", "complete", "delete"}
+
+    def is_write_operation(self, params: dict | None = None) -> bool:
+        action = str((params or {}).get("action") or "").strip().lower()
+        return action in {"add", "complete", "delete"}
 
     async def execute(self, params: dict, context: SkillContext | None = None) -> SkillResult:
         if not context or not context.user_id:

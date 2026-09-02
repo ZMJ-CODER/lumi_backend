@@ -1,4 +1,4 @@
-"""Compile model-facing Skill selection policy from registry metadata."""
+"""依据注册表元数据编译面向模型的 Skill 选择策略。"""
 
 from __future__ import annotations
 

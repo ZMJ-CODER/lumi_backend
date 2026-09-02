@@ -1,8 +1,7 @@
-"""Safe structured logging facade.
+"""安全的结构化日志门面。
 
-The facade deliberately fails open: a monitoring failure must never break a
-user task.  Loguru remains the actual sink so existing deployment logging is
-unchanged; a later adapter can additionally persist events or send Sentry.
+该门面刻意采用失败开放：监控失败绝不能中断用户任务。Loguru 仍是实际输出端，
+因此既有部署日志不变；后续适配器可额外持久化事件或发送 Sentry。
 """
 
 from __future__ import annotations

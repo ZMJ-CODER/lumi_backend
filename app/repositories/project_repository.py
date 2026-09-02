@@ -1,4 +1,4 @@
-"""Project index repository used by planners."""
+"""供规划器查询项目索引的仓储。"""
 
 from __future__ import annotations
 

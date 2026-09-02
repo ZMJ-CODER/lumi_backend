@@ -16,6 +16,7 @@ from app.agents.skills.prompting import build_tool_selection_contract
 from app.agents.skills.executor import (
     get_office_react_capabilities_with_trace,
     record_candidate_selection,
+    selection_requires_escalation,
 )
 from app.core.agent_security import redact_server_text, wrap_untrusted_tool_output
 
@@ -116,6 +117,18 @@ class OfficeReactRunner:
                         scene="office",
                         reason="legacy_selector",
                     )
+                if selection_requires_escalation(selection, route_text):
+                    self.selection_traces.append(record_candidate_selection(
+                        selection,
+                        request=route_text,
+                        user_id=self.user_id,
+                        job_id=self.job_id,
+                        selection_round=int(state.get("rounds") or 0) + 1,
+                    ))
+                    return {
+                        "messages": [AIMessage(content="当前有多个候选工具无法区分，请明确要使用哪类能力后再继续。")],
+                        "allowed_tools": [],
+                    }
                 capabilities = selection.capabilities
                 if len(internal_docs) >= 2:
                     # Discovery is an operational prerequisite, not merely a
@@ -150,6 +163,7 @@ class OfficeReactRunner:
                         user_message=self.user_request, llm_config=self.llm_config,
                         approval_context_sha256=self.approval_context_sha256,
                         office_doc_ids=[str(item.get("doc_id")) for item in internal_docs],
+                        execution_scope=self.job_id,
                     )
                     if tool is not None:
                         tool_pairs.append((capability.name, tool))
@@ -237,6 +251,7 @@ class OfficeReactRunner:
                     user_message=self.user_request, llm_config=self.llm_config,
                     approval_context_sha256=self.approval_context_sha256,
                     office_doc_ids=[str(item.get("doc_id")) for item in internal_docs],
+                    execution_scope=self.job_id,
                 )
                 if tool is None:
                     return {"messages": [ToolMessage(

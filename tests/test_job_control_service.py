@@ -1,7 +1,7 @@
 import asyncio
 
 from app.agents.orchestration.control_service import JobControlService
-from app.agents.orchestration.execution_backend import BackendControlResult
+from app.agents.orchestration.backends.contracts import BackendControlResult
 from app.agents.orchestration.models import Job, JobStatus
 from app.agents.orchestration.state import InMemoryStateStore
 

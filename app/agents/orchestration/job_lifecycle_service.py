@@ -1,4 +1,4 @@
-"""Post-submission lifecycle responsibilities for office jobs."""
+"""办公任务提交后的生命周期职责。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Stable error taxonomy shared by orchestration runtime adapters."""
+"""编排运行时适配器共用的稳定错误分类。"""
 
 from __future__ import annotations
 

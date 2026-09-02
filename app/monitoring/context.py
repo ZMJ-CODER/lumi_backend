@@ -1,4 +1,4 @@
-"""Correlation context for structured monitoring events."""
+"""结构化监控事件的关联上下文。"""
 
 from __future__ import annotations
 

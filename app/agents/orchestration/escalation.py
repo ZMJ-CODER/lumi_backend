@@ -1,4 +1,4 @@
-"""Application compatibility layer for the standalone escalation protocol."""
+"""独立升级协议的应用适配层。"""
 
 from __future__ import annotations
 

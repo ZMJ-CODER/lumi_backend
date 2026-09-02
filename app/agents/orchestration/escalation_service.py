@@ -1,4 +1,4 @@
-"""Deterministic handling of task-level escalation signals."""
+"""任务级升级信号的确定性处理。"""
 
 from __future__ import annotations
 

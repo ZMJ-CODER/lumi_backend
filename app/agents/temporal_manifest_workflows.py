@@ -1,9 +1,7 @@
-"""Rolling Temporal workflow for explicitly authorized office task manifests.
+"""面向显式授权办公任务清单的滚动 Temporal 工作流。
 
-The workflow state is intentionally tiny: Job and node output stay in Redis,
-and user credentials stay in the short-lived credential bridge.  This keeps
-Temporal history suitable for long lists and prevents document/tool payloads
-from becoming workflow inputs.
+工作流状态刻意保持精简：Job 和节点输出留在 Redis，用户凭据留在短生命周期
+凭据桥中。这样既使 Temporal 历史适合长清单，也避免文档或工具负载成为工作流输入。
 """
 
 import asyncio

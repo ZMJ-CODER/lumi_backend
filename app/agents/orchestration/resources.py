@@ -1,4 +1,4 @@
-"""Lumi infrastructure adapter for the orchestration resource kernel."""
+"""编排资源内核的 Lumi 基础设施适配器。"""
 
 from __future__ import annotations
 

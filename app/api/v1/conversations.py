@@ -77,6 +77,18 @@ def _message_steps(message: Message | None) -> list[dict]:
         return []
 
 
+def _message_output_blocks(message: Message | None) -> list[dict]:
+    """读取受控混合输出块；未知/非法值不向客户端透传。"""
+    if not message or not message.metadata_:
+        return []
+    try:
+        data = json.loads(message.metadata_)
+    except (ValueError, TypeError):
+        return []
+    blocks = data.get("output_blocks") if isinstance(data, dict) else None
+    return blocks if isinstance(blocks, list) else []
+
+
 async def _get_owned_conversation(
     db: AsyncSession,
     conversation_id: str,
@@ -144,6 +156,7 @@ async def _find_duplicate(db: AsyncSession, conversation_id: str, client_message
         "segments": split_segments(assistant.content),
         "citations": json.loads(assistant.citations) if assistant.citations else [],
         "steps": _message_steps(assistant),
+        "output_blocks": _message_output_blocks(assistant),
         "scene": None,
         "local_mode": False,
         "replayed": True,
@@ -185,7 +198,7 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
             # 后续"多条短句回复"策略直接向数组追加分段，不新增消息行。
             content=serialize_content(result.get("segments") or result.get("content", "")),
             citations=json.dumps(result.get("citations") or [], ensure_ascii=False),
-            metadata_=json.dumps({"steps": result.get("steps") or []}, ensure_ascii=False),
+            metadata_=json.dumps({"steps": result.get("steps") or [], "output_blocks": result.get("output_blocks") or []}, ensure_ascii=False),
         )
         db.add(assistant_msg)
     except (ValueError, TypeError, KeyError):
@@ -195,7 +208,7 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
             role="assistant",
             content=serialize_content(result.get("segments") or result.get("content", "")),
             citations=json.dumps(result.get("citations") or [], ensure_ascii=False),
-            metadata_=json.dumps({"steps": result.get("steps") or []}, ensure_ascii=False),
+            metadata_=json.dumps({"steps": result.get("steps") or [], "output_blocks": result.get("output_blocks") or []}, ensure_ascii=False),
         )
         db.add(assistant_msg)
         result["message_id"] = str(assistant_msg.id)
@@ -284,6 +297,7 @@ async def _persist_messages(db: AsyncSession, conv: Conversation, req: SendMessa
             "segments": result.get("segments") or [],
             "citations": result.get("citations") or [],
             "steps": result.get("steps") or [],
+            "output_blocks": result.get("output_blocks") or [],
             "created_at": datetime.now(timezone.utc).isoformat(),
         },
     )
@@ -697,6 +711,7 @@ async def get_messages(
             "client_message_id": m.client_message_id,
             "citations": json.loads(m.citations) if m.citations else [],
             "steps": _message_steps(m),
+            "output_blocks": _message_output_blocks(m),
             "attachments": attachments_by_message.get(str(m.id), []),
             "created_at": m.created_at.isoformat() if m.created_at else None,
         }

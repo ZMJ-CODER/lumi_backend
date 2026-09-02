@@ -1,4 +1,4 @@
-"""Application-owned policy hook implementations."""
+"""由应用层实现的策略钩子。"""
 
 from __future__ import annotations
 

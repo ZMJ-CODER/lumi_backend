@@ -1,4 +1,4 @@
-"""Generic lifecycle transition contract for orchestration jobs."""
+"""编排任务通用的生命周期转换契约。"""
 
 from __future__ import annotations
 

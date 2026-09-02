@@ -10,12 +10,38 @@ Temporal 开发服务器未启动时还可自动拉起（tools/temporal/temporal
 import asyncio
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from app.core.config import PROJECT_ROOT, settings
 
+if TYPE_CHECKING:
+    from temporalio.worker import Worker
+
 _worker_task: asyncio.Task | None = None
+
+
+def build_inprocess_workers(client) -> tuple["Worker", ...]:
+    """构造随 API 进程运行的全部 Temporal 队列 Worker。
+
+    逻辑计划运行时也由 ``RuntimeGateway`` 提交到 Temporal；若这里只注册
+    静态 DAG/清单队列，任务会被持久化却始终没有消费者。独立 Worker 入口与
+    本函数保持相同的队列集合，避免两种开发方式表现不一致。
+    """
+    from app.agents.orchestration.temporal.worker import (
+        build_logical_effects_worker,
+        build_logical_read_worker,
+        build_manifest_worker,
+        build_worker,
+    )
+
+    return (
+        build_worker(client),
+        build_manifest_worker(client),
+        build_logical_read_worker(client),
+        build_logical_effects_worker(client),
+    )
 
 
 def _temporal_host_port() -> tuple[str, int]:
@@ -101,7 +127,6 @@ async def start_inprocess_worker() -> None:
 
     from temporalio.client import Client
 
-    from app.agents.orchestration.temporal.worker import build_manifest_worker, build_worker
     from app.agents.skills.registry import SkillRegistry, init_skills
     from app.core import redis as redis_mod
 
@@ -113,15 +138,22 @@ async def start_inprocess_worker() -> None:
     client = await Client.connect(
         settings.TEMPORAL_ADDRESS, namespace=settings.TEMPORAL_NAMESPACE
     )
-    static_worker = build_worker(client)
-    manifest_worker = build_manifest_worker(client)
+    workers = build_inprocess_workers(client)
     logger.info(
-        "Temporal Worker 已随后端进程启动: {} queue={}",
+        "Temporal Worker 已随后端进程启动: {} queues={}",
         settings.TEMPORAL_ADDRESS,
-        settings.TEMPORAL_MANIFEST_TASK_QUEUE,
+        ", ".join(
+            (
+                settings.TEMPORAL_TASK_QUEUE,
+                settings.TEMPORAL_MANIFEST_TASK_QUEUE,
+                settings.TEMPORAL_LOGICAL_READ_TASK_QUEUE,
+                settings.TEMPORAL_LOGICAL_EFFECTS_TASK_QUEUE,
+            )
+        ),
     )
+
     async def run_workers() -> None:
-        await asyncio.gather(static_worker.run(), manifest_worker.run())
+        await asyncio.gather(*(worker.run() for worker in workers))
 
     _worker_task = asyncio.create_task(run_workers())
     _worker_task.add_done_callback(_on_worker_done)

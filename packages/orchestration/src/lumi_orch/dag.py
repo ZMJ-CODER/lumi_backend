@@ -1,4 +1,4 @@
-"""Pure DAG invariants shared by all execution backends."""
+"""所有执行后端共用的纯 DAG 不变量约束。"""
 
 from __future__ import annotations
 

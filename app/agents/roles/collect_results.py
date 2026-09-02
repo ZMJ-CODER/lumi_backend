@@ -1,4 +1,4 @@
-"""Worker wrapper for the MCP-backed deterministic manifest collector."""
+"""基于 MCP 的确定性清单汇集器工作节点封装。"""
 
 from __future__ import annotations
 

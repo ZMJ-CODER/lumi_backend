@@ -3,7 +3,7 @@
 import asyncio
 
 from app.agents.core.base import WorkerContext
-from app.agents.orchestration.langgraph_runner import LangGraphNodeRunner
+from app.agents.orchestration.execution.node_runtime import NodeExecutionRunner
 from app.agents.orchestration.models import TaskNode
 from app.agents.orchestration.review import NoopReviewer
 
@@ -21,7 +21,7 @@ def test_langgraph_retries_transient_failure_with_same_tool():
     node = TaskNode(id="n1", name="n1", agent="test", params={})
     worker = Worker()
     out = asyncio.run(
-        LangGraphNodeRunner(
+        NodeExecutionRunner(
             worker=worker,
             node=node,
             ctx=WorkerContext(user_id="u1", job_id="j1"),
@@ -46,7 +46,7 @@ def test_langgraph_does_not_retry_invalid_arguments():
 
     worker = Worker()
     out = asyncio.run(
-        LangGraphNodeRunner(
+        NodeExecutionRunner(
             worker=worker,
             node=TaskNode(id="n1", name="n1", agent="test", params={}),
             ctx=WorkerContext(user_id="u1", job_id="j1"),
@@ -75,7 +75,7 @@ def test_langgraph_stops_immediately_when_model_balance_is_insufficient():
 
     worker = Worker()
     out = asyncio.run(
-        LangGraphNodeRunner(
+        NodeExecutionRunner(
             worker=worker,
             node=TaskNode(id="n1", name="n1", agent="test", params={}),
             ctx=WorkerContext(user_id="u1", job_id="j1"),
@@ -105,7 +105,7 @@ def test_langgraph_hard_timeout_cancels_worker_without_retry():
                     raise
 
         worker = Worker()
-        outcome = await LangGraphNodeRunner(
+        outcome = await NodeExecutionRunner(
             worker=worker,
             node=TaskNode(id="slow", name="slow", agent="test", params={}),
             ctx=WorkerContext(user_id="u1", job_id="j1"),

@@ -1,4 +1,4 @@
-"""Idempotency and admission guard for job submission."""
+"""任务提交的幂等与准入保护器。"""
 
 from __future__ import annotations
 

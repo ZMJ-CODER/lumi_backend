@@ -21,7 +21,7 @@ MODEL_CATALOG: list[dict] = [
         "provider": "deepseek",
         "context_window": 131072,
         "multimodal": False,
-        "supports_reasoning_effort": False,
+        "supports_reasoning_effort": True,
         "price_input_per_million": 0.5,
         "price_output_per_million": 2.0,
         "description": "轻量快速，适合日常对话与办公任务",
@@ -32,7 +32,7 @@ MODEL_CATALOG: list[dict] = [
         "provider": "deepseek",
         "context_window": 131072,
         "multimodal": False,
-        "supports_reasoning_effort": False,
+        "supports_reasoning_effort": True,
         "price_input_per_million": 4.0,
         "price_output_per_million": 16.0,
         "description": "深度推理，适合复杂任务与代码",
@@ -102,6 +102,22 @@ def normalize_byok_base_url(value: str, *, allow_private: bool = False) -> str:
             address = None
         if address and (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved):
             raise ValueError("不允许使用内网或回环地址；如为受信任自托管服务，请由管理员开启私网 BYOK")
+    return normalize_provider_base_url(raw)
+
+
+def normalize_provider_base_url(value: str) -> str:
+    """规范化已知官方端点，保留其他兼容网关的原始路径。
+
+    DeepSeek V4 官方 SDK 的 ``base_url`` 是 ``https://api.deepseek.com``，并
+    不带 ``/v1``。历史前端曾把所有兼容接口套用 ``/v1``，会导致官方端点
+    拼出错误请求路径；仅对该精确官方主机做向后兼容修正，第三方网关不受影响。
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    raw = (value or "").strip().rstrip("/")
+    parsed = urlparse(raw)
+    if parsed.hostname and parsed.hostname.casefold() == "api.deepseek.com" and parsed.path.rstrip("/") == "/v1":
+        return urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
     return raw
 
 

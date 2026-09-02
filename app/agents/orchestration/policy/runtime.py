@@ -1,7 +1,8 @@
-"""Process-start policy loading; hot reload is deliberately not supported."""
+"""进程启动时加载策略；刻意不支持热更新。"""
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pathlib import Path
 
@@ -9,6 +10,32 @@ from app.agents.orchestration.policy.engine import PolicyLoadError, RoutingPolic
 from app.core.config import settings
 from app.monitoring.context import MonitorContext
 from app.monitoring.logger import monitor_logger
+from lumi_orch.runner import resolve_node_timeout
+
+
+_CHANNEL_TIMEOUT_SETTINGS = {
+    "direct_llm": "AGENT_NODE_TIMEOUT_DIRECT_LLM_SECONDS",
+    "deterministic_script": "AGENT_NODE_TIMEOUT_SCRIPT_SECONDS",
+    "rag": "AGENT_NODE_TIMEOUT_RAG_SECONDS",
+    "agent": "AGENT_NODE_TIMEOUT_AGENT_SECONDS",
+}
+
+
+def node_timeout_seconds(node, configured: int | None = None) -> int:
+    """从应用设置解析节点超时，供 Legacy 与 Temporal 共用。"""
+    try:
+        overrides = json.loads(str(settings.AGENT_NODE_TOOL_TIMEOUTS_JSON or "{}"))
+    except (TypeError, ValueError):
+        overrides = {}
+    return resolve_node_timeout(
+        node,
+        default_seconds=int(configured or settings.AGENT_NODE_TIMEOUT_SECONDS),
+        channel_timeouts={
+            channel: int(getattr(settings, setting_name, 0) or 0)
+            for channel, setting_name in _CHANNEL_TIMEOUT_SETTINGS.items()
+        },
+        tool_timeouts=overrides if isinstance(overrides, dict) else {},
+    )
 
 
 def routing_policy_mode() -> str:

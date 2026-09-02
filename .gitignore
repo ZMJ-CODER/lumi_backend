@@ -13,7 +13,17 @@ venv/
 
 # Env
 .env
+.env.*
+!.env.example
 app/.env
+
+# Local credentials and private-key exports.  Public configuration templates
+# stay tracked; actual values must be supplied through the deployment host.
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
 
 # Logs
 logs/
@@ -31,7 +41,9 @@ artifacts/
 
 # One-off load tests, live LLM evaluation replays and public benchmark corpora.
 # They are generated locally and may contain access tokens or provider output.
-loadtests/
+# Locust 脚本可复用且不含凭据；其 CSV 结果仍写入 artifacts/ 并被忽略。
+loadtests/*
+!loadtests/locustfile.py
 data/eval/
 
 # 运行时数据（嵌入模型缓存 / 用户上传文件），首次运行自动下载，不入库
@@ -51,5 +63,3 @@ Thumbs.db
 
 # Temporal 本地开发工具（CLI 二进制 ~175MB + 运行时数据库/日志），按需下载，不入库
 tools/temporal/
-# 密钥文件（Docker secrets 本地占位）
-secrets/

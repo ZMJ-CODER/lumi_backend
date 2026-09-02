@@ -1,4 +1,4 @@
-"""Lumi adapter from the standalone policy kernel to application route types."""
+"""从独立策略内核到应用路由类型的 Lumi 适配器。"""
 
 from __future__ import annotations
 

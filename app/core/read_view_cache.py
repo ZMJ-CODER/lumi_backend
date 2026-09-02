@@ -1,8 +1,7 @@
-"""User-scoped read-view caching and latency helpers for high-traffic API reads.
+"""高频 API 读取使用的用户范围视图缓存与延迟辅助函数。
 
-The cache is deliberately separate from ``mem:user:*``.  That key stores data
-for prompt injection; API response payloads have a different schema and TTL.
-Redis is an optimization only: all failures fail open to the database.
+缓存刻意与 ``mem:user:*`` 分离：后者存放提示词注入数据，而 API 响应负载拥有不
+同的数据结构和 TTL。Redis 仅是优化；任意失败都失败开放至数据库。
 """
 
 from __future__ import annotations

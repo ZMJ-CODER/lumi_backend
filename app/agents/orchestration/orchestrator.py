@@ -14,11 +14,11 @@ import asyncio
 import hashlib
 import json
 
-from app.agents.orchestration.execution_backend import (
-    LegacyDagBackend,
-    TemporalManifestBackend,
-    TemporalStaticBackend,
-)
+from app.agents.orchestration.backends.legacy import LegacyDagBackend
+from app.agents.orchestration.backends.temporal_logical_effects import TemporalLogicalEffectsBackend
+from app.agents.orchestration.backends.temporal_logical_read import TemporalLogicalReadBackend
+from app.agents.orchestration.backends.temporal_manifest import TemporalManifestBackend
+from app.agents.orchestration.backends.temporal_static import TemporalStaticBackend
 from app.agents.orchestration.execution_loop_service import ExecutionLoopService
 from app.agents.orchestration.fork_service import JobForkService
 from app.agents.orchestration.failed_job_replan_service import FailedJobReplanService
@@ -44,15 +44,17 @@ from app.agents.orchestration.office_plan_selection_service import OfficePlanSel
 from app.agents.orchestration.job_materialization_service import JobMaterializationService
 from app.agents.orchestration.job_lifecycle_service import JobLifecycleService
 from app.agents.orchestration.job_submission_service import JobSubmissionService
+from app.agents.orchestration.job_coordinator import JobOperationsCoordinator
 from app.agents.orchestration.logical_plan_replan_service import LogicalPlanReplanService
+from app.agents.orchestration.scheduling.service import PlanPatchAppendResult, PlanPatchScheduler
 from app.agents.orchestration.replan_evidence_service import ReplanEvidenceService
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus
 from app.agents.orchestration.memory_service import OfficeMemoryService
 from app.agents.orchestration.query_service import JobQueryService
 from app.agents.orchestration.runtime_gateway import RuntimeGateway
 from app.agents.orchestration.planner import LlmPlanner, Planner
-from app.agents.orchestration.plan_context import PlanRequestContext
-from app.agents.orchestration.plan_compilation_service import PlanCompilationService
+from app.agents.orchestration.planning.context import PlanRequestContext
+from app.agents.orchestration.planning.compilation import PlanCompilationService
 from app.agents.orchestration.plan_cache import PlanCache
 from app.agents.orchestration.review import ReviewHook, get_reviewer
 from app.agents.orchestration.tca import ComplexityLevel, TaskComplexityAssessor
@@ -110,6 +112,11 @@ class AgentOrchestrator:
         self._plan_compilation = PlanCompilationService(
             workers=self._workers,
             plan_with_context=self._plan_with_context,
+            temporal_static_mode=(
+                (settings.AGENT_ORCHESTRATION.strip().lower() == "temporal")
+                if temporal_enabled is None
+                else bool(temporal_enabled)
+            ),
         )
         self._failed_job_replan = FailedJobReplanService(
             store=self._store,
@@ -126,7 +133,6 @@ class AgentOrchestrator:
             assessor=self._complexity_assessor,
             plan_cache=self._plan_cache,
         )
-        self._job_materialization = JobMaterializationService(workers=self._workers)
         self._replan_evidence = ReplanEvidenceService()
         self._logical_plan_replan = LogicalPlanReplanService(
             store=self._store,
@@ -158,10 +164,20 @@ class AgentOrchestrator:
         )
         self._temporal_mode = self._orchestration_mode in {"temporal", "manifest_temporal"}
         self._temporal_static_mode = self._orchestration_mode == "temporal"
+        self._temporal_logical_read_mode = (
+            self._orchestration_mode == "temporal" and settings.TEMPORAL_LOGICAL_READ_ENABLED
+        )
+        self._temporal_logical_effects_mode = (
+            self._orchestration_mode == "temporal" and settings.TEMPORAL_LOGICAL_EFFECTS_ENABLED
+        )
         self._temporal_available = False
         self._temporal_probe_at = 0.0
         self._temporal_unavailable_until = 0.0
         self._runtime = RuntimeGateway(store=self._store, temporal_mode=self._temporal_mode)
+        self._job_materialization = JobMaterializationService(
+            workers=self._workers,
+            temporal_static_mode=self._temporal_static_mode,
+        )
         # ── legacy 自建 DAG 后台任务 ──
         self._tasks: dict[str, asyncio.Task] = {}  # job_id -> 后台执行任务
         # BYOK：legacy 路径的任务内临时 API key（仅内存，任务结束即释放）
@@ -195,6 +211,9 @@ class AgentOrchestrator:
         )
         self._manifest_backend = TemporalManifestBackend(self._runtime)
         self._static_backend = TemporalStaticBackend(self._runtime)
+        self._logical_read_backend = TemporalLogicalReadBackend(self._runtime)
+        self._logical_effects_backend = TemporalLogicalEffectsBackend(self._runtime)
+        self._plan_patches = PlanPatchScheduler(store=self._store, workers=self._workers)
         self._submission = JobSubmissionService(
             store=self._store,
             context_service=self._submission_context,
@@ -204,11 +223,15 @@ class AgentOrchestrator:
             materialization=self._job_materialization,
             temporal_mode=self._temporal_mode,
             temporal_static_mode=self._temporal_static_mode,
+            temporal_logical_read_mode=self._temporal_logical_read_mode,
+            temporal_logical_effects_mode=self._temporal_logical_effects_mode,
             can_run_manifest_temporal=self._can_run_manifest_temporal,
             can_run_static_temporal=self._can_run_static_temporal,
             probe_temporal=self._probe_temporal,
             manifest_backend=self._manifest_backend,
             static_backend=self._static_backend,
+            logical_read_backend=self._logical_read_backend,
+            logical_effects_backend=self._logical_effects_backend,
             legacy_backend=self._legacy_backend,
             start_heartbeat=self._start_admission_heartbeat,
             stop_heartbeat=self._stop_admission_heartbeat,
@@ -231,6 +254,13 @@ class AgentOrchestrator:
             on_learning=self._lifecycle.learn_from_finished_job,
             on_terminal=self._lifecycle.cleanup_terminal,
         )
+        from app.agents.orchestration.execution.service import ApplicationTaskExecutionService
+
+        task_execution_service = ApplicationTaskExecutionService(
+            store=self._store,
+            workers=self._workers,
+            review=self._review,
+        )
         self._execution_loop = ExecutionLoopService(
             store=self._store,
             workers=self._workers,
@@ -249,15 +279,23 @@ class AgentOrchestrator:
             node_concurrency=settings.AGENT_NODE_CONCURRENCY,
             suspend_capacity=self._finalizer.suspend_capacity,
             ensure_active_capacity=self._ensure_active_capacity,
+            task_execution_service=task_execution_service,
         )
         self._control = JobControlService(
             repository=self._store,
             approval=self._approval,
             temporal_backend=self._manifest_backend,
             static_backend=self._static_backend,
+            logical_read_backend=self._logical_read_backend,
+            logical_effects_backend=self._logical_effects_backend,
             legacy_backend=self._legacy_backend,
             finalizer=self._finalizer,
             ensure_active_capacity=self._ensure_active_capacity,
+        )
+        self._operations = JobOperationsCoordinator(
+            submission=self._submission,
+            lifecycle=self._lifecycle,
+            control=self._control,
         )
         self._fork = JobForkService(
             repository=self._store,
@@ -437,7 +475,7 @@ class AgentOrchestrator:
         admission_token: str,
     ) -> Job:
         """Delegate one admitted submission to the focused transaction service."""
-        return await self._submission.submit(
+        return await self._operations.submit(
             user_id=user_id,
             request=request,
             scene=scene,
@@ -604,14 +642,14 @@ class AgentOrchestrator:
 
     async def _learn_from_finished_job(self, job: Job) -> None:
         """Compatibility delegate for lifecycle plan learning."""
-        await self._lifecycle.learn_from_finished_job(job)
+        await self._operations.learn_from_finished_job(job)
 
     def _discard_pending_learning(self, job_id: str) -> None:
-        self._lifecycle.discard_pending_learning(job_id)
+        self._operations.discard_pending_learning(job_id)
 
     async def _attach_progress(self, job: Job) -> Job:
         """Compatibility delegate for response-only progress decoration."""
-        return await self._lifecycle.attach_progress(job)
+        return await self._operations.attach_progress(job)
 
     async def list_jobs(self, user_id: str, limit: int = 20) -> list[Job]:
         return await self._query.list_jobs(user_id, limit)
@@ -622,16 +660,38 @@ class AgentOrchestrator:
     # ── 控制：终止 / 暂停 / 恢复 ─────────────────────────────
 
     async def cancel_job(self, job_id: str, keep_completed: bool = True) -> Job | None:
-        return await self._control.cancel(job_id, keep_completed)
+        return await self._operations.cancel(job_id, keep_completed)
 
     async def approve_job(self, job_id: str, node_id: str, approved: bool = True) -> None:
-        await self._control.approve(job_id, node_id, approved)
+        await self._operations.approve(job_id, node_id, approved)
 
     async def pause_job(self, job_id: str) -> Job | None:
-        return await self._control.pause(job_id)
+        return await self._operations.pause(job_id)
 
     async def resume_job(self, job_id: str) -> Job | None:
-        return await self._control.resume(job_id)
+        return await self._operations.resume(job_id)
+
+    async def append_plan_patch(self, job_id: str, user_id: str, patch) -> PlanPatchAppendResult:
+        """持久化受限补图，并在需要时恢复等待中的 Legacy 执行器。"""
+        outcome = await self._plan_patches.append_external(
+            job_id=job_id,
+            user_id=user_id,
+            patch=patch,
+        )
+        if outcome.requires_legacy_resume:
+            resumed = await self.resume_job(job_id)
+            if resumed is None:
+                raise RuntimeError("补图已保存，但 Legacy 执行器恢复失败")
+            return PlanPatchAppendResult(
+                job=resumed,
+                patch_id=outcome.patch_id,
+                slot_id=outcome.slot_id,
+                revision=outcome.revision,
+                replayed=outcome.replayed,
+                temporal_signaled=False,
+                requires_legacy_resume=False,
+            )
+        return outcome
 
 
 # 全局单例（API 层使用）

@@ -117,7 +117,7 @@ M0 失败不能伪造“已完成”，而是附带失败证据升到 M1/M2。M2
 
 **根因**：模型异常只按 HTTP 状态粗分，失败没有被写成终态；兼容接口对请求字段的支持不同。
 
-**解决**：模型错误至少区分余额不足（402）、鉴权（401）、模型不存在（404）、不支持的高级参数、其他配置错误和暂时不可用。前五类应结束办公任务并给出下一步，不做盲重试。`reasoning_effort` 默认不向 OpenAI-compatible 接口发送，只有 `LLM_REASONING_EFFORT_MODELS` 明确白名单的模型才透传。历史 UI 显示名会被规范为实际模型 ID，例如 `DeepSeek V4 Flash` → `deepseek-v4-flash`。
+**解决**：模型错误至少区分余额不足（402）、鉴权（401）、模型不存在（404）、不支持的高级参数、其他配置错误和暂时不可用。前五类应结束办公任务并给出下一步，不做盲重试。除官方 `api.deepseek.com` 的 V4 模型外，`reasoning_effort` 默认不向 OpenAI-compatible 接口发送；其他兼容端点只有在 `LLM_REASONING_EFFORT_MODELS` 明确白名单中才透传。官方 V4 请求同时显式启用 `thinking`；历史 UI 显示名会被规范为实际模型 ID，例如 `DeepSeek V4 Flash` → `deepseek-v4-flash`。
 
 ### 2.10 Docker 构建或沙箱错误被误判为模型/Agent 问题
 

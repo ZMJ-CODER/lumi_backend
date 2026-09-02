@@ -7,14 +7,19 @@
 
 import time
 import uuid
-from abc import ABC, abstractmethod
 from pathlib import Path
 import re
 
 from loguru import logger
 
 from app.agents.orchestration.models import TaskNode
-from app.agents.orchestration.plan_context import PlanRequestContext
+from app.agents.orchestration.planning.context import PlanRequestContext
+from app.agents.orchestration.planning.contracts import Planner, PlannerModelError, TaskTree
+from app.agents.orchestration.planning.prompting import (
+    build_planner_prompt as _build_planner_prompt,
+    known_agents as _known_agents,
+    runtime_capability_note as _runtime_capability_note,
+)
 from app.agents.orchestration.intent import (
     classify,
     extract_output_contract,
@@ -29,7 +34,9 @@ from app.agents.orchestration.routing_intent import (
     merge_llm_route_intent,
     should_use_llm_route_fallback,
 )
-from app.agents.orchestration.route_plan import compile_static_route
+from app.agents.orchestration.planning.static_routes import compile_static_route
+from app.agents.orchestration.planning.office_compound import build_text_then_todo_plan
+from app.agents.orchestration.planning.read_only_dag import build_explicit_read_only_dag
 from app.agents.skills.recovery import classify_model_error
 from app.repositories.project_repository import (
     ProjectRepository,
@@ -57,30 +64,51 @@ def _is_datetime_request(request: str) -> bool:
     return not any(term in text for term in other_action_terms)
 
 
-class TaskTree:
-    """规划结果：一组带依赖的任务节点."""
-
-    def __init__(
-        self,
-        nodes: list[TaskNode],
-        clarification: str | None = None,
-        plan_text: str | None = None,
-        error: str | None = None,
-        error_code: str | None = None,
-    ):
-        self.nodes = nodes
-        self.clarification = clarification
-        self.plan_text = plan_text
-        self.error = error
-        self.error_code = error_code
-
-
-class PlannerModelError(RuntimeError):
-    """规划模型无法继续时的可展示错误；不得伪装成知识库检索。"""
-
-    def __init__(self, code: str, message: str):
-        super().__init__(message)
-        self.code = code
+def _deterministic_read_tool_tree(request: str) -> TaskTree | None:
+    """编译常见只读工具请求，避免短查询依赖规划模型。"""
+    text = (request or "").strip()
+    lower = text.casefold()
+    if not text:
+        return None
+    # 快捷只读节点绝不能吞掉同一句中的外部动作。此类请求需要保留动作
+    # 顺序并进入动态编排，后续由审批门控制真正的外部调用。
+    external_markers = ("打开", "启动", "发送", "发邮件", "修改", "删除", "执行", "运行")
+    if any(marker in lower for marker in external_markers):
+        return None
+    # 计算器：保留表达式原文，由 Skill 自己做安全解析；不执行任意代码。
+    if any(marker in lower for marker in ("计算", "算一下", "帮我算", "算出")):
+        expression = text
+        node_id = f"c{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        return TaskTree(nodes=[TaskNode(
+            id=node_id,
+            name="精确计算",
+            agent="atomic_step",
+            params={"instruction": text, "preferred_tool": "calculator", "fallback_tools": [], "inputs": {"expression": expression}},
+            depends_on=[],
+        )], plan_text="调用计算器完成精确计算。")
+    # 天气、新闻、汇率等公开实时信息固定走 web_research；不把“查询”本身
+    # 当成联网授权，避免普通知识问题产生外部请求。
+    if any(marker in lower for marker in ("天气", "新闻", "汇率", "行情", "股价", "网页", "网上", "联网", "公开资料")):
+        node_id = f"w{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        return TaskTree(nodes=[TaskNode(
+            id=node_id,
+            name="联网查询",
+            agent="web_research",
+            params={"query": text, "top_k": 5},
+            depends_on=[],
+        )], plan_text="按请求查询公开实时信息。")
+    # 知识库/资料类查询走受控 retrieval；没有来源词时仍只对明确查询动词
+    # 生效，裸“查询”交给澄清逻辑。
+    if any(marker in lower for marker in ("知识库", "资料库", "资料中", "文档中", "文件中", "根据我的资料", "根据文档", "根据文件")):
+        node_id = f"k{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        return TaskTree(nodes=[TaskNode(
+            id=node_id,
+            name="知识库检索",
+            agent="retrieval",
+            params={"query": text, "top_k": 5},
+            depends_on=[],
+        )], plan_text="检索已授权知识库资料。")
+    return None
 
 
 def _is_multi_document_fact_request(request: str, office_docs: list[dict] | None) -> bool:
@@ -241,61 +269,6 @@ def _apply_output_contract(nodes: list[TaskNode], request: str) -> None:
         )
 
 
-class Planner(ABC):
-    """指挥层基类."""
-
-    async def plan_context(self, context: PlanRequestContext) -> TaskTree:
-        """Context-based compatibility entry point.
-
-        Custom planners only need to keep implementing ``plan`` for now.  The
-        default adapter keeps those implementations working while callers can
-        use one stable context object internally.
-        """
-        # Preserve the old plugin signature while making the new routing
-        # signals visible to planners that still consume ``prior_summaries``.
-        summary = context.prior_summaries
-        context_lines: list[str] = []
-        if context.recent_messages:
-            context_lines.append("最近对话：" + " | ".join(context.recent_messages[-6:]))
-        if context.recent_artifacts:
-            context_lines.append("最近产物：" + ", ".join(
-                str(item.get("filename") or item.get("artifact_type") or "未命名产物")
-                for item in context.recent_artifacts[-6:]
-            ))
-        if context.previous_plan:
-            context_lines.append("上一计划：" + str(context.previous_plan.get("plan_text") or "已存在上一计划"))
-        if context_lines:
-            summary = (summary + "\n" if summary else "") + "\n".join(context_lines)
-        args = list(context.as_legacy_args())
-        args[-1] = summary
-        try:
-            if context.llm_config is None:
-                return await self.plan(*args)
-            return await self.plan(*args, llm_config=context.llm_config)
-        except TypeError as exc:
-            # Third-party planners may still expose the historical signature.
-            if "llm_config" not in str(exc):
-                raise
-            return await self.plan(*args)
-
-    @abstractmethod
-    async def plan(
-        self,
-        user_id: str,
-        request: str,
-        scene: str = "office",
-        project_id: str | None = None,
-        project_ids: list[str] | None = None,
-        llm_api_key: str | None = None,
-        clarification_answer: str | None = None,
-        office_docs: list[dict] | None = None,
-        prior_summaries: str = "",
-        *,
-        llm_config: dict | None = None,
-    ) -> TaskTree:
-        ...
-
-
 class RulePlanner(Planner):
     """框架版规划器：检索类请求 → 单个 retrieval 节点.
 
@@ -345,6 +318,12 @@ class RulePlanner(Planner):
                 ],
                 plan_text="查询当前日期和时间。",
             )
+        deterministic = _deterministic_read_tool_tree(combined)
+        if deterministic is not None:
+            return deterministic
+        compound_plan = build_text_then_todo_plan(request)
+        if compound_plan is not None:
+            return TaskTree(nodes=compound_plan.nodes, plan_text=compound_plan.plan_text)
         conversion = resolve_direct_text_conversion(request, office_docs)
         if conversion:
             return _direct_conversion_tree(request, conversion)
@@ -470,9 +449,15 @@ class RulePlanner(Planner):
             )
             if candidate:
                 route = merge_llm_route_intent(route, candidate, request)
-        if route.needs_clarification or (
-            route.confidence < 0.7 and route.risk_level != "read_only"
-        ):
+        # An L3 hint is not a calibrated probability. Typed side-effect
+        # requests may proceed only through the existing approval gate; an
+        # untyped or unresolved request still requires clarification.
+        unresolved_risky = (
+            route.confidence < 0.7
+            and route.risk_level != "read_only"
+            and (not route.objects or route.needs_clarification)
+        )
+        if route.needs_clarification or unresolved_risky:
             return TaskTree(
                 nodes=[],
                 clarification=clarification_for_intent(route, request, office_docs),
@@ -488,6 +473,7 @@ class RulePlanner(Planner):
                 for static_node in static_nodes:
                     static_node.metadata.setdefault("routing", {
                         "confidence": route.confidence,
+                        "classifier_confidence_hint": route.classifier_confidence_hint,
                         "confidence_detail": route.confidence_detail.__dict__ if route.confidence_detail else {},
                         "risk_level": route.risk_level,
                         "action_steps": [step.__dict__ for step in route.action_steps],
@@ -527,6 +513,7 @@ class RulePlanner(Planner):
                     metadata={
                         "routing": {
                             "confidence": route.confidence,
+                            "classifier_confidence_hint": route.classifier_confidence_hint,
                             "confidence_detail": route.confidence_detail.__dict__ if route.confidence_detail else {},
                             "risk_level": route.risk_level,
                             "action_steps": [step.__dict__ for step in route.action_steps],
@@ -598,124 +585,6 @@ class RulePlanner(Planner):
         return None
 
 
-# ── LLM 意图拆解规划器 ───────────────────────────────
-
-# 注册表为空时的兜底 agent 清单（正常情况下由 AgentRegistry 动态生成）
-_FALLBACK_AGENTS = (
-    "retrieval",
-    "web_research",
-)
-
-_FALLBACK_AGENT_LINES = (
-    "- retrieval：检索知识库/项目索引定位信息，params 用 {\"query\": \"检索词\", \"top_k\": 5}\n"
-    "- code_reader：在本地代码项目里定位并读取相关文件，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"定位/分析指令\", \"target_file\": \"可选文件路径\"}\n"
-    "- code_writer：生成或修改本地代码文件并写回，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"编码指令\", \"target_file\": \"可选文件路径\", \"original_content\": \"可选，来自 reader\"}\n"
-    "- code_tester：按项目类型自动选择并运行合适的验证命令（如 npm run build / pytest -q），params 用 {\"project_id\": \"项目ID\"}，不要预设 command，由 tester 根据项目文件自行决定\n"
-    "- code_reviewer：审查已有代码或改动，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"审查要求\", \"target_file\": \"可选文件路径\"}\n"
-    "- code：旧版单节点代码任务（定位→生成→写回），params 用 {\"project_id\": \"项目ID\", \"instruction\": \"指令\"}\n"
-)
-
-
-def _agent_prompt_lines() -> str:
-    """从集中注册表动态生成"可用执行 agent"提示词段（新增 agent 自动出现在规划器）."""
-    try:
-        from app.agents.core.registry import AgentRegistry
-
-        agents = AgentRegistry.list()
-    except Exception:  # noqa: BLE001
-        agents = []
-    if not agents:
-        return _FALLBACK_AGENT_LINES
-    lines = []
-    for a in sorted(agents, key=lambda x: x.name):
-        extra = f"，{a.params_help}" if a.params_help else ""
-        lines.append(f"- {a.name}：{a.description}{extra}")
-    return "\n".join(lines)
-
-
-def _build_planner_prompt() -> str:
-    """构建规划器提示词（agent 清单由注册表动态生成）."""
-    from app.core.agent_security import UNTRUSTED_CONTENT_RULES
-
-    return (
-        "你是任务规划器。把用户请求拆解为任务计划。\n"
-        "默认使用 atomic_step，把任务拆成可独立提交、可独立失败/重试的原子步骤。"
-        "每个 atomic_step 只允许一个唯一目标、最多一次 Skill/MCP 调用；需要读后再写、搜索后再总结时必须拆成多个节点。"
-        "所有步骤必须按用户叙述的顺序串行执行：除第一个步骤外，每一步都 depends_on 前一步，禁止并行。"
-        "必须覆盖用户请求中的每一个动作；上传文档只提供上下文，不能让文档分析任务吞掉打开应用、写文件、发邮件等独立指令。"
-        "atomic_step 可以调用当前 office 场景的本地 Skill、system Skill 和 MCP 工具，"
-        "但规划时必须唯一指定 preferred_tool，执行器只会向模型暴露这一个工具。"
-        "params 用 {\"instruction\":\"本步骤唯一目标\",\"preferred_tool\":\"首选工具名\",\"fallback_tools\":[\"不同原理的备用工具\"],\"inputs\":{}}。"
-        "为可能失败的读取、解析、转换步骤规划不同原理且当前已允许的 fallback_tools；备用工具不得与首选工具重复。"
-        "涉及同一文件、文档、日历或待办的步骤必须通过 depends_on 表达逻辑顺序；"
-        "执行器还会根据输入自动声明资源读写锁。\n"
-        "可用执行 agent：\n"
-        + _agent_prompt_lines()
-        + "\n代码任务建议按文件拆分节点，便于前端逐步展示进度：\n"
-        "  - 每个需要阅读/定位的文件一个 code_reader 节点（按阅读顺序设置 depends_on）；\n"
-        "  - 每个需要修改的文件一个 code_writer 节点，depends_on 指向对应的 reader 节点；\n"
-        "  - 需要新建文件时，code_writer 的 target_file 用新文件路径（如 src/NewPage.vue），会自动创建；\n"
-        "  - 需要删除文件/临时脚本/缓存时，生成 code_writer 节点，params 加 \"action\": \"delete\"，instruction 写清要删除的文件路径；\n"
-        "  - 修改已有文件时必须明确 target_file（从项目文件清单里选具体文件）；指令没指明文件时先安排 code_reader/grep 定位，禁止因为指令模糊就默认改入口文件（app.vue / main.js / index.js 等）；\n"
-        "  - 所有写入完成后一个 code_tester 节点；需要时最后加 code_reviewer。\n"
-        "办公任务（涉及文档/检索/文本产出时，例如上传文档后总结/改写/生成邮件/竞品分析/整理待办）：\n"
-        "  - 文件转换、批量处理、清洗、合并拆分、数据导出或生成真实文件时，优先规划单个 office_script 节点，"
-        "由通用 python_exec 在授权沙箱内一次完成；禁止拆成逐行读取、逐行口述或 read_file/write_file 循环；\n"
-        "  - 先分析/读取相关文档：office_doc 节点，mode=analyze 或 read，params 必须带正确的 doc_id；\n"
-        "  - 再按用户要求产出：邮件/公文/改写/摘要/纪要/抽取/合规用 office_text（task=email/doc/rewrite/summary/minutes/extract/compliance，instruction 写清要求）；\n"
-        "  - 竞品分析/文档问答/客服回复/早晚报用 office_research（mode=competitor/document_qa/customer_service/daily_report）；待办用 office_todo；\n"
-        "  - 修改文档用 office_doc（mode=edit，带 doc_id）；\n"
-        "  - 产出节点 depends_on 对应的分析/读取节点，确保先读到文档再产出。\n"
-        "项目很小或任务简单（如只改/建一两个小文件）时，用最少的节点：单个 code_writer 直接完成，不要过度拆分 reader/writer。\n"
-        "项目定位：根据用户请求与项目文件清单自动判断涉及哪个/哪些项目，不要因为未指定项目就澄清。\n"
-        "涉及多个项目时按顺序生成任务：先完成一个项目再切换下一个（不同项目用各自的 project_id）。\n"
-        "严格输出 JSON（不要代码块围栏、不要任何解释）：\n"
-        "{\"plan\":\"一句话/一段执行计划（给用户看）\",\"tasks\":[{\"id\":\"t1\",\"name\":\"任务名\",\"agent\":\"retrieval\",\"params\":{},\"depends_on\":[]}],\"clarification\":\"\"}\n"
-        "意图不明确或缺少关键信息（如未指定哪个项目）时，tasks 留空、clarification 填需要向用户确认的问题。"
-        "\n\n" + UNTRUSTED_CONTENT_RULES
-    )
-
-
-async def _runtime_capability_note(request: str, user_id: str = "") -> str:
-    """把当前真正能执行的工具给规划模型，避免规划不可部署的方案。"""
-    try:
-        from app.agents.skills.executor import select_capabilities_for_request
-
-        capabilities = await select_capabilities_for_request(request, "office", user_id=user_id)
-        entries = []
-        for capability in capabilities:
-            schema = capability.parameters if isinstance(capability.parameters, dict) else {}
-            required = schema.get("required") if isinstance(schema, dict) else []
-            flags = []
-            if required:
-                flags.append("required=" + ",".join(str(item) for item in required[:8]))
-            if capability.write_op:
-                flags.append("write=true")
-            if capability.requires_confirmation:
-                flags.append("confirmation=true")
-            description = str(capability.description or "").replace("\n", " ")[:120]
-            entries.append(
-                f"{capability.name}({'; '.join(flags) or 'read'}): {description}"
-            )
-        return (
-            "\n当前请求可用的候选 Skill（已按权限、场景和运行时状态收窄；"
-            "preferred_tool 必须从此列表选择）：\n- " + "\n- ".join(entries)
-        )
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-def _known_agents() -> tuple[str, ...]:
-    """执行层 agent 白名单（跟随集中注册表，注册表为空时回退内置清单）."""
-    try:
-        from app.agents.core.registry import AgentRegistry
-
-        names = tuple(AgentRegistry.names())
-    except Exception:  # noqa: BLE001
-        names = ()
-    return names or _FALLBACK_AGENTS
-
-
 class LlmPlanner(Planner):
     """LLM 意图拆解：用户请求 → 任务树（DAG）.
 
@@ -730,7 +599,7 @@ class LlmPlanner(Planner):
     ):
         self._project_repository = project_repository or SqlAlchemyProjectRepository()
         self._fallback = fallback or RulePlanner(project_repository=self._project_repository)
-        from app.agents.orchestration.planner_strategies import PlannerStrategies
+        from app.agents.orchestration.planning.strategies import PlannerStrategies
 
         self._strategies = PlannerStrategies()
 
@@ -780,6 +649,19 @@ class LlmPlanner(Planner):
         office_docs = [dict(item) for item in context.office_docs]
         prior_summaries = context.prior_summaries
         level = ComplexityLevel(level)
+        # Keep explicit persistent actions ahead of every level-specific fast
+        # path, including M1 template selection and bypass_fast_paths replans.
+        # Otherwise a generic ETL/daily template can still swallow a trailing
+        # "add this to my todo" clause before the normal planner is reached.
+        compound_plan = build_text_then_todo_plan(request)
+        if compound_plan is not None:
+            return TaskTree(nodes=compound_plan.nodes, plan_text=compound_plan.plan_text)
+        explicit_read_only_dag = build_explicit_read_only_dag(request)
+        if explicit_read_only_dag is not None:
+            return TaskTree(
+                nodes=explicit_read_only_dag,
+                plan_text="按用户声明的 A/B 并行、C 汇总、D 交付的只读分析 DAG 执行。",
+            )
         if bypass_fast_paths:
             selected_docs, unresolved_docs, has_named_docs = select_named_office_documents(
                 request, office_docs
@@ -842,6 +724,7 @@ class LlmPlanner(Planner):
                     metadata={
                         "routing": {
                             "confidence": route.confidence,
+                            "classifier_confidence_hint": route.classifier_confidence_hint,
                             "confidence_detail": route.confidence_detail.__dict__ if route.confidence_detail else {},
                             "risk_level": route.risk_level,
                             "action_steps": [step.__dict__ for step in route.action_steps],
@@ -899,6 +782,21 @@ class LlmPlanner(Planner):
                 clarification_answer,
                 office_docs,
                 prior_summaries,
+            )
+        deterministic = _deterministic_read_tool_tree(request + (f" {clarification_answer}" if clarification_answer else ""))
+        if deterministic is not None:
+            return deterministic
+        # Explicit text-generation plus todo persistence is a small known DAG.
+        # Compile it before the semi-structured ETL selector so the latter
+        # cannot collapse the requested write into a text-only summary node.
+        compound_plan = build_text_then_todo_plan(request)
+        if compound_plan is not None:
+            return TaskTree(nodes=compound_plan.nodes, plan_text=compound_plan.plan_text)
+        explicit_read_only_dag = build_explicit_read_only_dag(request)
+        if explicit_read_only_dag is not None:
+            return TaskTree(
+                nodes=explicit_read_only_dag,
+                plan_text="按用户声明的 A/B 并行、C 汇总、D 交付的只读分析 DAG 执行。",
             )
         # 简单“指定文件 -> 指定文本格式”不需要模型计划。先按文件名精确定位，
         # 避免自由规划把每份上传文档都塞进读/分析节点。
@@ -1067,12 +965,18 @@ class LlmPlanner(Planner):
                 llm_api_key,
                 force_template=intent["template"],
                 prior_summaries=prior_summaries,
+                llm_config=llm_config,
             )
             if templated is not None:
                 return templated
         elif intent["task_type"] == "semi_structured":
             patterned = await self._plan_with_pattern(
-                user_id, request, office_docs, llm_api_key, prior_summaries=prior_summaries
+                user_id,
+                request,
+                office_docs,
+                llm_api_key,
+                prior_summaries=prior_summaries,
+                llm_config=llm_config,
             )
             if patterned is not None:
                 return patterned
@@ -1099,7 +1003,21 @@ class LlmPlanner(Planner):
         # free / 兜底：Plan-then-Execute（LLM 自由规划，含 office_doc 兜底注入）
         try:
             # 保持此调用的四参数契约；项目里已有插件/测试会替换该方法。
-            data = await self._call_structured_planner(user_id, request, context, llm_api_key)
+            try:
+                data = await self._call_structured_planner(
+                    user_id,
+                    request,
+                    context,
+                    llm_api_key,
+                    llm_config=llm_config,
+                )
+            except TypeError as exc:
+                # 兼容旧插件/测试替换的四参数规划器。
+                if "llm_config" not in str(exc):
+                    raise
+                data = await self._call_structured_planner(
+                    user_id, request, context, llm_api_key
+                )
         except PlannerModelError:
             raise
         if not data:
@@ -1265,25 +1183,3 @@ class LlmPlanner(Planner):
                 "办公规划模型耗时: duration_ms={}",
                 int((time.perf_counter() - started) * 1000),
             )
-
-
-def _template_default_params(template: str, request: str) -> dict:
-    """模板任务的规则抽参（免 LLM）：按请求关键词推断参数."""
-    if template == "document_analysis_flow":
-        task = "summary" if any(k in request for k in ("总结", "摘要")) else "qa"
-        return {"task": task, "mode": "summary" if task == "summary" else "qa"}
-    if template == "daily_brief_flow":
-        period = "evening" if any(k in request for k in ("晚报", "晚间")) else "morning"
-        return {"period": period, "focus": ""}
-    if template == "invoice_filter_flow":
-        return {"threshold": 10000, "alert_threshold": 50000, "notify": "财务"}
-    if template == "document_compare_flow":
-        return {"dimensions": ""}
-    if template == "document_combine_flow":
-        return {"output": "summary"}
-    if template == "document_translate_flow":
-        for lang in ("英文", "日文", "韩文", "法文", "德文"):
-            if lang in request:
-                return {"target_lang": lang}
-        return {"target_lang": "中文"}
-    return {}

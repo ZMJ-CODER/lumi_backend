@@ -40,6 +40,7 @@ from app.services.memory.privacy import resolve_decrypt_candidates
 from app.services.conversation_memory import ConversationRecall, retrieve_conversation_recall
 from app.services.prompts import get_base_system_prompt, get_prompt_content
 from app.services.usage import CATEGORY_CHAT, CATEGORY_SKILL, CATEGORY_TITLE
+from app.services.tool_output_projection import project_citations
 
 # Redis Key 模板
 CONTEXT_KEY = "conv:ctx:{conversation_id}"  # 会话上下文 (list of json)
@@ -183,26 +184,24 @@ def _chat_reasoning_effort(thinking_mode: str) -> str | None:
 
 
 def _chat_model_override(scene: str, thinking_mode: str, llm_api_key: str | None) -> dict | None:
-    """普通模式快速/思考档模型切换：默认均使用服务端千问。
+    """普通模式可选的思考模型覆盖。
 
-    用户 BYOK 或非普通模式不覆盖。保留 ``CHAT_THINK_*`` 作为可选的
-    千问强模型覆盖；已下架 DeepSeek 默认模型不再进入服务端链路。
+    默认不覆盖 ``get_llm_config`` 的供应商选择，确保聊天、办公与 BYOK 使用
+    同一份已生效配置。仅在管理员显式填写完整 ``CHAT_THINK_*`` 三元组时，
+    ``think`` 档才切换到独立模型。
     """
     if scene != "chat" or llm_api_key:
         return None
-    if thinking_mode == "think":
+    if thinking_mode == "think" and all(
+        (settings.CHAT_THINK_MODEL, settings.CHAT_THINK_BASE_URL, settings.CHAT_THINK_API_KEY)
+    ):
         return {
-            "base_url": (settings.CHAT_THINK_BASE_URL or settings.QWEN_BASE_URL).rstrip("/"),
-            "api_key": settings.CHAT_THINK_API_KEY or settings.QWEN_API_KEY,
-            "model": settings.CHAT_THINK_MODEL or settings.QWEN_MODEL,
+            "base_url": settings.CHAT_THINK_BASE_URL.rstrip("/"),
+            "api_key": settings.CHAT_THINK_API_KEY,
+            "model": settings.CHAT_THINK_MODEL,
             "timeout": 120.0,
         }
-    return {
-        "base_url": settings.QWEN_BASE_URL.rstrip("/"),
-        "api_key": settings.QWEN_API_KEY,
-        "model": settings.QWEN_MODEL,
-        "timeout": 120.0,
-    }
+    return None
 
 
 async def _get_chat_model_override(
@@ -707,6 +706,12 @@ class Orchestrator:
         image_uris = await self._load_image_data_uris(user_id, attachments)
 
         office_execution = scene == "office" and requires_office_execution(content, office_docs)
+        logger.info(
+            "办公请求路由判定: scene={} execution={} content={}",
+            scene,
+            office_execution,
+            content[:120].replace("\n", " "),
+        )
         if scene == "office" and not office_execution:
             # 办公模式也可以是纯文本创作/问答。不要为此生成虚假的任务、工具
             # 步骤或公文模板；直接使用完整对话上下文获得正常 C 端生成体验。
@@ -724,7 +729,7 @@ class Orchestrator:
             await self._finalize_reply(conversation_id, user_id, reply, scene)
             return {
                 "message_id": str(uuid.uuid4()), "content": reply,
-                "citations": prep["citations"], "scene": scene, "local_mode": False,
+                "citations": project_citations(prep["citations"]), "scene": scene, "local_mode": False,
                 "title": title or "", "transcript": transcript, "steps": [],
             }
 
@@ -747,7 +752,7 @@ class Orchestrator:
             return {
                 "message_id": str(uuid.uuid4()),
                 "content": reply,
-                "citations": prep["citations"],
+                "citations": project_citations(prep["citations"]),
                 "scene": scene,
                 "local_mode": False,
                 "title": title or "",
@@ -796,7 +801,7 @@ class Orchestrator:
         return {
             "message_id": str(uuid.uuid4()),
             "content": reply,
-            "citations": prep["citations"],
+            "citations": project_citations(prep["citations"]),
             "scene": scene,
             "local_mode": False,
             "title": title or "",
@@ -861,6 +866,12 @@ class Orchestrator:
         full_text = ""
         atomic_steps: dict[str, dict] = {}
         office_execution = scene == "office" and requires_office_execution(content, office_docs)
+        logger.info(
+            "办公请求路由判定: scene={} execution={} content={}",
+            scene,
+            office_execution,
+            content[:120].replace("\n", " "),
+        )
         if scene == "office" and not office_execution:
             prep["messages"][0]["content"] += _DIRECT_GENERATION_PROMPT
         stream = (
@@ -928,7 +939,7 @@ class Orchestrator:
             "type": "done",
             "message_id": message_id,
             "content": full_text,
-            "citations": prep["citations"],
+            "citations": project_citations(prep["citations"]),
             "scene": scene,
             "title": title or "",
             "segments": segments,
@@ -966,6 +977,49 @@ class Orchestrator:
                 else None
             ),
         }
+
+    @classmethod
+    async def _logical_plan_steps(cls, user_id: str, routing: dict) -> list[dict]:
+        """从持久化逻辑计划恢复全部节点的展示状态。
+
+        ``Job.nodes`` 只保存当前滚动执行窗口。前沿推进后，已完成节点会从
+        Job 快照移除；SSE 因此必须以逻辑计划中的状态记录补齐历史节点。结果
+        正文仍由运行中的节点 delta 单独推送，避免重复把完整输出写回聊天流。
+        """
+        pointer = routing.get("logical_plan") if isinstance(routing, dict) else None
+        plan_id = str((pointer or {}).get("plan_id") or "")
+        if not plan_id:
+            return []
+
+        try:
+            from app.agents.orchestration.logical_plan import load_logical_plan
+            from app.agents.orchestration.models import TaskNode, TaskStatus
+
+            plan = await load_logical_plan(user_id, plan_id)
+            if not plan:
+                return []
+            records = plan.get("nodes") or {}
+            steps: list[dict] = []
+            for node_id in plan.get("order") or []:
+                record = records.get(node_id)
+                if not isinstance(record, dict) or not isinstance(record.get("node"), dict):
+                    continue
+                node = TaskNode.model_validate(record["node"])
+                raw_status = str(record.get("status") or TaskStatus.PENDING.value)
+                try:
+                    node.status = TaskStatus(raw_status)
+                except ValueError:
+                    node.status = TaskStatus.FAILED
+                node.error = str(record.get("error") or "") or None
+                node.error_code = str(record.get("error_code") or "") or None
+                node.effect_status = record.get("effect_status")
+                # 完整结果仅存于 result_ref，不能在 SSE 状态同步中重复读取或发送。
+                node.result = None
+                steps.append(cls._job_step(node))
+            return steps
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取逻辑计划 SSE 状态失败（回退当前窗口）：{}", str(exc)[:200])
+            return []
 
     @staticmethod
     def _job_citations(job) -> list[dict]:
@@ -1101,11 +1155,17 @@ class Orchestrator:
                             },
                         }
                     last_plan_revision = plan_revision
+                logical_steps = await self._logical_plan_steps(user_id, routing)
+                # 逻辑计划负责旧窗口的最终状态；当前窗口覆盖其状态和输出，保证
+                # 正在运行节点的实时信息与文本流仍来自最新 Job 快照。
+                steps_by_id = {step["id"]: step for step in logical_steps}
                 for node in job.nodes:
                     step = self._job_step(node)
+                    steps_by_id[step["id"]] = step
+                for step in steps_by_id.values():
                     signature = (step["status"], step["error"], step["output"], step["effect_status"])
-                    if last.get(node.id) != signature:
-                        last[node.id] = signature
+                    if last.get(step["id"]) != signature:
+                        last[step["id"]] = signature
                         yield {"type": "step", "job_id": job.job_id, "step": step}
                 # Text-producing office skills publish deltas independently of
                 # status snapshots. Drain them while the node is still running.
@@ -1494,16 +1554,47 @@ class Orchestrator:
             and (force_web_search or _needs_chat_tool_graph(user_content))
         ):
             try:
-                reply, _tool_records, tool_citations = await run_skill_loop(
-                    self._llm,
-                    user_id,
-                    _append_chat_tool_contract(messages, web_search_preferred=force_web_search),
-                    scene="chat",
-                    conversation_id=conversation_id,
-                    llm_api_key=llm_api_key,
-                    llm_base_url=override["base_url"] if override else None,
-                    llm_model=override["model"] if override else None,
+                # ToolNode 在等待模型收尾回复期间也会发出运行状态。将其放进
+                # 队列而不是等整轮循环结束后再拼接，才能让 SSE 和实际执行保持
+                # 同步，前端也能明确看到工具确实已被调用。
+                progress_queue: asyncio.Queue[object] = asyncio.Queue()
+
+                def on_tool_progress(event: object) -> None:
+                    progress_queue.put_nowait(event)
+
+                tool_task = asyncio.create_task(
+                    run_skill_loop(
+                        self._llm,
+                        user_id,
+                        _append_chat_tool_contract(messages, web_search_preferred=force_web_search),
+                        scene="chat",
+                        conversation_id=conversation_id,
+                        llm_api_key=llm_api_key,
+                        llm_base_url=override["base_url"] if override else None,
+                        llm_model=override["model"] if override else None,
+                        on_progress=on_tool_progress,
+                    )
                 )
+                while not tool_task.done():
+                    next_progress = asyncio.create_task(progress_queue.get())
+                    done, _ = await asyncio.wait(
+                        {tool_task, next_progress}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if next_progress in done:
+                        progress = next_progress.result()
+                        if isinstance(progress, dict) and progress.get("type") == "step":
+                            yield {"type": "step", "step": progress}
+                    else:
+                        next_progress.cancel()
+                        await asyncio.gather(next_progress, return_exceptions=True)
+
+                # 在任务结束与最后一次 queue.get 竞争时，补发尚未消费的事件。
+                while not progress_queue.empty():
+                    progress = progress_queue.get_nowait()
+                    if isinstance(progress, dict) and progress.get("type") == "step":
+                        yield {"type": "step", "step": progress}
+
+                reply, _tool_records, tool_citations = tool_task.result()
                 citations.extend(tool_citations)
                 if reply:
                     yield {"type": "delta", "content": reply}

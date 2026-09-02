@@ -1,4 +1,4 @@
-"""Process-start loader for bounded deterministic-planning vocabulary."""
+"""进程启动时加载受限确定性规划词汇。"""
 
 from __future__ import annotations
 

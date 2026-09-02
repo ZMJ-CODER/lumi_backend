@@ -1,4 +1,4 @@
-"""Backend-neutral admission leases with an optional Redis ZSET backend."""
+"""与运行时后端无关的准入租约，支持可选 Redis ZSET 存储。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Office-job planning, materialization, and runtime submission.
+"""办公任务的规划、物化与运行时提交。
 
 Admission locking stays at the orchestrator boundary.  Once that lock is held,
 this service owns the linear submission transaction: prepare context, choose a
@@ -16,8 +16,8 @@ from app.agents.orchestration.job_materialization_service import JobMaterializat
 from app.agents.orchestration.manifest_submission_service import ManifestSubmissionService
 from app.agents.orchestration.models import Job
 from app.agents.orchestration.office_plan_selection_service import OfficePlanSelectionService
-from app.agents.orchestration.plan_compilation_service import PlanCompilationService
-from app.agents.orchestration.plan_context import PlanRequestContext
+from app.agents.orchestration.planning.compilation import PlanCompilationService
+from app.agents.orchestration.planning.context import PlanRequestContext
 from app.agents.orchestration.submission_context_service import SubmissionContextService
 from app.agents.orchestration.admission import job_admission
 from app.agents.orchestration.task_manifest import record_manifest_route_decisions
@@ -38,11 +38,15 @@ class JobSubmissionService:
         materialization: JobMaterializationService,
         temporal_mode: bool,
         temporal_static_mode: bool,
+        temporal_logical_read_mode: bool,
+        temporal_logical_effects_mode: bool,
         can_run_manifest_temporal: Callable[[Job], bool],
         can_run_static_temporal: Callable[[Job], bool],
         probe_temporal: Callable[[], Awaitable[bool]],
         manifest_backend: Any,
         static_backend: Any,
+        logical_read_backend: Any,
+        logical_effects_backend: Any,
         legacy_backend: Any,
         start_heartbeat: Callable[[str, str], None],
         stop_heartbeat: Callable[[str], Awaitable[None]],
@@ -59,11 +63,15 @@ class JobSubmissionService:
         self._materialization = materialization
         self._temporal_mode = temporal_mode
         self._temporal_static_mode = temporal_static_mode
+        self._temporal_logical_read_mode = temporal_logical_read_mode
+        self._temporal_logical_effects_mode = temporal_logical_effects_mode
         self._can_run_manifest_temporal = can_run_manifest_temporal
         self._can_run_static_temporal = can_run_static_temporal
         self._probe_temporal = probe_temporal
         self._manifest_backend = manifest_backend
         self._static_backend = static_backend
+        self._logical_read_backend = logical_read_backend
+        self._logical_effects_backend = logical_effects_backend
         self._legacy_backend = legacy_backend
         self._start_heartbeat = start_heartbeat
         self._stop_heartbeat = stop_heartbeat
@@ -151,7 +159,9 @@ class JobSubmissionService:
         self._plan_compilation.normalize_for_submission(
             tree.nodes,
             request,
-            preserve_dependencies=bool(routing.get("manifest")),
+            preserve_dependencies=bool(
+                routing.get("manifest") or routing.get("preserve_dependencies")
+            ),
         )
         if scene == "office" and tree.nodes and not tree.error and not routing.get("manifest"):
             tree = await self._plan_compilation.compile_with_feedback(
@@ -213,9 +223,104 @@ class JobSubmissionService:
             record_manifest_route_decisions(manifest)
         self._start_heartbeat(job.job_id, user_id)
         try:
+            effects_decision = None
+            if (
+                self._temporal_logical_effects_mode
+                and isinstance((job.routing or {}).get("logical_plan"), dict)
+            ):
+                from app.agents.orchestration.logical_plan import load_logical_plan
+                from app.agents.orchestration.runtime_gateway import RuntimeGateway
+
+                pointer = (job.routing or {}).get("logical_plan") or {}
+                plan = await load_logical_plan(job.user_id, str(pointer.get("plan_id") or ""))
+                effects_decision = RuntimeGateway.logical_effects_rollout_eligibility(job, plan)
+                job.routing = {
+                    **(job.routing or {}),
+                    "temporal_logical_effects_eligibility": {
+                        "eligible": effects_decision.eligible,
+                        "code": effects_decision.code,
+                        "detail": effects_decision.detail,
+                    },
+                }
+            if (
+                self._temporal_logical_effects_mode
+                and effects_decision is not None
+                and effects_decision.eligible
+                and await self._probe_temporal()
+            ):
+                try:
+                    await self._logical_effects_backend.submit(job, effective_llm.api_key, llm_config)
+                    logger.info("审批副作用逻辑计划已提交(Temporal): {}", job.job_id[:8])
+                    return job
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Temporal 审批副作用逻辑计划提交失败，回退自建 DAG: {} | {}", job.job_id[:8], exc)
+                    job.routing = {
+                        **(job.routing or {}),
+                        "runtime": "legacy",
+                        "temporal_submit_error": str(exc)[:200],
+                    }
+            logical_decision = None
+            if (
+                self._temporal_logical_read_mode
+                and isinstance((job.routing or {}).get("logical_plan"), dict)
+            ):
+                from app.agents.orchestration.logical_plan import load_logical_plan
+                from app.agents.orchestration.runtime_gateway import RuntimeGateway
+
+                pointer = (job.routing or {}).get("logical_plan") or {}
+                plan = await load_logical_plan(job.user_id, str(pointer.get("plan_id") or ""))
+                logical_decision = RuntimeGateway.logical_read_rollout_eligibility(job, plan)
+                job.routing = {
+                    **(job.routing or {}),
+                    "temporal_logical_read_eligibility": {
+                        "eligible": logical_decision.eligible,
+                        "code": logical_decision.code,
+                        "detail": logical_decision.detail,
+                    },
+                }
+            if (
+                self._temporal_logical_read_mode
+                and logical_decision is not None
+                and logical_decision.eligible
+                and await self._probe_temporal()
+            ):
+                try:
+                    await self._logical_read_backend.submit(job, effective_llm.api_key, llm_config)
+                    logger.info(
+                        "纯读逻辑计划已提交(Temporal): {} | frontier={} request={}",
+                        job.job_id[:8],
+                        len(job.nodes),
+                        request[:40],
+                    )
+                    return job
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Temporal 纯读逻辑计划提交失败，回退自建 DAG: {} | {}",
+                        job.job_id[:8],
+                        exc,
+                    )
+                    job.routing = {
+                        **(job.routing or {}),
+                        "runtime": "legacy",
+                        "temporal_submit_error": str(exc)[:200],
+                    }
+            static_decision = None
+            if self._temporal_static_mode:
+                from app.agents.orchestration.runtime_gateway import RuntimeGateway
+
+                static_decision = RuntimeGateway.static_rollout_eligibility(job)
+                job.routing = {
+                    **(job.routing or {}),
+                    "temporal_static_eligibility": {
+                        "eligible": static_decision.eligible,
+                        "code": static_decision.code,
+                        "detail": static_decision.detail,
+                    },
+                }
             if (
                 self._temporal_static_mode
-                and self._can_run_static_temporal(job)
+                and static_decision is not None
+                and static_decision.eligible
                 and await self._probe_temporal()
             ):
                 try:

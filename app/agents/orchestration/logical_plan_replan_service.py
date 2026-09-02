@@ -1,9 +1,7 @@
-"""Safe L3 replacement for failed rolling logical-plan frontiers.
+"""失败滚动逻辑计划前沿的安全 L3 替换。
 
-The service owns the durable logical-plan mutation after the orchestrator has
-already rejected terminal model failures and handled L2 approval signals.
-Keeping it separate prevents the facade from duplicating planner, compiler,
-and persistence mechanics for every rolling-plan recovery.
+编排器拒绝终态模型失败并处理 L2 审批信号后，本服务负责持久化逻辑计划的变更。
+保持其独立，可避免门面对每次滚动计划恢复重复实现规划、编译与持久化机制。
 """
 
 from __future__ import annotations
@@ -15,8 +13,8 @@ from typing import Any
 from loguru import logger
 
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus
-from app.agents.orchestration.plan_compilation_service import PlanCompilationService
-from app.agents.orchestration.plan_context import PlanRequestContext
+from app.agents.orchestration.planning.compilation import PlanCompilationService
+from app.agents.orchestration.planning.context import PlanRequestContext
 from app.agents.orchestration.replan_evidence_service import ReplanEvidenceService
 from app.agents.orchestration.replan_policy import decide_logical_plan_replan
 from app.agents.orchestration.tca import ComplexityLevel
@@ -144,7 +142,7 @@ class LogicalPlanReplanService:
             preserve_dependencies=False,
             adapt_workers=True,
         )
-        from app.agents.orchestration.dag import validate_planned_dag
+        from app.agents.orchestration.execution.validation import validate_planned_dag
         from app.agents.orchestration.plan_compiler import CompileDecision, compile_plan
         from app.agents.orchestration.presentation import attach_display_plan
         from app.agents.orchestration.safety import prepare_node_safety

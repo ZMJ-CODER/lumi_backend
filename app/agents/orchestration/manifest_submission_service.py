@@ -1,9 +1,8 @@
-"""Prepare explicitly authorized task manifests for job submission.
+"""为任务提交准备已显式授权的任务清单。
 
-This is the submission-time counterpart to ``ManifestContinuationService``.
-It owns authorization, safe source loading, deterministic parsing, and the
-optional model enrichment of a user-authorized checklist.  It never creates a
-Job or submits work to an execution backend.
+这是 ``ManifestContinuationService`` 在提交时的对应组件。它负责授权、安全加载
+来源、确定性解析，以及对用户已授权清单的可选模型补充；绝不创建 Job 或向执行
+后端提交工作。
 """
 
 from __future__ import annotations
@@ -50,6 +49,16 @@ class ManifestSubmissionService:
         llm_config: dict | None,
         routing_model: dict,
     ) -> ManifestSubmissionResult | None:
+        # A declared A/B parallel -> C -> D read-only workflow is a DAG
+        # contract, not a checklist. Let the dedicated compiler preserve its
+        # dependencies before the generic manifest parser attempts model-based
+        # item extraction.
+        from app.agents.orchestration.planning.read_only_dag import (
+            build_explicit_read_only_dag,
+        )
+
+        if build_explicit_read_only_dag(request) is not None:
+            return None
         authorization = authorize_manifest_source(request, office_docs)
         if authorization is None:
             return None
@@ -201,7 +210,7 @@ class ManifestSubmissionService:
         # react worker.  Apply the same compatibility adaptation to the first
         # rolling window as continuation batches; otherwise routed direct/rag
         # nodes remain without a worker and the manifest cannot progress.
-        from app.agents.orchestration.plan_normalizer import adapt_unavailable_manifest_workers
+        from app.agents.orchestration.planning.normalizer import adapt_unavailable_manifest_workers
 
         adapt_unavailable_manifest_workers(nodes, self._workers)
         return ManifestSubmissionResult(

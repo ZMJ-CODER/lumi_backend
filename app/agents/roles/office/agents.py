@@ -283,9 +283,9 @@ class OfficeScriptAgent(WorkerAgent):
             }
         # 先检查执行能力，避免模型花费 token 生成代码后才发现当前部署没有安全沙箱。
         from app.agents.skills.executor import skill_runtime_unavailable
-        from app.agents.skills.registry import SkillRegistry
+        from app.agents.skills.registry import ToolRegistry
 
-        python_skill = SkillRegistry.get("python_exec")
+        python_skill = ToolRegistry.get("python_exec")
         # 单元测试/插件尚未加载的启动边界交由 run_skill 的统一校验处理；
         # 正常运行时已注册则提前检查运行时可用性，节省一次模型调用。
         unavailable = skill_runtime_unavailable(python_skill) if python_skill else None
@@ -672,17 +672,17 @@ class OfficeSystemAgent(WorkerAgent):
         'params 用 {"task": "open_app|open_file|open_url|send_email|ps|kill|env|datetime|curl", '
         '"instruction": "指令/参数"}'
     )
-    skills = ["open_app", "open_file", "open_url", "send_email", "ps", "kill", "env", "get_datetime", "curl"]
+    skills = ["OpenApp", "OpenFile", "OpenUrl", "send_email", "ProcessList", "ProcessSignal", "SystemInfo", "DateTime", "curl"]
 
     _TASK_SKILL = {
-        "open_app": "open_app",
-        "open_file": "open_file",
-        "open_url": "open_url",
+        "open_app": "OpenApp",
+        "open_file": "OpenFile",
+        "open_url": "OpenUrl",
         "send_email": "send_email",
-        "ps": "ps",
-        "kill": "kill",
-        "env": "env",
-        "datetime": "get_datetime",
+        "ps": "ProcessList",
+        "kill": "ProcessSignal",
+        "env": "SystemInfo",
+        "datetime": "DateTime",
         "curl": "curl",
     }
 
@@ -737,7 +737,7 @@ class OfficeSystemAgent(WorkerAgent):
             return {"name": name, "args": list(raw.get("args") or [])} if name else None
         if task == "open_file":
             path = instruction or str(raw.get("path") or "").strip()
-            return {"path": path} if path else None
+            return {"file_path": path} if path else None
         if task == "open_url":
             url = instruction or str(raw.get("url") or "").strip()
             return {"url": url} if url else None
@@ -765,7 +765,7 @@ class OfficeSystemAgent(WorkerAgent):
             keys = raw.get("keys") or ([instruction] if instruction else [])
             return {"keys": list(keys) if isinstance(keys, list) else [str(keys)]}
         if task == "datetime":
-            return {}
+            return {"format": str(raw.get("format") or "datetime")}
         if task == "curl":
             url = instruction or str(raw.get("url") or "").strip()
             return {

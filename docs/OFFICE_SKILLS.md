@@ -8,7 +8,7 @@
 
 当前能力模型如下：
 
-1. `plugins/skills/` 中的 Skill 先经场景、角色、写开关、运行时可用性和用户绑定过滤；
+1. `plugins/tools/` 中的 Tool 先经场景、角色、写开关、运行时可用性和用户绑定过滤；
 2. 聊天仅从受限问答池按请求注入 Top-K，普通常识不会暴露工具；
 3. 办公 ReAct 每轮按最新观察刷新受限候选池，仍由 Gateway 复核参数、授权、文档范围、确认和副作用 journal；
 4. 多文档事实定位先 `inspect_document_set`，再以授权 `doc_id` 调用 `read_document`；

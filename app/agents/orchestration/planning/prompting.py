@@ -45,45 +45,97 @@ def build_planner_prompt() -> str:
     from app.core.agent_security import UNTRUSTED_CONTENT_RULES
 
     return (
-        "你是任务规划器。把用户请求拆解为任务计划。\n"
-        "默认使用 atomic_step，把任务拆成可独立提交、可独立失败/重试的原子步骤。"
-        "每个 atomic_step 只允许一个唯一目标、最多一次 Skill/MCP 调用；需要读后再写、搜索后再总结时必须拆成多个节点。"
-        "所有步骤必须按用户叙述的顺序串行执行：除第一个步骤外，每一步都 depends_on 前一步，禁止并行。"
-        "必须覆盖用户请求中的每一个动作；上传文档只提供上下文，不能让文档分析任务吞掉打开应用、写文件、发邮件等独立指令。"
-        "atomic_step 可以调用当前 office 场景的本地 Skill、system Skill 和 MCP 工具，"
-        "但规划时必须唯一指定 preferred_tool，执行器只会向模型暴露这一个工具。"
-        "params 用 {\"instruction\":\"本步骤唯一目标\",\"preferred_tool\":\"首选工具名\",\"fallback_tools\":[\"不同原理的备用工具\"],\"inputs\":{}}。"
-        "为可能失败的读取、解析、转换步骤规划不同原理且当前已允许的 fallback_tools；备用工具不得与首选工具重复。"
-        "涉及同一文件、文档、日历或待办的步骤必须通过 depends_on 表达逻辑顺序；执行器会自动声明资源读写锁。\n"
+        "你是办公任务规划器，只输出可校验的 JSON 计划。\n"
+        "把用户目标拆成最少的原子步骤；每个 atomic_step 只有一个目标和一次工具调用。"
+        "读后写、搜索后总结、或同一资源的读写必须拆步；互不依赖的读取/检索/分析保持 depends_on=[]。"
+        "只从下方候选能力中选择工具。atomic_step 的 params 必须是 "
+        "{\"instruction\":\"唯一目标\",\"preferred_tool\":\"候选工具名\",\"fallback_tools\":[],\"inputs\":{}}。"
+        "目标文档、项目、账户或候选工具要求的字段不明确时，返回 clarification，绝不编造 ID 或参数。"
+        "若候选中明确列出 Workflow Skill，才可使用 workflow_skill，params 为 "
+        "{\"skill_name\":\"候选工作流名\",\"inputs\":{}}。"
+        "只有下一步必须使用上一步结果、共享资源有先后关系，或用户明确要求顺序时填写 depends_on。"
+        "同一批无依赖节点最多生成 5 个；超过 5 个相似子任务时，拆成后续滚动批次，"
+        "不要一次性扇出大量模型或外部请求。"
+        "不得为了形式完整虚构步骤，也不得把多个独立操作吞进一个节点。\n"
         "可用执行 agent：\n" + agent_prompt_lines()
-        + "\n代码任务建议按文件拆分节点：阅读/定位使用 code_reader，修改使用 code_writer，"
-        "写入后用 code_tester 验证；修改已有文件必须明确 target_file，目标不明时先定位。\n"
-        "办公任务：文件转换、清洗、合并拆分、导出或生成真实文件优先使用 office_script；"
-        "读写文档用 office_doc 并携带 doc_id；文本产出使用 office_text；竞品分析、文档问答等使用 office_research；"
-        "产出节点必须依赖读取节点。\n"
-        "严格输出 JSON（不要代码块围栏、不要解释）：\n"
+        + "\n严格输出 JSON（不要代码块围栏、不要解释）：\n"
         "{\"plan\":\"给用户看的执行计划\",\"tasks\":[{\"id\":\"t1\",\"name\":\"任务名\",\"agent\":\"retrieval\",\"params\":{},\"depends_on\":[]}],\"clarification\":\"\"}\n"
         "意图不明确或缺少关键信息时，tasks 留空、clarification 填需要确认的问题。\n\n"
         + UNTRUSTED_CONTENT_RULES
     )
 
 
-async def runtime_capability_note(request: str, user_id: str = "") -> str:
+_DOCUMENT_SCOPED_TOOL_NAMES = frozenset({
+    "inspect_document_set",
+    "read_document",
+    "office_doc_read",
+    "office_doc_analyze",
+    "office_doc_edit",
+})
+
+
+async def runtime_capability_note(
+    request: str,
+    user_id: str = "",
+    office_docs: list[dict] | None = None,
+) -> str:
     """提供已鉴权的候选工具摘要，避免模型提出不可执行计划。"""
     try:
         from app.agents.skills.executor import select_capabilities_for_request
 
         capabilities = await select_capabilities_for_request(request, "office", user_id=user_id)
+        # 文档工具只有在本次 Job 已经注入了经授权的附件时才是可执行能力。
+        # 不能仅因用户说了“文档”就把编辑工具交给规划模型，否则模型容易
+        # 为普通文本分析臆造 doc_id，之后才由编译器拒绝，白白创建失败任务。
+        # 此处是规划候选的硬边界；编译器仍保留自己的 doc_id 校验作为纵深防御。
+        authorized_documents = any(
+            isinstance(item, dict) and str(item.get("doc_id") or "").strip()
+            for item in (office_docs or [])
+        )
+        if not authorized_documents:
+            capabilities = [
+                capability
+                for capability in capabilities
+                if capability.name not in _DOCUMENT_SCOPED_TOOL_NAMES
+                and "doc_id" not in set(getattr(capability, "plan_required_fields", None) or [])
+            ]
         entries: list[str] = []
         for capability in capabilities:
             schema = capability.parameters if isinstance(capability.parameters, dict) else {}
             required = schema.get("required") if isinstance(schema, dict) else []
             flags = (["required=" + ",".join(str(item) for item in required[:8])] if required else [])
+            plan_required = list(getattr(capability, "plan_required_fields", None) or [])
+            if plan_required:
+                flags.append("plan_required=" + ",".join(str(item) for item in plan_required[:8]))
             if capability.write_op:
                 flags.append("write=true")
             if capability.requires_confirmation:
                 flags.append("confirmation=true")
             entries.append(f"{capability.name}({'; '.join(flags) or 'read'}): {str(capability.description or '').replace(chr(10), ' ')[:120]}")
-        return "\n当前请求可用的候选 Skill（已按权限、场景和运行时状态收窄；preferred_tool 必须从此列表选择）：\n- " + "\n- ".join(entries)
+        from app.services.user_workflow_skills import get_visible_workflow_skills
+
+        workflows = await get_visible_workflow_skills(user_id)
+        workflow_entries = [
+            f"{item.name}(workflow; source={item.source}; tools={','.join(item.allowed_tools) or 'none'}): "
+            f"{str(item.description or '').replace(chr(10), ' ')[:120]}"
+            for item in workflows
+            if item.supports_scene("office")
+        ]
+        scope_note = (
+            "本次没有已授权办公附件；严禁规划需要 doc_id 的读取、分析或编辑工具。"
+            if not authorized_documents
+            else "本次已注入授权办公附件；涉及文档工具时必须使用清单中的真实 doc_id。"
+        )
+        tool_note = (
+            "\n" + scope_note
+            + "\n当前请求可用的候选 Tool（已按权限、场景和运行时状态收窄；atomic_step.preferred_tool 必须从此列表选择）：\n- "
+            + "\n- ".join(entries)
+        )
+        workflow_note = (
+            "\n当前用户可见的 Workflow Skill（仅可作为 workflow_skill.skill_name，不可作为 Tool 调用）：\n- "
+            + "\n- ".join(workflow_entries)
+            if workflow_entries else ""
+        )
+        return tool_note + workflow_note
     except Exception:  # noqa: BLE001
         return ""

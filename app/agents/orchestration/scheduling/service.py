@@ -69,6 +69,10 @@ class PlanPatchScheduler:
         patch: PlanPatch,
     ) -> PlanPatchAppendResult:
         """供内部 LangGraph 适配器使用；仍复用相同的持久化和安全校验。"""
+        from app.core.config import settings
+
+        if not bool(getattr(settings, "AGENT_REACT_PLAN_PATCH_ENABLED", False)):
+            raise PlanPatchConflict("Agent ReAct 暂不允许自主扩图；仅编排器可发起重规划")
         if patch.source != "langgraph":
             raise PlanPatchConflict("内部补图必须声明 source=langgraph")
         return await self._append(job_id=job_id, user_id=user_id, patch=patch)

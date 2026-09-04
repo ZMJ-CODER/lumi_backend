@@ -136,7 +136,9 @@ class FailedJobReplanService:
                 for node in job.nodes
             ],
         }
-        self._plan_compilation.normalize_for_replan(tree.nodes, job.request)
+        self._plan_compilation.normalize_for_replan(
+            tree.nodes, job.request, preserve_dependencies=True
+        )
         from app.agents.orchestration.execution.validation import validate_planned_dag
         from app.agents.orchestration.presentation import attach_display_plan
         from app.agents.orchestration.safety import prepare_node_safety

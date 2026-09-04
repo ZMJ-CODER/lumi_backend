@@ -16,6 +16,14 @@ from pydantic import ValidationError
 from app.core.config import settings
 
 
+_CHANNEL_TIMEOUT_SETTINGS = {
+    "direct_llm": "AGENT_NODE_TIMEOUT_DIRECT_LLM_SECONDS",
+    "deterministic_script": "AGENT_NODE_TIMEOUT_SCRIPT_SECONDS",
+    "rag": "AGENT_NODE_TIMEOUT_RAG_SECONDS",
+    "agent": "AGENT_NODE_TIMEOUT_AGENT_SECONDS",
+}
+
+
 @lru_cache(maxsize=1)
 def load_execution_defaults() -> ExecutionDefaultsDocument:
     path = Path(settings.AGENT_EXECUTION_DEFAULTS_PATH)
@@ -30,6 +38,8 @@ def resolve_node_execution_spec(
     node_spec: NodeExecutionSpec,
     *,
     task_policy: dict[str, Any] | None = None,
+    node_params: dict[str, Any] | None = None,
+    node_metadata: dict[str, Any] | None = None,
 ) -> tuple[NodeExecutionSpec, dict[str, Any]]:
     """Merge defaults < task policy < node facts and return an auditable snapshot."""
     document = load_execution_defaults()
@@ -62,6 +72,29 @@ def resolve_node_execution_spec(
         elif value is not None and value != getattr(NodeExecutionSpec(), key):
             base[key] = value
     resolved = NodeExecutionSpec.model_validate(base)
+    # Explicit node/task policy values remain authoritative.  Dynamic
+    # estimation only fills an unset timeout; it must not silently replace a
+    # business-declared safety window (for example a 30s bounded API call).
+    timeout_is_explicit = node_spec.timeout_seconds is not None or bool(
+        task_policy and task_policy.get("timeout_seconds") is not None
+    )
+    if node_params and not timeout_is_explicit:
+        from lumi_orch.runner import resolve_node_timeout
+
+        try:
+            tool_overrides = json.loads(str(settings.AGENT_NODE_TOOL_TIMEOUTS_JSON or "{}"))
+        except (TypeError, ValueError):
+            tool_overrides = {}
+        dynamic_timeout = resolve_node_timeout(
+            {"params": node_params, "metadata": node_metadata or {}},
+            default_seconds=int(resolved.timeout_seconds or defaults.timeout_seconds),
+            channel_timeouts={
+                channel: int(getattr(settings, setting_name, 0) or 0)
+                for channel, setting_name in _CHANNEL_TIMEOUT_SETTINGS.items()
+            },
+            tool_timeouts=tool_overrides if isinstance(tool_overrides, dict) else {},
+        )
+        resolved = resolved.model_copy(update={"timeout_seconds": dynamic_timeout})
     raw = json.dumps(resolved.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     policy_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return resolved, {"version": document.version, "sha256": policy_hash, "resolved": resolved.model_dump(mode="json")}

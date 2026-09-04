@@ -47,6 +47,7 @@ class CapabilitySnapshot(BaseModel):
     user_role: str
     workers: list[str] = Field(default_factory=list)
     tools: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    workflows: dict[str, dict[str, Any]] = Field(default_factory=dict)
     fingerprint: str = ""
 
 
@@ -82,6 +83,7 @@ _NODE_REQUIRED: dict[str, tuple[str, ...]] = {
 _NODE_COST = {
     "direct_llm": (1800, 8_000),
     "atomic_step": (2_500, 30_000),
+    "workflow_skill": (4_000, 60_000),
     "react_step": (12_000, 120_000),
     "office_script": (4_000, 60_000),
     "office_document": (5_000, 60_000),
@@ -147,6 +149,36 @@ def _validate_explicit_inputs(
             violations.append(PlanViolation(
                 code="PARAM_TYPE",
                 message=f"参数 {name} 类型不符合工具 schema（需要 {expected}）",
+                node_id=node.id,
+            ))
+
+
+def _validate_planning_required_inputs(
+    node: TaskNode,
+    tool_name: str,
+    tool: dict[str, Any],
+    violations: list[PlanViolation],
+) -> None:
+    """Enforce tool-declared object identities before a node can run.
+
+    The Tool states which values are unsafe to infer.  The compiler only
+    applies that declaration, so this is a common contract rather than another
+    per-tool routing rule.
+    """
+    required = tool.get("plan_required_fields") or []
+    if not isinstance(required, list):
+        return
+    inputs = (node.params or {}).get("inputs")
+    inputs = inputs if isinstance(inputs, dict) else {}
+    for field in required:
+        name = str(field or "").strip()
+        if name and inputs.get(name) in (None, "", []):
+            violations.append(PlanViolation(
+                code="PLAN_INPUT_REQUIRED",
+                message=(
+                    f"工具 {tool_name} 缺少必须明确指定的输入 {name}；"
+                    "请先确认目标，不能在执行时猜测。"
+                ),
                 node_id=node.id,
             ))
 
@@ -286,10 +318,13 @@ async def build_capability_snapshot(
 ) -> CapabilitySnapshot:
     """Build a per-job capability snapshot after scene/role/runtime filters."""
     tools: dict[str, dict[str, Any]] = {}
+    workflows: dict[str, dict[str, Any]] = {}
     try:
         from app.agents.skills.executor import get_capabilities_for_scene
 
-        capabilities = await get_capabilities_for_scene(scene, user_role, user_id)
+        capabilities = await get_capabilities_for_scene(
+            scene, user_role, user_id, include_internal=True
+        )
         for capability in capabilities:
             tools[capability.name] = {
                 "parameters": capability.parameters if isinstance(capability.parameters, dict) else {},
@@ -299,13 +334,26 @@ async def build_capability_snapshot(
                 "idempotent": bool(capability.idempotent),
                 "status": capability.status,
                 "description": capability.description,
+                "plan_required_fields": list(capability.plan_required_fields),
             }
     except Exception:
         # Local workers can still be compiled if an optional MCP discovery
         # backend is unavailable.  The executor performs the same final check.
         tools = {}
+    try:
+        from app.services.user_workflow_skills import get_visible_workflow_skills
+
+        for workflow in await get_visible_workflow_skills(user_id):
+            workflows[workflow.name] = {
+                "scenes": list(workflow.scenes),
+                "status": workflow.status,
+                "source": workflow.source,
+                "allowed_tools": list(workflow.allowed_tools),
+            }
+    except Exception:
+        workflows = {}
     encoded = json.dumps(
-        {"scene": scene, "role": user_role, "workers": sorted(workers), "tools": tools},
+        {"scene": scene, "role": user_role, "workers": sorted(workers), "tools": tools, "workflows": workflows},
         ensure_ascii=False, sort_keys=True, default=str,
     )
     return CapabilitySnapshot(
@@ -313,6 +361,7 @@ async def build_capability_snapshot(
         user_role=user_role,
         workers=sorted(workers),
         tools=tools,
+        workflows=workflows,
         fingerprint=hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16],
     )
 
@@ -364,6 +413,18 @@ async def compile_plan(
     except DagValidationError as exc:
         violations.append(PlanViolation(code="DAG_INVALID", message=str(exc)))
 
+    # 限制同一依赖前沿的扇出，避免 Planner 在一个调度周期内制造
+    # Provider 请求洪峰。超过窗口的长任务交给逻辑计划分批物化。
+    max_frontier = max(1, int(getattr(settings, "AGENT_MAX_PARALLEL_FRONTIER", 5) or 5))
+    indegree = {node.id: len(node.depends_on) for node in compiled_nodes}
+    frontier = [node for node in compiled_nodes if indegree[node.id] == 0]
+    if len(frontier) > max_frontier:
+        violations.append(PlanViolation(
+            code="PARALLEL_FRONTIER_LIMIT",
+            message=f"计划首个并发前沿包含 {len(frontier)} 个节点，超过上限 {max_frontier}；将分批执行",
+            severity="warning" if bool(getattr(settings, "AGENT_LOGICAL_PLAN_ENABLED", False)) else "error",
+        ))
+
     node_ids = {node.id for node in compiled_nodes}
     for node in compiled_nodes:
         _validate_plan_step_contract(node, node_ids, violations)
@@ -408,12 +469,32 @@ async def compile_plan(
                         params["fallback_tools"].remove(tool_name)
                     continue
                 _validate_explicit_inputs(node, tool.get("parameters") or {}, violations)
+                _validate_planning_required_inputs(node, tool_name, tool, violations)
             if params.get("preferred_tool"):
                 node.metadata = {
                     **(node.metadata or {}),
                     "compiled_tool": params["preferred_tool"],
                     "compiled_tool_write": bool((snapshot.tools.get(params["preferred_tool"]) or {}).get("write_op")),
                 }
+        if node.agent == "workflow_skill":
+            workflow_name = str(params.get("skill_name") or "").strip()
+            workflow = snapshot.workflows.get(workflow_name)
+            if workflow is None:
+                violations.append(PlanViolation(
+                    code="WORKFLOW_UNAVAILABLE",
+                    message=f"工作流 {workflow_name} 当前不可用或不属于此用户",
+                    node_id=node.id,
+                ))
+            elif scene not in set(workflow.get("scenes") or []):
+                violations.append(PlanViolation(
+                    code="WORKFLOW_SCENE_FORBIDDEN",
+                    message=f"工作流 {workflow_name} 不支持场景 {scene}",
+                    node_id=node.id,
+                ))
+            elif not isinstance(params.get("inputs") or {}, dict):
+                violations.append(PlanViolation(
+                    code="WORKFLOW_INPUTS_TYPE", message="工作流 inputs 必须是对象", node_id=node.id,
+                ))
         if node.agent == "react_step":
             rounds = params.get("max_rounds", 6)
             if not isinstance(rounds, int) or not 1 <= rounds <= 6:

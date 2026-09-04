@@ -420,8 +420,8 @@ async def locate_from_memory(worker, ctx, project_id: str, instruction: str) -> 
         try:
             pattern = "|".join(re.escape(t) for t in tokens)
             res = await worker.run_skill(
-                "grep_code",
-                {"project_id": project_id, "pattern": pattern, "max_results": 8},
+                "Grep",
+                {"project_id": project_id, "path": project_id, "pattern": pattern, "max_results": 8},
                 ctx,
             )
             if res.get("success"):
@@ -454,17 +454,17 @@ async def _read_with_retry(
     def _params(path, key):
         p = {"project_id": project_id}
         if path:
-            p["path"] = path
+            p["file_path"] = path
         elif key:
-            p["file_key"] = key
+            p["file_path"] = key
         return p
 
-    read = await worker.run_skill("read_project_file", _params(target_path, target_key), ctx)
+    read = await worker.run_skill("Read", _params(target_path, target_key), ctx)
     if not read.get("success"):
         located = await locate_project_file(ctx.user_id, project_id, instruction)
         if located and (located.get("path") or located.get("file_key")):
             retry = await worker.run_skill(
-                "read_project_file",
+                "Read",
                 _params(located.get("path"), located.get("file_key")),
                 ctx,
             )

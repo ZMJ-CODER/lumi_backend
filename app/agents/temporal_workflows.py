@@ -870,6 +870,7 @@ class AgentDagWorkflow:
             "user_role": self._job.get("user_role", "user"),
             "scene": self._job.get("scene", "office"),
             "user_request": self._job.get("request", ""),
+            "authorized_project_ids": list((self._job.get("routing") or {}).get("authorized_project_ids") or []),
             "node": node,
             "dependency_results": dependency_results,
             "config": cfg,

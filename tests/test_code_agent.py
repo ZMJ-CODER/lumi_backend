@@ -49,7 +49,7 @@ def test_code_agent_read_generate_write(monkeypatch):
 
     async def fake_run_skill(skill, params, ctx):
         calls.append((skill, params))
-        if skill == "read_project_file":
+        if skill == "Read":
             return {"success": True, "content": "old code"}
         return {"success": True, "content": "written"}
 
@@ -61,10 +61,10 @@ def test_code_agent_read_generate_write(monkeypatch):
     result = asyncio.run(agent.execute(node, _ctx()))
 
     assert result["success"] is True
-    assert calls[0][0] == "read_project_file"
-    assert calls[1][0] == "write_project_file"
-    assert calls[0][1]["path"] == "src/main.py"
-    assert calls[1][1]["path"] == "src/main.py"
+    assert calls[0][0] == "Read"
+    assert calls[1][0] == "Write"
+    assert calls[0][1]["file_path"] == "src/main.py"
+    assert calls[1][1]["file_path"] == "src/main.py"
     assert calls[1][1]["content"] == "new code"
     # 质检层可审查内容
     assert result["new_content"] == "new code"

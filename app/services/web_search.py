@@ -31,7 +31,11 @@ WEB_SEARCH_TOOL: dict = {
 }
 
 
-async def web_search_required(query: str, max_results: int | None = None) -> list[dict]:
+async def web_search_required(
+    query: str,
+    max_results: int | None = None,
+    allowed_domains: list[str] | None = None,
+) -> list[dict]:
     """Fetch fresh results or raise, so callers cannot silently use stale model knowledge."""
     if not query.strip():
         raise WebSearchUnavailableError("联网搜索缺少查询内容")
@@ -41,14 +45,18 @@ async def web_search_required(query: str, max_results: int | None = None) -> lis
     try:
         async def _search() -> dict:
             async with httpx.AsyncClient(timeout=settings.TAVILY_TIMEOUT_SECONDS) as client:
+                payload = {
+                    "api_key": settings.TAVILY_API_KEY,
+                    "query": query,
+                    "max_results": max_results,
+                    "search_depth": settings.TAVILY_SEARCH_DEPTH,
+                }
+                domains = [str(item).strip().lower() for item in (allowed_domains or []) if str(item).strip()]
+                if domains:
+                    payload["include_domains"] = domains[:20]
                 resp = await client.post(
                     "https://api.tavily.com/search",
-                    json={
-                        "api_key": settings.TAVILY_API_KEY,
-                        "query": query,
-                        "max_results": max_results,
-                        "search_depth": settings.TAVILY_SEARCH_DEPTH,
-                    },
+                    json=payload,
                 )
                 resp.raise_for_status()
                 return resp.json()
@@ -80,10 +88,14 @@ async def web_search_required(query: str, max_results: int | None = None) -> lis
         raise WebSearchUnavailableError("联网搜索失败，请检查网络、Tavily API Key 或账户额度") from exc
 
 
-async def web_search(query: str, max_results: int | None = None) -> list[dict]:
+async def web_search(
+    query: str,
+    max_results: int | None = None,
+    allowed_domains: list[str] | None = None,
+) -> list[dict]:
     """Best-effort compatibility wrapper for optional tool call sites."""
     try:
-        return await web_search_required(query, max_results)
+        return await web_search_required(query, max_results, allowed_domains)
     except WebSearchUnavailableError as exc:
         logger.info("Tavily 可选搜索未完成: {}", exc)
         return []

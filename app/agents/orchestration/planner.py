@@ -9,6 +9,7 @@ import time
 import uuid
 from pathlib import Path
 import re
+import ast
 
 from loguru import logger
 
@@ -64,6 +65,111 @@ def _is_datetime_request(request: str) -> bool:
     return not any(term in text for term in other_action_terms)
 
 
+_CALCULATOR_TRANSLATION = str.maketrans({
+    "×": "*", "÷": "/", "＋": "+", "－": "-", "％": "%", "（": "(", "）": ")",
+})
+_LABELED_EXPRESSION = re.compile(
+    r"(?:^|[；;。\n：:]|(?:计算|算)\s*)([A-Za-z][A-Za-z0-9_-]{0,31})\s*=\s*([^；;。\n]+)"
+)
+
+
+def _single_arithmetic_expression(value: object) -> str | None:
+    """Return one syntactically complete arithmetic expression, never prose.
+
+    This boundary deliberately lives in planning rather than the calculator:
+    one atomic tool call has one auditable input.  A compound request must be
+    represented by several nodes, not silently reduced to the longest slice.
+    """
+    text = str(value or "").strip().translate(_CALCULATOR_TRANSLATION)
+    text = re.sub(r"(?<=\d)[,，](?=\d)", "", text)
+    # Only strip a narrow, leading request shell.  We intentionally do not
+    # scan arbitrary prose for a longest fragment: that would reintroduce the
+    # old multi-item data-loss bug.
+    text = re.sub(r"^(?:请|帮我)?\s*(?:精确(?:地)?\s*)?(?:计算|算一下|帮我算|算出)\s*", "", text)
+    text = text.rstrip("。；;，,").strip()
+    # Delivery-only suffixes do not create a second task. Accepting them
+    # keeps natural one-expression requests on the fast path, while any
+    # substantive clause (another calculation, a table, comparison, etc.)
+    # still falls through to DAG/LLM planning instead of being discarded.
+    suffix = re.search(
+        r"[，,]\s*(?:"
+        r"只(?:返回|输出).{0,16}"
+        r"|(?:只)?(?:告诉我)?结果(?:即可)?"
+        r"|保留\d+位小数"
+        r")\s*$",
+        text,
+    )
+    if suffix:
+        text = text[:suffix.start()].strip()
+    if not text or not re.fullmatch(r"[0-9.\s()+\-*/%]+", text):
+        return None
+    try:
+        ast.parse(text, mode="eval")
+    except SyntaxError:
+        return None
+    return text
+
+
+def _multi_calculation_tree(request: str) -> TaskTree | None:
+    """Compile explicit labelled multi-calculation requests into a real DAG.
+
+    The shortcut accepts only labelled, standalone arithmetic values (``A =
+    ...；B = ...``).  Natural-language decomposition remains the LLM planner's
+    responsibility, while this unambiguous form avoids an unnecessary model
+    call and, crucially, never drops later items.
+    """
+    text = str(request or "").strip()
+    if not any(marker in text.casefold() for marker in ("计算", "算一下", "帮我算", "算出")):
+        return None
+    pairs: list[tuple[str, str]] = []
+    for label, raw_expression in _LABELED_EXPRESSION.findall(text.translate(_CALCULATOR_TRANSLATION)):
+        # 最后一项后面的“并汇总为表格”是 DAG 交付要求，而不是算式本身。
+        # 只接受这一类明确的交付尾注，其他自然语言仍拒绝，避免截断隐藏算式。
+        raw_expression = re.sub(
+            r"[，,]\s*(?:并)?(?:最后)?(?:汇总|整理|列出).*$",
+            "",
+            raw_expression,
+            flags=re.IGNORECASE,
+        )
+        expression = _single_arithmetic_expression(raw_expression)
+        if expression is None:
+            return None
+        pairs.append((label.upper(), expression))
+    if len(pairs) < 2:
+        return None
+
+    # A duplicated label is ambiguous; do not silently overwrite a result.
+    if len({label for label, _ in pairs}) != len(pairs):
+        return None
+    node_ids: list[str] = []
+    nodes: list[TaskNode] = []
+    for label, expression in pairs:
+        node_id = f"calc-{label.lower()}-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        node_ids.append(node_id)
+        nodes.append(TaskNode(
+            id=node_id,
+            name=f"计算 {label}",
+            agent="atomic_step",
+            params={
+                "instruction": f"计算 {label} = {expression}",
+                "preferred_tool": "Calculator",
+                "fallback_tools": [],
+                "inputs": {"expression": expression},
+            },
+            depends_on=[],
+            metadata={
+                "preserve_dependencies": True,
+                "route_channel": "deterministic_script",
+                "routing": {"reason": "explicit_multi_calculation", "item": label},
+            },
+        ))
+    # 算式和展示格式都在规则层可确定时，不应为了把三行结果排成表格再依赖
+    # 云端 LLM。最终回答聚合器会按节点原始结果交付；这使纯计算 DAG 在模型
+    # 短暂不可用时仍可完整完成。需要自然语言解释时才由上层自由规划生成
+    # direct_llm 汇总节点。
+    return TaskTree(nodes=nodes, plan_text=f"并行计算 {len(pairs)} 个明确表达式后汇总交付。")
+
+
 def _deterministic_read_tool_tree(request: str) -> TaskTree | None:
     """编译常见只读工具请求，避免短查询依赖规划模型。"""
     text = (request or "").strip()
@@ -75,20 +181,25 @@ def _deterministic_read_tool_tree(request: str) -> TaskTree | None:
     external_markers = ("打开", "启动", "发送", "发邮件", "修改", "删除", "执行", "运行")
     if any(marker in lower for marker in external_markers):
         return None
-    # 计算器：保留表达式原文，由 Skill 自己做安全解析；不执行任意代码。
+    # 计算器只接收一个完整算式。复合请求由上方 DAG 编译或 LLM 规划处理，
+    # 绝不能把整段自然语言丢给工具后只算出其中一个片段。
     if any(marker in lower for marker in ("计算", "算一下", "帮我算", "算出")):
-        expression = text
+        expression = _single_arithmetic_expression(text)
+        if expression is None:
+            return None
         node_id = f"c{int(time.time())}-{uuid.uuid4().hex[:6]}"
         return TaskTree(nodes=[TaskNode(
             id=node_id,
             name="精确计算",
             agent="atomic_step",
-            params={"instruction": text, "preferred_tool": "calculator", "fallback_tools": [], "inputs": {"expression": expression}},
+            params={"instruction": text, "preferred_tool": "Calculator", "fallback_tools": [], "inputs": {"expression": expression}},
             depends_on=[],
         )], plan_text="调用计算器完成精确计算。")
-    # 天气、新闻、汇率等公开实时信息固定走 web_research；不把“查询”本身
-    # 当成联网授权，避免普通知识问题产生外部请求。
-    if any(marker in lower for marker in ("天气", "新闻", "汇率", "行情", "股价", "网页", "网上", "联网", "公开资料")):
+    # 公开资料/网页信息的泛化查询走 web_research。涉及企业内部资料、知识库
+    # 或上传文档时优先走 retrieval，避免把私有内容发送到公网搜索。
+    private_markers = ("知识库", "资料库", "内部", "公司制度", "公司政策", "员工手册", "上传", "附件", "文档中", "文件中")
+    public_markers = ("天气", "新闻", "汇率", "行情", "股价", "网页", "网上", "联网", "公开资料", "查资料", "查信息", "检索资料", "检索信息", "查文献", "查官网", "官方资料")
+    if any(marker in lower for marker in public_markers) and not any(marker in lower for marker in private_markers):
         node_id = f"w{int(time.time())}-{uuid.uuid4().hex[:6]}"
         return TaskTree(nodes=[TaskNode(
             id=node_id,
@@ -309,15 +420,18 @@ class RulePlanner(Planner):
                         agent="atomic_step",
                         params={
                             "instruction": request,
-                            "preferred_tool": "get_datetime",
+                            "preferred_tool": "DateTime",
                             "fallback_tools": [],
-                            "inputs": {},
+                            "inputs": {"format": "datetime"},
                         },
                         depends_on=[],
                     )
                 ],
                 plan_text="查询当前日期和时间。",
             )
+        multi_calculation = _multi_calculation_tree(combined)
+        if multi_calculation is not None:
+            return multi_calculation
         deterministic = _deterministic_read_tool_tree(combined)
         if deterministic is not None:
             return deterministic
@@ -589,7 +703,10 @@ class LlmPlanner(Planner):
     """LLM 意图拆解：用户请求 → 任务树（DAG）.
 
     模型：与执行层同模型（用户当前选择的云端大模型，BYOK 透传临时 key）。
-    任何失败（模型不支持工具 / 解析失败 / 未定位到项目）→ 回退 RulePlanner。
+
+    对办公工作流，模型是唯一的计划作者；规则只负责授权、输入校验和计划
+    编译。复杂度等级不再选择模板、规则 DAG 或固定 ReAct 节点，而是作为
+    调度预算与安全策略的元数据。
     """
 
     def __init__(
@@ -598,10 +715,9 @@ class LlmPlanner(Planner):
         project_repository: ProjectRepository | None = None,
     ):
         self._project_repository = project_repository or SqlAlchemyProjectRepository()
-        self._fallback = fallback or RulePlanner(project_repository=self._project_repository)
-        from app.agents.orchestration.planning.strategies import PlannerStrategies
-
-        self._strategies = PlannerStrategies()
+        # Keep the optional argument in the public constructor for source
+        # compatibility with embedded deployments.  Office planning never uses
+        # it as a semantic fallback.
 
     # Routing can use the context-aware level entry point for the built-in
     # planner while preserving positional dispatch for third-party planners.
@@ -649,111 +765,31 @@ class LlmPlanner(Planner):
         office_docs = [dict(item) for item in context.office_docs]
         prior_summaries = context.prior_summaries
         level = ComplexityLevel(level)
-        # Keep explicit persistent actions ahead of every level-specific fast
-        # path, including M1 template selection and bypass_fast_paths replans.
-        # Otherwise a generic ETL/daily template can still swallow a trailing
-        # "add this to my todo" clause before the normal planner is reached.
-        compound_plan = build_text_then_todo_plan(request)
-        if compound_plan is not None:
-            return TaskTree(nodes=compound_plan.nodes, plan_text=compound_plan.plan_text)
-        explicit_read_only_dag = build_explicit_read_only_dag(request)
-        if explicit_read_only_dag is not None:
-            return TaskTree(
-                nodes=explicit_read_only_dag,
-                plan_text="按用户声明的 A/B 并行、C 汇总、D 交付的只读分析 DAG 执行。",
-            )
-        if bypass_fast_paths:
-            selected_docs, unresolved_docs, has_named_docs = select_named_office_documents(
-                request, office_docs
-            )
-            if has_named_docs and unresolved_docs:
-                return TaskTree(
-                    nodes=[],
-                    clarification=f"未能唯一定位文件《{'、'.join(unresolved_docs)}》。请确认准确名称后再试。",
-                )
-            if has_named_docs:
-                office_docs = selected_docs
+        if scene != "office":
             projects = await self._list_projects(user_id)
             try:
                 tree = await self._plan_with_llm(
-                    user_id,
-                    request,
-                    project_id,
-                    project_ids,
-                    llm_api_key,
-                    projects,
-                    clarification_answer,
-                    office_docs,
-                    prior_summaries,
+                    user_id, request, project_id, project_ids, llm_api_key,
+                    projects, clarification_answer, office_docs, prior_summaries,
                     llm_config=llm_config,
                 )
             except PlannerModelError as exc:
                 return TaskTree(nodes=[], error=str(exc), error_code=exc.code)
-            if tree is not None:
-                return tree
-            return TaskTree(
-                nodes=[],
-                error="任务升级规划未生成可执行步骤，请补充目标或稍后重试。",
-                error_code="REPLAN_EMPTY",
+            return tree or TaskTree(
+                nodes=[], error="未生成可执行计划，请补充任务目标。", error_code="PLANNER_EMPTY"
             )
-        if level == ComplexityLevel.M0:
-            return await self._fallback.plan_context(context)
-        if level == ComplexityLevel.M3 and scene == "office":
-            route = infer_route_intent(request, office_docs, prior_summaries=prior_summaries)
-            # M3 is not synonymous with ReAct. If the action types are known
-            # and the deterministic planner can compile them, preserve the
-            # static DAG even when the complexity assessor was conservative.
-            if not route.requires_dynamic and not route.requires_side_effect:
-                static_tree = await self._fallback.plan_context(context)
-                if static_tree.nodes and all(node.agent != "react_step" for node in static_tree.nodes):
-                    return static_tree
-            return TaskTree(
-                nodes=[TaskNode(
-                    id=f"r{int(time.time())}-{uuid.uuid4().hex[:6]}",
-                    name="动态分析与执行",
-                    agent="react_step",
-                    params={
-                        "instruction": request,
-                        "max_rounds": 6,
-                        "office_docs": [
-                            {"doc_id": str(item.get("doc_id")), "filename": str(item.get("filename") or "")}
-                            for item in (office_docs or [])
-                            if item.get("doc_id")
-                        ],
-                    },
-                    metadata={
-                        "routing": {
-                            "confidence": route.confidence,
-                            "classifier_confidence_hint": route.classifier_confidence_hint,
-                            "confidence_detail": route.confidence_detail.__dict__ if route.confidence_detail else {},
-                            "risk_level": route.risk_level,
-                            "action_steps": [step.__dict__ for step in route.action_steps],
-                        },
-                    },
-                    depends_on=[],
-                    approval=route.requires_side_effect,
-                    approval_note="该计划包含外部状态变化，执行前需要确认。" if route.requires_side_effect else "",
-                )],
-                plan_text="根据中间结果动态选择工具并完成任务。",
-            )
-        if level == ComplexityLevel.M1:
-            if extract_output_contract(request).get("requires_artifact"):
-                return await self.plan_context(context)
-            intent = classify(request, office_docs)
-            template = intent.get("template") if intent.get("task_type") == "template" else None
-            if template:
-                tree = await self._plan_with_template(
-                    user_id,
-                    request,
-                    office_docs,
-                    llm_api_key,
-                    force_template=str(template),
-                    prior_summaries=prior_summaries,
-                    llm_config=llm_config,
-                )
-                if tree is not None:
-                    return tree
-        return await self.plan_context(context)
+        return await self._plan_office_workflow(
+            level=level,
+            user_id=user_id,
+            request=request,
+            project_id=project_id,
+            project_ids=project_ids,
+            llm_api_key=llm_api_key,
+            clarification_answer=clarification_answer,
+            office_docs=office_docs,
+            prior_summaries=prior_summaries,
+            llm_config=llm_config,
+        )
 
     async def plan(
         self,
@@ -769,80 +805,83 @@ class LlmPlanner(Planner):
         *,
         llm_config: dict | None = None,
     ) -> TaskTree:
-        # 确定性、无副作用的系统查询不进入模型规划。这样即使用户的 BYOK
-        # 临时密钥缺失，也不会把“当前几点”这类请求误转为知识库检索。
-        if _is_datetime_request(request + (f" {clarification_answer}" if clarification_answer else "")):
-            return await self._fallback.plan(
-                user_id,
-                request,
-                scene,
-                project_id,
-                project_ids,
-                llm_api_key,
-                clarification_answer,
-                office_docs,
-                prior_summaries,
+        from app.agents.orchestration.tca import ComplexityLevel
+
+        if scene != "office":
+            projects = await self._list_projects(user_id)
+            try:
+                tree = await self._plan_with_llm(
+                    user_id, request, project_id, project_ids, llm_api_key,
+                    projects, clarification_answer, office_docs, prior_summaries,
+                    llm_config=llm_config,
+                )
+            except PlannerModelError as exc:
+                return TaskTree(nodes=[], error=str(exc), error_code=exc.code)
+            return tree or TaskTree(
+                nodes=[], error="未生成可执行计划，请补充任务目标。", error_code="PLANNER_EMPTY"
             )
-        deterministic = _deterministic_read_tool_tree(request + (f" {clarification_answer}" if clarification_answer else ""))
-        if deterministic is not None:
-            return deterministic
-        # Explicit text-generation plus todo persistence is a small known DAG.
-        # Compile it before the semi-structured ETL selector so the latter
-        # cannot collapse the requested write into a text-only summary node.
-        compound_plan = build_text_then_todo_plan(request)
-        if compound_plan is not None:
-            return TaskTree(nodes=compound_plan.nodes, plan_text=compound_plan.plan_text)
-        explicit_read_only_dag = build_explicit_read_only_dag(request)
-        if explicit_read_only_dag is not None:
-            return TaskTree(
-                nodes=explicit_read_only_dag,
-                plan_text="按用户声明的 A/B 并行、C 汇总、D 交付的只读分析 DAG 执行。",
-            )
-        # 简单“指定文件 -> 指定文本格式”不需要模型计划。先按文件名精确定位，
-        # 避免自由规划把每份上传文档都塞进读/分析节点。
-        conversion = resolve_direct_text_conversion(request, office_docs)
-        if conversion:
-            return _direct_conversion_tree(request, conversion)
-        selected_docs, unresolved_docs, has_named_docs = select_named_office_documents(request, office_docs)
+        return await self._plan_office_workflow(
+            level=ComplexityLevel.M2,
+            user_id=user_id,
+            request=request,
+            project_id=project_id,
+            project_ids=project_ids,
+            llm_api_key=llm_api_key,
+            clarification_answer=clarification_answer,
+            office_docs=office_docs,
+            prior_summaries=prior_summaries,
+            llm_config=llm_config,
+        )
+
+    async def _plan_office_workflow(
+        self,
+        *,
+        level: object,
+        user_id: str,
+        request: str,
+        project_id: str | None,
+        project_ids: list[str] | None,
+        llm_api_key: str | None,
+        clarification_answer: str | None,
+        office_docs: list[dict] | None,
+        prior_summaries: str,
+        llm_config: dict | None,
+    ) -> TaskTree:
+        """Ask the structured planner for every admitted office workflow."""
+        selected_docs, unresolved_docs, has_named_docs = select_named_office_documents(
+            request, office_docs
+        )
         if has_named_docs and unresolved_docs:
             return TaskTree(
                 nodes=[],
-                clarification=f"未能唯一定位文件《{'、'.join(unresolved_docs)}》。请从已上传文件中确认准确名称后再试。",
+                clarification=f"未能唯一定位文件《{'、'.join(unresolved_docs)}》。请确认准确名称后再试。",
             )
         if has_named_docs:
             office_docs = selected_docs
         projects = await self._list_projects(user_id)
         try:
             tree = await self._plan_with_llm(
-                user_id,
-                request,
-                project_id,
-                project_ids,
-                llm_api_key,
-                projects,
-                clarification_answer,
-                office_docs,
-                prior_summaries,
-                llm_config=llm_config,
+                user_id, request, project_id, project_ids, llm_api_key, projects,
+                clarification_answer, office_docs, prior_summaries, llm_config=llm_config,
             )
         except PlannerModelError as exc:
-            logger.warning("[Planner] 办公规划模型不可用: {}", exc)
             return TaskTree(nodes=[], error=str(exc), error_code=exc.code)
-        if tree is not None:
-            _apply_output_contract(tree.nodes, request)
-            return tree
-        return await self._fallback.plan(
-            user_id,
-            request,
-            scene,
-            project_id,
-            project_ids,
-            llm_api_key,
-                clarification_answer,
-                office_docs,
-                prior_summaries,
-                llm_config=llm_config,
+        if tree is None:
+            return TaskTree(
+                nodes=[],
+                error="任务规划未生成可执行步骤，请补充目标或稍后重试。",
+                error_code="PLANNER_EMPTY",
             )
+        for node in tree.nodes:
+            node.metadata = {
+                **(node.metadata or {}),
+                # Worker-side admission reads this stable key.  Complexity is
+                # an execution budget, not an alternative planning strategy.
+                "complexity_level": str(getattr(level, "value", level)).lower(),
+                "planning_complexity": str(getattr(level, "value", level)).lower(),
+            }
+        _apply_output_contract(tree.nodes, request)
+        return tree
 
     async def _list_projects(self, user_id: str) -> list[dict]:
         try:
@@ -877,7 +916,8 @@ class LlmPlanner(Planner):
         *,
         llm_config: dict | None = None,
     ) -> TaskTree | None:
-        # 只展示用户本机项目（自动定位时聚焦这些项目，避免无关项目干扰）
+        # 只展示用户本机项目（自动定位时聚焦这些项目，避免无关项目干扰）。
+        # 普通聊天不会进入该规划器；代码工具执行仍需服务端注入项目范围。
         if project_ids:
             pid_set = set(project_ids)
             focused = [p for p in projects if p["id"] in pid_set]
@@ -885,11 +925,11 @@ class LlmPlanner(Planner):
                 projects = focused
         # 文件清单只对代码/已选项目任务有价值。办公文档、日程、联网等请求不再
         # 串行扫描每个项目的文件索引，以免扩大提示词和规划等待时间。
-        request_lower = request.lower()
-        needs_project_files = bool(project_id or project_ids) or any(
-            marker in request_lower
-            for marker in ("代码", "code", "bug", "函数", "模块", "组件", "项目")
-        )
+        # 项目文件名也是用户数据，不能因为请求里出现“项目/代码”等泛化词
+        # 就把所有项目的索引注入模型。只有 API 明确提交了 project_id(s)
+        # 才视为本次任务已授权读取项目元数据；未明确授权时，后续代码路由
+        # 仍可要求用户先选择项目，但规划模型看不到任何文件清单。
+        needs_project_files = bool(project_id or project_ids)
         project_files: dict[str, list[str]] = {}
         if needs_project_files:
             for p in projects:
@@ -926,81 +966,9 @@ class LlmPlanner(Planner):
                 else ""
             )
         )
-        output_contract = extract_output_contract(request)
-        new_document = infer_new_office_document(request)
-        if new_document:
-            from app.agents.core.registry import AgentRegistry
-
-            if AgentRegistry.get("office_document") is not None:
-                return _new_office_document_tree(request, new_document, office_docs or [])
-        if output_contract.get("requires_artifact"):
-            return TaskTree(
-                nodes=[TaskNode(
-                    id=f"s{int(time.time())}-{uuid.uuid4().hex[:6]}",
-                    name="生成并校验文件",
-                    agent="office_script",
-                    params={
-                        "task": request,
-                        "doc_ids": [str(d.get("doc_id")) for d in office_docs or [] if d.get("doc_id")],
-                        "output_contract": output_contract,
-                    },
-                    depends_on=[],
-                )],
-                plan_text=f"按要求生成并校验《{output_contract['expected_output_names'][0]}》。",
-            )
-        if _is_multi_document_fact_request(request, office_docs):
-            from app.agents.core.registry import AgentRegistry
-
-            if "DOCUMENT_SELECTION_AMBIGUOUS" in prior_summaries and AgentRegistry.get("react_step") is not None:
-                return _multi_document_react_tree(request, office_docs or [])
-            if AgentRegistry.get("document_targeting") is not None and AgentRegistry.get("direct_llm") is not None:
-                return _multi_document_targeting_tree(request, office_docs or [])
-        # 意图分类（规则粗分类）：模板 / 半结构 / 自由
-        intent = classify(request, office_docs)
-        if intent["task_type"] == "template":
-            templated = await self._plan_with_template(
-                user_id,
-                request,
-                office_docs,
-                llm_api_key,
-                force_template=intent["template"],
-                prior_summaries=prior_summaries,
-                llm_config=llm_config,
-            )
-            if templated is not None:
-                return templated
-        elif intent["task_type"] == "semi_structured":
-            patterned = await self._plan_with_pattern(
-                user_id,
-                request,
-                office_docs,
-                llm_api_key,
-                prior_summaries=prior_summaries,
-                llm_config=llm_config,
-            )
-            if patterned is not None:
-                return patterned
-        elif intent["task_type"] == "script":
-            # 脚本任务：直接建 office_script 节点（写脚本处理文档，不逐步查看）
-            doc_ids = [str(d.get("doc_id")) for d in office_docs or [] if d.get("doc_id")]
-            if doc_ids:
-                return TaskTree(
-                    nodes=[
-                        TaskNode(
-                            id=f"s{int(time.time())}-{uuid.uuid4().hex[:6]}",
-                            name="脚本处理文档",
-                            agent="office_script",
-                            params={
-                                "task": request,
-                                "doc_ids": doc_ids,
-                                "output_contract": extract_output_contract(request),
-                            },
-                            depends_on=[],
-                        )
-                    ],
-                    plan_text=f"按脚本任务执行：{request}",
-                )
-        # free / 兜底：Plan-then-Execute（LLM 自由规划，含 office_doc 兜底注入）
+        # 工作流内只保留一个规划入口：LLM 输出 JobSpec。规则不再按模板、
+        # 文件名或半结构关键词抢先伪造节点；它们只作为模型可见能力、编译器
+        # 参数/权限校验和执行优化的一部分。
         try:
             # 保持此调用的四参数契约；项目里已有插件/测试会替换该方法。
             try:
@@ -1010,10 +978,11 @@ class LlmPlanner(Planner):
                     context,
                     llm_api_key,
                     llm_config=llm_config,
+                    office_docs=office_docs,
                 )
             except TypeError as exc:
                 # 兼容旧插件/测试替换的四参数规划器。
-                if "llm_config" not in str(exc):
+                if "llm_config" not in str(exc) and "office_docs" not in str(exc):
                     raise
                 data = await self._call_structured_planner(
                     user_id, request, context, llm_api_key
@@ -1037,6 +1006,11 @@ class LlmPlanner(Planner):
                 params["fallback_tools"] = [
                     str(name) for name in (params.get("fallback_tools") or []) if str(name).strip()
                 ][:2]
+            elif agent == "react_step":
+                # The model may choose bounded ReAct for a genuinely dynamic
+                # node, but it never controls the loop budget itself.
+                params["instruction"] = str(params.get("instruction") or t.get("name") or request)
+                params["max_rounds"] = min(6, max(1, int(params.get("max_rounds") or 6)))
             elif agent == "retrieval":
                 params.setdefault("query", request)
             elif agent.startswith("code"):
@@ -1054,91 +1028,14 @@ class LlmPlanner(Planner):
                     agent=agent,
                     params=params,
                     depends_on=[str(d) for d in (t.get("depends_on") or [])],
+                    metadata={"planner_generated": True},
                 )
             )
-        # 确定性兜底：带了办公文档但规划结果没覆盖到 → 强制补 office_doc 分析节点，
-        # 保证智能体一定能读到文档（不依赖 LLM 规划的自觉）
-        if office_docs and "office_doc" in _known_agents():
-            covered = {
-                str(n.params.get("doc_id"))
-                for n in nodes
-                if n.agent == "office_doc" and n.params.get("doc_id")
-            }
-            # A sandbox file operation reads its explicitly mounted source
-            # document directly. Do not append an unrelated LLM analysis node
-            # after a valid office_script plan; it adds latency and may inspect
-            # the same file twice without contributing to the artifact.
-            covered.update(
-                str(doc_id)
-                for n in nodes
-                if n.agent == "office_script"
-                for doc_id in (n.params.get("doc_ids") or [])
-                if doc_id
-            )
-            for d in office_docs or []:
-                doc_id = str(d.get("doc_id") or "")
-                if not doc_id or doc_id in covered:
-                    continue
-                fname = str(d.get("filename") or doc_id[:8])
-                nodes.append(
-                    TaskNode(
-                        id=f"od{int(time.time())}-{uuid.uuid4().hex[:6]}-{len(nodes)}",
-                        name=f"分析文档 {fname}",
-                        agent="office_doc",
-                        params={
-                            "doc_id": doc_id,
-                            "instruction": request,
-                            "mode": "analyze",
-                            "analyze_mode": "qa",
-                        },
-                        depends_on=[],
-                    )
-                )
         _apply_output_contract(nodes, request)
         return TaskTree(
             nodes=nodes,
             clarification=clarification,
             plan_text=str(data.get("plan") or "").strip() or None,
-        )
-
-    async def _plan_with_template(
-        self,
-        user_id: str,
-        request: str,
-        office_docs: list[dict] | None,
-        llm_api_key: str | None,
-        force_template: str | None = None,
-        prior_summaries: str = "",
-        *,
-        llm_config: dict | None = None,
-    ) -> TaskTree | None:
-        return await self._strategies.template(
-            user_id=user_id,
-            request=request,
-            office_docs=office_docs,
-            llm_api_key=llm_api_key,
-            force_template=force_template,
-            prior_summaries=prior_summaries,
-            llm_config=llm_config,
-        )
-
-    async def _plan_with_pattern(
-        self,
-        user_id: str,
-        request: str,
-        office_docs: list[dict] | None,
-        llm_api_key: str | None,
-        prior_summaries: str = "",
-        *,
-        llm_config: dict | None = None,
-    ) -> TaskTree | None:
-        return await self._strategies.pattern(
-            user_id=user_id,
-            request=request,
-            office_docs=office_docs,
-            llm_api_key=llm_api_key,
-            prior_summaries=prior_summaries,
-            llm_config=llm_config,
         )
 
     async def _call_structured_planner(
@@ -1149,14 +1046,20 @@ class LlmPlanner(Planner):
         llm_api_key: str | None,
         *,
         llm_config: dict | None = None,
+        office_docs: list[dict] | None = None,
     ) -> dict | None:
-        """走 LangChain JSON 规划调用；失败交由 RulePlanner 确定性回退。"""
+        """调用结构化规划模型；失败时返回明确错误，不伪造规则计划。"""
         started = time.perf_counter()
         try:
             from app.agents.langchain.planning import invoke_structured_planner
             from app.agents.orchestration.cases import format_cases, get_similar_cases
 
-            prompt = _build_planner_prompt() + await _runtime_capability_note(request, user_id) + "\n" + context
+            prompt = (
+                _build_planner_prompt()
+                + await _runtime_capability_note(request, user_id, office_docs)
+                + "\n"
+                + context
+            )
             similar = await get_similar_cases(request, 3)
             if similar:
                 prompt += "\n\n" + format_cases(similar)
@@ -1165,7 +1068,7 @@ class LlmPlanner(Planner):
             )
             return output.model_dump()
         except Exception as exc:  # noqa: BLE001
-            logger.debug("[Planner] LangChain 结构化规划不可用，交由 RulePlanner 回退: {}", exc)
+            logger.debug("[Planner] LangChain 结构化规划不可用: {}", exc)
             error_code, user_error = classify_model_error(exc)
             if error_code in {
                 "MODEL_INSUFFICIENT_BALANCE",

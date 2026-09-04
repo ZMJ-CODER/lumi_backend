@@ -1,0 +1,43 @@
+version: 1.0.0
+# 历史插件的集中补齐策略；新工具应直接在 Skill 中声明完整字段。
+defaults:
+  general:
+    domain: infra
+    use_when: [用户明确要求该工具所声明的能力]
+    do_not_use_when: [请求不属于该工具声明的能力范围]
+  office:
+    domain: document
+    use_when: [用户明确要求处理办公内容]
+    do_not_use_when: [请求不涉及办公内容或需要外部写操作]
+  filesystem:
+    domain: document
+    use_when: [用户明确授权访问指定文件或目录]
+    do_not_use_when: [路径未授权或请求扩大访问范围]
+  shell:
+    domain: system
+    use_when: [用户明确要求执行受控脚本或命令]
+    do_not_use_when: [命令会绕过沙箱、权限或安全确认]
+  process:
+    domain: system
+    use_when: [用户明确要求查看或管理指定进程]
+    do_not_use_when: [未指定目标或操作需要绕过权限确认]
+  system:
+    domain: system
+    use_when: [用户明确询问系统信息或确定性计算]
+    do_not_use_when: [请求要求访问敏感环境变量或未授权数据]
+  network:
+    domain: research
+    use_when: [用户明确要求访问公开网络或已授权知识库]
+    do_not_use_when: [请求访问私有项目、凭据或未授权内网]
+  devtools:
+    domain: development
+    use_when: [用户明确授权对指定项目执行开发辅助操作]
+    do_not_use_when: [未绑定项目范围或请求执行破坏性写操作]
+  desktop:
+    domain: desktop
+    use_when: [用户明确要求通过已绑定客户端执行桌面操作]
+    do_not_use_when: [没有绑定客户端或请求访问服务器资源]
+  orchestration:
+    domain: orchestration
+    use_when: [编排任务明确要求汇总或推进节点]
+    do_not_use_when: [请求绕过任务状态和执行策略]

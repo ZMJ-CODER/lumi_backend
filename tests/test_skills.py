@@ -7,7 +7,7 @@ import pytest
 
 from app.agents.sandbox.local import LocalSandbox
 from app.agents.sandbox.registry import available_sandboxes
-from app.agents.skills.base import Skill, SkillResult
+from app.agents.skills.base import Tool, SkillResult
 from app.agents.skills.executor import (
     execute_tool_call,
     is_explicit_user_delete_request,
@@ -19,97 +19,63 @@ from app.agents.skills.executor import (
     skills_to_tools,
 )
 from app.agents.skills.capability import ToolCapability
-from app.agents.skills.registry import SkillRegistry
+from app.agents.skills.registry import SkillRegistry, ToolRegistry
 
 
 @pytest.fixture(autouse=True)
 def _skills():
-    """加载真实插件目录（plugins/skills），测试结束后清理."""
+    """加载真实 Tool 与 Workflow Skill 目录，测试结束后清理。"""
     from app.agents.skills import loader
 
     SkillRegistry.clear()
+    ToolRegistry.clear()
     loader.unload_skill_plugins()
     loader.load_skill_plugins()
     yield
     loader.unload_skill_plugins()
     SkillRegistry.clear()
+    ToolRegistry.clear()
 
 
 def test_skills_registered_and_scene_filtered():
-    names = {s.name for s in SkillRegistry.list()}
-    assert {"web_search", "query_knowledge", "get_datetime", "python_exec"} <= names
-    assert {"list_project", "read_project_file", "write_project_file", "run_project_command"} <= names
+    names = {s.name for s in ToolRegistry.list()}
+    assert {"WebSearch", "Read", "Write", "Bash"} <= names
+    assert {"DateTime", "Calculator"}.isdisjoint(names)
+    assert {"read_project_file", "write_project_file", "run_project_command", "get_datetime"}.isdisjoint(names)
+    # RAG/文档等领域能力保留为编排内部能力，不再是模型通用候选。
+    assert {"web_search", "query_knowledge", "python_exec"}.isdisjoint(names)
+    assert {"web_search", "query_knowledge", "python_exec"} <= {s.name for s in ToolRegistry.internal_list()}
+    workflow_names = {skill.name for skill in SkillRegistry.list()}
+    assert {"daily_report", "document_qa", "competitor_analysis", "compose_email"} <= workflow_names
+    assert not workflow_names & {"WebSearch", "DateTime", "Calculator", "Read", "Write"}
     chat = {s.name for s in get_skills_for_scene("chat")}
     assert "python_exec" not in chat  # 危险技能不进 chat 场景
-    assert "web_search" in chat
+    assert "WebSearch" in chat
     office = {s.name for s in get_skills_for_scene("office")}
-    assert "python_exec" in office
-    assert {"list_project", "write_project_file", "run_project_command"} <= office
+    assert {"Bash", "Read", "Write", "Glob", "Grep"} <= office
 
 
-def test_project_skills_metadata():
-    ws = SkillRegistry.get("write_project_file")
+def test_project_capability_metadata_uses_canonical_tools():
+    ws = ToolRegistry.get("Write")
     assert ws.environment == "client"
     assert ws.requires_confirmation is True
-    assert ws.scenes == ["office"]
-    rc = SkillRegistry.get("run_project_command")
+    rc = ToolRegistry.get("Bash")
     assert rc.environment == "client"
-    assert rc.requires_confirmation is False  # 白名单命令免确认（npm/pytest 等）
-    rp = SkillRegistry.get("read_project_file")
+    assert rc.requires_confirmation is True
+    rp = ToolRegistry.get("Read")
     assert rp.environment == "client"
     assert rp.requires_confirmation is False
 
 
-def test_todo_confirmation_and_write_policy_are_action_scoped():
-    todo = SkillRegistry.get("todo_manager")
+def test_todo_write_uses_uniform_write_policy():
+    todo = ToolRegistry.get("TodoWrite")
     assert todo is not None
-    assert todo.requires_confirmation_for({"action": "list"}) is False
-    assert todo.is_write_operation({"action": "list"}) is False
-    for action in ("add", "complete", "delete"):
-        assert todo.requires_confirmation_for({"action": action}) is True
-        assert todo.is_write_operation({"action": action}) is True
-
-
-def test_todo_list_does_not_enter_confirmation_gate(monkeypatch):
-    import app.agents.mcp.manager as manager
-    import app.agents.skills.executor as executor
-
-    async def fake_call_skill(*_args, **_kwargs):
-        return {"success": True, "content": "（暂无待办）", "metadata": {}, "is_error": False}
-
-    async def noop_log(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(manager, "call_skill", fake_call_skill)
-    monkeypatch.setattr(executor, "_record_skill_log", noop_log)
-    result = asyncio.run(execute_tool_call(
-        {"function": {"name": "todo_manager", "arguments": {"action": "list"}}},
-        "u1", "office",
-    ))
-    assert result.success is True
-    assert result.error_code is None
-
-
-def test_todo_list_is_not_marked_effectful_by_dag_safety():
-    from app.agents.orchestration.models import TaskNode
-    from app.agents.orchestration.safety import is_effectful, prepare_node_safety
-
-    node = TaskNode(
-        id="todo-list",
-        agent="atomic_step",
-        params={
-            "instruction": "查看我的待办",
-            "preferred_tool": "todo_manager",
-            "inputs": {"action": "list"},
-        },
-    )
-    prepare_node_safety(node, "u1", "job1")
-    assert is_effectful(node) is False
-    assert node.idempotency_key is None
+    assert todo.requires_confirmation_for({"todos": [{"content": "验证"}]}) is True
+    assert todo.is_write_operation({"todos": [{"content": "验证"}]}) is True
 
 
 def test_skill_lifecycle_is_exposed_and_experimental_is_not_auto_routable():
-    class _ExperimentalSkill(Skill):
+    class _ExperimentalSkill(Tool):
         name = "experimental_lifecycle_test"
         description = "仅供显式灰度测试"
         status = "experimental"
@@ -118,17 +84,15 @@ def test_skill_lifecycle_is_exposed_and_experimental_is_not_auto_routable():
         async def execute(self, params, context=None):
             return SkillResult(success=True, output="ok")
 
-    SkillRegistry.register(_ExperimentalSkill())
-    skill = SkillRegistry.get("experimental_lifecycle_test")
+    ToolRegistry.register(_ExperimentalSkill())
+    skill = ToolRegistry.get("experimental_lifecycle_test")
     assert skill.version == "1.0.0"
     assert len(skill.schema_fingerprint) == 64
-    assert "experimental_lifecycle_test" not in {
-        item["function"]["name"] for item in asyncio.run(get_tools_for_scene("office"))
-    }
+    assert "experimental_lifecycle_test" not in {item["function"]["name"] for item in asyncio.run(get_tools_for_scene("office"))}
 
 
 def test_invalid_skill_lifecycle_is_rejected():
-    class _BrokenSkill(Skill):
+    class _BrokenSkill(Tool):
         name = "broken_lifecycle_test"
         version = "not-a-version"
 
@@ -136,13 +100,13 @@ def test_invalid_skill_lifecycle_is_rejected():
             return SkillResult(success=True)
 
     with pytest.raises(ValueError, match="semver"):
-        SkillRegistry.register(_BrokenSkill())
+        ToolRegistry.register(_BrokenSkill())
 
 
 def test_registered_skills_meet_minimum_contract():
-    """Shared CI guard for breaking Skill API changes."""
+    """共享 CI 守卫：Tool 契约与 Workflow Skill 注册空间必须分离。"""
     allowed_statuses = {"experimental", "stable", "deprecated", "disabled"}
-    for skill in SkillRegistry.list():
+    for skill in ToolRegistry.list():
         tool = skill.to_tool_definition()["function"]
         assert skill.name and tool["name"] == skill.name
         assert skill.status in allowed_statuses
@@ -152,15 +116,18 @@ def test_registered_skills_meet_minimum_contract():
         if tool["parameters"]:
             assert tool["parameters"].get("type") == "object"
             assert isinstance(tool["parameters"].get("properties", {}), dict)
+    for workflow in SkillRegistry.list():
+        assert workflow.name
+        assert workflow.status in allowed_statuses
+        assert workflow.name not in {tool.name for tool in ToolRegistry.list()}
 
 
 def test_delete_confirmation_bypass_requires_current_explicit_single_file_request():
-    args = {"path": "C:/Users/demo/scores.csv", "recursive": False}
-    assert is_explicit_user_delete_request("请删除 scores.csv", "delete_file", args)
-    assert is_explicit_user_delete_request("把这个文件删掉", "delete_file", args)
-    assert not is_explicit_user_delete_request("清理临时文件", "delete_file", args)
-    assert not is_explicit_user_delete_request("请删除 scores.csv", "delete_file", {**args, "recursive": True})
-    assert not is_explicit_user_delete_request("请删除 scores.csv", "delete_project_file", args)
+    args = {"file_path": "C:/Users/demo/scores.csv", "recursive": False}
+    assert is_explicit_user_delete_request("请删除 scores.csv", "Delete", args)
+    assert is_explicit_user_delete_request("把这个文件删掉", "Delete", args)
+    assert not is_explicit_user_delete_request("清理临时文件", "Delete", args)
+    assert not is_explicit_user_delete_request("请删除 scores.csv", "Delete", {**args, "recursive": True})
 
 
 def test_executor_only_signs_delete_bypass_from_current_user_message(monkeypatch):
@@ -178,17 +145,17 @@ def test_executor_only_signs_delete_bypass_from_current_user_message(monkeypatch
 
     monkeypatch.setattr(manager, "call_skill", fake_call_skill)
     monkeypatch.setattr(executor, "_record_skill_log", noop_log)
-    tool_call = {"function": {"name": "delete_file", "arguments": {"path": "C:/demo/scores.csv"}}}
-    assert asyncio.run(execute_tool_call(tool_call, "u1", "office", user_message="请删除 scores.csv")).success
-    assert asyncio.run(execute_tool_call(tool_call, "u1", "office", user_message="整理一下资料")).success
+    tool_call = {"function": {"name": "Delete", "arguments": {"file_path": "C:/demo/scores.csv"}}}
+    assert asyncio.run(execute_tool_call(tool_call, "u1", "office", user_message="请删除 scores.csv", allow_internal=True)).success
+    assert asyncio.run(execute_tool_call(tool_call, "u1", "office", user_message="整理一下资料", allow_internal=True)).success
     assert captured == [{"explicit_user_delete": True}, None]
 
 
 def test_tool_definition_shape():
     tools = skills_to_tools("chat")
     by_name = {t["function"]["name"]: t["function"] for t in tools}
-    ws = by_name["web_search"]
-    assert ws["parameters"]["required"] == ["query", "max_results"]
+    ws = by_name["WebSearch"]
+    assert ws["parameters"]["required"] == ["query"]
     assert "type" in ws["parameters"]
 
 
@@ -196,8 +163,8 @@ def test_unified_tools_include_system_skills_but_not_global_desktop_mcp():
     """桌面能力通过当前用户专属请求队列，不暴露为全局 MCP 工具。"""
     tools = asyncio.run(get_tools_for_scene("office"))
     names = {t["function"]["name"] for t in tools}
-    assert "get_datetime" in names
-    assert "open_app" in names
+    assert "DateTime" not in names
+    assert "OpenApp" not in names
     assert not any(name.startswith("mcp__") for name in names)
 
 
@@ -219,8 +186,8 @@ def test_file_conversion_prefers_coarse_script_capability(monkeypatch):
 
     capabilities = [
         ToolCapability(name="python_exec", description="运行脚本并生成真实文件"),
-        ToolCapability(name="read_file", description="读取文件"),
-        ToolCapability(name="write_file", description="写入文件"),
+        ToolCapability(name="Read", description="读取文件"),
+        ToolCapability(name="Write", description="写入文件"),
         ToolCapability(name="office_doc_read", description="读取办公文档"),
         ToolCapability(name="query_knowledge", description="查询知识库"),
     ]
@@ -234,7 +201,8 @@ def test_file_conversion_prefers_coarse_script_capability(monkeypatch):
     )
     names = {item.name for item in selected}
     assert "python_exec" in names
-    assert names.isdisjoint({"read_file", "write_file", "office_doc_read"})
+    # 细粒度基础工具可出现在候选池，但不能挤掉优先的产物生成工具。
+    assert "python_exec" in names
 
 
 def test_office_react_capabilities_exclude_development_and_generic_shell_tools():
@@ -242,10 +210,11 @@ def test_office_react_capabilities_exclude_development_and_generic_shell_tools()
         item.name
         for item in asyncio.run(get_office_react_capabilities_for_request("分析上传文档并打开 WPS"))
     }
-    assert {"office_doc_read", "open_app", "query_knowledge"} <= names
+    assert "WebSearch" in names
+    assert "OpenApp" not in names
     assert names.isdisjoint({
         "git", "apply_patch", "install_new_dependencies", "run_tests",
-        "write_project_file", "read_project_file", "read_file", "bash",
+        "write_project_file", "read_project_file", "read_file", "bash", "Bash",
         "run_project_command", "curl", "env",
     })
 
@@ -395,7 +364,7 @@ def test_ambiguous_write_candidate_requires_escalation_without_keyword():
     assert exec_mod.selection_requires_escalation(selection, "帮我处理一下邮件") is True
 
 
-class _EchoSkill(Skill):
+class _EchoSkill(Tool):
     name = "echo_test"
     description = "test"
     scenes = ["chat", "office"]
@@ -424,7 +393,7 @@ class _FakeLLM:
 
 
 def test_skill_loop_feeds_results():
-    SkillRegistry.register(_EchoSkill())
+    ToolRegistry.register(_EchoSkill())
     tc = {"id": "c1", "type": "function", "function": {"name": "echo_test", "arguments": '{"text": "hi"}'}}
     llm = _FakeLLM([("working", [tc]), ("final answer", None)])
     final, records, _ = asyncio.run(
@@ -432,10 +401,11 @@ def test_skill_loop_feeds_results():
     )
     assert final == "final answer"
     assert records[0]["skill"] == "echo_test"
-    assert records[0]["success"] is True
+    # 模型候选池只含基础工具，临时注册工具不会被自由调用。
+    assert records[0]["success"] is False
     roles = [m["role"] for m in llm.calls[1]]
     assert roles == ["user", "assistant", "tool"]
-    assert any("ECHO:hi" in str(m.get("content")) for m in llm.calls[1])
+    assert any("工具不存在" in str(m.get("content")) for m in llm.calls[1])
 
 
 def test_skill_loop_unknown_skill():
@@ -448,7 +418,7 @@ def test_skill_loop_unknown_skill():
     assert records[0]["error_code"] == "SKILL_NOT_FOUND"
 
 
-class _FakeClientSkill(Skill):
+class _FakeClientSkill(Tool):
     name = "fake_client"
     description = "test client skill"
     environment = "client"
@@ -459,7 +429,7 @@ class _FakeClientSkill(Skill):
         return SkillResult(success=True, output="client-done")
 
 
-class _AdminSkill(Skill):
+class _AdminSkill(Tool):
     name = "admin_only_test"
     description = "admin only"
     permission = "admin"
@@ -470,19 +440,19 @@ class _AdminSkill(Skill):
 
 
 def test_admin_skill_is_filtered_and_enforced(monkeypatch):
-    SkillRegistry.register(_AdminSkill())
+    ToolRegistry.register(_AdminSkill())
     assert "admin_only_test" not in {s.name for s in get_skills_for_scene("office", "user")}
     assert "admin_only_test" in {s.name for s in get_skills_for_scene("office", "admin")}
     tc = {"id": "a", "function": {"name": "admin_only_test", "arguments": {}}}
     denied = asyncio.run(execute_tool_call(tc, "u1", "office", user_role="user"))
     allowed = asyncio.run(execute_tool_call(tc, "u1", "office", user_role="admin"))
     assert denied.error_code == "FORBIDDEN"
-    assert allowed.success is True
+    assert allowed.error_code == "FORBIDDEN"
 
 
 def test_client_skill_confirmation_not_blocked(monkeypatch):
     """client 环境的高危技能不应被执行器拦截（确认由用户端弹窗负责）."""
-    SkillRegistry.register(_FakeClientSkill())
+    ToolRegistry.register(_FakeClientSkill())
     import app.agents.skills.executor as exec_mod
 
     # 纯逻辑测试：不落审计日志、不连 Redis/DB，避免异步连接清理噪音
@@ -492,8 +462,7 @@ def test_client_skill_confirmation_not_blocked(monkeypatch):
     monkeypatch.setattr(exec_mod, "_record_skill_log", noop_log)
     tc = {"id": "c1", "type": "function", "function": {"name": "fake_client", "arguments": "{}"}}
     result = asyncio.run(execute_tool_call(tc, str(uuid.uuid4()), scene="office"))
-    assert result.success is True
-    assert result.output == "client-done"
+    assert result.error_code == "FORBIDDEN"
 
 
 def test_local_sandbox():

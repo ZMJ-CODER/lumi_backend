@@ -19,7 +19,7 @@ class CodeReviewerAgent(WorkerAgent):
     params_help = (
         'params 用 {"project_id": "项目ID", "instruction": "审查要求", "target_file": "可选文件路径"}'
     )
-    skills = ["read_project_file"]
+    skills = ["Read"]
 
     async def execute(self, node: TaskNode, ctx: WorkerContext) -> dict:
         project_id = str(node.params.get("project_id") or "")
@@ -55,10 +55,10 @@ class CodeReviewerAgent(WorkerAgent):
             path_label = str(located.get("path") or located.get("file_key"))
             read_params = {"project_id": project_id}
             if located.get("file_key"):
-                read_params["file_key"] = located["file_key"]
+                read_params["file_path"] = located["file_key"]
             else:
-                read_params["path"] = located["path"]
-            read = await self.run_skill("read_project_file", read_params, ctx)
+                read_params["file_path"] = located["path"]
+            read = await self.run_skill("Read", read_params, ctx)
             if not read.get("success"):
                 return read
             content = read.get("content") or ""

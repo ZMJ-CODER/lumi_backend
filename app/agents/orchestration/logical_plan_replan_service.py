@@ -139,7 +139,9 @@ class LogicalPlanReplanService:
         self._plan_compilation.normalize_for_replan(
             tree.nodes,
             job.request,
-            preserve_dependencies=False,
+            # A replacement is another LLM JobSpec.  Keep its declared
+            # dependency graph; only the compiler may reject unsafe edges.
+            preserve_dependencies=True,
             adapt_workers=True,
         )
         from app.agents.orchestration.execution.validation import validate_planned_dag

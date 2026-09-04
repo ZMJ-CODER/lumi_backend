@@ -13,6 +13,10 @@ class ToolCapability(BaseModel):
     replacement_skill_id: str = ""
     description: str = ""
     category: str = "general"
+    resource: str = ""
+    action_type: str = "read"  # read / write
+    idempotency_type: str = "natural_key"
+    deprecated_by: str | None = None
     domain: str = ""
     intent_tags: list[str] = Field(default_factory=list)
     conflicts_with: list[str] = Field(default_factory=list)
@@ -34,6 +38,7 @@ class ToolCapability(BaseModel):
     confirmation_mode: str = "server"  # server / client / none
     idempotent: bool = True
     resource_templates: list[str] = Field(default_factory=list)
+    plan_required_fields: list[str] = Field(default_factory=list)
     annotations: dict = Field(default_factory=dict)
 
     def to_tool_definition(self) -> dict:
@@ -55,12 +60,17 @@ class ToolCapability(BaseModel):
         if self.result_contract:
             selection.append("返回：" + self.result_contract)
         guidance = "\n" + "\n".join(selection) if selection else ""
+        schema = dict(self.parameters or {})
+        if self.name in {"Read", "Write", "Edit", "Glob", "Grep", "Bash"}:
+            props = dict(schema.get("properties") or {})
+            props.setdefault("project_id", {"type": "string", "description": "可选的已授权项目 ID"})
+            schema["properties"] = props
         return {
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": f"{self.description}{suffix}{guidance}",
-                "parameters": self.parameters,
+                "parameters": schema,
             },
         }
 

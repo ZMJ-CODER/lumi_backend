@@ -55,7 +55,6 @@ from app.agents.orchestration.runtime_gateway import RuntimeGateway
 from app.agents.orchestration.planner import LlmPlanner, Planner
 from app.agents.orchestration.planning.context import PlanRequestContext
 from app.agents.orchestration.planning.compilation import PlanCompilationService
-from app.agents.orchestration.plan_cache import PlanCache
 from app.agents.orchestration.review import ReviewHook, get_reviewer
 from app.agents.orchestration.tca import ComplexityLevel, TaskComplexityAssessor
 from app.agents.orchestration.state import RedisStateStore
@@ -92,7 +91,6 @@ class AgentOrchestrator:
         review: ReviewHook | None = None,
         temporal_enabled: bool | None = None,
         complexity_assessor: TaskComplexityAssessor | None = None,
-        plan_cache: PlanCache | None = None,
         job_repository: JobRepository | None = None,
         project_repository: ProjectRepository | None = None,
         memory_repository: MemoryRepository | None = None,
@@ -108,7 +106,6 @@ class AgentOrchestrator:
         self._workers = workers if workers is not None else WORKERS
         self._review = review or get_reviewer()
         self._complexity_assessor = complexity_assessor or TaskComplexityAssessor()
-        self._plan_cache = plan_cache or PlanCache()
         self._plan_compilation = PlanCompilationService(
             workers=self._workers,
             plan_with_context=self._plan_with_context,
@@ -131,7 +128,6 @@ class AgentOrchestrator:
             planner=self._planner,
             workers=self._workers,
             assessor=self._complexity_assessor,
-            plan_cache=self._plan_cache,
         )
         self._replan_evidence = ReplanEvidenceService()
         self._logical_plan_replan = LogicalPlanReplanService(
@@ -188,10 +184,8 @@ class AgentOrchestrator:
         self._live_jobs: dict[str, Job] = {}
         # 同进程内串行化同一用户的“检查并提交”，避免两个并发请求同时越过限流检查。
         self._submission_guard = SubmissionGuard(store=self._store)
-        # 计划缓存只在任务成功后提交。上下文不进入 Job/API，避免把内部文档 ID
-        # 或项目绑定暴露给前端；进程异常时最多损失一次缓存学习，不影响执行正确性。
+        # 规划上下文不进入 Job/API，避免把内部文档 ID 或项目绑定暴露给前端。
         self._job_plan_context: dict[str, dict] = {}
-        self._pending_plan_cache: dict[str, tuple[str, list[dict] | None]] = {}
         self._manifest_continuation = ManifestContinuationService(
             store=self._store,
             workers=self._workers,
@@ -238,20 +232,17 @@ class AgentOrchestrator:
             plan_with_context=self._plan_with_context,
             plan_contexts=self._job_plan_context,
             llm_configs=self._job_llm_configs,
-            pending_plan_cache=self._pending_plan_cache,
         )
         self._lifecycle = JobLifecycleService(
-            plan_cache=self._plan_cache,
             plan_contexts=self._job_plan_context,
             llm_configs=self._job_llm_configs,
-            pending_plan_cache=self._pending_plan_cache,
         )
         self._finalizer = JobFinalizer(
             stop_heartbeat=lambda job_id: self._stop_admission_heartbeat(job_id),
             on_summary=lambda job: self._record_office_summary(job),
             on_task_index=lambda job: self._record_office_task_index(job),
             on_metric=self._lifecycle.record_metric,
-            on_learning=self._lifecycle.learn_from_finished_job,
+            on_learning=self._lifecycle.finalize_plan,
             on_terminal=self._lifecycle.cleanup_terminal,
         )
         from app.agents.orchestration.execution.service import ApplicationTaskExecutionService
@@ -317,7 +308,7 @@ class AgentOrchestrator:
             on_summary=lambda job: self._record_office_summary(job),
             on_task_index=lambda job: self._record_office_task_index(job),
             on_metric=self._lifecycle.record_metric,
-            on_learning=self._lifecycle.learn_from_finished_job,
+            on_learning=self._lifecycle.finalize_plan,
             attach_progress=self._lifecycle.attach_progress,
             on_terminal=self._lifecycle.cleanup_terminal,
             finalizer=self._finalizer,
@@ -640,9 +631,9 @@ class AgentOrchestrator:
             return None
         return job
 
-    async def _learn_from_finished_job(self, job: Job) -> None:
-        """Compatibility delegate for lifecycle plan learning."""
-        await self._operations.learn_from_finished_job(job)
+    async def _finalize_plan(self, job: Job) -> None:
+        """Finalize plan telemetry without caching executable workflow graphs."""
+        await self._operations.finalize_plan(job)
 
     def _discard_pending_learning(self, job_id: str) -> None:
         self._operations.discard_pending_learning(job_id)

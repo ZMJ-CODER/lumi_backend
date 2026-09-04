@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import MutableSequence, MutableMapping
 from typing import Any, Protocol
 
@@ -15,13 +16,47 @@ class PlanNode(Protocol):
     metadata: MutableMapping[str, Any]
 
 
+_OUTPUT_LENGTH = re.compile(r"(?:不少于|至少|约|大约|控制在|写|生成)?\s*(\d{3,6})\s*(?:字|字符)")
+
+
+def apply_generation_runtime_hints(nodes: MutableSequence[PlanNode], request: str) -> None:
+    """为文本生成节点补齐可审计的输出预算和动态超时提示。
+
+    Worker 的默认 ``max_tokens`` 不能只存在于函数体里，否则 JobSpec 冻结时
+    看不到真实生成规模，会把长文节点按普通 IO 的 60 秒策略执行。这里只从
+    用户明确的篇幅要求和节点自身指令推导执行事实，不做业务意图路由。
+    """
+    request_text = str(request or "")
+    for node in nodes:
+        if node.agent != "direct_llm":
+            continue
+        params = node.params or {}
+        instruction = str(params.get("instruction") or node.name or "")
+        combined = f"{request_text}\n{instruction}"
+        lengths = [int(value) for value in _OUTPUT_LENGTH.findall(combined)]
+        requested_chars = max(lengths, default=0)
+        explicitly_long = requested_chars >= 1500 or any(
+            marker in combined
+            for marker in ("长文", "长篇", "完整报告", "详细报告", "深度报告", "详细分析")
+        )
+        if not explicitly_long:
+            continue
+        # 中文长文本按约 1.2 token/字预留并加结构化输出余量；Worker 当前
+        # 上限为 4000，因此规格也必须使用同一个上限，避免声明和执行分裂。
+        estimated = min(4000, max(2000, int(requested_chars * 1.2) + 256))
+        params.setdefault("max_tokens", estimated)
+        params.setdefault("estimated_output_tokens", estimated)
+        params.setdefault("timeout_hint", "long_generation")
+        node.params = params
+
+
 def prefer_atomic_steps(nodes: MutableSequence[PlanNode], request: str) -> None:
     """将历史办公角色收束为声明能力的原子工具节点。"""
     tool_map = {"retrieval": "query_knowledge", "web_research": "web_search", "office_todo": "todo_manager", "office_calendar": "calendar_manager"}
     text_tools = {"email": "compose_email", "doc": "compose_official_doc", "rewrite": "rewrite_text", "summary": "summarize_text", "minutes": "meeting_minutes", "extract": "extract_info", "invoice": "invoice_parse", "compliance": "compliance_check"}
     research_tools = {"competitor": "competitor_analysis", "document_qa": "document_qa", "customer_service": "customer_service", "daily_report": "daily_report"}
     doc_tools = {"read": "office_doc_read", "edit": "office_doc_edit", "analyze": "office_doc_analyze"}
-    system_tools = {"open_app": "open_app", "open_file": "open_file", "open_url": "open_url", "send_email": "send_email", "ps": "ps", "kill": "kill", "env": "env", "datetime": "get_datetime", "curl": "curl"}
+    system_tools = {"open_app": "OpenApp", "open_file": "OpenFile", "open_url": "OpenUrl", "send_email": "send_email", "ps": "ProcessList", "kill": "ProcessSignal", "env": "SystemInfo", "datetime": "DateTime", "curl": "curl"}
     for node in nodes:
         preferred = tool_map.get(node.agent)
         if node.agent == "office_text":
@@ -39,6 +74,34 @@ def prefer_atomic_steps(nodes: MutableSequence[PlanNode], request: str) -> None:
         node.agent = "atomic_step"
         node.params = {"instruction": instruction, "preferred_tool": preferred, "fallback_tools": ["office_doc_read"] if preferred == "office_doc_analyze" else [], "inputs": original}
         node.metadata = {**(node.metadata or {}), "legacy_agent": old_agent}
+
+
+def enforce_react_complexity_policy(
+    nodes: MutableSequence[PlanNode],
+    complexity_level: str | None,
+) -> None:
+    """只允许 M3 节点进入 ReAct，其余复杂度降为单步执行。"""
+    level = str(complexity_level or "").lower()
+    if level not in {"m0", "m1", "m2"}:
+        return
+    for node in nodes:
+        if node.agent != "react_step":
+            continue
+        metadata = {**(node.metadata or {}), "react_blocked_by_complexity": level}
+        preferred = str((node.params or {}).get("preferred_tool") or "").strip()
+        if preferred:
+            node.agent = "atomic_step"
+            node.params = {
+                "instruction": str((node.params or {}).get("instruction") or node.name),
+                "preferred_tool": preferred,
+                "inputs": dict((node.params or {}).get("inputs") or {}),
+            }
+        else:
+            node.agent = "direct_llm"
+            node.params = {
+                "instruction": str((node.params or {}).get("instruction") or node.name),
+            }
+        node.metadata = metadata
 
 
 def adapt_unavailable_manifest_workers(nodes: MutableSequence[PlanNode], workers: dict[str, Any]) -> None:

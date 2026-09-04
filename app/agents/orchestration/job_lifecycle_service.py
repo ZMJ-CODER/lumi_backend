@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from loguru import logger
 
-from app.agents.orchestration.models import Job, JobStatus
-from app.agents.orchestration.plan_cache import PlanCache
+from app.agents.orchestration.models import Job
 
 
 class JobLifecycleService:
@@ -14,15 +13,11 @@ class JobLifecycleService:
     def __init__(
         self,
         *,
-        plan_cache: PlanCache,
         plan_contexts: dict[str, dict],
         llm_configs: dict[str, dict],
-        pending_plan_cache: dict[str, tuple[str, list[dict] | None]],
     ) -> None:
-        self._plan_cache = plan_cache
         self._plan_contexts = plan_contexts
         self._llm_configs = llm_configs
-        self._pending_plan_cache = pending_plan_cache
 
     async def record_metric(self, job: Job) -> None:
         """Count each terminal job once without affecting execution on telemetry failures."""
@@ -37,26 +32,14 @@ class JobLifecycleService:
         except Exception:  # noqa: BLE001
             pass
 
-    async def learn_from_finished_job(self, job: Job) -> None:
-        """Commit only successful plans to the reuse cache."""
-        pending = self._pending_plan_cache.get(job.job_id)
-        if job.status != JobStatus.COMPLETED or not pending:
-            if job.status in {
-                JobStatus.FAILED,
-                JobStatus.CANCELLED,
-                JobStatus.INTERRUPTED,
-            }:
-                self._pending_plan_cache.pop(job.job_id, None)
-            return
-        key, office_docs = pending
-        if await self._plan_cache.put(key, job.nodes, office_docs, job.plan_text):
-            self._pending_plan_cache.pop(job.job_id, None)
-            try:
-                from app.core.observability import inc_plan_cache
+    async def finalize_plan(self, job: Job) -> None:
+        """Leave a terminal hook without caching an executable LLM DAG.
 
-                inc_plan_cache("stored")
-            except Exception:  # noqa: BLE001
-                pass
+        A workflow plan captures current authorization and capability scope;
+        replaying it from a text-pattern cache is unsafe.  Future learning can
+        use de-identified outcomes, not executable plans.
+        """
+        del job
 
     def cleanup_terminal(self, job: Job) -> None:
         """Release process-local context once a finalizer observes a terminal job."""
@@ -66,7 +49,6 @@ class JobLifecycleService:
     def discard_pending_learning(self, job_id: str) -> None:
         """Remove submission-local state when a job never reaches normal finalization."""
         self._plan_contexts.pop(job_id, None)
-        self._pending_plan_cache.pop(job_id, None)
 
     async def attach_progress(self, job: Job) -> Job:
         """Merge transient node progress into a response-only job snapshot."""

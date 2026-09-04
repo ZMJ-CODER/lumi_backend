@@ -393,8 +393,8 @@ async def reset_llm_config_view(
 
 @router.get("/skills")
 async def list_skills_view(payload: dict = Depends(require_admin)):
-    """列出当前已注册的全部技能（含来源：builtin / plugin）."""
-    from app.agents.skills.registry import SkillRegistry
+    """分别列出原子工具和组合工作流 Skill。"""
+    from app.agents.skills.registry import SkillRegistry, ToolRegistry
 
     items = [
         {
@@ -408,16 +408,28 @@ async def list_skills_view(payload: dict = Depends(require_admin)):
             "permission": s.permission,
             "requires_confirmation": s.requires_confirmation,
             "scenes": s.scenes,
-            "source": SkillRegistry.get_source(s.name),
+            "source": ToolRegistry.get_source(s.name),
         }
-        for s in SkillRegistry.list()
+        for s in ToolRegistry.list()
     ]
-    return {"code": 0, "data": {"items": items}}
+    workflows = [
+        {
+            "name": skill.name,
+            "version": skill.version,
+            "status": skill.status,
+            "category": skill.category,
+            "scenes": skill.scenes,
+            "allowed_tools": skill.allowed_tools,
+            "source": SkillRegistry.get_source(skill.name),
+        }
+        for skill in SkillRegistry.list()
+    ]
+    return {"code": 0, "data": {"tools": items, "workflow_skills": workflows}}
 
 
 @router.post("/skills/reload")
 async def reload_skills_view(payload: dict = Depends(require_admin)):
-    """热更新技能插件：卸载已加载插件 → 重新扫描 plugins/skills 目录注册.
+    """热更新：卸载后分别扫描 plugins/tools 与 plugins/workflows。
 
     不重启进程即可生效；适合开发迭代与线上小步更新。
     """

@@ -30,6 +30,7 @@ from app.api.v1 import (
     uploads,
     usage,
     user,
+    workflow_skills,
 )
 
 api_router = APIRouter()
@@ -41,6 +42,7 @@ api_router.include_router(usage.router, prefix="/usage", tags=["usage"])
 
 # 多智能体协作（办公模式：任务编排 / 状态管理）
 api_router.include_router(agents.router, prefix="/agents", tags=["agents"])
+api_router.include_router(workflow_skills.router, prefix="/workflow-skills", tags=["workflow-skills"])
 
 # 健康检查
 api_router.include_router(health.router, prefix="/health", tags=["health"])

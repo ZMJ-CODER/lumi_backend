@@ -56,6 +56,11 @@ def sanitize_server_result(result: Any) -> Any:
     result.output = redact_server_text(result.output)
     result.error = redact_server_text(result.error) if result.error else None
     result.metadata = sanitize_server_metadata(result.metadata or {}) or {}
+    if hasattr(result, "data"):
+        result.data = sanitize_server_metadata(result.data)
+    if hasattr(result, "meta") and result.meta is not None:
+        result.meta.summary = redact_server_text(result.meta.summary)
+        result.meta.citations = sanitize_server_metadata(result.meta.citations) or []
     return result
 
 

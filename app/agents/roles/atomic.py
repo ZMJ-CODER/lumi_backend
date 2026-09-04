@@ -10,6 +10,7 @@ from app.agents.core.progress import set_progress as _report_progress
 from app.agents.orchestration.presentation import attach_display_result, working_text
 from app.agents.skills.executor import execute_tool_call, get_tools_for_scene
 from app.agents.skills.recovery import classify_model_error, decide_failure
+from app.services.tool_output_pipeline import render_for_model
 
 if TYPE_CHECKING:
     from app.agents.orchestration.models import TaskNode
@@ -18,12 +19,12 @@ if TYPE_CHECKING:
 class AtomicStepAgent(WorkerAgent):
     """不绑定角色白名单的步骤执行器.
 
-    每个节点都能看到当前场景允许的全部 Skill（包括 system）和 MCP 工具，
+    每个节点都能看到当前场景允许的全部 Tool（包括 system）和 MCP 工具，
     但一个节点最多调用一个工具。更多工作必须由规划器拆成下一个 DAG 节点。
     """
 
     name = "atomic_step"
-    description = "通用原子步骤：可调用当前场景任一本地/system Skill 或 MCP 工具；每步最多一次工具调用"
+    description = "通用原子步骤：可调用当前场景任一本地/system Tool 或 MCP 工具；每步最多一次工具调用"
     params_help = (
         'params 用 {"instruction":"本步骤唯一目标", "preferred_tool":"可选工具名", '
         '"inputs":{}}；需要多次工具调用时必须拆成多个有依赖关系的步骤'
@@ -43,16 +44,16 @@ class AtomicStepAgent(WorkerAgent):
         express that same choice again with ``tool_choice`` is both redundant
         and incompatible with otherwise usable OpenAI-compatible endpoints.
         Prefer the concrete plan inputs.  The direct-execution contract lives
-        on the Skill, so adding a capability does not require another branch
+        on the Tool, so adding a capability does not require another branch
         in this Agent.
         """
         schema = ((tool.get("function") or {}).get("parameters") or {})
         properties = schema.get("properties") if isinstance(schema, dict) else {}
         if not isinstance(properties, dict) or not properties:
             return None
-        from app.agents.skills.registry import SkillRegistry
+        from app.agents.skills.registry import ToolRegistry
 
-        skill = SkillRegistry.get(selected_tool)
+        skill = ToolRegistry.get(selected_tool)
         aliases = dict(getattr(skill, "direct_input_aliases", {}) or {}) if skill else {}
         direct = {}
         for key, value in (inputs.items() if isinstance(inputs, dict) else []):
@@ -78,6 +79,19 @@ class AtomicStepAgent(WorkerAgent):
         if all(name in properties and has_value(direct.get(name)) for name in required):
             return direct
         return None
+
+    @staticmethod
+    def _missing_planned_inputs(selected_tool: str, inputs: object) -> list[str]:
+        """Return only Tool-declared, non-inferable inputs absent from a plan."""
+        from app.agents.skills.registry import ToolRegistry
+
+        tool = ToolRegistry.get(selected_tool)
+        values = inputs if isinstance(inputs, dict) else {}
+        return [
+            str(field)
+            for field in (getattr(tool, "plan_required_fields", None) or [])
+            if str(field).strip() and values.get(str(field)) in (None, "", [])
+        ]
 
     @staticmethod
     async def _execute_direct(
@@ -109,9 +123,11 @@ class AtomicStepAgent(WorkerAgent):
             confirmed_tool_calls=ctx.confirmed_tool_calls,
             approval_context_sha256=ctx.approval_context_sha256,
             on_output=ctx.on_output,
+            authorized_project_ids=ctx.authorized_project_ids,
             execution_scope=ctx.job_id,
+            allow_internal=True,
         )
-        if not result.success:
+        if result.status == "failed":
             decision = decide_failure(
                 result.error_code,
                 result.error,
@@ -129,16 +145,16 @@ class AtomicStepAgent(WorkerAgent):
                 "use_next_tool": decision.try_alternative,
                 "recovery_category": decision.category,
                 "replan_required": decision.replan_required,
-                "approval_fingerprint": str(result.metadata.get("approval_fingerprint") or ""),
+                "approval_fingerprint": str(result.meta.quality_hints.get("approval_fingerprint") or ""),
+                "execution": result.to_execution_envelope(),
             }
         return attach_display_result(node, {
             "success": True,
-            "content": (result.output or "步骤已完成").strip(),
-            "output": result.output,
+            "content": render_for_model(result, max_chars=2200).strip(),
             "tool": selected_tool,
             "attempt": node.retries + 1,
             "method_chain": planned_tools,
-            "tool_metadata": result.metadata,
+            "execution": result.to_execution_envelope(),
             "step_title": node.name or str(node.params.get("instruction") or "")[:40],
         })
 
@@ -180,7 +196,9 @@ class AtomicStepAgent(WorkerAgent):
         # narrow compatibility fallback for older plugin/test providers that
         # still expose the original two-argument discovery contract.
         try:
-            all_tools = await get_tools_for_scene(ctx.scene, ctx.user_role, ctx.user_id)
+            all_tools = await get_tools_for_scene(
+                ctx.scene, ctx.user_role, ctx.user_id, include_internal=True
+            )
         except TypeError as exc:
             if "positional" not in str(exc) and "argument" not in str(exc):
                 raise
@@ -197,6 +215,21 @@ class AtomicStepAgent(WorkerAgent):
                 "error_code": "SKILL_NOT_FOUND",
             }
         inputs = node.params.get("inputs") or {}
+        missing_plan_inputs = self._missing_planned_inputs(selected_tool, inputs)
+        if missing_plan_inputs:
+            return {
+                "success": False,
+                "error": (
+                    "计划缺少必须由用户或规划器明确指定的目标信息："
+                    + "、".join(missing_plan_inputs)
+                    + "。系统不会猜测目标，请补充后重试。"
+                ),
+                "error_code": "MISSING_PARAMETER",
+                "tool": selected_tool,
+                "attempt": node.retries + 1,
+                "method_chain": planned_tools,
+                "retryable": False,
+            }
         direct_args = self._direct_arguments(tools[0], selected_tool, inputs, instruction)
         if direct_args is not None:
             return await self._execute_direct(
@@ -231,9 +264,11 @@ class AtomicStepAgent(WorkerAgent):
             }
         direct_args = self._direct_arguments(tools[0], selected_tool, extracted, instruction)
         if direct_args is None:
+            missing_plan_inputs = self._missing_planned_inputs(selected_tool, extracted)
+            missing = "、".join(missing_plan_inputs) if missing_plan_inputs else "工具所需参数"
             return {
                 "success": False,
-                "error": f"无法为已规划工具补齐必要参数: {selected_tool}",
+                "error": f"计划缺少必要输入：{missing}。系统不会猜测目标，请补充后重试。",
                 "error_code": "MISSING_PARAMETER",
                 "tool": selected_tool,
                 "attempt": node.retries + 1,

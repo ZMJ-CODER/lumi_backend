@@ -60,5 +60,6 @@ def intent_markers() -> dict[str, tuple[str, ...]]:
         "implicit_history": patterns.implicit_history,
         "dynamic": patterns.dynamic,
         "conditional": patterns.conditional,
+        "negation": patterns.negation,
     }
     return {name: tuple(values) for name, values in values.items()}

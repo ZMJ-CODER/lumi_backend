@@ -29,6 +29,11 @@ def _limit(channel: str) -> int:
     }.get(channel, settings.AGENT_CHANNEL_AGENT_CONCURRENCY))
 
 
+def _llm_limit() -> int:
+    """LLM 专用并发预算，不随普通 DAG 并发上限线性放大。"""
+    return max(1, int(getattr(settings, "AGENT_LLM_MAX_CONCURRENCY", 5) or 5))
+
+
 class ChannelLimiter(KernelChannelLimiter):
     """Binds generic lease coordination to Lumi's Redis and metrics."""
 
@@ -41,6 +46,8 @@ class ChannelLimiter(KernelChannelLimiter):
             return None
 
     def _limit(self, channel: str) -> int:
+        if channel == "llm_provider":
+            return _llm_limit()
         return _limit(channel)
 
     def _observe_wait(self, channel: str, seconds: float) -> None:

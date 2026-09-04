@@ -3,7 +3,7 @@
 import asyncio
 
 from app.agents.mcp import manager
-from app.agents.skills.base import Skill, SkillResult
+from app.agents.skills.base import Tool, SkillResult
 
 
 class _FakeCallResult:
@@ -47,7 +47,7 @@ class _FakeSession:
         )
 
 
-class _GatewaySkill(Skill):
+class _GatewaySkill(Tool):
     name = "gateway_skill"
     description = "gateway test skill"
 
@@ -110,14 +110,14 @@ def test_call_tool_mapping(monkeypatch):
 
     monkeypatch.setattr(manager, "_call_with_session", fake_call_with_session)
     res = asyncio.run(manager.call_tool("srv", "ok", {"x": 1}))
-    assert res["success"] is True
-    assert res["content"] == "输出文本"
-    assert res["metadata"] == {"key": "value"}
-    assert res["is_error"] is False
+    assert res["status"] == "success"
+    assert res["data"] == {"key": "value"}
+    assert res["content_type"] == "structured"
+    assert res["error"] is None
     assert session.calls == [("ok", {"x": 1})]
 
     res2 = asyncio.run(manager.call_tool("srv", "fail", {}))
-    assert res2["is_error"] is True
+    assert res2["status"] == "failed"
 
 
 def test_call_tool_failure_returns_none(monkeypatch):
@@ -142,7 +142,7 @@ def test_call_tool_passes_task_id_and_timeout_metadata(monkeypatch):
 
     monkeypatch.setattr(manager, "_call_with_session", fake_call_with_session)
     res = asyncio.run(manager.call_tool("srv", "ok", {}, task_id="job-1", timeout_s=2))
-    assert res["task_id"] == "job-1"
+    assert res["meta"]["quality_hints"]["task_id"] == "job-1"
 
 
 def test_cancel_task_cancels_active_request(monkeypatch):
@@ -188,9 +188,10 @@ def test_call_skill_prefers_advertised_client_mcp_tool(monkeypatch):
     monkeypatch.setattr(manager, "call_tool", fake_call_tool)
 
     result = asyncio.run(manager.call_skill(skill, {"path": "C:/work"}, task_id="job-1"))
-    assert result["content"] == "mcp-result"
-    assert result["metadata"]["transport"] == "mcp"
-    assert result["metadata"]["server"] == "lumi_client"
+    assert result["status"] == "success"
+    assert result["data"] == "mcp-result"
+    assert result["meta"]["quality_hints"]["transport"]["kind"] == "mcp"
+    assert result["meta"]["quality_hints"]["transport"]["server"] == "lumi_client"
     assert calls[0][0:3] == ("lumi_client", "gateway_skill", {"path": "C:/work"})
     assert skill.execute_calls == 0
 
@@ -231,9 +232,9 @@ def test_call_skill_client_falls_back_only_when_mcp_is_unavailable(monkeypatch):
     monkeypatch.setattr(manager, "call_tool", unavailable_call_tool)
 
     result = asyncio.run(manager.call_skill(skill, {"x": 1}))
-    assert result["success"] is True
-    assert result["content"] == "local-result"
-    assert result["metadata"]["transport"] == "in_process_adapter"
+    assert result["status"] == "success"
+    assert result["data"] == "local-result"
+    assert result["meta"]["quality_hints"]["transport"]["kind"] == "in_process_adapter"
     assert skill.execute_calls == 1
 
 
@@ -251,26 +252,26 @@ def test_call_skill_preserves_mcp_tool_error_without_local_replay(monkeypatch):
     monkeypatch.setattr(manager, "call_tool", failed_call_tool)
 
     result = asyncio.run(manager.call_skill(skill, {}))
-    assert result["is_error"] is True
+    assert result["status"] == "failed"
     assert result["error_code"] == "MCP_EXEC_ERROR"
-    assert result["metadata"]["transport"] == "mcp"
+    assert result["meta"]["quality_hints"]["transport"]["kind"] == "mcp"
     assert skill.execute_calls == 0
 
 
 def test_call_skill_server_uses_unified_local_adapter():
     skill = _GatewaySkill(environment="server")
     result = asyncio.run(manager.call_skill(skill, {}))
-    assert result["success"] is True
-    assert result["content"] == "local-result"
-    assert result["metadata"]["transport"] == "in_process_adapter"
-    assert result["metadata"]["server"] == manager.LOCAL_SKILL_SERVER
+    assert result["status"] == "success"
+    assert result["data"] == "local-result"
+    assert result["meta"]["quality_hints"]["transport"]["kind"] == "in_process_adapter"
+    assert result["meta"]["quality_hints"]["transport"]["server"] == manager.LOCAL_SKILL_SERVER
 
 
 def test_call_skill_local_error_keeps_gateway_metadata():
     skill = _GatewaySkill(environment="sandbox")
     result = asyncio.run(manager.call_skill(skill, {"raise_error": True}))
-    assert result["success"] is False
+    assert result["status"] == "failed"
     assert result["error_code"] == "MCP_EXEC_ERROR"
     assert result["retryable"] is True
-    assert result["metadata"]["transport"] == "in_process_adapter"
-    assert result["metadata"]["server"] == manager.LOCAL_SKILL_SERVER
+    assert result["meta"]["quality_hints"]["transport"]["kind"] == "in_process_adapter"
+    assert result["meta"]["quality_hints"]["transport"]["server"] == manager.LOCAL_SKILL_SERVER

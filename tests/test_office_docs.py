@@ -10,7 +10,7 @@ from app.services import office_docs
 
 def test_document_discovery_and_read_skills_cannot_expand_server_document_scope(monkeypatch):
     from app.agents.skills.base import SkillContext
-    from plugins.skills.office.office_docs import InspectDocumentSetSkill, ReadDocumentSkill
+    from plugins.tools.office.office_docs import InspectDocumentSetSkill, ReadDocumentSkill
 
     context = SkillContext(user_id="u1", scene="office", office_doc_ids=("allowed",))
     forbidden_read = asyncio.run(ReadDocumentSkill().execute({"doc_id": "other"}, context))
@@ -30,7 +30,7 @@ def test_document_discovery_and_read_skills_cannot_expand_server_document_scope(
             "page_count": 3,
         }]
 
-    monkeypatch.setattr("plugins.skills.office.office_docs.run_in_compute", fake_compute)
+    monkeypatch.setattr("plugins.tools.office.office_docs.run_in_compute", fake_compute)
     result = asyncio.run(InspectDocumentSetSkill().execute(
         {"scope": "doc_ids", "doc_ids": ["allowed", "other"], "query": "付款条款"},
         context,
@@ -313,7 +313,7 @@ def test_direct_text_conversion_honors_named_output_and_encoding(tmp_path):
 
 
 def test_python_exec_output_contract_validates_real_text_artifact(tmp_path):
-    from plugins.skills.shell.python_exec import _validate_output_contract
+    from plugins.tools.shell.python_exec import _validate_output_contract
 
     output = tmp_path / "scores.txt"
     output.write_bytes(b"\xef\xbb\xbfname\tscore\nAlice\t92\n")
@@ -373,7 +373,7 @@ def test_python_exec_marks_sandbox_output_transfer_failure(monkeypatch, tmp_path
     """回传错误不能退化为通用 EXEC_ERROR，否则 M0 会被错误升级为 M2。"""
     from app.agents.sandbox.base import SandboxResult
     from app.core.config import settings
-    from plugins.skills.shell.python_exec import PythonExecSkill
+    from plugins.tools.shell.python_exec import PythonExecSkill
 
     class FakeSandbox:
         name = "docker"
@@ -381,7 +381,7 @@ def test_python_exec_marks_sandbox_output_transfer_failure(monkeypatch, tmp_path
         async def run_script(self, *args, **kwargs):
             return SandboxResult(status="error", error="沙箱产物回传失败：读取沙箱产物失败")
 
-    monkeypatch.setattr("plugins.skills.shell.python_exec.get_sandbox", lambda: FakeSandbox())
+    monkeypatch.setattr("plugins.tools.shell.python_exec.get_sandbox", lambda: FakeSandbox())
     monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
     result = asyncio.run(PythonExecSkill().execute({"code": "print(1)"}))
     assert result.success is False

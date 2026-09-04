@@ -31,6 +31,10 @@ async def submit_tool_result(
         output=req.output,
         error=req.error,
         metadata=req.metadata,
+        data=req.data,
+        content_type=req.content_type,
+        error_code=req.error_code,
+        retryable=req.retryable,
     )
     if not ok:
         raise BadRequestException("请求不存在或已处理")

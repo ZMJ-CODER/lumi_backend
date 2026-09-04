@@ -22,7 +22,7 @@ async def main() -> None:
     from app.core.redis import init_redis
 
     await init_redis()  # 客户端技能 / BYOK 桥接 / 审计日志依赖 Redis
-    init_skills()  # 加载 plugins/skills 技能插件（与 API 进程一致）
+    init_skills()  # 加载 Tool 与开发者公共 Workflow Skill（与 API 进程一致）
     client = await Client.connect(
         settings.TEMPORAL_ADDRESS, namespace=settings.TEMPORAL_NAMESPACE
     )

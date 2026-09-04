@@ -104,9 +104,14 @@ class ApplicationTaskNodeExecutor:
     def _resource_scope(self, node: TaskNode) -> tuple[Any, list[Any]]:
         from app.agents.orchestration.resources import resource_coordinator
 
+        # AgentOrchestrator wraps every StateStore in StateStoreJobRepository.
+        # Inspect the wrapped store as well, otherwise in-memory tests are
+        # mistaken for production Redis and write nodes wait forever when
+        # Redis is intentionally absent.
+        backing_store = getattr(self._store, "_store", self._store)
         coordinator = (
             self._local_coordinator
-            if self._store.__class__.__name__ == "InMemoryStateStore"
+            if backing_store.__class__.__name__ == "InMemoryStateStore"
             else resource_coordinator
         )
         return coordinator, list(node.resource_claims)
@@ -172,6 +177,10 @@ class ApplicationTaskNodeExecutor:
 
         try:
             channel = str((node.metadata or {}).get("route_channel") or "agent")
+            # 所有会触发文本模型的节点共享 Provider 级闸门。DAG 并发上限
+            # 只限制节点数量，不能代替供应商的 RPM/连接池预算。
+            if node.agent in {"direct_llm", "atomic_step", "react_step", "collect_results", "office_text", "office_research"}:
+                channel = "llm_provider"
             async with channel_limiter.claim(channel, lease_seconds=max(60, timeout_seconds + 60)):
                 async with coordinator.claim(claims, ttl=max(60, timeout_seconds + 60)):
                     return await NodeExecutionRunner(
@@ -208,8 +217,19 @@ class ApplicationTaskNodeExecutor:
             confirmed_tool_calls=frozenset(str(v) for v in (node.metadata or {}).get("confirmed_tool_calls", [])),
             approval_context_sha256=str((node.metadata or {}).get("approval_upstream_sha256") or ""),
             office_doc_ids=tuple(str(v) for v in (node.params.get("doc_ids") or []) if str(v)),
+            authorized_project_ids=self._authorized_project_ids(),
             on_output=on_output,
         )
+
+    def _authorized_project_ids(self) -> tuple[str, ...]:
+        """返回提交请求显式授权的项目范围，不信任节点参数。"""
+        routing = self._job.routing if isinstance(self._job.routing, dict) else {}
+        values = []
+        for value in routing.get("authorized_project_ids") or []:
+            text = str(value or "").strip()
+            if text and text not in values:
+                values.append(text)
+        return tuple(values)
 
     async def _reserve_effect(self, node: TaskNode, effectful: bool) -> NodeExecutionResult | None:
         if not effectful or not node.idempotency_key:

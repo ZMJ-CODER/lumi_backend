@@ -86,6 +86,3 @@ docker build -f Dockerfile.sandbox -t lumi-python-sandbox:latest .
 - [docs/ORCHESTRATION_DEPLOYMENT_GUIDE.md](docs/ORCHESTRATION_DEPLOYMENT_GUIDE.md) — 编排部署、迁移与回归命令
 - [docs/API_AUTH.md](docs/API_AUTH.md) / [docs/API_INTEGRATION.md](docs/API_INTEGRATION.md) — API 与鉴权
 
-
-## 作者有话说
-- 个人项目，第一次开源，都是边学边做的，技术上有什么做的不好的地方还请见谅，不要试图抨击我

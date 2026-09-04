@@ -48,8 +48,8 @@ async def create_client_tool_request(
     r = get_redis()
     payload = {
         "request_id": request_id,
-        "skill": skill_name,
-        "params": json.dumps(params, ensure_ascii=False),
+        "skill": str(skill_name or "").strip(),
+        "params": json.dumps(dict(params or {}), ensure_ascii=False),
         "requires_confirmation": str(bool(requires_confirmation)).lower(),
         "status": "pending",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -89,18 +89,26 @@ async def complete_request(
     output: str = "",
     error: str | None = None,
     metadata: dict | None = None,
+    data: object = None,
+    content_type: str = "text",
+    error_code: str | None = None,
+    retryable: bool = False,
 ) -> bool:
     """用户端回传结果；请求不存在/已处理返回 False."""
     r = get_redis()
     key = _key(user_id, request_id)
-    data = await r.hgetall(key)
-    if not data or data.get("status") != "pending":
+    request_data = await r.hgetall(key)
+    if not request_data or request_data.get("status") != "pending":
         return False
     result = {
         "success": success,
         "output": output or "",
         "error": error,
         "metadata": metadata or {},
+        "data": data,
+        "content_type": content_type,
+        "error_code": error_code,
+        "retryable": retryable,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
     await r.hset(key, mapping={"status": "completed", "result": json.dumps(result, ensure_ascii=False)})

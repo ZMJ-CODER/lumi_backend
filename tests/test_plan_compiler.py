@@ -21,7 +21,7 @@ def _snapshot(*, tools=None):
         tools=tools or {
             "python_exec": {"parameters": {"type": "object", "properties": {"path": {"type": "string"}}}},
             "compliance_check": {"parameters": {"type": "object", "properties": {"text": {"type": "string"}}}},
-            "open_app": {"parameters": {"type": "object", "properties": {"app": {"type": "string"}}}},
+            "OpenApp": {"parameters": {"type": "object", "properties": {"name": {"type": "string"}}}},
         },
         fingerprint="test-capabilities",
     )
@@ -60,7 +60,7 @@ def test_compiler_accepts_explicit_three_step_plan(monkeypatch):
     result = _compile(monkeypatch, [
         _node("convert", "python_exec"),
         _node("judge", "compliance_check", deps=["convert"]),
-        _node("open", "open_app", deps=["judge"]),
+        _node("open", "OpenApp", deps=["judge"]),
     ])
 
     assert result.decision in {CompileDecision.ACCEPTED, CompileDecision.NORMALIZED}
@@ -71,7 +71,7 @@ def test_compiler_accepts_explicit_three_step_plan(monkeypatch):
 def test_compiler_keeps_oversized_plan_for_logical_window(monkeypatch):
     """A valid long plan is rolled, not rejected or silently truncated."""
     result = _compile(monkeypatch, [
-        _node(f"step-{index}", ["python_exec", "compliance_check", "open_app"][index % 3])
+        _node(f"step-{index}", ["python_exec", "compliance_check", "OpenApp"][index % 3])
         for index in range(9)
     ])
 
@@ -106,6 +106,52 @@ def test_compiler_rejects_malformed_explicit_tool_input(monkeypatch):
 
     assert result.decision == CompileDecision.REPLAN_REQUIRED
     assert any(item.code == "PARAM_TYPE" for item in result.violations)
+
+
+def test_compiler_rejects_edit_plan_without_explicit_document_identity(monkeypatch):
+    """不可推断的 doc_id 必须在执行前转为澄清/重规划，而非节点中途失败。"""
+    snapshot = _snapshot(tools={
+        "office_doc_edit": {
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doc_id": {"type": "string"},
+                    "instruction": {"type": "string"},
+                },
+                "required": ["doc_id", "instruction"],
+            },
+            "plan_required_fields": ["doc_id"],
+            "write_op": True,
+        },
+    })
+    result = _compile(monkeypatch, [_node("edit", "office_doc_edit")], snapshot)
+
+    assert result.decision == CompileDecision.REPLAN_REQUIRED
+    assert any(item.code == "PLAN_INPUT_REQUIRED" for item in result.violations)
+
+
+def test_compiler_accepts_edit_plan_with_explicit_document_identity(monkeypatch):
+    snapshot = _snapshot(tools={
+        "office_doc_edit": {
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doc_id": {"type": "string"},
+                    "instruction": {"type": "string"},
+                },
+                "required": ["doc_id", "instruction"],
+            },
+            "plan_required_fields": ["doc_id"],
+            "write_op": True,
+        },
+    })
+    result = _compile(
+        monkeypatch,
+        [_node("edit", "office_doc_edit", inputs={"doc_id": "authorized-doc"})],
+        snapshot,
+    )
+
+    assert result.decision in {CompileDecision.ACCEPTED, CompileDecision.NORMALIZED}
 
 
 def test_request_coverage_catches_dropped_multilingual_deliverables():

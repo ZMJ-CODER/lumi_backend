@@ -57,7 +57,21 @@ def resolve_node_timeout(
         configured = int(channel_timeouts.get(channel, 0))
     except (TypeError, ValueError):
         configured = 0
-    return max(1, configured) if configured > 0 else fallback
+    resolved = max(1, configured) if configured > 0 else fallback
+    hint = str(params.get("timeout_hint") or "").strip().lower()
+    if hint in {"short_qa", "short", "fast"}:
+        resolved = min(resolved, 20)
+    elif hint in {"long_generation", "long", "report"}:
+        resolved = max(resolved, 120)
+    estimate = params.get("estimated_output_tokens")
+    if estimate is None:
+        estimate = params.get("max_tokens")
+    try:
+        if estimate is not None and int(estimate) > 0:
+            resolved = max(resolved, min(600, 15 + (int(estimate) + 19) // 20))
+    except (TypeError, ValueError):
+        pass
+    return resolved
 
 
 def _node_mapping(node: Any, field: str) -> dict[str, Any]:

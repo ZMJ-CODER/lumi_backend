@@ -48,6 +48,16 @@ def test_kernel_timeout_selection_never_reads_global_settings():
     assert timeout == 20
 
 
+def test_kernel_timeout_hint_expands_long_generation():
+    timeout = resolve_node_timeout(
+        {"params": {"timeout_hint": "long_generation", "max_tokens": 3000}, "metadata": {"route_channel": "direct_llm"}},
+        default_seconds=60,
+        channel_timeouts={},
+        tool_timeouts={},
+    )
+    assert timeout >= 120
+
+
 def test_kernel_models_validate_resource_and_escalation_data():
     assert ResourceClaim(key="document:1", mode="read").mode == "read"
     signal = coerce_escalation({"level": "task", "reason": "missing_prerequisite"}, default_node_id="node-1")

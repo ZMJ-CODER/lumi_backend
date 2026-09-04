@@ -9,7 +9,6 @@ import pytest
 from app.agents.orchestration.execution.validation import DagValidationError, execute_dag, validate_dag
 from app.agents.orchestration.models import Job, JobStatus, ResourceClaim, TaskNode, TaskStatus
 from app.agents.orchestration.orchestrator import (
-    ActiveConversationJobError,
     AgentBackpressureError,
     AgentOrchestrator,
     UserJobLimitError,
@@ -509,6 +508,42 @@ def test_atomic_step_marks_capability_failure_for_alternative(monkeypatch):
     assert result["retryable"] is True
 
 
+def test_atomic_step_refuses_missing_noninferable_planning_input(monkeypatch):
+    """历史/异常计划也必须在执行入口得到澄清，而不是让模型猜 doc_id。"""
+    import app.agents.roles.atomic as atomic_mod
+    from app.agents.skills.base import Tool, ToolOutput
+    from app.agents.skills.registry import ToolRegistry
+
+    class EditTool(Tool):
+        name = "test_edit_requires_doc"
+        description = "测试编辑工具。适用：已明确文档；禁用：文档目标未知。"
+        scenes = ["office"]
+        plan_required_fields = ["doc_id"]
+        parameters_schema = {
+            "type": "object",
+            "properties": {"doc_id": {"type": "string"}, "instruction": {"type": "string"}},
+            "required": ["doc_id", "instruction"],
+        }
+
+        async def execute(self, params, context=None) -> ToolOutput:
+            raise AssertionError("缺少 doc_id 的节点不能触发工具执行")
+
+    ToolRegistry.register(EditTool())
+
+    async def fake_tools(*_args):
+        return [{"type": "function", "function": {"name": "test_edit_requires_doc", "parameters": EditTool.parameters_schema}}]
+
+    monkeypatch.setattr(atomic_mod, "get_tools_for_scene", fake_tools)
+    node = TaskNode(
+        id="edit", name="编辑文档", agent="atomic_step",
+        params={"instruction": "修改附件标题", "preferred_tool": "test_edit_requires_doc", "inputs": {}},
+    )
+    result = asyncio.run(AtomicStepAgent().execute(node, WorkerContext(user_id="u1", job_id="j1", scene="office")))
+
+    assert result["error_code"] == "MISSING_PARAMETER"
+    assert "doc_id" in result["error"]
+
+
 def test_atomic_document_step_executes_planned_tool_without_extra_llm(monkeypatch):
     import app.agents.roles.atomic as atomic_mod
 
@@ -583,7 +618,7 @@ def test_atomic_instruction_tool_executes_without_function_calling(monkeypatch):
     monkeypatch.setattr(atomic_mod, "execute_tool_call", fake_execute)
     monkeypatch.setattr("app.agents.langchain.agent.choose_single_tool", forbidden_tool_choice)
     monkeypatch.setattr(
-        "app.agents.skills.registry.SkillRegistry.get",
+        "app.agents.skills.registry.ToolRegistry.get",
         lambda name: DirectWritingContract() if name == "compose_official_doc" else None,
     )
     node = TaskNode(
@@ -609,7 +644,7 @@ def test_atomic_step_extracts_missing_parameters_without_function_calling(monkey
         return [{
             "type": "function",
             "function": {
-                "name": "open_app",
+                "name": "OpenApp",
                 "parameters": {
                     "type": "object",
                     "properties": {"name": {"type": "string"}, "args": {"type": "array"}},
@@ -619,7 +654,7 @@ def test_atomic_step_extracts_missing_parameters_without_function_calling(monkey
         }]
 
     async def fake_extract(**kwargs):
-        assert kwargs["tool_definition"]["function"]["name"] == "open_app"
+        assert kwargs["tool_definition"]["function"]["name"] == "OpenApp"
         return {"name": "记事本", "args": []}
 
     async def fake_execute(call, *args, **kwargs):
@@ -634,44 +669,13 @@ def test_atomic_step_extracts_missing_parameters_without_function_calling(monkey
     node = TaskNode(
         id="open",
         agent="atomic_step",
-        params={"instruction": "请打开记事本", "preferred_tool": "open_app"},
+        params={"instruction": "请打开记事本", "preferred_tool": "OpenApp"},
     )
 
     result = asyncio.run(AtomicStepAgent().execute(node, WorkerContext(user_id="u1", job_id="j1")))
 
     assert result["success"] is True
     assert '"name": "记事本"' in calls[0]["function"]["arguments"]
-
-
-def test_csv_to_txt_planning_selects_named_document_without_llm(monkeypatch):
-    from app.agents.orchestration.planner import LlmPlanner
-
-    async def forbidden_projects(*args, **kwargs):
-        raise AssertionError("确定性文件转换不应扫描项目或调用规划模型")
-
-    planner = LlmPlanner()
-    monkeypatch.setattr(planner, "_list_projects", forbidden_projects)
-    tree = asyncio.run(
-        planner.plan(
-            "u1",
-            "将score.csv转为txt",
-            office_docs=[
-                {"doc_id": "calendar", "filename": "calendar.ics"},
-                {"doc_id": "scores", "filename": "scores.csv"},
-                {"doc_id": "mail", "filename": "mail.eml"},
-            ],
-        )
-    )
-
-    assert len(tree.nodes) == 1
-    node = tree.nodes[0]
-    assert node.agent == "office_script"
-    assert node.params["doc_ids"] == ["scores"]
-    assert node.params["conversion"] == {
-        "source_filename": "scores.csv",
-        "target_extension": ".txt",
-        "output_filename": "scores.txt",
-    }
 
 
 def test_csv_to_txt_planning_does_not_guess_between_nearby_files():
@@ -787,7 +791,7 @@ def test_compound_office_and_daily_task_plans_and_executes_in_order(monkeypatch)
                     "agent": "atomic_step",
                     "params": {
                         "instruction": "查询当前时间",
-                        "preferred_tool": "get_datetime",
+                        "preferred_tool": "DateTime",
                         "fallback_tools": [],
                         "inputs": {},
                     },
@@ -950,6 +954,78 @@ def test_oversized_plan_is_rolled_through_logical_frontier():
     final = asyncio.run(scenario())
     assert final.status == JobStatus.COMPLETED
     assert final.routing["logical_plan"]["progress"]["completed"] == 9
+
+
+def test_parallel_preserved_dag_does_not_enter_logical_frontier():
+    """短小且已声明并行语义的 DAG 必须保留完整执行图。"""
+    class ParallelPlanner(Planner):
+        async def plan(self, *args, **kwargs):
+            nodes = [_node(f"parallel-{index}", agent="w1") for index in range(3)]
+            for node in nodes:
+                node.metadata["preserve_dependencies"] = True
+            return TaskTree(nodes=nodes, plan_text="parallel")
+
+    async def scenario():
+        orch = AgentOrchestrator(
+            store=InMemoryStateStore(),
+            planner=ParallelPlanner(),
+            workers={"w1": FakeWorker("w1", delay=0.01)},
+            review=NoopReviewer(),
+            temporal_enabled=False,
+        )
+        job = await orch.submit_job("parallel-owner", "并行处理三个只读步骤")
+        assert len(job.nodes) == 3
+        assert "logical_plan" not in job.routing
+        # 多结果任务会进入最终交付汇总；该单测只验证物化边界，不依赖真实模型。
+        async def deterministic_delivery(_job):
+            _job.result = {"final_answer": "parallel done"}
+            await orch._store.save_job(_job)
+
+        orch._execution_loop._synthesize_final_answer = deterministic_delivery
+        await orch._tasks[job.job_id]
+        return await orch.get_job(job.job_id)
+
+    final = asyncio.run(scenario())
+    assert final.status == JobStatus.COMPLETED
+    assert len(final.nodes) == 3
+
+
+def test_large_preserved_parallel_dag_is_rolled_into_logical_frontier(monkeypatch):
+    """Parallel semantics must survive, but an oversized frontier is batched."""
+    class LargeParallelPlanner(Planner):
+        async def plan(self, *args, **kwargs):
+            nodes = [_node(f"parallel-{index}", agent="w1") for index in range(8)]
+            for node in nodes:
+                node.metadata["preserve_dependencies"] = True
+                node.metadata["planner_generated"] = True
+            return TaskTree(nodes=nodes, plan_text="large parallel")
+
+    async def formatter_unavailable(*_args, **_kwargs):
+        raise RuntimeError("模型连接异常")
+
+    monkeypatch.setattr(
+        "app.agents.orchestration.temporal.activities.synthesize_final_answer_activity",
+        formatter_unavailable,
+    )
+
+    async def scenario():
+        orch = AgentOrchestrator(
+            store=InMemoryStateStore(),
+            planner=LargeParallelPlanner(),
+            workers={"w1": FakeWorker("w1", delay=0.01)},
+            review=NoopReviewer(),
+            temporal_enabled=False,
+        )
+        job = await orch.submit_job("large-parallel-owner", "并行处理八个独立只读步骤")
+        assert "logical_plan" in job.routing
+        assert len(job.nodes) <= settings.AGENT_LOGICAL_PLAN_FRONTIER_SIZE
+        await orch._tasks[job.job_id]
+        return await orch.get_job(job.job_id)
+
+    final = asyncio.run(scenario())
+    assert final.status == JobStatus.COMPLETED
+    assert final.result["final_answer"].count("result-w1") == 8
+    assert final.result["delivery_status"] == "degraded"
 
 
 def test_retrieval_worker_registered():
@@ -1491,8 +1567,8 @@ def test_l2_approval_resumes_only_the_approved_node():
     from app.agents.skills.executor import tool_call_fingerprint
 
     seen_confirmations = []
-    args = {"path": "report.txt"}
-    fingerprint = tool_call_fingerprint("delete_file", args)
+    args = {"file_path": "report.txt"}
+    fingerprint = tool_call_fingerprint("Delete", args)
 
     class ApprovalWorker:
         async def execute(self, _node, ctx):
@@ -1502,7 +1578,7 @@ def test_l2_approval_resumes_only_the_approved_node():
                     "success": False,
                     "error": "删除文件需要用户确认",
                     "error_code": "NEEDS_CONFIRMATION",
-                    "tool": "delete_file",
+                    "tool": "Delete",
                     "approval_fingerprint": fingerprint,
                 }
             return {"success": True, "content": "文件已删除"}
@@ -1515,7 +1591,7 @@ def test_l2_approval_resumes_only_the_approved_node():
     job = Job(
         job_id="l2-approval", user_id="u1", request="删除该文件", scene="office",
         status=JobStatus.RUNNING, routing={"level": "m2"},
-        nodes=[TaskNode(id="delete", agent="worker", params={"preferred_tool": "delete_file"})],
+        nodes=[TaskNode(id="delete", agent="worker", params={"preferred_tool": "Delete"})],
     )
 
     async def scenario():
@@ -1528,7 +1604,7 @@ def test_l2_approval_resumes_only_the_approved_node():
 
     waiting, final = asyncio.run(scenario())
     assert waiting.status == JobStatus.WAITING_APPROVAL
-    assert waiting.nodes[0].metadata["approval_tool"] == "delete_file"
+    assert waiting.nodes[0].metadata["approval_tool"] == "Delete"
     assert waiting.nodes[0].metadata["approval_fingerprint"] == fingerprint
     assert final.status == JobStatus.COMPLETED
     assert seen_confirmations == [set(), {fingerprint}]
@@ -1537,9 +1613,9 @@ def test_l2_approval_resumes_only_the_approved_node():
 def test_tool_confirmation_is_bound_to_exact_arguments():
     from app.agents.skills.executor import is_tool_call_confirmed, tool_call_fingerprint
 
-    approved = {tool_call_fingerprint("delete_file", {"path": "a.txt", "force": False})}
-    assert is_tool_call_confirmed("delete_file", {"force": False, "path": "a.txt"}, approved)
-    assert not is_tool_call_confirmed("delete_file", {"path": "b.txt", "force": False}, approved)
+    approved = {tool_call_fingerprint("Delete", {"file_path": "a.txt", "force": False})}
+    assert is_tool_call_confirmed("Delete", {"force": False, "file_path": "a.txt"}, approved)
+    assert not is_tool_call_confirmed("Delete", {"file_path": "b.txt", "force": False}, approved)
     assert not is_tool_call_confirmed("send_email", {"path": "a.txt", "force": False}, approved)
 
 
@@ -1639,7 +1715,7 @@ def test_orchestrator_threads_byok_key_to_worker():
     assert seen.get("key") == "sk-test"
 
 
-def test_orchestrator_rejects_second_active_job_in_same_conversation():
+def test_orchestrator_allows_two_active_jobs_in_same_conversation():
     gate = asyncio.Event()
 
     class SlowWorker:
@@ -1671,13 +1747,13 @@ def test_orchestrator_rejects_second_active_job_in_same_conversation():
     )
 
     async def scenario():
-        await orch.submit_job(
+        first = await orch.submit_job(
             "u1", "总结文档", conversation_id="c1", office_docs=[{"doc_id": "d1"}]
         )
-        with pytest.raises(ActiveConversationJobError):
-            await orch.submit_job(
-                "u1", "总结文档", conversation_id="c1", office_docs=[{"doc_id": "d2"}]
-            )
+        second = await orch.submit_job(
+            "u1", "总结文档", conversation_id="c1", office_docs=[{"doc_id": "d2"}]
+        )
+        assert second.job_id != first.job_id
         gate.set()
         await asyncio.gather(*orch._tasks.values())
 
@@ -1865,6 +1941,42 @@ def test_single_step_job_reuses_step_output_without_final_llm(monkeypatch):
 
     result = asyncio.run(scenario())
     assert result.result["final_answer"] == "直接结果"
+
+
+def test_multiple_deterministic_tool_nodes_skip_final_llm(monkeypatch):
+    """纯计算 DAG 的交付不应重新依赖模型网络。"""
+    class MultiStepPlanner(Planner):
+        async def plan(self, *args, **kwargs):
+            return TaskTree(nodes=[_node("a", agent="w1"), _node("b", agent="w1")])
+
+    class CalculatorWorker:
+        async def execute(self, node, ctx):
+            return {"success": True, "content": f"{node.id}=ok", "tool": "Calculator"}
+
+    orch = AgentOrchestrator(
+        store=InMemoryStateStore(),
+        planner=MultiStepPlanner(),
+        workers={"w1": CalculatorWorker()},
+        review=NoopReviewer(),
+        temporal_enabled=False,
+    )
+
+    async def should_not_summarize(*args, **kwargs):
+        raise AssertionError("确定性工具结果不应调用最终汇总模型")
+
+    monkeypatch.setattr(orch, "_record_office_summary", lambda *args, **kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(
+        "app.agents.orchestration.temporal.activities.synthesize_final_answer_activity",
+        should_not_summarize,
+    )
+
+    async def scenario():
+        job = await orch.submit_job("u1", "多个确定性步骤", conversation_id="c1")
+        await asyncio.gather(*orch._tasks.values())
+        return await orch.get_job(job.job_id)
+
+    result = asyncio.run(scenario())
+    assert result.result["final_answer"] == "a=ok\nb=ok"
 
 
 def test_state_store_cas_preserves_cancelled_status():

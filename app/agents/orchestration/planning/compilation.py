@@ -19,10 +19,16 @@ class PlanCompilationService:
         self._plan_with_context = plan_with_context
         self._temporal_static_mode = temporal_static_mode
 
-    def _normalize_for_workers(self, nodes, request: str, *, preserve_dependencies: bool = False, adapt_workers: bool = True) -> None:
-        from app.agents.orchestration.planning.normalizer import adapt_unavailable_manifest_workers, prefer_atomic_steps, serialize_steps
+    def _normalize_for_workers(self, nodes, request: str, *, preserve_dependencies: bool = True, adapt_workers: bool = True) -> None:
+        from app.agents.orchestration.planning.normalizer import (
+            adapt_unavailable_manifest_workers,
+            apply_generation_runtime_hints,
+            prefer_atomic_steps,
+            serialize_steps,
+        )
 
         prefer_atomic_steps(nodes, request)
+        apply_generation_runtime_hints(nodes, request)
         if adapt_workers:
             adapt_unavailable_manifest_workers(nodes, self._workers)
         if not preserve_dependencies:
@@ -69,7 +75,14 @@ class PlanCompilationService:
                 revised = None
                 logger.warning("带反馈重规划失败: {}", exc)
             if revised is not None and revised.nodes and not revised.error:
-                self._normalize_for_workers(revised.nodes, context.request, preserve_dependencies=any(bool((node.metadata or {}).get("preserve_dependencies")) for node in revised.nodes))
+                # Replanning produces a new LLM JobSpec.  Its dependency graph
+                # is part of the contract and must survive the feedback loop;
+                # checking only a legacy metadata flag here used to collapse a
+                # valid parallel revision into a serial chain.
+                self._normalize_for_workers(revised.nodes, context.request, preserve_dependencies=True)
+                from app.agents.orchestration.planning.normalizer import enforce_react_complexity_policy
+
+                enforce_react_complexity_policy(revised.nodes, str(routing.get("level") or ""))
                 compiled = await compile_current(revised)
                 tree = revised
         if compiled.decision == CompileDecision.REPLAN_REQUIRED:
@@ -81,8 +94,11 @@ class PlanCompilationService:
         tree.nodes = compiled.nodes
         return tree
 
-    def normalize_for_submission(self, nodes, request: str, *, preserve_dependencies: bool = False) -> None:
+    def normalize_for_submission(self, nodes, request: str, *, preserve_dependencies: bool = True, complexity_level: str | None = None) -> None:
         self._normalize_for_workers(nodes, request, preserve_dependencies=preserve_dependencies)
+        from app.agents.orchestration.planning.normalizer import enforce_react_complexity_policy
+
+        enforce_react_complexity_policy(nodes, complexity_level)
 
     def normalize_for_replan(self, nodes, request: str, *, preserve_dependencies: bool = True, adapt_workers: bool = False) -> None:
         self._normalize_for_workers(nodes, request, preserve_dependencies=preserve_dependencies, adapt_workers=adapt_workers)

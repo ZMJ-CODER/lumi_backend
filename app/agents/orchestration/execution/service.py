@@ -66,6 +66,10 @@ class ApplicationTaskExecutionService:
         engine = TaskExecutionEngine(
             executor=executor,
             concurrency=concurrency,
+            max_parallel_frontier=min(
+                concurrency,
+                max(1, int(getattr(settings, "AGENT_MAX_PARALLEL_FRONTIER", concurrency) or concurrency)),
+            ),
             control=ApplicationExecutionControl(self._store),
             lifecycle=lifecycle,
         )

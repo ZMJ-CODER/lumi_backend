@@ -22,7 +22,7 @@ from sqlalchemy import select
 from app.agents.base import AgentContext
 from app.agents.registry import AgentRegistry
 from app.agents.skills.executor import run_skill_loop
-from app.agents.orchestration.intent import requires_office_execution
+from app.agents.orchestration.intent import OfficeDispatch, classify_office_dispatch
 from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.llm import LLMClient
@@ -93,6 +93,24 @@ _CHAT_LOCAL_CONTEXT_MARKERS = (
     "会议纪要", "帮我总结", "帮我改写", "润色", "写一篇", "写个",
 )
 _CHAT_SMALLTALK_MARKERS = ("你好", "嗨", "哈喽", "在吗", "谢谢", "再见", "晚安", "早上好")
+
+# 普通聊天没有项目授权上下文，不能让模型把自身训练知识包装成“已检查
+# Lumi 后端”的结论。命中时直接返回边界说明，不进入检索或工具链。
+_INTERNAL_PROJECT_MARKERS = (
+    "lumi项目", "本项目", "项目代码", "后端代码", "后端实现", "源码", "源代码",
+    "测试脚本", "测试数据", "编排引擎", "执行引擎", "项目架构", "代码实现",
+)
+
+
+def _is_internal_project_question(content: str) -> bool:
+    text = (content or "").casefold().replace(" ", "")
+    return any(marker in text for marker in _INTERNAL_PROJECT_MARKERS)
+
+
+_INTERNAL_PROJECT_BOUNDARY_REPLY = (
+    "我不能在普通对话中读取或核验 Lumi 的源代码、后端实现、测试数据、部署配置或内部提示词。"
+    "如果需要执行项目代码任务，请在任务提交时明确选择已授权的项目；否则我只能提供与具体仓库无关的一般性说明。"
+)
 
 def _should_retrieve_chat_knowledge(
     content: str, attachments: list | None, retrieval_query: str | None
@@ -169,6 +187,22 @@ def _append_chat_tool_contract(messages: list[dict], *, web_search_preferred: bo
     return [{"role": "system", "content": contract.strip()}] + enriched
 
 
+def _append_office_read_tool_contract(messages: list[dict]) -> list[dict]:
+    """轻量办公工具路径：只辅助事实获取，绝不升级为任务编排。"""
+    contract = (
+        "\n\n[办公轻量工具]\n"
+        "本轮仅在确有必要时使用一个只读工具来取得精确计算、实时公开信息或用户明确指定的内部资料。"
+        "如果你已经能用通用知识可靠回答，直接回答，不要调用工具。"
+        "不得创建任务、写入文件、修改待办、访问未授权附件，工具失败时如实说明限制。"
+    )
+    enriched = [dict(message) for message in messages]
+    for message in enriched:
+        if message.get("role") == "system" and isinstance(message.get("content"), str):
+            message["content"] += contract
+            return enriched
+    return [{"role": "system", "content": contract.strip()}] + enriched
+
+
 def _requires_fresh_web_data(content: str) -> bool:
     """Deprecated compatibility helper; live data is selected by the model/tool gate.
 
@@ -219,7 +253,7 @@ async def _get_chat_model_override(
 # 角色提示词下的场景行为补充（角色负责性格，场景负责行为）
 _SCENE_BEHAVIOR = {
     "chat": "",
-    "office": "当前为办公模式：优先从用户知识库检索相关信息，回答时引用文档来源（📁 个人资料 / 🌐 公共知识库）。",
+    "office": "当前为办公模式：先用通用知识直接完成不依赖外部事实的请求。只有用户明确要求实时信息、公司内部资料、已上传文件或外部操作时，才使用相应工具；不要为了回答而强行检索。",
     "game": "当前为游戏模式：回复短小精悍，像队友一样；可结合攻略语料给出可执行建议。",
 }
 
@@ -677,6 +711,20 @@ class Orchestrator:
         transcript = await self._resolve_transcript(content, attachments)
         content = transcript
 
+        if scene == "chat" and _is_internal_project_question(content):
+            # 这是权限边界而不是模型自评；不调用 LLM，避免产生看似来自
+            # 仓库检查的幻觉答案，也避免把项目问题送入长期记忆抽取。
+            return {
+                "message_id": str(uuid.uuid4()),
+                "content": _INTERNAL_PROJECT_BOUNDARY_REPLY,
+                "citations": [],
+                "scene": scene,
+                "local_mode": False,
+                "title": "",
+                "transcript": transcript,
+                "steps": [],
+            }
+
         # 本地模式：仅记录，不生成回复（PC端已处理）
         if local_mode:
             return {
@@ -705,14 +753,18 @@ class Orchestrator:
         )
         image_uris = await self._load_image_data_uris(user_id, attachments)
 
-        office_execution = scene == "office" and requires_office_execution(content, office_docs)
+        office_dispatch = (
+            classify_office_dispatch(content, office_docs)
+            if scene == "office"
+            else OfficeDispatch.DIRECT
+        )
         logger.info(
-            "办公请求路由判定: scene={} execution={} content={}",
+            "办公请求路由判定: scene={} dispatch={} content={}",
             scene,
-            office_execution,
+            office_dispatch.value,
             content[:120].replace("\n", " "),
         )
-        if scene == "office" and not office_execution:
+        if scene == "office" and office_dispatch == OfficeDispatch.DIRECT:
             # 办公模式也可以是纯文本创作/问答。不要为此生成虚假的任务、工具
             # 步骤或公文模板；直接使用完整对话上下文获得正常 C 端生成体验。
             prep["messages"][0]["content"] += _DIRECT_GENERATION_PROMPT
@@ -726,6 +778,29 @@ class Orchestrator:
                 title = await self._generate_title(content, user_id, llm_api_key)
                 if title:
                     await self.save_conversation_title(conversation_id, title)
+            await self._finalize_reply(conversation_id, user_id, reply, scene)
+            return {
+                "message_id": str(uuid.uuid4()), "content": reply,
+                "citations": project_citations(prep["citations"]), "scene": scene, "local_mode": False,
+                "title": title or "", "transcript": transcript, "steps": [],
+            }
+
+        if scene == "office" and office_dispatch == OfficeDispatch.TOOL_ASSISTED:
+            reply, _tool_records, tool_citations = await run_skill_loop(
+                self._llm,
+                user_id,
+                _append_office_read_tool_contract(prep["messages"]),
+                scene="office",
+                conversation_id=conversation_id,
+                llm_api_key=llm_api_key,
+            )
+            prep["citations"].extend(tool_citations)
+            if not reply:
+                reply = await self._call_llm_auto(
+                    user_id, prep["messages"], scene, image_uris, content, prep["citations"],
+                    conversation_id, llm_api_key, thinking_mode=thinking_mode,
+                )
+            title = await self.get_conversation_title(conversation_id)
             await self._finalize_reply(conversation_id, user_id, reply, scene)
             return {
                 "message_id": str(uuid.uuid4()), "content": reply,
@@ -832,6 +907,18 @@ class Orchestrator:
         transcript = await self._resolve_transcript(content, attachments)
         content = transcript
 
+        if scene == "chat" and _is_internal_project_question(content):
+            yield {"type": "delta", "content": _INTERNAL_PROJECT_BOUNDARY_REPLY}
+            yield {
+                "type": "done",
+                "message_id": str(uuid.uuid4()),
+                "content": _INTERNAL_PROJECT_BOUNDARY_REPLY,
+                "citations": [],
+                "scene": scene,
+                "title": "",
+            }
+            return
+
         if local_mode:
             yield {
                 "type": "done",
@@ -865,14 +952,18 @@ class Orchestrator:
 
         full_text = ""
         atomic_steps: dict[str, dict] = {}
-        office_execution = scene == "office" and requires_office_execution(content, office_docs)
+        office_dispatch = (
+            classify_office_dispatch(content, office_docs)
+            if scene == "office"
+            else OfficeDispatch.DIRECT
+        )
         logger.info(
-            "办公请求路由判定: scene={} execution={} content={}",
+            "办公请求路由判定: scene={} dispatch={} content={}",
             scene,
-            office_execution,
+            office_dispatch.value,
             content[:120].replace("\n", " "),
         )
-        if scene == "office" and not office_execution:
+        if scene == "office" and office_dispatch == OfficeDispatch.DIRECT:
             prep["messages"][0]["content"] += _DIRECT_GENERATION_PROMPT
         stream = (
             self._stream_office_job(
@@ -884,7 +975,11 @@ class Orchestrator:
                 prep["citations"],
                 user_role,
             )
-            if office_execution
+            if office_dispatch == OfficeDispatch.WORKFLOW
+            else self._stream_office_read_tools(
+                user_id, conversation_id, content, prep["messages"], prep["citations"], llm_api_key
+            )
+            if office_dispatch == OfficeDispatch.TOOL_ASSISTED
             else self._stream_llm_auto(
                 user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key,
                 thinking_mode=thinking_mode,
@@ -1085,6 +1180,58 @@ class Orchestrator:
             await asyncio.sleep(0.15)
             job = await agent_orchestrator.get_job(job.job_id) or job
         return self._job_answer(job), [self._job_step(n) for n in job.nodes], self._job_citations(job)
+
+    async def _stream_office_read_tools(
+        self,
+        user_id: str,
+        conversation_id: str,
+        content: str,
+        messages: list[dict],
+        citations: list[dict],
+        llm_api_key: str | None,
+    ):
+        """以一次短生命周期工具循环处理只读事实请求，不创建 Job。"""
+        progress_queue: asyncio.Queue[object] = asyncio.Queue()
+
+        def on_progress(event: object) -> None:
+            progress_queue.put_nowait(event)
+
+        task = asyncio.create_task(
+            run_skill_loop(
+                self._llm,
+                user_id,
+                _append_office_read_tool_contract(messages),
+                scene="office",
+                conversation_id=conversation_id,
+                llm_api_key=llm_api_key,
+                on_progress=on_progress,
+            )
+        )
+        while not task.done():
+            next_progress = asyncio.create_task(progress_queue.get())
+            done, _ = await asyncio.wait({task, next_progress}, return_when=asyncio.FIRST_COMPLETED)
+            if next_progress in done:
+                event = next_progress.result()
+                if isinstance(event, dict) and event.get("type") == "step":
+                    yield {"type": "step", "step": event}
+            else:
+                next_progress.cancel()
+                await asyncio.gather(next_progress, return_exceptions=True)
+        while not progress_queue.empty():
+            event = progress_queue.get_nowait()
+            if isinstance(event, dict) and event.get("type") == "step":
+                yield {"type": "step", "step": event}
+        reply, _records, tool_citations = task.result()
+        citations.extend(tool_citations)
+        if not reply:
+            reply = await self._llm.chat(
+                messages,
+                scene="office",
+                usage_user_id=user_id,
+                usage_category=CATEGORY_CHAT,
+                api_key=llm_api_key,
+            )
+        yield {"type": "delta", "content": reply}
 
     async def _stream_office_job(
         self,

@@ -117,6 +117,9 @@ async def _execute_node_activity_inner(payload: dict) -> dict:
             str(value) for value in ((node.metadata or {}).get("confirmed_tool_calls") or [])
         ),
         approval_context_sha256=str((node.metadata or {}).get("approval_upstream_sha256") or ""),
+        authorized_project_ids=tuple(
+            str(value) for value in (payload.get("authorized_project_ids") or []) if str(value).strip()
+        ),
         on_output=on_output,
     )
 

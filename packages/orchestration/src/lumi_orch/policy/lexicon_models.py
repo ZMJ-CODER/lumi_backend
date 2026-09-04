@@ -72,6 +72,7 @@ IntentPatternName = Literal[
     "network", "retrieval", "multiple_connectors", "vague_referents",
     "vague_actions", "bare_query_commands", "greetings", "feedback",
     "implicit_history", "dynamic", "conditional",
+    "negation",
 ]
 
 
@@ -90,6 +91,7 @@ class IntentPatternDocument(BaseModel):
     implicit_history: tuple[str, ...] = ()
     dynamic: tuple[str, ...] = ()
     conditional: tuple[str, ...] = ()
+    negation: tuple[str, ...] = ()
 
     @field_validator("network")
     @classmethod
@@ -101,7 +103,7 @@ class IntentPatternDocument(BaseModel):
     @field_validator(
         "retrieval", "multiple_connectors", "vague_referents", "vague_actions",
         "bare_query_commands", "greetings", "feedback", "implicit_history",
-        "dynamic", "conditional", mode="before",
+        "dynamic", "conditional", "negation", mode="before",
     )
     @classmethod
     def normalize_markers(cls, values: object) -> tuple[str, ...]:

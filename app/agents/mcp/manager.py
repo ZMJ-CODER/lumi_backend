@@ -1,7 +1,7 @@
 """MCP 客户端管理器：连接可插拔的 MCP 服务器（如 Electron 端暴露的本地工具）.
 
 混合架构：
-  - 服务端技能：原生 Python 函数（现有 plugins/skills，environment=server）；
+  - 服务端工具：原生 Python 函数（plugins/tools，environment=server）；
   - 客户端技能：通过 MCP 调用（Electron 端跑 MCP server，可插拔，断开时回退 Redis 轮询）。
 
 配置（config.MCP_SERVERS）：[{"name": "lumi_client", "transport": "streamable-http",
@@ -25,7 +25,9 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.resilience import CircuitOpenError, get_breaker
-from app.agents.skills.base import Skill, SkillContext, SkillProgress, SkillResult
+from app.agents.skills.base import SkillContext, SkillProgress, Tool
+from app.agents.skills.output_contract import OutputMeta, ToolOutput
+from app.services.tool_output_pipeline import to_execution_envelope
 
 # 连接失败冷却：Electron 未启动/后端先于前端启动时，避免每次调用都重试并刷日志
 _RETRY_COOLDOWN_S = 30.0
@@ -36,8 +38,8 @@ _active_calls: dict[str, asyncio.Task] = {}
 _active_requests: dict[str, tuple[object, int | str]] = {}
 
 # Registered Skills use this gateway as their single execution boundary.  A
-# client Skill is sent to the Electron MCP server when the server exposes the
-# same tool; server/sandbox Skills are executed in-process behind the same
+# client Tool is sent to the Electron MCP server when the server exposes the
+# same tool; server/sandbox Tool is executed in-process behind the same
 # result contract.  This keeps scheduling, timeout and audit callers agnostic
 # to where a capability lives while retaining the Redis fallback for clients
 # that have not upgraded their Electron runtime yet.
@@ -314,16 +316,24 @@ async def call_tool(
         structured = getattr(res, "structured_content", None) or getattr(
             res, "structuredContent", None
         )
-        return {
-            "success": True,
-            "content": text,
-            "metadata": structured or {},
-            "is_error": bool(
-                getattr(res, "is_error", None) is True
-                or getattr(res, "isError", False)
+        is_error = bool(
+            getattr(res, "is_error", None) is True
+            or getattr(res, "isError", False)
+        )
+        data = structured if structured is not None else text
+        output = ToolOutput(
+            status="failed" if is_error else ("empty" if not data else "success"),
+            data=data,
+            content_type="structured" if structured is not None else "text",
+            meta=OutputMeta(
+                total_size=len(text),
+                summary=text[:500] if structured is not None else "",
+                quality_hints={"task_id": task_id} if task_id else {},
             ),
-            "task_id": task_id,
-        }
+            error=text or "MCP 工具执行失败" if is_error else None,
+            error_code="MCP_EXEC_ERROR" if is_error else None,
+        )
+        return to_execution_envelope(output)
 
     current = asyncio.current_task()
     if task_id and current:
@@ -341,17 +351,18 @@ async def call_tool(
     except asyncio.TimeoutError:
         if task_id:
             await _notify_remote_cancel(task_id, "MCP tool deadline exceeded")
-        return {
-            "success": False, "content": "MCP 工具执行超时", "metadata": {"task_id": task_id},
-            "is_error": True, "error_code": "MCP_TIMEOUT", "task_id": task_id,
-        }
+        return to_execution_envelope(ToolOutput(
+            status="failed", data="MCP 工具执行超时", error="MCP 工具执行超时",
+            error_code="MCP_TIMEOUT", retryable=True,
+            meta=OutputMeta(quality_hints={"task_id": task_id} if task_id else {}),
+        ))
     finally:
         if task_id and _active_calls.get(task_id) is current:
             _active_calls.pop(task_id, None)
 
 
 async def call_skill(
-    skill: Skill,
+    skill: Tool,
     args: dict | None = None,
     *,
     context: SkillContext | None = None,
@@ -360,7 +371,7 @@ async def call_skill(
     on_progress: Callable[[dict], Any] | None = None,
     execution_policy: dict | None = None,
 ) -> dict:
-    """Execute any registered Skill through the unified MCP gateway.
+    """通过统一 MCP 网关执行一个已注册的原子 Tool。
 
     Client skills prefer the real Electron MCP endpoint when it advertises the
     skill name.  If the desktop is not connected, the legacy per-user request
@@ -397,20 +408,17 @@ async def call_skill(
                     # Keep the transport visible to the scheduler/audit layer.
                     # An MCP tool error is still an MCP execution result and
                     # must not be silently retried through the legacy queue.
-                    is_error = bool(raw.get("is_error")) or not bool(raw.get("success", True))
-                    return {
-                        **raw,
-                        "error_code": raw.get("error_code") or (
-                            "MCP_EXEC_ERROR" if is_error else None
-                        ),
-                        "retryable": bool(raw.get("retryable", False)),
-                        "metadata": {
+                    normalized = ToolOutput.model_validate(to_execution_envelope(raw))
+                    if normalized.status == "failed" and not normalized.error_code:
+                        normalized = normalized.model_copy(update={"error_code": "MCP_EXEC_ERROR"})
+                    return to_execution_envelope(
+                        normalized,
+                        transport_meta={
                             "skill": skill.name,
-                            "transport": "mcp",
+                            "kind": "mcp",
                             "server": server_name,
-                            **(raw.get("metadata") or {}),
                         },
-                    }
+                    )
                 break
 
     try:
@@ -418,26 +426,22 @@ async def call_skill(
             getattr(settings, "MCP_TOOL_TIMEOUT_S", 180.0)
         )
         operation = skill.execute(args, context)
-        result: SkillResult = await asyncio.wait_for(operation, effective_timeout) if effective_timeout > 0 else await operation
+        result: ToolOutput = await asyncio.wait_for(operation, effective_timeout) if effective_timeout > 0 else await operation
     except asyncio.TimeoutError:
-        return {
-            "success": False,
-            "content": "技能执行超时",
-            "metadata": {
-                "skill": skill.name,
-                "task_id": task_id,
-                "transport": "in_process_adapter",
-                "server": LOCAL_SKILL_SERVER,
+        return to_execution_envelope(
+            ToolOutput(
+                status="failed", data="技能执行超时", error="技能执行超时",
+                error_code="MCP_TIMEOUT", retryable=True,
+            ),
+            transport_meta={
+                "skill": skill.name, "kind": "in_process_adapter",
+                "server": LOCAL_SKILL_SERVER, "task_id": task_id,
             },
-            "is_error": True,
-            "error_code": "MCP_TIMEOUT",
-            "retryable": True,
-            "task_id": task_id,
-        }
+        )
     except Exception as exc:  # noqa: BLE001
         error_code = "MCP_EXEC_ERROR"
         error_message = str(exc) or "技能执行失败"
-        # Skill implementations may call the request-scoped model directly.
+        # Tool implementations may call the request-scoped model directly.
         # Preserve billing/auth/provider semantics so the DAG cannot retry or
         # replan them as if they were an ordinary tool error.
         lowered = error_message.lower()
@@ -451,36 +455,26 @@ async def call_skill(
             from app.agents.skills.recovery import classify_model_error
 
             error_code, error_message = classify_model_error(exc)
-        return {
-            "success": False,
-            "content": error_message,
-            "metadata": {
-                "skill": skill.name,
-                "task_id": task_id,
-                "transport": "in_process_adapter",
-                "server": LOCAL_SKILL_SERVER,
+        return to_execution_envelope(
+            ToolOutput(
+                status="failed", data=error_message, error=error_message,
+                error_code=error_code,
+                retryable=False if error_code.startswith("MODEL_") else True,
+            ),
+            transport_meta={
+                "skill": skill.name, "kind": "in_process_adapter",
+                "server": LOCAL_SKILL_SERVER, "task_id": task_id,
             },
-            "is_error": True,
-            "error_code": error_code,
-            "retryable": False if error_code.startswith("MODEL_") else True,
-            "task_id": task_id,
-        }
-    if not isinstance(result, SkillResult):
-        result = SkillResult(success=False, error="技能返回结果无效", error_code="EXEC_ERROR")
-    return {
-        "success": bool(result.success),
-        "content": result.output if result.success else (result.error or "技能执行失败"),
-        "metadata": {
-            "skill": skill.name,
-            "task_id": task_id,
-            "transport": "in_process_adapter",
-            "server": LOCAL_SKILL_SERVER,
-            **(result.metadata or {}),
+        )
+    if not isinstance(result, ToolOutput):
+        result = ToolOutput(status="failed", error="技能返回结果无效", error_code="EXEC_ERROR")
+    return to_execution_envelope(
+        result,
+        transport_meta={
+            "skill": skill.name, "kind": "in_process_adapter",
+            "server": LOCAL_SKILL_SERVER, "task_id": task_id,
         },
-        "is_error": not bool(result.success),
-        "error_code": result.error_code,
-        "task_id": task_id,
-    }
+    )
 
 
 async def _notify_remote_cancel(task_id: str, reason: str) -> None:

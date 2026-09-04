@@ -23,7 +23,7 @@ class CodeReaderAgent(WorkerAgent):
     params_help = (
         'params 用 {"project_id": "项目ID", "instruction": "定位/分析指令", "target_file": "可选文件路径"}'
     )
-    skills = ["list_project", "read_project_file", "grep_code"]
+    skills = ["Glob", "Read", "Grep"]
 
     async def execute(self, node: TaskNode, ctx: WorkerContext) -> dict:
         project_id = str(node.params.get("project_id") or "")

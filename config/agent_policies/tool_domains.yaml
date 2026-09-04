@@ -1,0 +1,29 @@
+version: 1.0.0
+domains:
+  research:
+    description: "检索公共资料或已授权知识，不读取项目源码和未授权私有数据。"
+    keywords: [查询, 检索, 搜索, 研究, 资料, 知识库, 联网, 网页]
+  document:
+    description: "读取、分析和生成已授权文档，不进行任意文件系统访问。"
+    keywords: [文档, 文件, 附件, 表格, PDF, CSV, OCR]
+  system:
+    description: "提供时间、计算等确定性系统能力，不执行外部写操作。"
+    keywords: [时间, 日期, 计算, 百分比]
+  desktop:
+    description: "通过已绑定客户端操作桌面，不代表拥有服务器权限。"
+    keywords: [打开, 启动, 应用, 网页, 进程]
+  data:
+    description: "处理用户明确授权的数据和文件，不扩大输入范围。"
+    keywords: [转换, 导出, 清洗, 合并, 拆分]
+  writing:
+    description: "生成或改写用户要求的文本内容，不代替外部发送或提交。"
+    keywords: [撰写, 改写, 润色, 摘要, 报告]
+  schedule:
+    description: "管理用户授权的日程、会议和待办信息。"
+    keywords: [日历, 日程, 会议, 待办, 提醒]
+  communication:
+    description: "处理用户明确授权的消息和邮件动作，写操作需确认。"
+    keywords: [邮件, 消息, 发送, 收件人]
+  memory:
+    description: "查询或整理当前用户授权的记忆信息。"
+    keywords: [记忆, 上次, 此前]

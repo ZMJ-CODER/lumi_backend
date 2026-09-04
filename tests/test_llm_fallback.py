@@ -22,6 +22,8 @@ def test_is_retryable_error():
         httpx.HTTPStatusError("e", request=req, response=resp400)
     )
     assert LLMClient._is_retryable_error(httpx.ConnectError("no", request=req))
+    resp402 = httpx.Response(402, request=req)
+    assert LLMClient._is_retryable_error(httpx.HTTPStatusError("Insufficient Balance", request=req, response=resp402))
 
 
 def test_fallback_cfg(monkeypatch):

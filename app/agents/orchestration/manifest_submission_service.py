@@ -49,16 +49,6 @@ class ManifestSubmissionService:
         llm_config: dict | None,
         routing_model: dict,
     ) -> ManifestSubmissionResult | None:
-        # A declared A/B parallel -> C -> D read-only workflow is a DAG
-        # contract, not a checklist. Let the dedicated compiler preserve its
-        # dependencies before the generic manifest parser attempts model-based
-        # item extraction.
-        from app.agents.orchestration.planning.read_only_dag import (
-            build_explicit_read_only_dag,
-        )
-
-        if build_explicit_read_only_dag(request) is not None:
-            return None
         authorization = authorize_manifest_source(request, office_docs)
         if authorization is None:
             return None
@@ -73,7 +63,6 @@ class ManifestSubmissionService:
                     "llm": routing_model,
                     "level": "manifest",
                     "mode": "manifest_clarification",
-                    "cache_hit": False,
                     "plan_revision": 1,
                     "manifest_source": manifest_source,
                 },
@@ -154,7 +143,6 @@ class ManifestSubmissionService:
                             "llm": routing_model,
                             "level": "manifest",
                             "mode": "manifest_model_error",
-                            "cache_hit": False,
                             "plan_revision": 1,
                             "manifest_source": manifest_source,
                         },
@@ -198,7 +186,6 @@ class ManifestSubmissionService:
                     "llm": routing_model,
                     "level": "manifest",
                     "mode": "manifest_budget_confirmation",
-                    "cache_hit": False,
                     "plan_revision": 1,
                     "manifest_source": manifest_source,
                     "estimated_tokens": manifest["estimated_tokens"],
@@ -225,7 +212,6 @@ class ManifestSubmissionService:
                 "llm": routing_model,
                 "level": "manifest",
                 "mode": "four_channel_manifest",
-                "cache_hit": False,
                 "plan_revision": 1,
                 "manifest": manifest,
                 "manifest_progress": manifest_progress(manifest),
@@ -247,7 +233,6 @@ class ManifestSubmissionService:
                 "llm": routing_model,
                 "level": "manifest",
                 "mode": "manifest_clarification",
-                "cache_hit": False,
                 "plan_revision": 1,
                 "manifest_source": manifest_source,
             },

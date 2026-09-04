@@ -82,7 +82,7 @@ def test_renderer_rejects_pathlike_filename(tmp_path):
 def test_document_skill_returns_generic_output_without_path(monkeypatch, tmp_path):
     from app.agents.skills.base import SkillContext
     from app.core.config import settings
-    from plugins.skills.office.create_office_document import CreateOfficeDocumentSkill
+    from plugins.tools.office.create_office_document import CreateOfficeDocumentSkill
 
     monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path / "uploads"))
     result = asyncio.run(

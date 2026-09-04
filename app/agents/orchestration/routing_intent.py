@@ -105,21 +105,78 @@ _FEEDBACK_MARKERS = _INTENT_MARKERS.get("feedback", ())
 _IMPLICIT_HISTORY_MARKERS = _INTENT_MARKERS.get("implicit_history", ())
 _DYNAMIC_MARKERS = _INTENT_MARKERS.get("dynamic", ())
 _CONDITIONAL_MARKERS = _INTENT_MARKERS.get("conditional", ())
+_NEGATION_MARKERS = _INTENT_MARKERS.get("negation", ())
+
+# 公开检索的泛化表达不能覆盖企业私有来源；命中这些词时优先进入
+# knowledge/RAG 路径，避免“查一下公司制度”被误发到公网。
+_PRIVATE_SOURCE_MARKERS = (
+    "知识库", "资料库", "内部", "公司制度", "公司政策", "员工手册",
+    "上传的", "上传内容", "附件", "文档中", "文件中", "根据我的资料",
+)
 
 
 def _matches(text: str, markers: tuple[str, ...]) -> bool:
-    return any(marker.casefold() in text.casefold() for marker in markers)
+    folded = text.casefold()
+    for marker in markers:
+        value = str(marker or "").strip().casefold()
+        if not value:
+            continue
+        # English markers such as ``send`` must not match inside product names
+        # like ``Send API`` when they are intended as an action verb. Chinese
+        # phrases continue to use bounded substring matching.
+        if re.fullmatch(r"[a-z0-9_ -]+", value):
+            if re.search(rf"(?<![a-z0-9_]){re.escape(value)}(?![a-z0-9_])", folded):
+                return True
+        elif value in folded:
+            return True
+    return False
+
+
+# Chinese list commas (、/，) continue a coordinated negation scope.  Only
+# sentence boundaries and contrast connectors start a new scope.
+_NEGATION_CLAUSE_BREAK_RE = re.compile(r"[。；;\n]|(?:但是|但|而是|不过|却)")
+
+
+def _is_negated_position(text: str, position: int) -> bool:
+    """Return whether an action occurrence is negated in its current clause.
+
+    This is intentionally a small safety guard, not a semantic parser.  A
+    negation applies across coordinated verbs in one clause (``不读取、修改或
+    创建``), but must stop at punctuation or contrast words (``不读取，但修改``).
+    The vocabulary lives in the policy file so new wording does not require a
+    code release.
+    """
+    if not _NEGATION_MARKERS:
+        return False
+    prefix = text[:position]
+    breaks = list(_NEGATION_CLAUSE_BREAK_RE.finditer(prefix))
+    clause_start = breaks[-1].end() if breaks else 0
+    clause = prefix[clause_start:]
+    return any(marker.casefold() in clause.casefold() for marker in _NEGATION_MARKERS)
+
+
+def _active_marker_positions(text: str, markers: tuple[str, ...]) -> list[int]:
+    lowered = text.casefold()
+    positions: list[int] = []
+    for marker in markers:
+        marker_lower = marker.casefold()
+        start = 0
+        while True:
+            position = lowered.find(marker_lower, start)
+            if position < 0:
+                break
+            if not _is_negated_position(text, position):
+                positions.append(position)
+            start = position + max(1, len(marker_lower))
+    return positions
 
 
 def _matches_action(text: str, action: str, markers: tuple[str, ...]) -> bool:
     lowered = text.casefold()
     for marker in markers:
         marker_lower = marker.casefold()
-        start = lowered.find(marker_lower)
-        if start < 0:
-            continue
-        prefix = text[max(0, start - 6):start]
-        if re.search(r"(?:不要|别|无需|不用|不需要|不必|暂时不|先不)[^，。；,，]{0,8}$", prefix):
+        positions = _active_marker_positions(text, (marker,))
+        if not positions:
             continue
         if action == "execute" and marker == "执行":
             # These are evaluation dimensions, not instructions to run a
@@ -135,11 +192,11 @@ def _action_steps(text: str, actions: list[str], objects: list[str]) -> tuple[Ac
     positions: list[ActionStep] = []
     for action in actions:
         marker_positions = [
-            text.casefold().find(marker.casefold())
+            position
             for name, markers in _ACTION_MARKERS
             if name == action
             for marker in markers
-            if text.casefold().find(marker.casefold()) >= 0
+            for position in _active_marker_positions(text, (marker,))
         ]
         if marker_positions:
             position = min(marker_positions)
@@ -217,6 +274,10 @@ def infer_route_intent(
     for obj, markers in _OBJECT_MARKERS:
         if _matches(text, markers):
             objects.append(obj)
+    # 技术名词（例如“LangGraph Send API”）中的 send 不是发送消息动作。
+    # 只有出现收件人/邮件/通知等消息对象，或明确的发送动词，才保留外部发送风险。
+    if "send" in actions and "message" not in objects and not re.search(r"(?iu)(发送|发给|发出|邮件|通知)", text):
+        actions = [item for item in actions if item != "send"]
     if _matches(text, _FEEDBACK_MARKERS) and "task_result" not in objects:
         objects.append("task_result")
 
@@ -227,8 +288,9 @@ def infer_route_intent(
         objects.append("task_history")
 
     requires_network = bool(
-        "query" in actions
+        any(action in actions for action in ("query", "read"))
         and (_matches(text, _NETWORK_MARKERS) or _matches(text, _NETWORK_CONTEXT_MARKERS) or "external_resource" in objects)
+        and not _matches(text, _PRIVATE_SOURCE_MARKERS)
     )
     requires_retrieval = bool(
         _matches(text, _RETRIEVAL_MARKERS)

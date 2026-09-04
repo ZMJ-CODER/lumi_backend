@@ -20,6 +20,7 @@ from app.agents.roles.atomic import AtomicStepAgent
 from app.agents.roles.direct_llm import DirectLlmAgent
 from app.agents.roles.collect_results import CollectResultsAgent
 from app.agents.roles.react import ReactStepAgent
+from app.agents.roles.workflow import WorkflowSkillAgent
 from app.agents.roles.office.agents import (
     OfficeCalendarAgent,
     OfficeDocAgent,
@@ -44,6 +45,7 @@ def register_all_agents() -> list[WorkerAgent]:
         DirectLlmAgent(),
         CollectResultsAgent(),
         ReactStepAgent(),
+        WorkflowSkillAgent(),
         RetrievalAgent(),
         DocumentTargetingAgent(),
         WebResearchAgent(),
@@ -75,6 +77,7 @@ def register_all_agents() -> list[WorkerAgent]:
 __all__ = [
     "register_all_agents",
     "AtomicStepAgent",
+    "WorkflowSkillAgent",
     "RetrievalAgent",
     "DocumentTargetingAgent",
     "WebResearchAgent",

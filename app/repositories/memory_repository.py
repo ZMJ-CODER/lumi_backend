@@ -92,6 +92,15 @@ class DefaultMemoryRepository:
             JobStatus.INTERRUPTED,
         }:
             return
+        # InMemory/fixture users use short identifiers; PostgreSQL requires UUID.
+        # Skip before opening a DB session so cancelled-job tests remain fast and
+        # do not emit repeated invalid-UUID connection errors.
+        import uuid
+
+        try:
+            uuid.UUID(str(job.user_id))
+        except (ValueError, AttributeError, TypeError):
+            return
         try:
             from app.core.database import async_session_factory
             from app.services.office_task_memory import upsert_office_task_index

@@ -25,8 +25,7 @@ class CodeTesterAgent(WorkerAgent):
     description = "在本地项目自动选择并运行合适的测试/构建命令，如实汇报结果"
     params_help = 'params 用 {"project_id": "项目ID"}，不要预设 command，由 tester 根据项目文件自行决定'
     skills = [
-        "read_project_file",
-        "write_project_file",
+        "Read", "Write",
         "run_in_sandbox",
         "check_new_dependencies",
         "install_new_dependencies",

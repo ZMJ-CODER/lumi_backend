@@ -245,7 +245,11 @@ class Settings(BaseSettings):
     AGENT_CLIENT_TOOL_TIMEOUT_SECONDS: int = 45  # 客户端工具等待用户执行/确认的最长时间（过长会让任务卡在思维链）
     AGENT_REVIEW_ENABLED: bool = False   # activity 级质检开关：与 writer 自检 + reviewer 节点重复，
                                          # 默认关闭省一次 LLM 调用/节点；需要可改回 True
-    SKILL_PLUGINS_DIR: str = "plugins/skills"     # 技能插件目录（Docker 挂载为 volume 支持热更新）
+    TOOL_PLUGINS_DIR: str = "plugins/tools"       # 原子工具插件目录（Docker 挂载支持热更新）
+    WORKFLOW_SKILLS_DIR: str = "plugins/workflows" # 组合 Skill 插件目录，不进入 Function Calling
+    # 基础工具协议默认启用：模型自由 Function Calling 只看到规范基础工具。
+    # 领域能力由编排器固化为内部节点后执行，不进入自由候选池。
+    AGENT_BASE_TOOLS_ONLY: bool = True
     # 合法 Skill 池内的向量排序；权限/场景过滤永远在它之前。语义索引在启动时
     # 预热；未就绪或嵌入异常时会以 ``lexical_fallback`` 显式记录，而不是静默混用。
     SKILL_SEMANTIC_ROUTING_ENABLED: bool = True
@@ -262,6 +266,7 @@ class Settings(BaseSettings):
     SKILL_CANDIDATE_TIE_EPSILON: float = 3.0
     SKILL_CANDIDATE_MAX_OVERFLOW: int = 1
     SKILL_BOOTSTRAP_EXPIRING_DAYS: int = 3
+    TOOL_DISCOVERY_CACHE_TTL_SECONDS: int = 1800  # 会话工具发现元数据短期缓存
     # 用户显式绑定的外部 MCP 走独立配额，避免其可用性或成本拖垮内置 Skill。
     # 部署可在 MCP_SERVERS 的单个 server 配置中用 mcp_daily_call_limit /
     # mcp_concurrency_limit 覆盖这些默认值。
@@ -277,6 +282,10 @@ class Settings(BaseSettings):
     AGENT_NODE_CONCURRENCY: int = 2               # 同时执行的 DAG 节点数（资源协调上限）
     AGENT_NODE_MAX_RETRIES: int = 1               # 单节点失败最大重试次数（React 重试）
     AGENT_NODE_TIMEOUT_SECONDS: int = 120         # 单节点执行超时；避免一次失败拖成数分钟
+    # LLM 节点独立于 DAG 节点并发；按模型/端点分别限流，避免并发洪峰触发
+    # Provider 429 或本地连接池排队。
+    AGENT_LLM_MAX_CONCURRENCY: int = 5
+    AGENT_MAX_PARALLEL_FRONTIER: int = 5
     # 0 表示回退到 AGENT_NODE_TIMEOUT_SECONDS；可按通道收紧/放宽硬超时。
     AGENT_NODE_TIMEOUT_DIRECT_LLM_SECONDS: int = 0
     AGENT_NODE_TIMEOUT_SCRIPT_SECONDS: int = 0
@@ -316,6 +325,8 @@ class Settings(BaseSettings):
     # subgraph. The default remains the persisted DAG runtime until the
     # Temporal manifest workflow has completed its local rollout.
     AGENT_DYNAMIC_SUBGRAPH_ENABLED: bool = True
+    # React worker 仅负责执行当前节点，稳定前不得自行生成或提交补图。
+    AGENT_REACT_PLAN_PATCH_ENABLED: bool = False
     AGENT_SUBGRAPH_MAX_REPLANS: int = 2
     # 通道级全局并发上限：真正的外部执行由 B/D 受控；A 通常在服务层直出。
     AGENT_CHANNEL_DIRECT_LLM_CONCURRENCY: int = 32
@@ -377,6 +388,10 @@ class Settings(BaseSettings):
     AGENT_EXECUTION_DEFAULTS_PATH: str = "config/agent_policies/execution_defaults.yaml"
     AGENT_ROUTING_INTENT_PATTERN_PATH: str = "config/agent_policies/route_intent_patterns.yaml"
     AGENT_PLANNING_POLICY_PATH: str = "config/agent_policies/planning_rules.yaml"
+    AGENT_TOOL_DOMAIN_POLICY_PATH: str = "config/agent_policies/tool_domains.yaml"
+    AGENT_TOOL_REGISTRY_POLICY_PATH: str = "config/agent_policies/tool_registry.yaml"
+    AGENT_BASE_TOOLS_POLICY_PATH: str = "config/agent_policies/base_tools.yaml"
+    SKILL_REGISTRY_STRICT: bool = True  # L0 契约不完整的插件拒绝加载
     TEMPORAL_ADDRESS: str = "localhost:7233"      # Temporal 前端 gRPC 地址
     TEMPORAL_NAMESPACE: str = "default"           # Temporal namespace
     TEMPORAL_TASK_QUEUE: str = "lumi-agents"      # Temporal 任务队列（worker 与客户端必须一致）
@@ -515,7 +530,8 @@ class Settings(BaseSettings):
         "UPLOAD_DIR",
         "EMBEDDING_CACHE_DIR",
         "PROMPTS_DIR",
-        "SKILL_PLUGINS_DIR",
+        "TOOL_PLUGINS_DIR",
+        "WORKFLOW_SKILLS_DIR",
         "AGENT_ROUTING_POLICY_PATH",
         "AGENT_TCA_POLICY_PATH",
         "AGENT_ROUTING_LEXICON_PATH",

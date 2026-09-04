@@ -20,6 +20,12 @@ from langgraph.prebuilt import ToolNode
 
 from app.agents.langchain.models import get_chat_model
 from app.agents.langchain.tools import make_skill_tool
+from app.agents.skills.discovery import (
+    ToolDiscoverySession,
+    build_domain_groups,
+    record_discovery,
+    search_tools,
+)
 from app.agents.skills.base import SkillResult
 from app.agents.skills.prompting import build_tool_selection_contract
 from app.agents.skills.executor import (
@@ -28,8 +34,10 @@ from app.agents.skills.executor import (
     get_chat_capabilities_with_trace,
     record_candidate_selection,
     selection_requires_escalation,
+    select_capabilities_with_trace,
 )
 from app.core.agent_security import redact_server_text, wrap_untrusted_tool_output
+from app.services.tool_output_pipeline import clean_assistant_text
 
 
 class ChatGraphState(TypedDict, total=False):
@@ -77,6 +85,7 @@ class LangGraphChatRunner:
         self.records: list[dict] = []
         self.citations: list[dict] = []
         self._tool_results: list[SkillResult] = []
+        self.discovery_session = ToolDiscoverySession()
 
     def _emit(self, value: str | dict) -> None:
         if self.on_progress:
@@ -89,6 +98,7 @@ class LangGraphChatRunner:
 
     async def run(self, messages: list[dict] | list[BaseMessage]) -> tuple[str, list[dict], list[dict]]:
         """执行串行工具循环，返回旧 ``run_skill_loop`` 保持的三元组契约。"""
+        await self.discovery_session.load(self.user_id, self.conversation_id)
         current_user_message = ""
         for message in reversed(messages):
             role = message.get("role") if isinstance(message, dict) else getattr(message, "type", "")
@@ -99,19 +109,73 @@ class LangGraphChatRunner:
         # Office DAG already provides a request-scoped capability namespace.
         # Chat has a small shared allowlist, but still selects only the useful
         # candidates so adjacent tools do not compete in every model context.
-        selection = (
-            await get_chat_capabilities_with_trace(
-                current_user_message, self.user_role, self.user_id,
-            )
-            if self.scene == "chat" and self.chat_model is None
-            else CapabilitySelection(
+        if self.chat_model is not None:
+            selection = CapabilitySelection(
                 capabilities=await get_capabilities_for_scene(self.scene, self.user_role, self.user_id),
                 candidates=[],
                 scene=self.scene,
-                reason="explicit_model_or_nonchat",
+                reason="explicit_model",
             )
+        elif self.scene == "chat":
+            selection = await get_chat_capabilities_with_trace(
+                current_user_message, self.user_role, self.user_id,
+            )
+        else:
+            selection = await select_capabilities_with_trace(
+                current_user_message,
+                self.scene,
+                self.user_role,
+                limit=3 if self.scene == "office" else 8,
+                user_id=self.user_id,
         )
         capabilities = selection.capabilities
+        # ``office`` is also used by the lightweight fact-assistance path.
+        # That path never owns a Job/effect journal, so write and confirmation
+        # tools must be removed in code rather than merely discouraged in its
+        # prompt. Durable office workflows use their separate executor path.
+        if self.scene == "office":
+            capabilities = [
+                item for item in capabilities
+                if not item.write_op and not item.requires_confirmation
+            ]
+        # 会话级 L2 缓存可恢复此前已展开的稳定工具；仍受本轮场景和授权池限制。
+        if self.discovery_session.loaded_tools:
+            legal_names = {item.name for item in await get_capabilities_for_scene(self.scene, self.user_role, self.user_id)}
+            cached = [
+                item for item in self.discovery_session.loaded_tools.values()
+                if item.name in legal_names
+                and item.status == "stable"
+                and (self.scene != "office" or (not item.write_op and not item.requires_confirmation))
+            ]
+            by_name = {item.name: item for item in [*capabilities, *cached]}
+            capabilities = list(by_name.values())[:8]
+        if self.chat_model is None:
+            legal_capabilities = await get_capabilities_for_scene(self.scene, self.user_role, self.user_id)
+            if self.scene == "office":
+                legal_capabilities = [
+                    item for item in legal_capabilities
+                    if not item.write_op and not item.requires_confirmation
+                ]
+            discovered = search_tools(
+                current_user_message,
+                legal_capabilities,
+                limit=5,
+                allowed_tools={item.name for item in capabilities},
+            )
+            if discovered:
+                self.discovery_session.add(discovered)
+                record_discovery(
+                    current_user_message,
+                    groups=build_domain_groups(legal_capabilities),
+                    results=discovered,
+                    scene=self.scene,
+                    user_id=self.user_id,
+                    job_id=self.conversation_id,
+                    session=self.discovery_session,
+                )
+                await self.discovery_session.save(self.user_id, self.conversation_id)
+                by_name = {item.name: item for item in [*capabilities, *discovered]}
+                capabilities = list(by_name.values())[: max(1, min(8, len(by_name)))]
         if selection_requires_escalation(selection, current_user_message):
             record_candidate_selection(
                 selection, request=current_user_message, user_id=self.user_id,
@@ -130,6 +194,7 @@ class LangGraphChatRunner:
                 on_result=self._on_tool_result,
                 user_message=current_user_message,
                 llm_config=self.llm_config,
+                allowed_tools={item.name for item in capabilities},
             )
             if tool is not None:
                 tools.append(tool)
@@ -259,4 +324,4 @@ class LangGraphChatRunner:
             if isinstance(message, AIMessage) and not message.tool_calls:
                 final = str(message.content or "")
                 break
-        return redact_server_text(final), self.records, self.citations
+        return clean_assistant_text(redact_server_text(final)), self.records, self.citations

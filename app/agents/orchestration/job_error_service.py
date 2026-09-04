@@ -50,6 +50,24 @@ class JobErrorService:
         job = await self._store.get_job(job_id)
         if job is None:
             return None
+        if job.status == JobStatus.CANCELLED:
+            # 取消请求先落库再取消后台协程；此时保留已执行节点的中断语义，
+            # 并将尚未启动的节点标记为取消，避免快照永久停留在 RUNNING。
+            from app.agents.orchestration.models import TaskStatus
+
+            for node in job.nodes:
+                if node.status == TaskStatus.RUNNING:
+                    node.status = TaskStatus.INTERRUPTED
+                    node.error = message
+                    node.error_code = "JOB_CANCELLED"
+                elif node.status in {TaskStatus.PENDING, TaskStatus.READY, TaskStatus.RETRYING}:
+                    node.status = TaskStatus.CANCELLED
+                    node.error = message
+                    node.error_code = "JOB_CANCELLED"
+            job.error = message[:1000]
+            job.updated_at = time.time()
+            await self._store.save_job(job)
+            return job
         if job.status not in {
             JobStatus.COMPLETED,
             JobStatus.FAILED,

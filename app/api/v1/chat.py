@@ -3,7 +3,7 @@
 事件格式（text/event-stream，每行 data: {json}）：
   {"type":"delta","content":"部分文本"}
   {"type":"done","message_id":"uuid","content":"完整文本","citations":[...],"title":"...","scene":"..."}
-  {"type":"error","message":"...","status":500}
+  {"type":"error","message":"...","status":500,"code":"STABLE_ERROR_CODE"}
 """
 
 import asyncio
@@ -39,6 +39,7 @@ from app.agents.orchestration.orchestrator import (
 from app.agents.orchestration.state import StatePersistenceError
 from app.models.conversation import SendMessageRequest
 from app.services.orchestrator import orchestrator
+from app.agents.skills.recovery import classify_model_error
 
 router = APIRouter()
 
@@ -208,7 +209,28 @@ async def chat_stream(
                         await _persist_messages(db, conv, req, partial)
                 except Exception as persist_exc:  # noqa: BLE001
                     logger.warning("流式中断持久化失败: {}", persist_exc)
-            yield _sse({"type": "error", "message": "服务器内部错误", "status": 500})
+            # Provider billing/auth/configuration failures are actionable
+            # client states, not generic server errors.  In particular a
+            # long office task can exhaust the selected DeepSeek account;
+            # returning 500 makes the next chat appear broken and encourages
+            # blind retries that consume more quota.
+            model_code, model_message = classify_model_error(exc)
+            model_status = {
+                "MODEL_INSUFFICIENT_BALANCE": 402,
+                "MODEL_AUTH_ERROR": 401,
+                "MODEL_NOT_FOUND": 404,
+                "MODEL_CONFIG_ERROR": 400,
+                "MODEL_TOOL_CALL_UNSUPPORTED": 422,
+                "MODEL_PROVIDER_UNAVAILABLE": 503,
+                "MODEL_CONNECTION_ERROR": 503,
+                "MODEL_UNAVAILABLE": 503,
+            }.get(model_code)
+            yield _sse({
+                "type": "error",
+                "message": model_message if model_status else "服务器内部错误",
+                "status": model_status or 500,
+                "code": model_code if model_status else "CHAT_STREAM_INTERNAL_ERROR",
+            })
         finally:
             if lock is not None:
                 try:

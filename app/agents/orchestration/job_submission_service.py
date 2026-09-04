@@ -53,7 +53,6 @@ class JobSubmissionService:
         plan_with_context: Callable[[PlanRequestContext], Awaitable[Any]],
         plan_contexts: dict[str, dict],
         llm_configs: dict[str, dict],
-        pending_plan_cache: dict[str, tuple[str, list[dict] | None]],
     ) -> None:
         self._store = store
         self._context_service = context_service
@@ -78,11 +77,9 @@ class JobSubmissionService:
         self._plan_with_context = plan_with_context
         self._plan_contexts = plan_contexts
         self._llm_configs = llm_configs
-        self._pending_plan_cache = pending_plan_cache
 
     def _discard_pending(self, job_id: str) -> None:
         self._plan_contexts.pop(job_id, None)
-        self._pending_plan_cache.pop(job_id, None)
 
     async def submit(
         self,
@@ -118,8 +115,6 @@ class JobSubmissionService:
         routing_model = effective_llm.public_dict()
         planning_context = prepared.planning_context
         routing: dict = {"llm": routing_model} if scene == "office" else {}
-        cache_key = ""
-        cache_hit = False
 
         manifest_submission = (
             await self._manifest_submission.prepare(
@@ -151,17 +146,18 @@ class JobSubmissionService:
             )
             tree = selection.tree
             routing = selection.routing
-            cache_key = selection.cache_key
-            cache_hit = selection.cache_hit
         else:
             tree = await self._plan_with_context(planning_context)
 
         self._plan_compilation.normalize_for_submission(
             tree.nodes,
             request,
-            preserve_dependencies=bool(
-                routing.get("manifest") or routing.get("preserve_dependencies")
-            ),
+            # Dependencies are declared by the LLM JobSpec and validated by
+            # the compiler.  Do not collapse arbitrary plans into a serial
+            # chain; that changes the task semantics and defeats node-level
+            # concurrency.
+            preserve_dependencies=True,
+            complexity_level=str(routing.get("level") or ""),
         )
         if scene == "office" and tree.nodes and not tree.error and not routing.get("manifest"):
             tree = await self._plan_compilation.compile_with_feedback(
@@ -180,6 +176,14 @@ class JobSubmissionService:
                 for item in office_docs or []
                 if item.get("doc_id")
             ]
+            # 项目代码访问是显式授权能力：仅复制 API 请求中提供的项目 ID，
+            # 不从规划器推断的节点参数或用户文本回填授权范围。
+            authorized_projects: list[str] = []
+            for value in [project_id, *(project_ids or [])]:
+                text = str(value or "").strip()
+                if text and text not in authorized_projects:
+                    authorized_projects.append(text)
+            routing["authorized_project_ids"] = authorized_projects
 
         materialized = await self._materialization.materialize(
             user_id=user_id,
@@ -208,8 +212,6 @@ class JobSubmissionService:
                 "presentation_preferences": prepared.presentation_preferences,
             }
             self._llm_configs[job.job_id] = llm_config
-            if cache_key and not cache_hit:
-                self._pending_plan_cache[job.job_id] = (cache_key, office_docs)
 
         if materialized.terminal:
             await self._store.create_job(job)

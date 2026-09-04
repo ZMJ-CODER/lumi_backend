@@ -1,16 +1,13 @@
-"""通过评估、缓存和规划路由选择普通办公计划。"""
+"""通过复杂度遥测和统一 LLM 入口选择办公工作流计划。"""
 
 from __future__ import annotations
 
-import hashlib
 import time
 from dataclasses import dataclass
 from typing import Any
 
-from app.agents.orchestration.plan_cache import PlanCache, build_plan_cache_key
 from app.agents.orchestration.planning.context import PlanRequestContext
 from app.agents.orchestration.tca import ComplexityLevel, TaskComplexityAssessor
-from app.agents.orchestration.planning.read_only_dag import build_explicit_read_only_dag
 
 
 @dataclass(slots=True)
@@ -18,8 +15,6 @@ class OfficePlanSelection:
     tree: Any
     routing: dict
     level: ComplexityLevel
-    cache_key: str
-    cache_hit: bool
 
 
 class OfficePlanSelectionService:
@@ -31,12 +26,10 @@ class OfficePlanSelectionService:
         planner: Any,
         workers: dict,
         assessor: TaskComplexityAssessor,
-        plan_cache: PlanCache,
     ) -> None:
         self._planner = planner
         self._workers = workers
         self._assessor = assessor
-        self._plan_cache = plan_cache
 
     async def select(
         self,
@@ -62,87 +55,41 @@ class OfficePlanSelectionService:
         routing = {
             "llm": routing_model,
             **assessment.audit_dict(),
-            "cache_hit": False,
             "replan_count": 0,
             "upgrade_count": 0,
             "upgrades": [],
             "plan_revision": 1,
             "plan_history": [],
         }
-        capability_parts = [f"worker:{name}" for name in sorted(self._workers)]
-        try:
-            from app.agents.skills.registry import SkillRegistry
+        # A workflow plan is a model decision over the current request,
+        # attachments, permissions and tool/Skill versions.  Reusing it from a
+        # coarse text-pattern cache can silently apply stale dependencies or
+        # capabilities.  Keep the cache implementation for explicitly opted-in
+        # deterministic workloads, but never use it for office LLM plans.
+        from app.agents.orchestration.routing import plan_for_level
 
-            capability_parts.extend(
-                f"skill:{skill.name}:{skill.category}:{skill.environment}:"
-                f"{int(skill.write_op)}:{int(skill.idempotent)}"
-                for skill in sorted(SkillRegistry.list(), key=lambda item: item.name)
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        capability_signature = hashlib.sha256(
-            "|".join(capability_parts).encode("utf-8")
-        ).hexdigest()[:16]
-        # This DAG deliberately carries execution-shape metadata that is not
-        # persisted by the generic plan cache. Replanning is deterministic and
-        # cheap, while caching it could erase its parallel dependency contract.
-        explicit_read_only_dag = build_explicit_read_only_dag(request)
-        cache_allowed = (
-            level in {ComplexityLevel.M1, ComplexityLevel.M2}
-            and not project_id
-            and not project_ids
-            and not clarification_answer
-            and not prior_summaries
-            and explicit_read_only_dag is None
+        tree = await plan_for_level(
+            self._planner,
+            level,
+            user_id,
+            request,
+            "office",
+            project_id,
+            project_ids,
+            planning_context.llm_api_key,
+            clarification_answer,
+            office_docs,
+            prior_summaries,
+            context=planning_context,
         )
-        cache_key = ""
-        cache_hit = False
-        tree = None
-        if cache_allowed:
-            cache_key = build_plan_cache_key(
-                user_id=user_id,
-                request=request,
-                scene="office",
-                user_role=user_role,
-                office_docs=office_docs,
-                capability_signature=capability_signature,
-            )
-            cached = await self._plan_cache.get(cache_key, office_docs)
-            try:
-                from app.core.observability import inc_plan_cache
-
-                inc_plan_cache("hit" if cached else "miss")
-            except Exception:  # noqa: BLE001
-                pass
-            if cached:
-                from app.agents.orchestration.planner import TaskTree
-
-                cached_nodes, cached_plan_text = cached
-                tree = TaskTree(nodes=cached_nodes, plan_text=cached_plan_text)
-                cache_hit = True
-        if tree is None:
-            from app.agents.orchestration.routing import plan_for_level
-
-            tree = await plan_for_level(
-                self._planner,
-                level,
-                user_id,
-                request,
-                "office",
-                project_id,
-                project_ids,
-                planning_context.llm_api_key,
-                clarification_answer,
-                office_docs,
-                prior_summaries,
-                context=planning_context,
-            )
-        routing["cache_hit"] = cache_hit
-        # A deliberately declared parallel, read-only DAG is safe to retain.
-        # Other legacy planner output keeps the compatibility serialisation
-        # policy until it explicitly opts in through node metadata.
+        # LLM-planned dependencies are part of the JobSpec contract.  The
+        # executor validates resource conflicts and side effects; it must not
+        # silently turn independent nodes into a serial chain merely because
+        # they were not produced by an old deterministic shortcut. External
+        # legacy Planner implementations retain their old windowing behavior.
         routing["preserve_dependencies"] = any(
-            bool((node.metadata or {}).get("preserve_dependencies"))
+            bool((node.metadata or {}).get("planner_generated"))
+            or bool((node.metadata or {}).get("preserve_dependencies"))
             for node in (tree.nodes or [])
         )
         duration = time.perf_counter() - started
@@ -150,13 +97,11 @@ class OfficePlanSelectionService:
         try:
             from app.core.observability import inc_agent_route
 
-            inc_agent_route(level.value, assessment.mode.value, cache_hit, duration)
+            inc_agent_route(level.value, assessment.mode.value, False, duration)
         except Exception:  # noqa: BLE001
             pass
         return OfficePlanSelection(
             tree=tree,
             routing=routing,
             level=level,
-            cache_key=cache_key,
-            cache_hit=cache_hit,
         )

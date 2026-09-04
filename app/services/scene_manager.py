@@ -35,7 +35,7 @@ SCENE_CONFIGS: dict[str, dict] = {
         ),
         "knowledge_tags": ["office", "productivity"],
         "local_acceleration": False,
-        "control_permissions": ["open_app", "read_file", "write_file"],
+        "control_permissions": ["OpenApp", "Read", "Write"],
     },
     "game": {
         "name": "游戏",
@@ -49,7 +49,7 @@ SCENE_CONFIGS: dict[str, dict] = {
         ),
         "knowledge_tags": ["game", "gaming"],
         "local_acceleration": True,  # 优先使用 PC 本地加速
-        "control_permissions": ["volume_set", "open_app"],
+        "control_permissions": ["volume_set", "OpenApp"],
     },
 }
 

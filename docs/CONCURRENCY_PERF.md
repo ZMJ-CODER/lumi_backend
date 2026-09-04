@@ -115,7 +115,7 @@ Postgres/Redis（host.docker.internal），与 Windows 同脚本、同并发压�
 原先在 async 接口里直接调用，一个上传就把整个事件循环卡死（实测 health 延迟飙到 3 秒）。
 
 修复：`app/api/v1/office_docs.py`、`app/services/office_docs.py`、
-`plugins/skills/office/office_docs.py` 全部改为 `asyncio.to_thread(...)`。
+`plugins/tools/office/office_docs.py` 全部改为 `asyncio.to_thread(...)`。
 
 ### 2. health 接口每次占用数据库连接池
 原 `/api/v1/health` 每次请求都 `SELECT 1` + Redis ping 并占用一个池槽位，

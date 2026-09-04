@@ -93,6 +93,29 @@ class JobMaterializationService:
             from app.agents.orchestration.runtime_gateway import RuntimeGateway
 
             static_temporal_candidate = RuntimeGateway.can_run_static(job)
+        # 计划图的依赖关系已由编译器验证。无论计划是模型生成还是旧的显式
+        # 并行格式，都必须保留完整图形；否则逻辑计划窗口会把互不依赖的节点
+        # 退化成串行前沿，改变用户任务的语义并浪费并发能力。
+        # ``preserve_dependencies`` describes graph semantics, not a promise
+        # that the whole graph fits in one execution window.  Large fan-out
+        # plans used to bypass logical-plan rolling solely because the planner
+        # marked them as parallel, leaving the execution engine to queue an
+        # unbounded frontier.  Preserve the complete DAG only when both the
+        # node count and the initial ready frontier fit the configured window.
+        max_plan_nodes = max(1, int(getattr(settings, "AGENT_PLAN_MAX_NODES", 6) or 6))
+        max_frontier = max(1, int(getattr(settings, "AGENT_MAX_PARALLEL_FRONTIER", 5) or 5))
+        indegree = {node.id: 0 for node in job.nodes}
+        for node in job.nodes:
+            for dependency in node.depends_on:
+                if dependency in indegree:
+                    indegree[node.id] += 1
+        initial_frontier_size = sum(1 for value in indegree.values() if value == 0)
+        preserved_parallel_dag = bool(
+            job.nodes
+            and bool(routing.get("preserve_dependencies"))
+            and len(job.nodes) <= max_plan_nodes
+            and initial_frontier_size <= max_frontier
+        )
         if (
             scene == "office"
             and settings.AGENT_LOGICAL_PLAN_ENABLED
@@ -101,6 +124,10 @@ class JobMaterializationService:
                 len(job.nodes) >= settings.AGENT_LOGICAL_PLAN_MIN_NODES
                 or bool(getattr(tree, "expansion_slots", []) or [])
             )
+            # 有界滚动计划用于长链/动态扩图。对于一个能直接装进当前执行窗口的
+            # 并行 DAG，转为逻辑计划会让已就绪兄弟节点被前沿窗口切成多轮，既
+            # 丢失并行也让 API 快照只保留最后一个节点。保持普通 DAG 即可。
+            and not preserved_parallel_dag
             and not static_temporal_candidate
         ):
             from app.agents.orchestration.logical_plan import (

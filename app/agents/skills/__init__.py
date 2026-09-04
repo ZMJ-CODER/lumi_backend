@@ -1,13 +1,11 @@
-"""技能层（预留）—— 智能体可调用的能力单元.
+"""工具与组合 Skill 层。
 
-新增技能步骤（后期）：
-  1. 继承 app.agents.skills.base.Skill
-  2. 实现 name / description / parameters_schema / execute
-  3. SkillRegistry.register(...) 注册
-  4. 需要执行代码/命令的技能，通过沙箱接口运行（见 app.agents.sandbox）
+原子 Tool 才会进入模型的 Function Calling；WorkflowSkill 仅供规划器选择，
+通过受控的 ``workflow_runner`` 编排多个 Tool。
 """
 
-from app.agents.skills.base import Skill, SkillResult
-from app.agents.skills.registry import SkillRegistry
+from app.agents.skills.base import SkillResult, Tool, WorkflowSkill
+from app.agents.skills.output_contract import ArtifactRef, Citation, OutputMeta, ToolOutput
+from app.agents.skills.registry import SkillRegistry, ToolRegistry
 
-__all__ = ["Skill", "SkillResult", "SkillRegistry"]
+__all__ = ["Tool", "WorkflowSkill", "SkillResult", "ToolRegistry", "SkillRegistry", "ArtifactRef", "Citation", "OutputMeta", "ToolOutput"]

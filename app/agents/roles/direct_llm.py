@@ -39,6 +39,12 @@ class DirectLlmAgent(WorkerAgent):
         for dep_id, result in list(dependencies.items())[-6:]:
             if not isinstance(result, dict):
                 continue
+            dep_status = str(result.get("status") or "completed")
+            if dep_status not in {"completed", "success"}:
+                evidence.append(
+                    f"[{dep_id}] 状态={dep_status}，错误={str(result.get('error') or '上游结果不可用')[:500]}"
+                )
+                continue
             text = str(result.get("content") or result.get("output") or result.get("answer") or "").strip()
             if text:
                 evidence.append(f"[{dep_id}]\n{text[:6000]}")
@@ -53,6 +59,7 @@ class DirectLlmAgent(WorkerAgent):
             ),
             "你是内容生成执行器。直接完成当前原子任务，严格遵守用户指定的格式、题目、字数和语气。"
             "不要调用或声称调用任何外部工具；不要把普通文本套成公文模板。只输出交付内容。"
+            "如果前置结果中存在失败或超时，仍基于可用结果完成汇总，并明确说明数据缺口，不能直接放弃。"
             "若完成当前任务必须读取用户私有资料、已上传文档或知识库，而当前输入和依赖结果没有"
             "提供该事实，只输出精确标记 [[ROUTE_UPGRADE_RAG]]，不要猜测、不要解释。",
             prompt,

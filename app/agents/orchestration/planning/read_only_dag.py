@@ -47,7 +47,7 @@ def build_explicit_read_only_dag(request: str) -> list[TaskNode] | None:
             id=ids[label], name=f"阶段 {label}：只读分析", agent="direct_llm",
             params={"instruction": _instruction(label, stages[label], dependencies), "max_tokens": 600},
             depends_on=[ids[item] for item in dependencies],
-            metadata={"route_channel": "direct_llm", "preserve_dependencies": True, "routing": {"reason": "explicit_read_only_parallel_dag", "stage": label, "side_effect_free": True}},
+            metadata={"route_channel": "direct_llm", "preserve_dependencies": True, "aggregation_node": label in {"C", "D"}, "routing": {"reason": "explicit_read_only_parallel_dag", "stage": label, "side_effect_free": True}},
         )
 
     return [node("A"), node("B"), node("C", ("A", "B")), node("D", ("C",))]

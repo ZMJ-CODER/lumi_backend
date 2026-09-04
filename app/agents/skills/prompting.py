@@ -24,7 +24,7 @@ def build_tool_selection_contract(capabilities: Iterable[ToolCapability]) -> str
         if capability.use_when:
             lines.append("  适用：" + "；".join(capability.use_when[:2]))
         if capability.do_not_use_when:
-            lines.append("  不适用：" + "；".join(capability.do_not_use_when[:2]))
+            lines.append("  绝对禁止：" + "；".join(capability.do_not_use_when[:3]))
         if capability.handoff_to:
             lines.append("  下一步交接：" + ", ".join(capability.handoff_to[:3]))
     return "\n".join(lines)

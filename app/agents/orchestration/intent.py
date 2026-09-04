@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from difflib import SequenceMatcher
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -383,6 +384,53 @@ _READ_ONLY_TOOL_QUERY_RE = re.compile(
 )
 
 
+class OfficeDispatch(StrEnum):
+    """办公请求的运行边界，而非任务内容分类。
+
+    ``DIRECT`` 保留模型的通用回答能力；``TOOL_ASSISTED`` 只临时开放少量
+    无副作用工具；只有 ``WORKFLOW`` 才创建可持久化的 Job/DAG。
+    """
+
+    DIRECT = "direct"
+    TOOL_ASSISTED = "tool_assisted"
+    WORKFLOW = "workflow"
+
+
+_EXPLICIT_READ_ASSIST_RE = re.compile(
+    r"(?iu)(?:现在几点|当前(?:日期|时间)|今天(?:几号|日期)|"
+    r"(?:精确)?计算|算一下|帮我算|"
+    r"查资料|查信息|检索资料|检索信息|检索一下|查一下|搜索一下|了解一下|"
+    r"联网(?:查|搜索)|(?:查|搜索|检索|了解).{0,32}(?:最新|实时|天气|新闻|汇率|行情|网页|网上|网络|公开资料|"
+    r"知识库|(?:公司)?内部.{0,12}(?:制度|政策|资料)|公司.{0,12}(?:制度|政策|规定)|员工手册))"
+)
+
+
+def classify_office_dispatch(request: str, office_docs: list[dict] | None = None) -> OfficeDispatch:
+    """只按是否需要受控能力选择运行路径，默认保持直通。
+
+    这是刻意保守的正向识别：漏掉一个工具需求最多让模型说明限制；误把普通
+    对话送进编排却会造成额外延迟、提示词污染和不必要的持久化任务。
+    """
+    text = (request or "").strip()
+    if not text:
+        return OfficeDispatch.DIRECT
+    if re.search(r"(?iu)(?:为什么|为何|怎么|无法|不能|不可|不支持).{0,8}(?:查询|搜索|检索)", text):
+        return OfficeDispatch.DIRECT
+    # 附件、真实文件交付、写入/客户端操作和待办日程都需要可恢复的执行边界。
+    if office_docs:
+        return OfficeDispatch.WORKFLOW
+    if (
+        infer_new_office_document(text) is not None
+        or extract_output_contract(text).get("requires_artifact")
+        or _STATEFUL_OFFICE_ACTION_RE.search(text)
+        or _SCHEDULE_OR_TODO_ACTION_RE.search(text)
+    ):
+        return OfficeDispatch.WORKFLOW
+    if _EXPLICIT_READ_ASSIST_RE.search(text):
+        return OfficeDispatch.TOOL_ASSISTED
+    return OfficeDispatch.DIRECT
+
+
 def requires_office_execution(request: str, office_docs: list[dict] | None = None) -> bool:
     """Return whether an office request needs the execution runtime.
 
@@ -392,38 +440,7 @@ def requires_office_execution(request: str, office_docs: list[dict] | None = Non
     We enter DAG/MCP only for attached sources, a requested downloadable
     artifact, or an operation on an external resource.
     """
-    text = (request or "").strip()
-    if not text:
-        return False
-    # “为什么不能查询/提示不能查询”是故障咨询，不是一次查询请求；交给
-    # 普通回答路径解释原因，避免把错误描述本身再次提交给检索工具。
-    if re.search(r"(?iu)(?:为什么|为何|怎么|无法|不能|不可|不支持).{0,8}(?:查询|搜索|检索)", text):
-        return False
-    # A user may explicitly describe a bounded, dependency-aware, read-only
-    # workflow.  Although its individual nodes only generate text, it still
-    # needs the execution runtime to preserve A/B parallelism and C/D
-    # dependencies.  Keep this narrow parser ahead of generic text handling;
-    # ordinary multi-paragraph writing remains on the direct chat path.
-    if "并行" in text:
-        from app.agents.orchestration.planning.read_only_dag import build_explicit_read_only_dag
-
-        if build_explicit_read_only_dag(text) is not None:
-            return True
-    # An attachment is an explicit external source.  Its contents must be read
-    # through the document capability rather than guessed from message text.
-    if office_docs:
-        return True
-    if infer_new_office_document(text) is not None:
-        return True
-    if extract_output_contract(text).get("requires_artifact"):
-        return True
-    if _STATEFUL_OFFICE_ACTION_RE.search(text):
-        return True
-    # 明确的只读工具意图（时间、精确计算、知识库/网页查询）同样需要
-    # 受控执行层；否则办公客户端会直接走无工具的普通聊天路径。
-    if _READ_ONLY_TOOL_QUERY_RE.search(text):
-        return True
-    return bool(_SCHEDULE_OR_TODO_ACTION_RE.search(text))
+    return classify_office_dispatch(request, office_docs) != OfficeDispatch.DIRECT
 
 # 需要先上传文档/上下文才能执行的模板：无 office_docs 时不命中，避免生成空跑节点
 DOC_REQUIRED_TEMPLATE_KEYWORDS: dict[str, list[str]] = {

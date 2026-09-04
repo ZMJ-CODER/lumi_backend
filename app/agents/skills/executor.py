@@ -19,15 +19,16 @@ from datetime import date, timedelta
 
 from loguru import logger
 
-from app.agents.skills.base import Skill, SkillContext, SkillResult
+from app.agents.skills.base import Tool, SkillContext, SkillResult
 from app.agents.skills.capability import ToolCapability, role_allows
-from app.agents.skills.registry import SkillRegistry
+from app.agents.skills.registry import ToolRegistry
 from app.core.config import settings
 from app.core.agent_security import redact_server_text, sanitize_server_result, wrap_untrusted_tool_output
 from app.core.database import async_session_factory
 from app.models.db_models import ControlLog
 from app.services import client_tools
 from app.services.tool_output_projection import project_tool_output
+from app.services.tool_output_pipeline import clean_assistant_text, normalize_skill_result
 from app.services.usage import CATEGORY_CHAT, CATEGORY_SKILL
 
 
@@ -40,16 +41,30 @@ _WRITE_NAME_HINTS = (
 # ``chat``，也不能因此获得本机操作、写入、日程或文件管理等能力。文档检索、
 # 可信的当前时间与联网查询属于“问答”范畴，保留在聊天白名单中。
 _CHAT_SKILL_ALLOWLIST = {
-    "web_search", "query_knowledge", "get_datetime", "calculator", "open_app",
+    "WebSearch", "WebFetch", "DateTime", "Calculator", "AskUserQuestion",
+}
+
+_PROJECT_SCOPED_SKILLS = {
+    "get_project_context", "run_static_check", "run_in_sandbox", "check_new_dependencies",
+    "rollback_dependency_manifests",
 }
 
 # M3 ReAct 是动态选择工具的路径，不能把项目开发、通用文件系统和通用 Shell
 # 一并交给模型。普通办公只保留业务办公、桌面/进程控制、系统信息，以及明确
 # 审核过的检索和隔离脚本能力。开发工具仍可由显式的代码 Worker / M2 计划使用。
-_OFFICE_REACT_ALLOWED_CATEGORIES = {"office", "desktop", "process", "system", "mcp"}
+_OFFICE_REACT_ALLOWED_CATEGORIES = {
+    "office", "desktop", "process", "system", "mcp", "filesystem", "development",
+    "shell", "network", "interaction", "productivity", "orchestration",
+}
 _OFFICE_REACT_ALLOWED_SKILLS = {
+    "WebFetch", "WebSearch", "Calculator", "DateTime", "SystemInfo",
+    "OpenFile", "OpenApp", "OpenUrl", "ProcessList", "ProcessSignal",
     "python_exec", "create_office_document", "query_knowledge", "web_search",
     "inspect_document_set", "read_document",
+    "Read", "Edit", "Write", "Glob", "Grep", "FileStat", "Rename", "Delete",
+    "Bash", "BashOutput", "KillShell",
+    "AskUserQuestion", "TodoWrite", "Task", "Skill", "SlashCommand",
+    "EnterPlanMode", "ExitPlanMode", "NotebookEdit",
 }
 _OFFICE_REACT_DENIED_SKILLS = {"env"}
 _bootstrap_expiry_alerts: set[tuple[str, str]] = set()
@@ -152,15 +167,15 @@ _OFFICE_REACT_ROUTING_METADATA: dict[str, dict] = {
     "calendar_manager": {"domain": "schedule", "intent_tags": ["日历", "日程", "会议", "预约"]},
     "todo_manager": {"domain": "schedule", "intent_tags": ["待办", "任务清单", "提醒"]},
     "send_email": {"domain": "communication", "intent_tags": ["发送邮件", "发邮件", "收件人"], "conflicts_with": ["compose_email"]},
-    "open_app": {"domain": "desktop", "intent_tags": ["打开应用", "启动", "软件", "wps", "excel", "word"]},
-    "open_file": {"domain": "desktop", "intent_tags": ["打开文件", "预览文件"]},
-    "open_url": {"domain": "desktop", "intent_tags": ["打开网页", "网址", "链接"]},
-    "ask_user": {"domain": "desktop", "intent_tags": ["询问", "确认", "选择"]},
-    "ps": {"domain": "desktop", "intent_tags": ["进程", "运行中", "状态"]},
-    "kill": {"domain": "desktop", "intent_tags": ["结束进程", "关闭进程"]},
+    "OpenApp": {"domain": "desktop", "intent_tags": ["打开应用", "启动", "软件", "wps", "excel", "word"]},
+    "OpenFile": {"domain": "desktop", "intent_tags": ["打开文件", "预览文件"]},
+    "OpenUrl": {"domain": "desktop", "intent_tags": ["打开网页", "网址", "链接"]},
+    "AskUserQuestion": {"domain": "interaction", "intent_tags": ["询问", "确认", "选择"]},
+    "ProcessList": {"domain": "system", "intent_tags": ["进程", "运行中", "状态"]},
+    "ProcessSignal": {"domain": "system", "intent_tags": ["结束进程", "关闭进程"]},
     "speech_to_text": {"domain": "document", "intent_tags": ["语音", "转文字", "转写"]},
-    "get_datetime": {"domain": "system", "intent_tags": ["日期", "时间", "几点"], "use_when": ["询问当前日期、时间、星期"], "do_not_use_when": ["用户自己的今日待办或日程", "天气、汇率、行情等其他实时数据"], "selection_examples": ["“现在几点？” → get_datetime"]},
-    "calculator": {"domain": "system", "intent_tags": ["计算", "算一下", "算术", "加减乘除", "百分比", "表达式"], "use_when": ["用户要求精确算术、百分比或括号表达式计算"], "do_not_use_when": ["仅需解释数学概念", "需要统计上传数据时先读取数据"], "selection_examples": ["“帮我算一下 (12873×47-912)÷13” → calculator"]},
+    "DateTime": {"domain": "system", "intent_tags": ["日期", "时间", "几点"], "use_when": ["询问当前日期、时间、星期"], "do_not_use_when": ["用户自己的今日待办或日程", "天气、汇率、行情等其他实时数据"], "selection_examples": ["“现在几点？” → DateTime"]},
+    "Calculator": {"domain": "system", "intent_tags": ["计算", "算一下", "算术", "加减乘除", "百分比", "表达式"], "use_when": ["用户要求精确算术、百分比或括号表达式计算"], "do_not_use_when": ["仅需解释数学概念", "需要统计上传数据时先读取数据"], "selection_examples": ["“帮我算一下 (12873×47-912)÷13” → Calculator"]},
     "task_memory": {"domain": "memory", "intent_tags": ["上次", "此前", "记忆"]},
     "compliance_check": {"domain": "writing", "intent_tags": ["合规", "敏感词", "审查"]},
 }
@@ -212,7 +227,7 @@ class CapabilitySelection:
         }
 
 
-def _skill_is_write(skill: Skill, params: dict | None = None) -> bool:
+def _skill_is_write(skill: Tool, params: dict | None = None) -> bool:
     name = str(skill.name or "").lower()
     # Mixed-action skills may be read-only for the current invocation (or when
     # exposing their namespace to the planner).  Their override takes
@@ -226,7 +241,7 @@ def _skill_is_write(skill: Skill, params: dict | None = None) -> bool:
     )
 
 
-def skill_runtime_unavailable(skill: Skill | None) -> tuple[str, str] | None:
+def skill_runtime_unavailable(skill: Tool | None) -> tuple[str, str] | None:
     """返回当前部署下不可执行的 Skill 原因。
 
     规划阶段就隐藏不可用能力，执行阶段仍复核一次，避免模型生成一段脚本后
@@ -255,18 +270,19 @@ def get_skills_for_scene(
     user_role: str = "user",
     *,
     include_bootstrap: bool = False,
-) -> list[Skill]:
-    """按场景过滤技能（scenes 白名单；空 = 全场景）.
+    include_internal: bool = False,
+) -> list[Tool]:
+    """按场景过滤可直接调用的原子工具（历史函数名暂保留）。
 
     渐进开放写工具：AGENT_TOOL_WRITE_ENABLED=False 时隐藏写操作技能（只读先行）。
     """
     allow_write = bool(settings.AGENT_TOOL_WRITE_ENABLED)
-    return [
+    tools = [
         s
-        for s in SkillRegistry.list()
+        for s in ToolRegistry.list(include_internal=include_internal)
         if s.supports_scene(scene)
         and s.status != "disabled"
-        and (settings.WEB_SEARCH_TOOL_ENABLED or s.name != "web_search")
+        and (settings.WEB_SEARCH_TOOL_ENABLED or s.name != "WebSearch")
         and (
             scene != "chat"
             or s.name in _CHAT_SKILL_ALLOWLIST
@@ -281,6 +297,7 @@ def get_skills_for_scene(
         and (allow_write or not _skill_is_write(s))
         and role_allows(s.permission, user_role)
     ]
+    return tools
 
 
 def skills_to_tools(scene: str, user_role: str = "user") -> list[dict]:
@@ -297,13 +314,13 @@ def _bootstrap_is_active(value: str) -> bool:
         return False
 
 
-def _skill_capability(skill: Skill) -> ToolCapability:
+def _skill_capability(skill: Tool) -> ToolCapability:
     parameters = skill.parameters_schema if isinstance(skill.parameters_schema, dict) else {}
     resource_templates = (
         skill.resource_templates if isinstance(skill.resource_templates, list) else []
     )
     routing = _OFFICE_REACT_ROUTING_METADATA.get(skill.name, {})
-    return ToolCapability(
+    capability = ToolCapability(
         name=skill.name,
         version=skill.version,
         status=skill.status,
@@ -311,6 +328,9 @@ def _skill_capability(skill: Skill) -> ToolCapability:
         replacement_skill_id=skill.replacement_skill_id,
         description=skill.description,
         category=skill.category,
+        resource=str(getattr(skill, "resource", "") or skill.category),
+        action_type="write" if _skill_is_write(skill) else "read",
+        idempotency_type=("non_idempotent" if not skill.idempotent else "natural_key"),
         domain=str(getattr(skill, "domain", "") or routing.get("domain") or skill.category),
         intent_tags=list(getattr(skill, "intent_tags", None) or routing.get("intent_tags") or []),
         conflicts_with=list(getattr(skill, "conflicts_with", None) or routing.get("conflicts_with") or []),
@@ -323,18 +343,22 @@ def _skill_capability(skill: Skill) -> ToolCapability:
         bootstrap_intents=list(getattr(skill, "bootstrap_intents", None) or routing.get("bootstrap_intents") or []),
         bootstrap_until=str(getattr(skill, "bootstrap_until", "") or routing.get("bootstrap_until") or ""),
         parameters=parameters,
-        source="skill",
+        source="tool",
         permission=skill.permission,
         write_op=_skill_is_write(skill),
         requires_confirmation=bool(skill.requires_confirmation),
         confirmation_mode="client" if skill.environment == "client" else "server",
         idempotent=bool(skill.idempotent and not _skill_is_write(skill)),
         resource_templates=list(resource_templates),
+        plan_required_fields=list(getattr(skill, "plan_required_fields", None) or []),
         annotations={
             "cost_estimate": skill.cost_estimate,
             "success_rate": skill.success_rate,
         },
     )
+    from app.agents.skills.discovery import enrich_tool_capability
+
+    return enrich_tool_capability(capability)
 
 
 async def get_capabilities_for_scene(
@@ -343,14 +367,26 @@ async def get_capabilities_for_scene(
     user_id: str = "",
     include_nonstable: bool = False,
     include_bootstrap: bool = False,
+    include_internal: bool = False,
 ) -> list[ToolCapability]:
     """统一能力目录；在暴露给 Planner/Executor 前完成权限和写开关过滤。"""
     capabilities = [
         _skill_capability(s)
-        for s in get_skills_for_scene(scene, user_role, include_bootstrap=include_bootstrap)
+        for s in get_skills_for_scene(
+            scene,
+            user_role,
+            include_bootstrap=include_bootstrap,
+            include_internal=include_internal,
+        )
         if skill_runtime_unavailable(s) is None
         and (include_nonstable or s.status == "stable")
     ]
+    if bool(getattr(settings, "AGENT_BASE_TOOLS_ONLY", False)) and not include_internal:
+        from app.agents.skills.discovery import base_tool_names
+
+        allowed_base = base_tool_names()
+        if allowed_base:
+            capabilities = [item for item in capabilities if item.name in allowed_base]
     # 桌面端能力不以 MCP 全局发现：后端无法从固定地址判断某个 Electron
     # 属于哪位用户。所有客户端 Skill 必须经 run_client_skill_request() 投递到
     # 当前 JWT 用户的专属队列，由其已登录桌面端领取。这样 user_id、角色和
@@ -362,6 +398,14 @@ async def get_capabilities_for_scene(
             capabilities.extend(await get_bound_capabilities(user_id, scene, user_role))
         except Exception as exc:  # noqa: BLE001
             logger.debug("加载用户 MCP 工具绑定失败，继续使用本地 Skill: {}", exc)
+    # 外部 MCP 绑定也必须服从基础工具迁移开关；否则用户绑定的旧工具会
+    # 绕过 L0 白名单重新进入 Function Calling 候选池。
+    if bool(getattr(settings, "AGENT_BASE_TOOLS_ONLY", False)) and not include_internal:
+        from app.agents.skills.discovery import base_tool_names
+
+        allowed_base = base_tool_names()
+        if allowed_base:
+            capabilities = [item for item in capabilities if item.name in allowed_base]
     try:
         from app.services.skill_telemetry import apply_success_rate_hints
 
@@ -404,6 +448,7 @@ async def select_capabilities_with_trace(
     allowed_categories: set[str] | None = None,
     denied_names: set[str] | None = None,
     user_id: str = "",
+    skill_allowed_tools: set[str] | None = None,
 ) -> CapabilitySelection:
     """Select a legal capability namespace and retain a safe routing trace.
 
@@ -416,24 +461,39 @@ async def select_capabilities_with_trace(
         user_id,
         include_bootstrap=(scene == "chat"),
     )
-    if allowed_names is not None or allowed_categories is not None or denied_names:
+    if allowed_names is not None or allowed_categories is not None or denied_names or skill_allowed_tools is not None:
         capabilities = [
             capability
             for capability in capabilities
-            if (allowed_names is None or capability.name in allowed_names
-                or (allowed_categories is not None and capability.category in allowed_categories))
-            # Chat's fixed allowlist remains the default. A newly registered
-            # tool may temporarily join it only through the scoped bootstrap
-            # mechanism; later selection still requires its declared intent.
-            or (
-                scene == "chat"
-                and _bootstrap_is_active(capability.bootstrap_until)
-                and bool(capability.bootstrap_intents)
+            if capability.name not in (denied_names or set())
+            and (skill_allowed_tools is None or capability.name in skill_allowed_tools)
+            and (
+                allowed_names is None and allowed_categories is None
+                or capability.name in (allowed_names or set())
+                or capability.category in (allowed_categories or set())
+                or (
+                    scene == "chat"
+                    and _bootstrap_is_active(capability.bootstrap_until)
+                    and bool(capability.bootstrap_intents)
+                )
             )
-            and capability.name not in (denied_names or set())
         ]
     if not capabilities:
         return CapabilitySelection([], [], scene, reason="no_authorized_capabilities")
+    # L1/L2 规模化候选收窄：先按域索引定位，再进行工具级排序；保留原有
+    # 评分作为 tie-breaker，确保旧评测和插件兼容。
+    try:
+        from app.agents.skills.discovery import search_tools
+
+        # L2 discovery supplies an ordering hint; the established scorer still
+        # owns the final candidate set so legacy Skill/L3 allowlists remain
+        # compatible while the namespace scales.
+        discovered = search_tools(request, capabilities, limit=max(limit, 5))
+        if discovered:
+            order = {item.name: index for index, item in enumerate(discovered)}
+            capabilities = sorted(capabilities, key=lambda item: order.get(item.name, len(order)))
+    except Exception:  # noqa: BLE001
+        pass
     request_terms = _routing_terms(request)
     lower = (request or "").casefold()
     preferred_domains = _preferred_domains(request)
@@ -460,7 +520,7 @@ async def select_capabilities_with_trace(
         ("待办", "todo", "任务清单"):
             {"todo_manager"},
         ("代码", "脚本", "python", "bug", "项目"):
-            {"python_exec", "shell_exec", "read_file", "write_file"},
+            {"python_exec", "shell_exec", "Read", "Write"},
     }
     for markers, names in groups.items():
         if any(marker in lower for marker in markers):
@@ -512,7 +572,7 @@ async def select_capabilities_with_trace(
             # 仍保留给文档问答和编辑，但不应在这种请求里压过脚本执行器。
             if capability.name in {"python_exec", "create_office_document"}:
                 score += 100
-            elif capability.name in {"read_file", "write_file", "office_doc_read", "office_doc_analyze"}:
+            elif capability.name in {"Read", "Write", "office_doc_read", "office_doc_analyze"}:
                 score -= 35
         ranked.append((score, -index, capability, bootstrap))
     ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
@@ -629,6 +689,7 @@ async def select_capabilities_for_request(
     allowed_categories: set[str] | None = None,
     denied_names: set[str] | None = None,
     user_id: str = "",
+    skill_allowed_tools: set[str] | None = None,
 ) -> list[ToolCapability]:
     """Compatibility wrapper for callers that only need the candidate list."""
     selection = await select_capabilities_with_trace(
@@ -640,8 +701,28 @@ async def select_capabilities_for_request(
         allowed_categories,
         denied_names,
         user_id,
+        skill_allowed_tools,
     )
     return selection.capabilities
+
+
+async def select_capabilities_for_skill(
+    request: str,
+    scene: str,
+    skill,
+    user_role: str = "user",
+    limit: int = 8,
+    user_id: str = "",
+) -> list[ToolCapability]:
+    """按 Workflow Skill 的 ``allowed_tools`` 收窄候选 Tool。"""
+    return await select_capabilities_for_request(
+        request,
+        scene,
+        user_role=user_role,
+        limit=limit,
+        user_id=user_id,
+        skill_allowed_tools=set(skill.allowed_tools) if skill.allowed_tools else None,
+    )
 
 
 def _selection_with_capabilities(selection: CapabilitySelection, capabilities: list[ToolCapability], *, reason: str | None = None) -> CapabilitySelection:
@@ -689,18 +770,9 @@ def selection_requires_escalation(selection: CapabilitySelection, request: str) 
     capability. Broad conversational requests may keep their bounded pool so
     the model can answer without a needless clarification round.
     """
-    if not selection.ambiguous:
-        return False
-    if request_has_explicit_tool_intent(request):
-        return True
-    # Ambiguous write/external candidates must not be left to an uncalibrated
-    # model choice even when the request wording does not contain a known
-    # trigger phrase. Read-only ties may continue through the bounded pool.
-    return any(
-        capability.write_op or capability.requires_confirmation
-        or capability.domain in {"communication", "desktop", "process"}
-        for capability in selection.capabilities
-    )
+    # 候选分数过近时不让模型盲猜。即使是只读工具，错误选择也会造成
+    # 语义漂移或把私有数据请求误送到公开搜索，因此统一升级澄清/复核。
+    return bool(selection.ambiguous)
 
 
 def record_candidate_selection(
@@ -866,13 +938,34 @@ async def get_office_react_capabilities_with_trace(
     return _selection_with_capabilities(selection, capabilities, reason="scoped" if preferred_domains else selection.reason)
 
 
-async def get_tools_for_scene(scene: str, user_role: str = "user", user_id: str = "") -> list[dict]:
-    """统一工具目录：本地 Skill（含 system）+ 所有已连接的 MCP 工具."""
-    return [c.to_tool_definition() for c in await get_capabilities_for_scene(scene, user_role, user_id)]
+async def get_tools_for_scene(
+    scene: str,
+    user_role: str = "user",
+    user_id: str = "",
+    *,
+    include_internal: bool = False,
+) -> list[dict]:
+    """返回 Function Calling 可见的原子 Tool + 已绑定 MCP 工具。
+
+    Workflow Skill 永远不从这里出现；它们只能由 Planner/Worker 选择。
+    """
+    capabilities = await get_capabilities_for_scene(
+        scene, user_role, user_id, include_internal=include_internal
+    )
+    return [capability.to_tool_definition() for capability in capabilities]
 
 
-async def get_tool_capability(name: str, scene: str, user_role: str = "user", user_id: str = "") -> ToolCapability | None:
-    for capability in await get_capabilities_for_scene(scene, user_role, user_id):
+async def get_tool_capability(
+    name: str,
+    scene: str,
+    user_role: str = "user",
+    user_id: str = "",
+    *,
+    include_internal: bool = False,
+) -> ToolCapability | None:
+    for capability in await get_capabilities_for_scene(
+        scene, user_role, user_id, include_internal=include_internal
+    ):
         if capability.name == name:
             return capability
     return None
@@ -909,12 +1002,12 @@ def is_explicit_user_delete_request(user_message: str, skill_name: str, args: di
     a planner-produced instruction.  Those are all untrusted for destructive
     actions.  Recursive directory deletes always require a local confirmation.
     """
-    if skill_name != "delete_file" or bool(args.get("recursive")):
+    if skill_name != "Delete" or bool(args.get("recursive")):
         return False
     message = str(user_message or "").strip()
     if not message or not _EXPLICIT_DELETE_RE.search(message):
         return False
-    target = str(args.get("path") or "").strip().replace("\\", "/")
+    target = str(args.get("file_path") or args.get("path") or "").strip().replace("\\", "/")
     filename = target.rsplit("/", 1)[-1].casefold()
     normalized = message.replace("\\", "/").casefold()
     # A named target is the strongest signal.  Pronouns are allowed only for a
@@ -966,22 +1059,35 @@ async def execute_tool_call(
     confirmed_tool_calls: frozenset[str] | set[str] | None = None,
     approval_context_sha256: str = "",
     office_doc_ids: tuple[str, ...] | list[str] | None = None,
+    authorized_project_ids: tuple[str, ...] | list[str] | None = None,
     on_output=None,
     execution_scope: str = "",
+    allowed_tools: set[str] | None = None,
+    allow_internal: bool = False,
 ) -> SkillResult:
     """执行一次技能调用：校验 → 高危拦截 → 执行 → 审计。
 
     ``execution_scope`` 仅由 DAG 节点执行器注入。它将同一 Job 中的同名工具
     调用串行化，而不会影响普通聊天会话或不同工具的节点级并发。
     """
-    fn = tool_call.get("function") or {}
-    name = str(fn.get("name") or "")
-    args = _parse_arguments(fn.get("arguments"))
+    original_fn = tool_call.get("function") or {}
+    name = str(original_fn.get("name") or "").strip()
+    args = _parse_arguments(original_fn.get("arguments"))
     # Reserved policy fields can never originate from a model tool call.
     args.pop("_lumi_execution_policy", None)
-    capability = await get_tool_capability(name, scene, user_role, user_id)
+    if allowed_tools is not None and name not in allowed_tools:
+        return SkillResult(
+            success=False,
+            error=f"当前 Skill 未授权调用工具: {name}",
+            error_code="SKILL_TOOL_FORBIDDEN",
+            retryable=False,
+            metadata={"tool": name},
+        )
+    capability = await get_tool_capability(
+        name, scene, user_role, user_id, include_internal=allow_internal
+    )
     if capability is None:
-        registered = SkillRegistry.get(name)
+        registered = ToolRegistry.get(name)
         unavailable = skill_runtime_unavailable(registered) if registered is not None else None
         if unavailable:
             code, error = unavailable
@@ -1000,6 +1106,26 @@ async def execute_tool_call(
             retryable=False,
             metadata={"tool": name, "scene": scene, "role": user_role},
         )
+
+    # 项目/代码工具必须绑定到提交时由服务端注入的项目范围。模型不能仅
+    # 通过传入 project_id，或在提示词中声称“这是我的项目”，扩大授权。
+    # 旧项目工具规范化为 Read/Write/Glob/Grep/Bash 后，仍必须保留项目
+    # 授权边界；只有携带 project_id 的调用才走项目范围校验。
+    project_scoped = name in _PROJECT_SCOPED_SKILLS or (
+        name in {"Read", "Write", "Edit", "Glob", "Grep", "Bash"}
+        and bool(args.get("project_id"))
+    )
+    if project_scoped:
+        requested_project = str(args.get("project_id") or "").strip()
+        allowed_projects = {str(value).strip() for value in (authorized_project_ids or ()) if str(value).strip()}
+        if not requested_project or requested_project not in allowed_projects:
+            return SkillResult(
+                success=False,
+                error="未授权访问该项目；请在任务提交时明确选择项目后重试",
+                error_code="PROJECT_SCOPE_REQUIRED",
+                retryable=False,
+                metadata={"tool": name},
+            )
 
     mcp_target = _parse_mcp_name(name)
     if mcp_target:
@@ -1080,25 +1206,14 @@ async def execute_tool_call(
                 retryable=True,
                 metadata={"server": server_name, "tool": tool_name},
             )
-        result = sanitize_server_result(SkillResult(
-            success=bool(raw.get("success")) and not bool(raw.get("is_error")),
-            output=str(raw.get("content") or ""),
-            error=(str(raw.get("content") or "MCP 工具执行失败") if raw.get("is_error") else None),
-            error_code=("MCP_EXEC_ERROR" if raw.get("is_error") else None),
-            retryable=False,
-            metadata={
-                "server": server_name,
-                "tool": tool_name,
-                **(raw.get("metadata") or {}),
-            },
-        ))
+        result = sanitize_server_result(normalize_skill_result(raw))
         await _record_skill_telemetry(
             capability, scene, result, int((time.perf_counter() - started_at) * 1000)
         )
         await _record_skill_log(user_id, capability, args, result)
         return result
 
-    skill = SkillRegistry.get(name)
+    skill = ToolRegistry.get(name)
     if not skill:
         return SkillResult(
             success=False,
@@ -1160,6 +1275,7 @@ async def execute_tool_call(
         on_output=on_output,
         execution_policy=execution_policy,
         office_doc_ids=tuple(str(value) for value in (office_doc_ids or ()) if str(value).strip()),
+        authorized_project_ids=tuple(str(value) for value in (authorized_project_ids or ()) if str(value).strip()),
     )
     # All registered Skills now pass through the MCP gateway.  The gateway
     # chooses Electron MCP for client capabilities and an in-process adapter
@@ -1179,14 +1295,11 @@ async def execute_tool_call(
             )
     except ToolExecutionCoordinationUnavailable:
         return _tool_coordination_failure(name)
-    result = SkillResult(
-        success=bool(raw.get("success")) and not bool(raw.get("is_error")),
-        output=str(raw.get("content") or "") if not raw.get("is_error") else "",
-        error=str(raw.get("content") or "技能执行失败") if raw.get("is_error") else None,
-        error_code=raw.get("error_code") or ("EXEC_ERROR" if raw.get("is_error") else None),
-        retryable=bool(raw.get("retryable", False)),
-        metadata=raw.get("metadata") or {},
-    )
+    # ``call_skill`` crosses the local/MCP boundary with the canonical
+    # ExecutionOutput envelope.  Normalize once here so callers receive the
+    # same object regardless of transport; do not reconstruct legacy
+    # success/content/metadata fields.
+    result = normalize_skill_result(raw)
     # server/sandbox results may contain stack traces, environment variables or
     # absolute paths; client paths are user-device data and remain untouched.
     if skill.environment in {"server", "sandbox"}:
@@ -1221,7 +1334,7 @@ async def _record_skill_telemetry(
 
 async def _record_skill_log(
     user_id: str,
-    skill: Skill | ToolCapability,
+    skill: Tool | ToolCapability,
     params: dict,
     result: SkillResult,
 ) -> None:
@@ -1301,13 +1414,16 @@ async def run_client_skill_request(
         return SkillResult(
             success=True,
             output=str(result.get("output") or ""),
+            data=result.get("data"),
+            content_type=str(result.get("content_type") or "text"),
             metadata=result.get("metadata") or {},
         )
     return SkillResult(
         success=False,
         error=str(result.get("error") or "客户端执行失败"),
-        error_code=str((result.get("metadata") or {}).get("error_code") or "EXEC_ERROR"),
+        error_code=str(result.get("error_code") or (result.get("metadata") or {}).get("error_code") or "EXEC_ERROR"),
         retryable=False,
+        data=result.get("data"),
         metadata=result.get("metadata") or {},
     )
 
@@ -1473,7 +1589,7 @@ async def _run_skill_loop_legacy(
         if on_text:
             on_text(final_text)
 
-    return redact_server_text(final_text), records, citations
+    return clean_assistant_text(redact_server_text(final_text)), records, citations
 
 
 def _result_for_model(result: SkillResult) -> str:

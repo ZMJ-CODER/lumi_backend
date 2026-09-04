@@ -416,6 +416,40 @@ class SkillTelemetryDaily(Base, UUIDMixin):
     )
 
 
+class UserWorkflowSkill(Base, UUIDMixin):
+    """用户自建的声明式 Workflow Skill。
+
+    不保存、导入或执行用户提交的 Python。用户只可定义任务说明、流程步骤和
+    已审核 Tool 的白名单；所有真实调用仍经过统一 Tool Executor。
+    """
+
+    __tablename__ = "user_workflow_skills"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    category: Mapped[str] = mapped_column(String(80), nullable=False, default="user")
+    scenes: Mapped[list] = mapped_column(JSONB, nullable=False, default=lambda: ["office"])
+    allowed_tools: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    steps: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    input_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="enabled")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_user_workflow_skill_name"),
+        CheckConstraint("status IN ('enabled', 'disabled')", name="ck_user_workflow_skill_status"),
+        Index("idx_user_workflow_skills_user_status", "user_id", "status"),
+    )
+
+
 # ── 长期记忆表 ─────────────────────────────────────────
 
 class Memory(Base, UUIDMixin):

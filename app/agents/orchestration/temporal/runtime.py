@@ -127,12 +127,12 @@ async def start_inprocess_worker() -> None:
 
     from temporalio.client import Client
 
-    from app.agents.skills.registry import SkillRegistry, init_skills
+    from app.agents.skills.registry import ToolRegistry, init_skills
     from app.core import redis as redis_mod
 
     if redis_mod.redis_client is None:
         await redis_mod.init_redis()
-    if not SkillRegistry.list():
+    if not ToolRegistry.list():
         init_skills()
 
     client = await Client.connect(

@@ -38,8 +38,8 @@ class JobOperationsCoordinator:
     async def record_metric(self, job):
         return await self.lifecycle.record_metric(job)
 
-    async def learn_from_finished_job(self, job):
-        return await self.lifecycle.learn_from_finished_job(job)
+    async def finalize_plan(self, job):
+        return await self.lifecycle.finalize_plan(job)
 
     def discard_pending_learning(self, job_id):
         return self.lifecycle.discard_pending_learning(job_id)

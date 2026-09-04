@@ -75,6 +75,16 @@ class ApplicationNodeLifecycle:
 
     def _apply_result(self, node: TaskNode, result: NodeExecutionResult) -> None:
         if result.status == "waiting_approval":
+            # ApprovalService validates the exact tool and argument
+            # fingerprint from the durable node snapshot.  Keep the pending
+            # worker payload on the node; dropping it here turns a valid
+            # approval signal into an unrecoverable "missing credentials"
+            # state after the execution engine suspends.
+            node.result = result.result
+            node.error = result.error
+            node.error_code = result.error_code
+            node.retries = result.retries
+            node.effect_status = result.effect_status
             node.status = TaskStatus.ESCALATED
             self._job.status = JobStatus.WAITING_APPROVAL
         elif result.status == "waiting_resources":

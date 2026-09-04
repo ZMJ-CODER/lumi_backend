@@ -152,5 +152,5 @@ stateful_reasoning:
   targets: [系统, 规则, 要求, 标准, 条款, 记录, 数据, 状态]
   max_gap: 32
 factual_document_question:
-  actions: [哪个, 哪份, 是否, 有没有, 包含, 提到, 写了什么, 什么是, 多少, 几页, 条款, 条件, 金额, 日期, 负责人, 找出, 定位, 查一下, 看看, which file, which document, which one, contain, mention, include, state, payment terms, amount, date, deadline, clause, owner]
+  actions: [哪个, 哪份, 哪一份, 是否, 有没有, 包含, 提到, 写了什么, 什么是, 多少, 几页, 条款, 条件, 金额, 日期, 负责人, 找出, 定位, 查一下, 看看, which file, which document, which one, contain, mention, include, state, payment terms, amount, date, deadline, clause, owner]
   max_gap: 80

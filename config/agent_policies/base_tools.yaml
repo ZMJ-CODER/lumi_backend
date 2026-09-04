@@ -1,0 +1,23 @@
+version: 3.0.0
+# 模型公共候选池严格固定为 18 个高杠杆基础协议工具。
+# 办公领域工具（知识库、业务数据、文档、日历等）保留在内部注册表，
+# 由 Workflow/Planner 按声明调用，不再和基础工具竞争 Function Calling 名称空间。
+tools:
+  Task: {kind: control, environment: server, action_type: read, use_when: [复杂任务需要受限子代理], do_not_use_when: [读取特定文件应使用 Read]}
+  Bash: {kind: execution, environment: client, action_type: write, use_when: [用户明确要求执行命令], do_not_use_when: [专用只读工具足够时]}
+  Glob: {kind: filesystem, environment: client, action_type: read, use_when: [按文件名查找], do_not_use_when: [搜索文件内容应使用 Grep]}
+  Grep: {kind: filesystem, environment: client, action_type: read, use_when: [搜索文件内容], do_not_use_when: [按文件名查找应使用 Glob]}
+  ExitPlanMode: {kind: control, environment: server, action_type: read, use_when: [计划完成后请求批准], do_not_use_when: [简单任务]}
+  Read: {kind: filesystem, environment: client, action_type: read, use_when: [读取已授权文件], do_not_use_when: [路径未授权]}
+  Edit: {kind: filesystem, environment: client, action_type: write, use_when: [精确修改已授权文件], do_not_use_when: [未先读取文件]}
+  Write: {kind: filesystem, environment: client, action_type: write, use_when: [创建或覆盖已授权文件], do_not_use_when: [用户未授权写入]}
+  NotebookEdit: {kind: filesystem, environment: client, action_type: write, use_when: [编辑 notebook], do_not_use_when: [非 ipynb 文件]}
+  WebFetch: {kind: network, environment: server, action_type: read, use_when: [抓取指定公开 URL], do_not_use_when: [私有内网或未授权 URL]}
+  TodoWrite: {kind: productivity, environment: server, action_type: write, use_when: [维护任务清单], do_not_use_when: [一次性简单问题]}
+  WebSearch: {kind: network, environment: server, action_type: read, use_when: [公开网页检索], do_not_use_when: [私有数据检索]}
+  BashOutput: {kind: execution, environment: client, action_type: read, use_when: [读取后台 shell 输出], do_not_use_when: [没有会话 ID]}
+  KillShell: {kind: execution, environment: client, action_type: write, use_when: [终止后台 shell], do_not_use_when: [未指定会话]}
+  AskUserQuestion: {kind: control, environment: client, action_type: read, use_when: [缺少关键决策], do_not_use_when: [参数完整时]}
+  Skill: {kind: control, environment: server, action_type: read, use_when: [加载有权限的组合技能], do_not_use_when: [臆测技能名称]}
+  SlashCommand: {kind: control, environment: server, action_type: write, use_when: [执行 allowlist 命令], do_not_use_when: [任意拼接命令]}
+  EnterPlanMode: {kind: control, environment: server, action_type: read, use_when: [复杂写任务需先规划], do_not_use_when: [简单任务]}

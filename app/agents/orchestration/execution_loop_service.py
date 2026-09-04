@@ -116,7 +116,18 @@ class ExecutionLoopService:
                 job = await self._job_errors.ensure_failed(
                     job, "办公任务未能收敛，已自动停止。"
                 )
-            if job and job.status == JobStatus.COMPLETED and not job.result:
+            # The runtime-neutral engine always returns an aggregate
+            # ``outputs`` envelope.  It is not yet a user-facing answer, so
+            # synthesize whenever the terminal snapshot lacks
+            # ``final_answer`` rather than checking for an empty result.
+            if (
+                job
+                and job.status == JobStatus.COMPLETED
+                and (
+                    not isinstance(job.result, dict)
+                    or not str((job.result or {}).get("final_answer") or "").strip()
+                )
+            ):
                 await self._synthesize_final_answer(job)
         except DagValidationError as exc:
             logger.error("任务 DAG 非法 {}: {}", job_id, exc)
@@ -160,11 +171,58 @@ class ExecutionLoopService:
                         "content": str(content)[:30000],
                     }
                 )
+        # A rolling logical plan keeps completed batches outside ``job.nodes``
+        # to avoid bloating the mutable snapshot.  At delivery time the whole
+        # completed result set must nevertheless be restored; otherwise only
+        # the final frontier is summarized and earlier batches disappear.
+        pointer = (job.routing or {}).get("logical_plan") if isinstance(job.routing, dict) else None
+        if isinstance(pointer, dict) and pointer.get("plan_id"):
+            try:
+                from app.agents.orchestration.logical_plan import load_logical_plan
+                from app.agents.orchestration.execution.lineage import resolve_result_ref
+
+                plan = await load_logical_plan(job.user_id, str(pointer["plan_id"]))
+                records = (plan or {}).get("nodes") or {}
+                restored = []
+                for node_id in (plan or {}).get("order") or []:
+                    record = records.get(str(node_id))
+                    if not isinstance(record, dict) or str(record.get("status") or "") != "completed":
+                        continue
+                    ref = record.get("result_ref")
+                    value = await resolve_result_ref(job.user_id, ref) if isinstance(ref, dict) else None
+                    if not isinstance(value, dict):
+                        continue
+                    content = str(value.get("content") or value.get("output") or value.get("answer") or "").strip()
+                    if content:
+                        source = record.get("node") or {}
+                        restored.append({
+                            "agent": str(source.get("agent") or ""),
+                            "title": str(source.get("name") or node_id),
+                            "content": content[:30000],
+                        })
+                if restored:
+                    results = restored
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("恢复逻辑计划完整结果失败 {}: {}", job.job_id, exc)
         if len(results) == 1:
             job.result = {"final_answer": results[0]["content"]}
             await self._store.save_job(job)
             return
         if not results:
+            return
+        # 全部为确定性原子工具结果时，按原始节点顺序直接交付，不能因为
+        # “汇总排版”再调用模型。这样计算、时间等只读 DAG 在模型网络短暂
+        # 不可用时依然是完整可交付的；含文本分析节点的任务仍走 LLM 汇总。
+        deterministic_tools = {"Calculator", "DateTime"}
+        if all(
+            str((node.result or {}).get("tool") or "") in deterministic_tools
+            for node in job.nodes
+            if (node.result or {}).get("content") or (node.result or {}).get("output")
+        ):
+            job.result = {
+                "final_answer": "\n".join(str(item["content"]) for item in results),
+            }
+            await self._store.save_job(job)
             return
         try:
             from app.agents.orchestration.temporal.activities import (
@@ -193,9 +251,24 @@ class ExecutionLoopService:
 
             code, message = classify_model_error(exc)
             if is_terminal_model_error_code(code):
-                job.status = JobStatus.FAILED
-                job.error = message
-                job.result = {"error_code": code, "message": message}
+                # Final formatting is an optional delivery step.  A provider
+                # outage after every node succeeded must not turn a completed
+                # large/batched DAG into a failed job or discard its outputs.
+                # Return a bounded deterministic envelope and expose the
+                # formatting degradation separately for the UI/telemetry.
+                fallback = "\n\n".join(
+                    f"{item['title']}：{item['content']}"
+                    for item in results
+                    if str(item.get("content") or "").strip()
+                )[:60000]
+                job.status = JobStatus.COMPLETED
+                job.error = None
+                job.result = {
+                    "final_answer": fallback,
+                    "delivery_status": "degraded",
+                    "delivery_error_code": code,
+                    "delivery_error": message,
+                }
                 await self._store.save_job(job)
             else:
                 logger.debug("legacy DAG 最终答案汇总失败 {}: {}", job.job_id, exc)

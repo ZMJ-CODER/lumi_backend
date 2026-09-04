@@ -47,13 +47,17 @@ class LLMClient:
         if isinstance(exc, RuntimeError) and "空内容" in str(exc):
             return True
         if isinstance(exc, httpx.HTTPStatusError):
-            return exc.response.status_code >= 500 or exc.response.status_code in (401, 429)
+            # 402 is provider/account specific (for example DeepSeek
+            # ``Insufficient Balance``).  It is safe to try a configured
+            # *different* provider for ordinary chat; office/BYOK callers are
+            # still blocked by the scene/config guards below.
+            return exc.response.status_code >= 500 or exc.response.status_code in (401, 402, 429)
         if isinstance(exc, (httpx.TransportError, httpx.TimeoutException)):
             return True
         name, text = type(exc).__name__.lower(), str(exc).lower()
         return is_transient_dependency_error(exc) or any(
             token in name or token in text
-            for token in ("timeout", "connection", "rate", "servererror", "503")
+            for token in ("timeout", "connection", "rate", "servererror", "503", "402", "insufficient balance")
         )
 
     @staticmethod

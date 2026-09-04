@@ -34,7 +34,12 @@ def freeze_job_spec(job: Job) -> JobSpec:
             execution=(NodeExecutionSpec.model_validate(declared) if isinstance(declared, dict) else node.execution),
             metadata=node.metadata,
         )
-        execution, snapshot = resolve_node_execution_spec(base.execution, task_policy=task_policy)
+        execution, snapshot = resolve_node_execution_spec(
+            base.execution,
+            task_policy=task_policy,
+            node_params=base.params,
+            node_metadata=base.metadata,
+        )
         frozen_nodes.append(base.model_copy(update={"execution": execution}))
         policy_snapshots[node.id] = snapshot
     spec = JobSpec(

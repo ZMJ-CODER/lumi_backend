@@ -34,13 +34,7 @@ class CodeAgent(WorkerAgent):
     description = "根据指令读写本地代码项目，生成/修改代码并运行测试"
     params_help = 'params 用 {"project_id": "项目ID", "instruction": "指令"}'
     skills = [
-        "list_project",
-        "read_project_file",
-        "write_project_file",
-        "delete_project_file",
-        "rename_project_file",
-        "grep_code",
-        "run_project_command",
+        "Glob", "Read", "Write", "Delete", "Rename", "Grep", "Bash",
     ]
 
     _SYSTEM_PROMPT = CODE_SYSTEM_PROMPT
@@ -85,10 +79,10 @@ class CodeAgent(WorkerAgent):
                 ctx.job_id, node.id, f"正在删除 {target_path or target_key}…"
             )
             del_result = await self.run_skill(
-                "delete_project_file",
+                "Delete",
                 {
                     "project_id": project_id,
-                    "path": target_path or target_key or "",
+                    "file_path": target_path or target_key or "",
                     "recursive": False,
                 },
                 ctx,
@@ -158,14 +152,13 @@ class CodeAgent(WorkerAgent):
                 }
 
         # 4. 写入（client 技能，确认弹窗）；结果附带可审查内容供质检层使用
-        write_params = {"project_id": project_id}
-        if target_path:
-            write_params["path"] = str(target_path)
-        else:
-            write_params["file_key"] = target_key
+        write_params = {
+            "project_id": project_id,
+            "file_path": str(target_path or target_key or ""),
+        }
         await _report_progress(ctx.job_id, node.id, f"正在写入 {target_path or target_key}…")
         write_result = await self.run_skill(
-            "write_project_file", {**write_params, "content": new_content}, ctx
+            "Write", {**write_params, "content": new_content}, ctx
         )
         if write_result.get("success"):
             write_result["new_content"] = new_content

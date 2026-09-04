@@ -31,9 +31,7 @@ class SubmissionGuard:
     _ACTIVE_STATUSES = frozenset({
         JobStatus.PENDING,
         JobStatus.RUNNING,
-        JobStatus.PAUSED,
-        JobStatus.WAITING_APPROVAL,
-        JobStatus.WAITING_RESOURCES,
+        JobStatus.CONTINUING,
     })
 
     def __init__(self, *, store: StateStore) -> None:
@@ -76,10 +74,24 @@ class SubmissionGuard:
                 for job in await self._store.list_jobs(user_id, 50)
                 if job.status in self._ACTIVE_STATUSES
             ]
-            if conversation_id and any(job.conversation_id == conversation_id for job in active_jobs):
-                raise ActiveConversationJobError(
-                    "当前会话已有办公任务正在执行，请等待完成或主动终止任务。"
-                )
+            # 终态快照是准入租约的事实来源：如果执行器在进程重启、
+            # Temporal 回调延迟或清理失败后留下了陈旧 Redis 成员，提交时
+            # 主动按终态回收，避免“明明完成了仍提示有任务进行中”。
+            terminal_jobs = [
+                job
+                for job in await self._store.list_jobs(user_id, 50)
+                if job.status in {
+                    JobStatus.COMPLETED,
+                    JobStatus.FAILED,
+                    JobStatus.CANCELLED,
+                    JobStatus.INTERRUPTED,
+                }
+            ]
+            for job in terminal_jobs:
+                await job_admission.release(job_id=job.job_id, user_id=user_id)
+            # 并发上限按用户统一计算，而不是按 conversation_id 计算。
+            # 同一会话也可以提交多个独立任务；submission_key 仍负责防止
+            # 同一请求的重复提交，避免把“会话”误当成任务配额。
             if len(active_jobs) >= settings.AGENT_USER_ACTIVE_JOB_LIMIT:
                 raise UserJobLimitError("当前有任务正在进行中，请切换到普通模式对话")
             token = str(uuid.uuid4())

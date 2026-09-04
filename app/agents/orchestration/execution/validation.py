@@ -16,6 +16,7 @@ _REQUIRED_PARAMS: dict[str, list[str]] = {
     "direct_llm": ["instruction"],
     "collect_results": ["items"],
     "atomic_step": ["instruction", "preferred_tool"],
+    "workflow_skill": ["skill_name"],
     "react_step": ["instruction"],
     "office_doc": ["doc_id", "instruction", "mode"],
     "office_text": ["instruction"],

@@ -27,7 +27,7 @@ def node_timeout_seconds(node, configured: int | None = None) -> int:
         overrides = json.loads(str(settings.AGENT_NODE_TOOL_TIMEOUTS_JSON or "{}"))
     except (TypeError, ValueError):
         overrides = {}
-    return resolve_node_timeout(
+    resolved = resolve_node_timeout(
         node,
         default_seconds=int(configured or settings.AGENT_NODE_TIMEOUT_SECONDS),
         channel_timeouts={
@@ -36,6 +36,24 @@ def node_timeout_seconds(node, configured: int | None = None) -> int:
         },
         tool_timeouts=overrides if isinstance(overrides, dict) else {},
     )
+    # 节点可声明短问答/长生成提示；仅在显式提供时覆盖通道默认值，
+    # 保持旧计划的超时行为可复现。
+    params = node.get("params", {}) if isinstance(node, dict) else getattr(node, "params", {}) or {}
+    hint = str(params.get("timeout_hint") or "").strip().lower() if isinstance(params, dict) else ""
+    if hint in {"short_qa", "short", "fast"}:
+        resolved = min(resolved, 20)
+    elif hint in {"long_generation", "long", "report"}:
+        resolved = max(resolved, 120)
+    estimate = params.get("estimated_output_tokens") if isinstance(params, dict) else None
+    if estimate is None and isinstance(params, dict):
+        estimate = params.get("max_tokens")
+    try:
+        if estimate is not None and int(estimate) > 0:
+            # 保守按 20 token/s 估算，并保留连接/排队缓冲。
+            resolved = max(resolved, min(600, 5 + (int(estimate) + 19) // 20 + 10))
+    except (TypeError, ValueError):
+        pass
+    return resolved
 
 
 def routing_policy_mode() -> str:

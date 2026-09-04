@@ -1,14 +1,7 @@
-"""技能插件加载器 —— 递归扫描 plugins/skills 分类目录，自动发现并注册 Skill 子类.
+"""工具与开发者工作流插件加载器。
 
-设计：
-  - 每个插件 = 分类子目录下一个 Python 文件，定义一个（或多个）Skill 子类
-  - 八大分类：filesystem / shell / process / system / network / devtools / desktop / mcp
-  - 启动时与 POST /admin/skills/reload 时扫描注册；同名插件覆盖内置技能
-  - 热更新不重启进程：重新扫描 → 卸载旧插件技能（恢复被覆盖的内置技能）→ 重新注册
-  - Docker 部署时将 ./plugins 挂载为 volume，改插件文件无需重建镜像
-
-安全边界：插件在服务端进程内执行 Python 代码，属于受信代码（管理员放置），
-不能作为用户上传入口；用户级插件市场需走沙箱隔离（后续）。
+``plugins/tools`` 只能放原子 Tool；``plugins/workflows`` 只能放开发者
+维护的公共 WorkflowSkill。用户自建 Skill 存数据库，不加载任意 Python。
 """
 
 import importlib.util
@@ -18,48 +11,52 @@ from pathlib import Path
 
 from loguru import logger
 
-from app.agents.skills.base import Skill
+from app.agents.skills.base import Tool, WorkflowSkill
 from app.agents.skills.contract_lint import lint_skill_contracts
-from app.agents.skills.registry import SkillRegistry
+from app.agents.skills.registry import SkillRegistry, ToolRegistry
 from app.core.config import settings
 
-# 已加载的插件模块名 / 插件注册的技能名（reload 时据此卸载）
+# 已加载模块与注册名称（reload 时据此卸载）
 _loaded_modules: list[str] = []
 _loaded_skill_names: list[str] = []
+_loaded_tool_names: list[str] = []
 # 被插件覆盖的内置技能（卸载插件时恢复）
-_builtin_backup: dict[str, Skill] = {}
+_builtin_backup: dict[str, Tool | WorkflowSkill] = {}
+
+def tool_plugins_dir() -> Path:
+    return Path(settings.TOOL_PLUGINS_DIR)
 
 
-def plugins_dir() -> Path:
-    return Path(settings.SKILL_PLUGINS_DIR)
+def workflow_plugins_dir() -> Path:
+    return Path(settings.WORKFLOW_SKILLS_DIR)
 
 
 def load_skill_plugins() -> int:
-    """扫描插件目录并注册；返回新注册的技能数."""
-    directory = plugins_dir()
-    if not directory.is_dir():
-        logger.warning("技能插件目录不存在，跳过: {}", directory)
-        return 0
+    """扫描工具/工作流插件并注册；返回两类新增实例总数。"""
     count = 0
-    for path in sorted(directory.rglob("*.py")):
-        # 跳过隐藏/私有文件、__init__.py 与 __pycache__ 字节码缓存
-        if (
-            path.name.startswith("_")
-            or "__pycache__" in path.parts
-            or path.name == "__init__.py"
-        ):
+    for kind, directory in (("tool", tool_plugins_dir()), ("workflow", workflow_plugins_dir())):
+        if not directory.is_dir():
+            logger.warning("{} 插件目录不存在，跳过: {}", "工具" if kind == "tool" else "工作流 Skill", directory)
             continue
-        # 模块名 = 分类_文件名（相对插件根），避免不同目录同名文件冲突
-        rel_parts = path.relative_to(directory).with_suffix("").parts
-        module_name = _safe_module_name("_".join(rel_parts))
-        if not module_name:
-            logger.warning("跳过非法插件文件名（需字母/数字/下划线）: {}", path.name)
-            continue
-        count += _load_module(f"lumi_skill_plugin_{module_name}", path)
+        for path in sorted(directory.rglob("*.py")):
+            if path.name.startswith("_") or "__pycache__" in path.parts or path.name == "__init__.py":
+                continue
+            rel_parts = path.relative_to(directory).with_suffix("").parts
+            module_name = _safe_module_name(f"{kind}_" + "_".join(rel_parts))
+            if not module_name:
+                logger.warning("跳过非法插件文件名（需字母/数字/下划线）: {}", path.name)
+                continue
+            count += _load_module(f"lumi_{kind}_plugin_{module_name}", path, expected_kind=kind)
     errors = lint_skill_contracts(SkillRegistry.list())
     if errors:
         raise RuntimeError("Skill 契约静态检查失败：" + " | ".join(errors[:8]))
-    logger.info("技能插件加载完成: {} 个新技能", count)
+    logger.info(
+        "插件加载完成: {} 个公共基础工具，{} 个内部工具，{} 个工作流 Skill（插件实例 {}）",
+        len(ToolRegistry.list()),
+        len(ToolRegistry.internal_list()),
+        len(SkillRegistry.list()),
+        count,
+    )
     return count
 
 
@@ -69,9 +66,17 @@ def unload_skill_plugins() -> int:
     for name in _loaded_skill_names:
         SkillRegistry.unregister(name)
         if name in _builtin_backup:
-            SkillRegistry.register(_builtin_backup.pop(name), source="builtin")
+            previous = _builtin_backup.pop(name)
+            if isinstance(previous, WorkflowSkill):
+                SkillRegistry.register(previous, source="builtin")
+        removed += 1
+    for name in _loaded_tool_names:
+        ToolRegistry.unregister(name)
+        if name in _builtin_backup:
+            ToolRegistry.register(_builtin_backup.pop(name), source="builtin")
         removed += 1
     _loaded_skill_names.clear()
+    _loaded_tool_names.clear()
     for mod_name in _loaded_modules:
         sys.modules.pop(mod_name, None)
     _loaded_modules.clear()
@@ -85,9 +90,13 @@ def reload_skill_plugins() -> dict:
     return {
         "unloaded": unloaded,
         "registered": registered,
-        "skills": [
-            {"name": s.name, "source": SkillRegistry.get_source(s.name)}
+        "workflow_skills": [
+            {"name": s.name, "source": SkillRegistry.get_source(s.name), "kind": "workflow_skill"}
             for s in SkillRegistry.list()
+        ],
+        "tools": [
+            {"name": tool.name, "source": ToolRegistry.get_source(tool.name), "kind": "tool"}
+            for tool in ToolRegistry.list()
         ],
     }
 
@@ -110,8 +119,8 @@ def _safe_module_name(stem: str) -> str:
     return cleaned if cleaned else ""
 
 
-def _load_module(module_name: str, path: Path) -> int:
-    """导入单个插件文件并注册其中定义的 Skill 子类."""
+def _load_module(module_name: str, path: Path, *, expected_kind: str) -> int:
+    """导入单个插件文件；目录类型和类类型必须一致。"""
     try:
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
@@ -138,7 +147,10 @@ def _load_module(module_name: str, path: Path) -> int:
 
     count = 0
     for _, obj in inspect.getmembers(module, inspect.isclass):
-        if obj is Skill or not issubclass(obj, Skill):
+        if obj in (Tool, WorkflowSkill) or not issubclass(obj, (Tool, WorkflowSkill)):
+            continue
+        # 以“_”开头的类是插件内部抽象基类，不是可注册能力。
+        if obj.__name__.startswith("_"):
             continue
         # 只注册本模块定义的子类（跳过导入的基类/其他模块的类）
         if getattr(obj, "__module__", None) != module_name:
@@ -148,18 +160,41 @@ def _load_module(module_name: str, path: Path) -> int:
         except TypeError:
             logger.warning("插件 {} 中 {} 无法实例化，跳过", path.name, obj.__name__)
             continue
+        actual_kind = "workflow" if isinstance(instance, WorkflowSkill) else "tool"
+        if actual_kind != expected_kind:
+            logger.error(
+                "插件类型错误: {} 位于 {} 目录，却声明为 {}；已拒绝加载",
+                path.name, expected_kind, actual_kind,
+            )
+            continue
         _register_plugin(instance)
         count += 1
     _loaded_modules.append(module_name)
     return count
 
 
-def _register_plugin(instance: Skill) -> None:
-    """注册插件技能；若覆盖内置技能则先备份."""
+def _register_plugin(instance: Tool | WorkflowSkill) -> None:
+    """按类型注册：Tool 进原子工具表，WorkflowSkill 进工作流表。"""
     name = instance.name
-    existing = SkillRegistry.get(name)
-    if existing is not None and SkillRegistry.get_source(name) == "builtin" and name not in _builtin_backup:
-        _builtin_backup[name] = existing
-        logger.warning("插件技能 '{}' 覆盖内置技能", name)
-    SkillRegistry.register(instance, source="plugin")
-    _loaded_skill_names.append(name)
+    if isinstance(instance, WorkflowSkill):
+        existing = SkillRegistry.get_workflow(name)
+        if existing is not None and SkillRegistry.get_source(name) == "builtin" and name not in _builtin_backup:
+            _builtin_backup[name] = existing
+        # 文件系统插件属于开发者维护的公共资产；用户私有 Skill 只从数据库加载。
+        instance.source = "developer"
+        instance.visibility = "public"
+        instance.owner_user_id = None
+        SkillRegistry.register(instance, source="developer")
+        _loaded_skill_names.append(name)
+    else:
+        existing = ToolRegistry.get(name)
+        if existing is not None and ToolRegistry.get_source(name) == "builtin" and name not in _builtin_backup:
+            _builtin_backup[name] = existing
+        # 只有 base_tools.yaml 中明确列出的规范工具进入模型公共候选池。
+        # 其余插件仍保留为执行器内部能力，供已编译 Workflow/Worker 使用，
+        # 但不会被 Function Calling 或自由路由暴露。
+        from app.agents.skills.discovery import base_tool_names
+
+        public_names = base_tool_names()
+        ToolRegistry.register(instance, source="plugin", public=(not public_names or name in public_names))
+        _loaded_tool_names.append(name)

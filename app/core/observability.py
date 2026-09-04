@@ -52,7 +52,6 @@ _skill_routing_modes = None
 _rag_searches = None
 _agent_routes = None
 _agent_replans = None
-_plan_cache = None
 _agent_route_duration = None
 _agent_node_duration = None
 _agent_channel_wait = None
@@ -67,7 +66,7 @@ _read_view_stage_duration = None
 def _ensure_metrics():
     """懒加载 prometheus-client 指标（避免未安装/未启用时阻塞启动）."""
     global _prometheus, _http_requests, _http_duration, _agent_jobs, _skill_calls, _skill_routing_modes, _rag_searches
-    global _agent_routes, _agent_replans, _plan_cache, _agent_route_duration, _agent_node_duration
+    global _agent_routes, _agent_replans, _agent_route_duration, _agent_node_duration
     global _agent_channel_wait, _manifest_route_upgrades
     global _celery_queue_ready, _document_pipeline_state, _document_pipeline_oldest_age
     global _read_view_cache, _read_view_stage_duration
@@ -102,9 +101,6 @@ def _ensure_metrics():
         )
         _agent_replans = Counter(
             "lumi_agent_replans_total", "办公任务升级或重规划", ["from_level", "to_level", "reason"]
-        )
-        _plan_cache = Counter(
-            "lumi_agent_plan_cache_total", "办公计划缓存事件", ["result"]
         )
         _agent_route_duration = Histogram(
             "lumi_agent_route_duration_seconds",
@@ -214,11 +210,6 @@ def inc_agent_replan(from_level: str, to_level: str, reason: str) -> None:
             to_level=to_level or "unknown",
             reason=reason or "unknown",
         ).inc()
-
-
-def inc_plan_cache(result: str) -> None:
-    if _ensure_metrics():
-        _plan_cache.labels(result=result or "unknown").inc()
 
 
 def observe_agent_node_duration(agent: str, success: bool, duration: float) -> None:

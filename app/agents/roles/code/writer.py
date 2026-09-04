@@ -49,11 +49,7 @@ class CodeWriterAgent(WorkerAgent):
         '"target_file": "可选文件路径", "original_content": "可选，来自 reader"}'
     )
     skills = [
-        "read_project_file",
-        "write_project_file",
-        "delete_project_file",
-        "rename_project_file",
-        "grep_code",
+        "Read", "Write", "Delete", "Rename", "Grep",
         "extract_code_blocks",
         "apply_patch",
         "run_static_check",
@@ -100,11 +96,11 @@ class CodeWriterAgent(WorkerAgent):
             return None  # 无可用的静态检查器 → 正常流程
         errors = str(static.get("output") or "")[:3000]
         read = await self.run_skill(
-            "read_project_file",
+            "Read",
             {
                 "project_id": project_id,
-                "path": target_path or target_key,
-                "max_chars": 120000,
+                "file_path": target_path or target_key,
+                "limit": 120000,
             },
             ctx,
         )
@@ -177,8 +173,8 @@ class CodeWriterAgent(WorkerAgent):
             return None
         try:
             res = await self.run_skill(
-                "list_project",
-                {"project_id": project_id, "path": parent, "include_hidden": False},
+                "Glob",
+                {"project_id": project_id, "path": parent, "pattern": "**/*", "include_hidden": False},
                 ctx,
             )
         except Exception:  # noqa: BLE001
@@ -396,10 +392,10 @@ class CodeWriterAgent(WorkerAgent):
         if node.params.get("action") == "delete":
             await _report_progress(ctx.job_id, node.id, f"正在删除 {path_label}…")
             del_result = await self.run_skill(
-                "delete_project_file",
+                "Delete",
                 {
                     "project_id": project_id,
-                    "path": target_path or target_key or "",
+                    "file_path": target_path or target_key or "",
                     "recursive": False,
                 },
                 ctx,

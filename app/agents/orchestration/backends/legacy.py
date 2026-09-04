@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 import time
 
 from app.agents.orchestration.backends.contracts import BackendControlResult
@@ -50,12 +51,38 @@ class LegacyDagBackend:
             return BackendControlResult(job)
         transition(job, JobStatus.CANCELLED)
         job.updated_at = time.time()
-        if not keep_completed:
-            for node in job.nodes:
-                if node.status in {TaskStatus.PENDING, TaskStatus.READY, TaskStatus.RUNNING, TaskStatus.RETRYING}:
-                    node.status = TaskStatus.CANCELLED
-                    node.error = "任务被用户终止"
+        for node in job.nodes:
+            if node.status in {TaskStatus.PENDING, TaskStatus.READY, TaskStatus.RETRYING}:
+                node.status = TaskStatus.CANCELLED
+                node.error = "任务被用户终止"
+                node.error_code = "JOB_CANCELLED"
+            elif node.status == TaskStatus.RUNNING:
+                node.status = TaskStatus.INTERRUPTED
+                node.error = "任务被用户终止"
+                node.error_code = "JOB_CANCELLED"
         await self._store.save_job(job)
+        # 取消 Legacy 后台协程，避免长耗时 Activity 在测试/生产中继续占用
+        # worker、工具互斥锁和事件循环。ExecutionLoopService 会在取消异常中
+        # 统一收敛已运行节点为 interrupted。
+        task = self._tasks.get(job.job_id)
+        if task is not None and not task.done():
+            task.cancel()
+            # 等待执行循环完成状态收敛，控制 API 返回时快照已可读；
+            # 不把后台取消异常传播给调用方。
+            with suppress(asyncio.CancelledError):
+                await task
+            settled = await self._store.get_job(job.job_id)
+            if settled is not None and settled.status == JobStatus.CANCELLED:
+                for node in settled.nodes:
+                    if node.status in {TaskStatus.PENDING, TaskStatus.READY, TaskStatus.RETRYING}:
+                        node.status = TaskStatus.CANCELLED
+                        node.error = "任务被用户终止"
+                        node.error_code = "JOB_CANCELLED"
+                    elif node.status == TaskStatus.RUNNING:
+                        node.status = TaskStatus.INTERRUPTED
+                        node.error = "任务被用户终止"
+                        node.error_code = "JOB_CANCELLED"
+                await self._store.save_job(settled)
         return BackendControlResult(job, release_capacity=True)
 
     async def pause(self, job: Job | None) -> BackendControlResult | None:

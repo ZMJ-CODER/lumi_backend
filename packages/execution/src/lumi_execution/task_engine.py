@@ -38,12 +38,14 @@ class TaskExecutionEngine:
         *,
         executor: TaskNodeExecutor,
         concurrency: int = 1,
+        max_parallel_frontier: int | None = None,
         control: ExecutionControlPort | None = None,
         lifecycle: NodeLifecyclePort | None = None,
         poll_interval_seconds: float = 0.1,
     ) -> None:
         self._executor = executor
         self._concurrency = max(1, int(concurrency))
+        self._max_parallel_frontier = max(1, int(max_parallel_frontier or concurrency))
         self._control = control
         self._lifecycle = lifecycle
         self._poll_interval_seconds = max(0.01, float(poll_interval_seconds))
@@ -104,16 +106,32 @@ class TaskExecutionEngine:
                 results[node_id] = result
                 await self._notify(spec, nodes[node_id], result)
 
-            available = self._concurrency - len(running)
+            available = min(
+                self._concurrency - len(running),
+                self._max_parallel_frontier - len(running),
+            )
             for node_id in ready[:max(0, available)]:
                 pending.remove(node_id)
                 node = nodes[node_id]
                 await self._notify(spec, node, None, phase="ready")
+                tolerate_dependency_failure = (
+                    node.agent == "collect_results"
+                    or bool((node.metadata or {}).get("aggregation_node"))
+                    or bool((node.metadata or {}).get("continue_on_dependency_failure"))
+                    or (node.agent == "direct_llm" and len(node.depends_on) >= 2)
+                )
                 dependencies = {
                     dependency: results[dependency].result or {}
                     for dependency in node.depends_on
-                    if dependency in results and results[dependency].status == "completed"
+                    if dependency in results
+                    and (results[dependency].status == "completed" or tolerate_dependency_failure)
                 }
+                if tolerate_dependency_failure:
+                    dependencies = {
+                        dependency: self._dependency_payload(results[dependency])
+                        for dependency in node.depends_on
+                        if dependency in results
+                    }
                 running[node_id] = asyncio.create_task(self._run_one(spec, node, dependencies))
 
             if not running:
@@ -163,6 +181,17 @@ class TaskExecutionEngine:
         return self._finish(spec, results, self._derive_status(results, spec))
 
     @staticmethod
+    def _dependency_payload(result: NodeExecutionResult) -> dict:
+        """Expose bounded success or failure evidence to tolerant aggregators."""
+        payload = dict(result.result or {})
+        payload.setdefault("status", result.status)
+        if result.error:
+            payload.setdefault("error", result.error)
+        if result.error_code:
+            payload.setdefault("error_code", result.error_code)
+        return payload
+
+    @staticmethod
     def _initial_results(
         spec: JobSpec,
         prior: tuple[NodeExecutionResult, ...],
@@ -186,6 +215,8 @@ class TaskExecutionEngine:
             node = nodes[node_id]
             dependencies = [results.get(dependency) for dependency in node.depends_on]
             continue_after_failure = bool((node.metadata or {}).get("continue_on_dependency_failure"))
+            if node.agent == "collect_results" or bool((node.metadata or {}).get("aggregation_node")) or (node.agent == "direct_llm" and len(node.depends_on) >= 2):
+                continue_after_failure = True
             if not continue_after_failure and any(
                 value is not None and value.status in FAILED_DEPENDENCY_STATUSES
                 for value in dependencies

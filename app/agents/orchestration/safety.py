@@ -21,9 +21,9 @@ def _tool_is_write(tool: str, params: dict | None = None) -> bool:
         # MCP 暂无统一安全元数据，P0 先按可能写操作保守处理。
         return True
     try:
-        from app.agents.skills.registry import SkillRegistry
+        from app.agents.skills.registry import ToolRegistry
 
-        skill = SkillRegistry.get(tool)
+        skill = ToolRegistry.get(tool)
         if skill is not None:
             if params is not None and hasattr(skill, "is_write_operation"):
                 return bool(skill.is_write_operation(params))
@@ -80,9 +80,9 @@ def prepare_node_safety(node: TaskNode, user_id: str, job_id: str) -> None:
         claims.append(ResourceClaim(key=f"office-output:{job_id}", mode="write"))
     if tool:
         try:
-            from app.agents.skills.registry import SkillRegistry
+            from app.agents.skills.registry import ToolRegistry
 
-            skill = SkillRegistry.get(tool)
+            skill = ToolRegistry.get(tool)
             if skill is not None:
                 for template in skill.resource_templates or []:
                     key = _render_resource_template(template, inputs)

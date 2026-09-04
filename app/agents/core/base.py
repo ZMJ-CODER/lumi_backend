@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from typing import Any
 
-from app.agents.skills.registry import SkillRegistry
+from app.agents.skills.registry import SkillRegistry, ToolRegistry
+from app.services.tool_output_pipeline import render_for_model
 
 if TYPE_CHECKING:
     from app.agents.orchestration.models import TaskNode
@@ -46,6 +47,8 @@ class WorkerContext:
     # Server-injected, ownership-checked office-document scope for a Worker.
     # A Worker may narrow this set for a Skill call, but can never expand it.
     office_doc_ids: tuple[str, ...] = ()
+    # Explicit project scope supplied by the authenticated task request.
+    authorized_project_ids: tuple[str, ...] = ()
 
 
 class WorkerAgent(ABC):
@@ -65,11 +68,31 @@ class WorkerAgent(ABC):
         ...
 
     async def run_skill(self, skill_name: str, params: dict, ctx: WorkerContext) -> dict:
-        """调用技能并统一包装结果（带审计，复用技能体系）."""
-        skill = SkillRegistry.get(skill_name)
-        if skill is None:
+        """调用 Tool 或当前用户可见的 Workflow Skill，并统一包装结果。"""
+        workflow = SkillRegistry.get_visible_workflow(skill_name, ctx.user_id)
+        tool = ToolRegistry.get(skill_name)
+        # 私有工作流不能只在创建 API 所在进程注册：执行可能由另一 API
+        # worker 或 Temporal worker 接手。仅在名称未命中且不是 Tool 时按
+        # user_id 查询，避免数据库读取干扰最常见的原子 Tool 调用。
+        if workflow is None and tool is None and ctx.user_id:
+            try:
+                from app.core.database import async_session_factory
+                from app.services.user_workflow_skills import load_user_workflow_skill
+
+                async with async_session_factory() as session:
+                    workflow = await load_user_workflow_skill(session, ctx.user_id, skill_name)
+                if workflow is not None:
+                    # 缓存只是性能优化；权限判断仍以 ``get_visible_workflow``
+                    # 的 owner key 和上述 SQL 条件为准。
+                    SkillRegistry.register(workflow, source="user")
+            except Exception:
+                # 用户工作流不可用时不要把数据库内部错误泄露给模型；后续
+                # 统一按不存在处理并留下执行层日志。
+                workflow = None
+        if workflow is None and tool is None:
             return {"success": False, "error": f"技能不存在: {skill_name}", "error_code": "SKILL_NOT_FOUND"}
-        if not skill.supports_scene(ctx.scene):
+        selected = workflow or tool
+        if not selected.supports_scene(ctx.scene):
             return {
                 "success": False,
                 "error": f"技能 {skill_name} 不支持场景 {ctx.scene}",
@@ -85,6 +108,42 @@ class WorkerAgent(ABC):
                 "error": "规则校验未通过：" + "；".join(violations[:3]),
                 "error_code": "RULE_VIOLATION",
             }
+        if workflow is not None:
+            from app.agents.skills.base import SkillContext
+            from app.agents.skills.workflow_runner import run_workflow_skill
+
+            result = await run_workflow_skill(
+                workflow,
+                params,
+                SkillContext(
+                    user_id=ctx.user_id,
+                    scene=ctx.scene,
+                    conversation_id=ctx.job_id,
+                    job_id=ctx.job_id,
+                    llm_api_key=ctx.llm_api_key,
+                    llm_config=ctx.llm_config,
+                    on_output=ctx.on_output,
+                    office_doc_ids=ctx.office_doc_ids,
+                    authorized_project_ids=ctx.authorized_project_ids,
+                ),
+                user_role=ctx.user_role,
+                user_message=ctx.user_request,
+                confirmed_tools=ctx.confirmed_tools,
+                confirmed_tool_calls=ctx.confirmed_tool_calls,
+                approval_context_sha256=ctx.approval_context_sha256,
+                authorized_project_ids=ctx.authorized_project_ids,
+            )
+            if result.status == "failed":
+                return {
+                    "success": False, "error": result.error, "error_code": result.error_code,
+                    "retryable": result.retryable, "execution": result.to_execution_envelope(), "skill": skill_name,
+                }
+            return {
+                "success": True,
+                "content": render_for_model(result),
+                "execution": result.to_execution_envelope(),
+            }
+
         from app.agents.skills.executor import execute_tool_call
 
         result = await execute_tool_call(
@@ -105,19 +164,25 @@ class WorkerAgent(ABC):
             llm_config=ctx.llm_config,
             on_output=ctx.on_output,
             office_doc_ids=ctx.office_doc_ids,
+            authorized_project_ids=ctx.authorized_project_ids,
             execution_scope=ctx.job_id,
+            allow_internal=True,
         )
-        if not result.success:
+        if result.status == "failed":
             return {
                 "success": False,
                 "error": result.error,
                 "error_code": result.error_code,
                 "retryable": result.retryable,
-                "tool_metadata": result.metadata,
+                "execution": result.to_execution_envelope(),
                 "tool": skill_name,
-                "approval_fingerprint": str(result.metadata.get("approval_fingerprint") or ""),
+                "approval_fingerprint": str(result.meta.quality_hints.get("approval_fingerprint") or ""),
             }
-        return {"success": True, "content": result.output, **result.metadata}
+        return {
+            "success": True,
+            "content": render_for_model(result),
+            "execution": result.to_execution_envelope(),
+        }
 
     def __repr__(self) -> str:
         return f"<WorkerAgent: {self.name} skills={self.skills}>"

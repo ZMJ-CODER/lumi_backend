@@ -6,9 +6,9 @@ from app.agents.orchestration.models import TaskNode
 from app.agents.orchestration.react_runner import OfficeReactRunner
 from app.agents.roles.react import ReactStepAgent
 from app.agents.core.base import WorkerContext
-from app.agents.skills.base import Skill, SkillResult
+from app.agents.skills.base import Tool, SkillResult
 from app.agents.skills.capability import ToolCapability
-from app.agents.skills.registry import SkillRegistry
+from app.agents.skills.registry import ToolRegistry
 
 
 class _Bound:
@@ -33,7 +33,7 @@ class _Model:
         return self.replies.pop(0)
 
 
-class _Echo(Skill):
+class _Echo(Tool):
     name = "react_echo"
     description = "react test echo"
     scenes = ["office"]
@@ -44,7 +44,7 @@ class _Echo(Skill):
 
 
 def test_office_react_runs_one_tool_per_round(monkeypatch):
-    SkillRegistry.register(_Echo())
+    ToolRegistry.register(_Echo())
     model = _Model([
         AIMessage(content="", tool_calls=[
             {"name": "react_echo", "args": {"text": "one"}, "id": "r1"},
@@ -71,7 +71,7 @@ def test_office_react_runs_one_tool_per_round(monkeypatch):
 
 def test_office_react_preserves_reasoning_payload_after_tool_call(monkeypatch):
     """Thinking-mode providers require reasoning_content on the tool-result turn."""
-    SkillRegistry.register(_Echo())
+    ToolRegistry.register(_Echo())
     first = AIMessage(
         content="",
         tool_calls=[{"name": "react_echo", "args": {"text": "one"}, "id": "r1"}],
@@ -96,11 +96,24 @@ def test_office_react_preserves_reasoning_payload_after_tool_call(monkeypatch):
     assert replayed.additional_kwargs["reasoning_content"] == "tool selection reasoning"
 
 
-def test_m3_planner_creates_react_step():
+def test_m3_planner_leaves_react_choice_to_structured_planner(monkeypatch):
     from app.agents.orchestration.planner import LlmPlanner
     from app.agents.orchestration.tca import ComplexityLevel
 
-    tree = asyncio.run(LlmPlanner().plan_for_level(
+    planner = LlmPlanner()
+
+    async def fake_structured(*_args, **_kwargs):
+        return {
+            "plan": "需要根据中间结果处理",
+            "tasks": [{"id": "r1", "name": "动态处理", "agent": "react_step", "params": {"instruction": "分析销售下滑"}, "depends_on": []}],
+        }
+
+    async def fake_projects(_user_id):
+        return []
+
+    monkeypatch.setattr(planner, "_call_structured_planner", fake_structured)
+    monkeypatch.setattr(planner, "_list_projects", fake_projects)
+    tree = asyncio.run(planner.plan_for_level(
         ComplexityLevel.M3, "u1", "分析销售下滑原因并给出建议", "office",
     ))
     assert len(tree.nodes) == 1
@@ -113,6 +126,23 @@ def test_react_worker_requires_instruction():
         TaskNode(id="r1", agent="react_step"), WorkerContext(user_id="u1", job_id="j1")
     ))
     assert result["error_code"] == "INVALID_ARGS"
+
+
+def test_react_is_only_planned_for_m3():
+    from app.agents.orchestration.planning.normalizer import enforce_react_complexity_policy
+
+    node = TaskNode(id="r1", agent="react_step", name="生成摘要", params={"instruction": "生成摘要"})
+    enforce_react_complexity_policy([node], "m2")
+    assert node.agent == "direct_llm"
+    assert node.metadata["react_blocked_by_complexity"] == "m2"
+
+
+def test_react_kept_for_m3():
+    from app.agents.orchestration.planning.normalizer import enforce_react_complexity_policy
+
+    node = TaskNode(id="r1", agent="react_step", name="开放分析", params={"instruction": "开放分析"})
+    enforce_react_complexity_policy([node], "m3")
+    assert node.agent == "react_step"
 
 
 def test_react_worker_injects_manifest_predecessor_results(monkeypatch):

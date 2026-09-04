@@ -1,4 +1,4 @@
-"""将现有受控 Skill 适配为 LangChain StructuredTool。
+"""将现有受控 Tool 适配为 LangChain StructuredTool。
 
 这里不把权限判断交给模型：工具暴露前仍经过 scene/role/runtime 过滤，调用时
 仍回到 execute_tool_call 的审计、参数校验、用户隔离和确认逻辑。
@@ -16,6 +16,23 @@ from langchain_core.tools import StructuredTool
 from app.agents.skills.base import SkillResult
 from app.agents.skills.executor import execute_tool_call, get_tool_capability
 from app.services.tool_output_projection import project_tool_output
+
+
+def make_tool_search_definition() -> dict:
+    """L2 搜索原语定义；它不代表任何业务工具权限。"""
+    return {
+        "type": "function",
+        "function": {
+            "name": "search_tools",
+            "description": "按当前任务描述发现可用工具。只返回少量工具引用；发现后再调用具体工具。",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "要完成的任务或能力描述"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    }
 
 
 def _safe_schema(schema: dict | None) -> dict:
@@ -45,10 +62,12 @@ async def make_skill_tool(
     user_message: str = "",
     approval_context_sha256: str = "",
     office_doc_ids: tuple[str, ...] | list[str] | None = None,
+    authorized_project_ids: tuple[str, ...] | list[str] | None = None,
     execution_scope: str = "",
+    allowed_tools: set[str] | None = None,
 ) -> StructuredTool | None:
     """构造绑定到当前用户/场景的工具实例，不能跨用户复用。"""
-    capability = await get_tool_capability(name, scene, user_role)
+    capability = await get_tool_capability(name, scene, user_role, user_id)
     if capability is None:
         return None
 
@@ -68,7 +87,9 @@ async def make_skill_tool(
             llm_config=llm_config,
             approval_context_sha256=approval_context_sha256,
             office_doc_ids=office_doc_ids,
+            authorized_project_ids=authorized_project_ids,
             execution_scope=execution_scope,
+            allowed_tools=allowed_tools,
         )
         # ToolNode 会把抛出的异常转成一条工具消息，但那会中断我们的审计/引用
         # 收集，也会把底层异常文本暴露给模型。失败统一作为受控工具结果回填，

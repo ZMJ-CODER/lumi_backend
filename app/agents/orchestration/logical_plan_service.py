@@ -47,6 +47,13 @@ class LogicalPlanContinuationService:
         result = await resolve_result_ref(user_id, record.get("result_ref"))
         if not isinstance(result, dict):
             return ""
+        # Retrieval output is evidence for the final answer, not a user-facing
+        # answer by itself.  Returning it here would mark the rolling plan as
+        # complete and bypass ExecutionLoopService._synthesize_final_answer,
+        # causing raw web-search snippets to be copied into the chat bubble.
+        retrieval_tools = {"web_search", "web_fetch", "kb_search", "query_knowledge"}
+        if str(result.get("tool") or "") in retrieval_tools:
+            return ""
         return str(result.get("content") or result.get("output") or "").strip()
 
     async def continue_job(self, job: Job) -> bool:

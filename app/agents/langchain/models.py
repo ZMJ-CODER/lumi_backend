@@ -15,6 +15,29 @@ from app.core.model_catalog import normalize_provider_base_url
 from app.core.network import resolve_http_proxy
 
 
+# Provider/model capability cache.  A local model's lack of Function Calling
+# is stable for the lifetime of the process; avoid deliberately sending a
+# second failing bind_tools request on every chat turn.
+_TOOL_SUPPORT_CACHE: dict[tuple[str, str], bool] = {}
+
+
+def tool_support_cache_key(model: str | None, base_url: str | None) -> tuple[str, str]:
+    return (str(model or "").strip().casefold(), str(base_url or "").strip().rstrip("/").casefold())
+
+
+def cached_tool_support(model: str | None, base_url: str | None) -> bool | None:
+    return _TOOL_SUPPORT_CACHE.get(tool_support_cache_key(model, base_url))
+
+
+def remember_tool_support(model: str | None, base_url: str | None, supported: bool) -> None:
+    _TOOL_SUPPORT_CACHE[tool_support_cache_key(model, base_url)] = bool(supported)
+
+
+def clear_tool_support_cache() -> None:
+    """清理模型能力缓存，供配置热更新和测试使用。"""
+    _TOOL_SUPPORT_CACHE.clear()
+
+
 class CompatibleChatOpenAI(ChatOpenAI):
     """Preserve non-standard reasoning payloads used by compatible providers.
 

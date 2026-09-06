@@ -31,7 +31,6 @@ READ_ONLY_AGENT_PROFILES: dict[str, ReadOnlyAgentProfile] = {
     "direct_llm": ReadOnlyAgentProfile(),
     "retrieval": ReadOnlyAgentProfile(),
     "document_targeting": ReadOnlyAgentProfile(),
-    "web_research": ReadOnlyAgentProfile(),
     "office_text": ReadOnlyAgentProfile(),
     "office_research": ReadOnlyAgentProfile(),
     "office_doc": ReadOnlyAgentProfile(
@@ -46,9 +45,9 @@ READ_ONLY_AGENT_PROFILES: dict[str, ReadOnlyAgentProfile] = {
 # 纯读节点。新增插件默认继续走 Legacy。
 LOGICAL_READ_AGENT_PROFILES: dict[str, ReadOnlyAgentProfile] = {
     "direct_llm": ReadOnlyAgentProfile(),
+    "atomic_step": ReadOnlyAgentProfile(),
     "retrieval": ReadOnlyAgentProfile(),
     "document_targeting": ReadOnlyAgentProfile(),
-    "web_research": ReadOnlyAgentProfile(),
     "office_text": ReadOnlyAgentProfile(),
     "office_research": ReadOnlyAgentProfile(),
     "office_doc": ReadOnlyAgentProfile(modes=frozenset({"read", "analyze"})),

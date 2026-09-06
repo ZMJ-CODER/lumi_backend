@@ -35,6 +35,26 @@ def make_tool_search_definition() -> dict:
     }
 
 
+def make_domain_discovery_definition() -> dict:
+    """L1 domain request primitive; it grants no tool permission by itself."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "discover_domain",
+            "description": "申请进入一个能力领域（research/document/data/development/system 等）；系统校验权限后才注入域内工具。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "domain": {"type": "string", "description": "目标领域"},
+                    "reason": {"type": "string", "description": "为什么需要该领域"},
+                },
+                "required": ["domain"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def _safe_schema(schema: dict | None) -> dict:
     schema = schema if isinstance(schema, dict) else {}
     return {

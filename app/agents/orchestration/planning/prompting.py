@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 _FALLBACK_AGENT_LINES = (
+    "- decision_node：受控阶段决策（request_domain/clarify/continue/finish），params 用 {\"decision\":\"continue\"}\n"
     "- retrieval：检索知识库/项目索引定位信息，params 用 {\"query\": \"检索词\", \"top_k\": 5}\n"
     "- code_reader：在本地代码项目里定位并读取相关文件，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"定位/分析指令\", \"target_file\": \"可选文件路径\"}\n"
     "- code_writer：生成或修改本地代码文件并写回，params 用 {\"project_id\": \"项目ID\", \"instruction\": \"编码指令\", \"target_file\": \"可选文件路径\", \"original_content\": \"可选，来自 reader\"}\n"
@@ -21,7 +22,7 @@ def known_agents() -> tuple[str, ...]:
         names = tuple(AgentRegistry.names())
     except Exception:  # noqa: BLE001
         names = ()
-    return names or ("retrieval", "web_research")
+    return names or ("retrieval", "atomic_step")
 
 
 def agent_prompt_lines() -> str:
@@ -45,7 +46,14 @@ def build_planner_prompt() -> str:
     from app.core.agent_security import UNTRUSTED_CONTENT_RULES
 
     return (
-        "你是办公任务规划器，只输出可校验的 JSON 计划。\n"
+        "你是办公任务规划器，只输出可校验的 JSON 计划。优先输出 stages（阶段/领域路径），"
+        "不要在 stages 中指定具体工具；具体工具由运行中的 Agent 在已授权领域内选择。"
+        "每个 stage 至少包含 stage_id、domain、goal、mode、depends_on；mode 为 read_only、write、llm 或 direct。"
+        "需要补充信息或切换领域时，可使用受控 decision_node；只允许 request_domain、clarify、continue、finish，不得生成任意 PlanPatch。\n"
+        "先在内部用自然语言梳理完成目标所需的最少步骤，再把步骤映射为 JSON；不要把思维链写入输出。\n"
+        "信息边界：你没有实时数据、用户私有文件或本机状态。涉及实时/近期/官方信息必须规划 web_search；"
+        "涉及授权文件/内部资料必须规划本轮提供的读取工具；静态常识、解释、创作和一般建议直接使用 direct_llm。\n"
+        "决策示例：‘现在的股价’→web_search；‘项目 README 内容’→授权文件读取；‘法国首都’→direct_llm。\n"
         "把用户目标拆成最少的原子步骤；每个 atomic_step 只有一个目标和一次工具调用。"
         "读后写、搜索后总结、或同一资源的读写必须拆步；互不依赖的读取/检索/分析保持 depends_on=[]。"
         "只从下方候选能力中选择工具。atomic_step 的 params 必须是 "
@@ -59,8 +67,8 @@ def build_planner_prompt() -> str:
         "不得为了形式完整虚构步骤，也不得把多个独立操作吞进一个节点。\n"
         "可用执行 agent：\n" + agent_prompt_lines()
         + "\n严格输出 JSON（不要代码块围栏、不要解释）：\n"
-        "{\"plan\":\"给用户看的执行计划\",\"tasks\":[{\"id\":\"t1\",\"name\":\"任务名\",\"agent\":\"retrieval\",\"params\":{},\"depends_on\":[]}],\"clarification\":\"\"}\n"
-        "意图不明确或缺少关键信息时，tasks 留空、clarification 填需要确认的问题。\n\n"
+        "{\"plan\":\"给用户看的执行计划\",\"stages\":[{\"stage_id\":\"s1\",\"domain\":\"research\",\"goal\":\"获取公开资料\",\"mode\":\"read_only\",\"depends_on\":[]}],\"tasks\":[],\"clarification\":\"\"}\n"
+        "意图不明确或缺少关键信息时，stages/tasks 留空、clarification 填需要确认的问题。\n\n"
         + UNTRUSTED_CONTENT_RULES
     )
 

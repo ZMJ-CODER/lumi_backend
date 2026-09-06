@@ -207,7 +207,7 @@ def test_chat_tool_graph_is_intent_gated_and_never_exposes_office_tools():
     assert _needs_chat_tool_graph("帮我总结刚上传的文档") is False
     assert _needs_chat_tool_graph("你好") is False
     names = {item["function"]["name"] for item in asyncio.run(get_tools_for_scene("chat"))}
-    assert names <= {"WebSearch", "WebFetch", "AskUserQuestion", "DateTime", "Calculator"}
+    assert names <= {"web_search", "web_fetch", "AskUserQuestion"}
     assert "python_exec" not in names
 
 

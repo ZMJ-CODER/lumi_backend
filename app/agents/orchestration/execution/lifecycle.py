@@ -74,6 +74,30 @@ class ApplicationNodeLifecycle:
         await self._store.save_job(self._job)
 
     def _apply_result(self, node: TaskNode, result: NodeExecutionResult) -> None:
+        # DecisionNode is an orchestrator control signal, not user work.  Keep
+        # its structured decision in the durable snapshot and project
+        # clarification/domain requests into job-level state so they are not
+        # mistaken for an ordinary tool success.
+        if node.is_decision_node and result.status == "completed" and isinstance(result.result, dict):
+            decision = str(result.result.get("decision") or "").strip().casefold()
+            if decision == "clarify":
+                node.status = TaskStatus.COMPLETED
+                node.result = result.result
+                node.error = node.error_code = None
+                node.completed_at = time.time()
+                self._job.status = JobStatus.COMPLETED
+                self._job.result = {
+                    "type": "clarification",
+                    "question": str(result.result.get("content") or result.result.get("output") or "完成任务还需要补充信息。"),
+                    "source": "decision_node",
+                    "node_id": node.id,
+                }
+                return
+            if decision == "request_domain":
+                routing = dict(self._job.routing or {})
+                routing["active_domain"] = str(result.result.get("domain") or "")
+                routing["last_decision"] = {"decision": decision, "node_id": node.id}
+                self._job.routing = routing
         if result.status == "waiting_approval":
             # ApprovalService validates the exact tool and argument
             # fingerprint from the durable node snapshot.  Keep the pending

@@ -39,6 +39,8 @@ async def office_llm(
     llm = LLMClient()
     if format_response:
         system = f"{system}\n\n{OFFICE_RESPONSE_FORMAT_COMPACT}"
+    if context and context.skill_prompt:
+        system = f"{system}\n\n[当前 Workflow Skill 的业务流程提示]\n{context.skill_prompt[:12000]}"
     system = f"{system}\n\n{UNTRUSTED_CONTENT_RULES}"
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     kwargs = {
@@ -54,6 +56,10 @@ async def office_llm(
     if not stream or not (context and context.on_output):
         return await llm.chat(messages, **kwargs)
     parts: list[str] = []
+    # Keep a small tail buffered so internal route sentinels cannot leak one
+    # token at a time through SSE before DirectLlmAgent classifies the result.
+    pending = ""
+    sentinel = "ROUTE_UPGRADE_"
     started = time.perf_counter()
     first_delta_at: float | None = None
     # Do not accidentally remove the caller's output budget while switching to
@@ -70,8 +76,18 @@ async def office_llm(
                 int((first_delta_at - started) * 1000),
             )
         parts.append(delta)
-        await _emit_output(context, delta)
+        pending += delta
+        if sentinel in pending:
+            # The caller will convert this into a controlled reroute result;
+            # never stream the control marker to the client.
+            continue
+        safe_len = max(0, len(pending) - len(sentinel) + 1)
+        if safe_len:
+            await _emit_output(context, pending[:safe_len])
+            pending = pending[safe_len:]
     output = "".join(parts)
+    if sentinel not in output and pending:
+        await _emit_output(context, pending)
     from loguru import logger
 
     logger.info(

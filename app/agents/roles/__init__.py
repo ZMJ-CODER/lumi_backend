@@ -15,11 +15,11 @@ from loguru import logger
 
 from app.agents.roles.knowledge.retrieval import RetrievalAgent
 from app.agents.roles.knowledge.document_targeting import DocumentTargetingAgent
-from app.agents.roles.knowledge.web_research import WebResearchAgent
 from app.agents.roles.atomic import AtomicStepAgent
 from app.agents.roles.direct_llm import DirectLlmAgent
 from app.agents.roles.collect_results import CollectResultsAgent
 from app.agents.roles.react import ReactStepAgent
+from app.agents.roles.decision import DecisionNodeAgent
 from app.agents.roles.workflow import WorkflowSkillAgent
 from app.agents.roles.office.agents import (
     OfficeCalendarAgent,
@@ -45,10 +45,10 @@ def register_all_agents() -> list[WorkerAgent]:
         DirectLlmAgent(),
         CollectResultsAgent(),
         ReactStepAgent(),
+        DecisionNodeAgent(),
         WorkflowSkillAgent(),
         RetrievalAgent(),
         DocumentTargetingAgent(),
-        WebResearchAgent(),
         OfficeTextAgent(),
         OfficeResearchAgent(),
         OfficeTodoAgent(),
@@ -77,10 +77,10 @@ def register_all_agents() -> list[WorkerAgent]:
 __all__ = [
     "register_all_agents",
     "AtomicStepAgent",
+    "DecisionNodeAgent",
     "WorkflowSkillAgent",
     "RetrievalAgent",
     "DocumentTargetingAgent",
-    "WebResearchAgent",
     "OfficeTextAgent",
     "OfficeResearchAgent",
     "OfficeTodoAgent",

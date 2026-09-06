@@ -128,6 +128,27 @@ def test_react_worker_requires_instruction():
     assert result["error_code"] == "INVALID_ARGS"
 
 
+def test_react_runner_autonomous_mode_extends_system_contract(monkeypatch):
+    model = _Model([AIMessage(content="无需工具，任务完成")])
+    monkeypatch.setattr(
+        "app.agents.orchestration.react_runner.get_chat_model",
+        lambda **kwargs: asyncio.sleep(0, result=model),
+    )
+    async def capabilities(*_args, **_kwargs):
+        return [ToolCapability(name="react_echo", description="react test echo", category="office")]
+    monkeypatch.setattr(
+        "app.agents.orchestration.react_runner.get_office_react_capabilities_with_trace",
+        capabilities,
+    )
+    result = asyncio.run(OfficeReactRunner(
+        user_id="u1", job_id="j1", autonomous_mode=True,
+    ).run("实现功能并确保能运行"))
+    assert result.success is True
+    system = "\n".join(str(message.content) for message in model.calls[0] if getattr(message, "content", None))
+    assert "滚动执行任务" in system
+    assert "遇到错误先分析错误类别" in system
+
+
 def test_react_is_only_planned_for_m3():
     from app.agents.orchestration.planning.normalizer import enforce_react_complexity_policy
 
@@ -143,6 +164,36 @@ def test_react_kept_for_m3():
     node = TaskNode(id="r1", agent="react_step", name="开放分析", params={"instruction": "开放分析"})
     enforce_react_complexity_policy([node], "m3")
     assert node.agent == "react_step"
+
+
+def test_planner_accepts_stage_domain_path(monkeypatch):
+    from app.agents.orchestration.planner import LlmPlanner
+    from app.agents.orchestration.tca import ComplexityLevel
+
+    planner = LlmPlanner()
+
+    async def fake_structured(*_args, **_kwargs):
+        return {
+            "plan": "先查公开资料，再汇总",
+            "stages": [
+                {"stage_id": "research", "domain": "research", "goal": "获取官方资料", "mode": "read_only", "depends_on": []},
+                {"stage_id": "writeup", "domain": "writing", "goal": "生成对比说明", "mode": "direct", "depends_on": ["research"]},
+            ],
+            "tasks": [],
+        }
+
+    async def fake_projects(_user_id):
+        return []
+
+    monkeypatch.setattr(planner, "_call_structured_planner", fake_structured)
+    monkeypatch.setattr(planner, "_list_projects", fake_projects)
+    tree = asyncio.run(planner.plan_for_level(
+        ComplexityLevel.M3, "比较两个公开方案", "u1", "office",
+    ))
+    assert [node.params["domain"] for node in tree.nodes] == ["research", "writing"]
+    assert tree.nodes[0].agent == "react_step"
+    assert tree.nodes[1].agent == "direct_llm"
+    assert tree.nodes[1].depends_on == ["research"]
 
 
 def test_react_worker_injects_manifest_predecessor_results(monkeypatch):
@@ -233,3 +284,79 @@ def test_office_react_compiles_candidate_boundary_from_registry_contract(monkeyp
     assert result.success is True
     assert "候选工具选择边界" in str(model.calls[0][0].content)
     assert "react_echo@2.0.0" in str(model.calls[0][0].content)
+
+
+def test_react_blocks_write_before_read(monkeypatch):
+    model = _Model([
+            AIMessage(content="", tool_calls=[{"name": "Edit", "args": {"file_path": "x", "content": "x"}, "id": "w1"}]),
+        AIMessage(content="已停止"),
+    ])
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_chat_model", lambda **kwargs: asyncio.sleep(0, result=model))
+    async def capabilities(*_args, **_kwargs):
+        return [ToolCapability(name="Edit", description="edit", category="office")]
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_office_react_capabilities_with_trace", capabilities)
+    result = asyncio.run(OfficeReactRunner(user_id="u1", job_id="j1", autonomous_mode=True).run("修改文件"))
+    assert result.success is True
+    assert result.records[0]["success"] is False
+
+
+def test_react_requires_read_for_same_target(monkeypatch):
+    model = _Model([
+        AIMessage(content="", tool_calls=[{"name": "Read", "args": {"file_path": "a.py"}, "id": "r1"}]),
+        AIMessage(content="", tool_calls=[{"name": "Write", "args": {"file_path": "b.py", "content": "x"}, "id": "w1"}]),
+        AIMessage(content="已停止"),
+    ])
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_chat_model", lambda **kwargs: asyncio.sleep(0, result=model))
+    async def capabilities(*_args, **_kwargs):
+        return [ToolCapability(name="Read", description="read", category="office"), ToolCapability(name="Write", description="write", category="office")]
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_office_react_capabilities_with_trace", capabilities)
+    async def fake_tool(name, **kwargs):
+        class Tool:
+            async def ainvoke(self, args):
+                result = SkillResult(success=name == "Read", output="content" if name == "Read" else "")
+                await kwargs["on_result"](result)
+                return result.output
+        return Tool()
+    monkeypatch.setattr("app.agents.orchestration.react_runner.make_skill_tool", fake_tool)
+    result = asyncio.run(OfficeReactRunner(user_id="u1", job_id="j1", autonomous_mode=True).run("修改代码"))
+    assert [record["skill"] for record in result.records] == ["Read", "Write"]
+    assert result.records[-1]["success"] is False
+
+
+def test_react_result_contains_execution_metrics(monkeypatch):
+    model = _Model([AIMessage(content="完成")])
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_chat_model", lambda **kwargs: asyncio.sleep(0, result=model))
+    async def capabilities(*_args, **_kwargs):
+        return [ToolCapability(name="react_echo", description="echo", category="office")]
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_office_react_capabilities_with_trace", capabilities)
+    result = asyncio.run(OfficeReactRunner(user_id="u1", job_id="j1", autonomous_mode=True).run("完成"))
+    assert result.metrics["autonomous_mode"] is True
+    assert result.metrics["rounds"] == 0
+
+
+def test_domain_first_starts_with_only_discovery_primitive(monkeypatch):
+    model = _Model([AIMessage(content="", tool_calls=[{"name": "discover_domain", "args": {"domain": "network", "reason": "查公开资料"}, "id": "d1"}]), AIMessage(content="已进入网络域")])
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_chat_model", lambda **kwargs: asyncio.sleep(0, result=model))
+    async def capabilities(*_args, **_kwargs):
+        return [ToolCapability(name="web_search", description="search", category="network", domain="research", parameters={"type": "object", "properties": {}})]
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_office_react_capabilities_with_trace", capabilities)
+    runner = OfficeReactRunner(user_id="u1", job_id="j1", domain_first=True)
+    result = asyncio.run(runner.run("找公开资料"))
+    assert result.success is True
+    assert runner.toolsets[0] == ["search_tools", "discover_domain"]
+
+
+def test_invalid_params_turns_into_clarification(monkeypatch):
+    model = _Model([AIMessage(content="", tool_calls=[{"name": "needs_arg", "args": {}, "id": "x1"}]), AIMessage(content="请提供必要信息")])
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_chat_model", lambda **kwargs: asyncio.sleep(0, result=model))
+    async def capabilities(*_args, **_kwargs):
+        return [ToolCapability(name="needs_arg", description="arg", category="office", parameters={"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]})]
+    monkeypatch.setattr("app.agents.orchestration.react_runner.get_office_react_capabilities_with_trace", capabilities)
+    async def fake_tool(name, **kwargs):
+        class Tool:
+            async def ainvoke(self, args):
+                return ""
+        return Tool()
+    monkeypatch.setattr("app.agents.orchestration.react_runner.make_skill_tool", fake_tool)
+    result = asyncio.run(OfficeReactRunner(user_id="u1", job_id="j1").run("处理任务"))
+    assert result.success is True

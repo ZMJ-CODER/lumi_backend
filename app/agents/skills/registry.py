@@ -13,13 +13,15 @@ from app.agents.skills.base import Tool, WorkflowSkill
 class ToolRegistry:
     """原子工具注册表。
 
-    ``_tools`` 是模型可见的规范工具集合；旧领域工具和实现细节放入
-    ``_internal_tools``，仍可被已编译的 Workflow/Worker 使用，但不会进入
-    Function Calling 候选池。这样迁移期间不需要让旧工具继续污染模型命名空间。
+    ``_tools`` 是唯一的可执行工具集合。历史上的内部工具不再注册；组合
+    Skill 只能依赖公开基础工具或直接调用受控业务服务，避免隐藏工具继续
+    膨胀模型的能力空间。
     """
 
     _tools: dict[str, Tool] = {}
-    _internal_tools: dict[str, Tool] = {}
+    # Skill-only implementations are executable dependencies, not registered
+    # model capabilities. They are intentionally absent from list()/counts.
+    _skill_implementations: dict[str, Tool] = {}
     _sources: dict[str, str] = {}
 
     @classmethod
@@ -31,9 +33,13 @@ class ToolRegistry:
         errors = validate_tool_entry(_skill_capability(tool))
         if errors:
             raise ValueError(f"Tool {tool.name} 未通过 L0 准入: {'；'.join(errors)}")
-        target = cls._tools if public else cls._internal_tools
-        other = cls._internal_tools if public else cls._tools
-        other.pop(tool.name, None)
+        # 内部工具已经从运行时协议中移除。调用方应迁移到 base_tools.yaml
+        # 中的基础工具；这里保留 public 参数仅为插件加载 API 的平滑过渡。
+        if not public:
+            cls._skill_implementations[tool.name] = tool
+            logger.debug("记录 Skill 执行实现（不进入工具注册表）: {}", tool.name)
+            return
+        target = cls._tools
         if tool.name in target:
             logger.warning("工具 '{}' 已存在，将被覆盖（来源: {}）", tool.name, source)
         target[tool.name] = tool
@@ -41,12 +47,12 @@ class ToolRegistry:
 
     @classmethod
     def get(cls, name: str) -> Tool | None:
-        return cls._tools.get(name) or cls._internal_tools.get(name)
+        return cls._tools.get(name) or cls._skill_implementations.get(name)
 
     @classmethod
     def unregister(cls, name: str) -> Tool | None:
         cls._sources.pop(name, None)
-        return cls._tools.pop(name, None) or cls._internal_tools.pop(name, None)
+        return cls._tools.pop(name, None) or cls._skill_implementations.pop(name, None)
 
     @classmethod
     def get_source(cls, name: str) -> str:
@@ -54,20 +60,22 @@ class ToolRegistry:
 
     @classmethod
     def list(cls, *, include_internal: bool = False) -> list[Tool]:
-        """列出工具；默认只返回 18 个规范公共工具。"""
-        values = list(cls._tools.values())
-        if include_internal:
-            values.extend(cls._internal_tools.values())
-        return values
+        """列出唯一的规范基础工具集合。
+
+        ``include_internal`` 仅为旧调用方保留参数，不再改变结果；内部
+        工具已从注册协议中移除，避免以隐藏方式扩大模型能力空间。
+        """
+        return list(cls._tools.values())
 
     @classmethod
     def internal_list(cls) -> list[Tool]:
-        return list(cls._internal_tools.values())
+        # 兼容查询接口；Skill 执行实现不是可发现工具。
+        return []
 
     @classmethod
     def clear(cls) -> None:
         cls._tools.clear()
-        cls._internal_tools.clear()
+        cls._skill_implementations.clear()
         cls._sources.clear()
 
 

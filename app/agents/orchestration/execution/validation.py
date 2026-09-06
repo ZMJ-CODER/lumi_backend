@@ -24,10 +24,10 @@ _REQUIRED_PARAMS: dict[str, list[str]] = {
     "office_todo": ["action"],
     "retrieval": ["query"],
     "document_targeting": ["query", "office_docs"],
-    "web_research": ["instruction"],
     "code": ["project_id", "instruction"],
     "code_reader": ["project_id", "instruction"],
     "code_writer": ["project_id", "instruction"],
+    "decision_node": ["decision"],
 }
 
 

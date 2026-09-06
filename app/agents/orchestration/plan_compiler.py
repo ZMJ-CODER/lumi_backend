@@ -67,6 +67,7 @@ class CompiledPlan(BaseModel):
 _NODE_REQUIRED: dict[str, tuple[str, ...]] = {
     "direct_llm": ("instruction",),
     "collect_results": ("items",),
+    "decision_node": ("decision",),
     "atomic_step": ("instruction", "preferred_tool"),
     "react_step": ("instruction",),
     "office_doc": ("doc_id", "instruction", "mode"),
@@ -74,7 +75,6 @@ _NODE_REQUIRED: dict[str, tuple[str, ...]] = {
     "office_research": ("instruction", "mode"),
     "office_todo": ("action",),
     "retrieval": ("query",),
-    "web_research": ("instruction",),
     "code": ("project_id", "instruction"),
     "code_reader": ("project_id", "instruction"),
     "code_writer": ("project_id", "instruction"),
@@ -88,7 +88,6 @@ _NODE_COST = {
     "office_script": (4_000, 60_000),
     "office_document": (5_000, 60_000),
     "retrieval": (1_200, 5_000),
-    "web_research": (3_500, 20_000),
     "office_doc": (2_500, 20_000),
     "office_text": (2_500, 20_000),
     "office_research": (4_000, 30_000),
@@ -349,6 +348,7 @@ async def build_capability_snapshot(
                 "status": workflow.status,
                 "source": workflow.source,
                 "allowed_tools": list(workflow.allowed_tools),
+                "prompt_version": str(getattr(workflow, "prompt_version", "") or ""),
             }
     except Exception:
         workflows = {}
@@ -495,12 +495,32 @@ async def compile_plan(
                 violations.append(PlanViolation(
                     code="WORKFLOW_INPUTS_TYPE", message="工作流 inputs 必须是对象", node_id=node.id,
                 ))
-        if node.agent == "react_step":
+    if node.agent == "react_step":
             rounds = params.get("max_rounds", 6)
-            if not isinstance(rounds, int) or not 1 <= rounds <= 6:
+            # Rolling plans need enough turns to explore, act, repair and
+            # verify. The hard ceiling remains finite to prevent runaway
+            # loops; autonomous nodes may use up to 20 rounds.
+            if not isinstance(rounds, int) or not 1 <= rounds <= 20:
                 violations.append(PlanViolation(
-                    code="REACT_ROUNDS", message="react_step.max_rounds 必须在 1 到 6 之间", node_id=node.id,
+                    code="REACT_ROUNDS", message="react_step.max_rounds 必须在 1 到 20 之间", node_id=node.id,
                 ))
+    if node.agent == "decision_node":
+        decision = str(params.get("decision") or "").strip()
+        allowed = {"request_domain", "clarify", "continue", "finish"}
+        if decision not in allowed:
+            violations.append(PlanViolation(
+                code="DECISION_KIND", message="DecisionNode 只能使用 request_domain/clarify/continue/finish", node_id=node.id,
+            ))
+        if decision == "request_domain":
+            domain = str(params.get("domain") or "").strip().casefold()
+            if domain not in {"research", "document", "data", "development", "system", "desktop", "schedule", "communication", "writing"}:
+                violations.append(PlanViolation(
+                    code="DECISION_DOMAIN", message="DecisionNode 的 domain 未授权", node_id=node.id,
+                ))
+        if decision == "clarify" and not str(params.get("question") or "").strip():
+            violations.append(PlanViolation(
+                code="DECISION_QUESTION", message="clarify 决策必须提供 question", node_id=node.id,
+            ))
 
     # Optional fallback failures are warnings after normalization, not a reason
     # to reject an otherwise executable plan.

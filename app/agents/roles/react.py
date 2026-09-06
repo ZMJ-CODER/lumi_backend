@@ -83,6 +83,11 @@ class ReactStepAgent(WorkerAgent):
             on_progress=on_progress,
             user_request=ctx.user_request,
             approval_context_sha256=ctx.approval_context_sha256,
+            autonomous_mode=bool((node.metadata or {}).get("autonomous_mode")),
+            max_elapsed_seconds=float(node.params.get("max_elapsed_seconds") or 0) or None,
+            initial_domain=str(node.params.get("domain") or ""),
+            initial_mode=str(node.params.get("mode") or "read_only"),
+            domain_first=bool((node.metadata or {}).get("domain_stage")),
         ).run(instruction, office_docs=node.params.get("office_docs") or [])
         if not result.success:
             return {"success": False, "error": result.error or "ReAct 任务未完成",
@@ -97,4 +102,5 @@ class ReactStepAgent(WorkerAgent):
                 ],
                 "selection_traces": result.selection_traces,
             },
+                "execution_metrics": result.metrics,
                 "step_title": "动态分析与执行"}

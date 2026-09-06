@@ -399,7 +399,7 @@ class OfficeDispatch(StrEnum):
 _EXPLICIT_READ_ASSIST_RE = re.compile(
     r"(?iu)(?:现在几点|当前(?:日期|时间)|今天(?:几号|日期)|"
     r"(?:精确)?计算|算一下|帮我算|"
-    r"查资料|查信息|检索资料|检索信息|检索一下|查一下|搜索一下|了解一下|"
+    r"查资料|查信息|检索资料|检索信息|检索一下|查一下|搜索一下|了解一下|调研|研究一下|找资料|找来源|"
     r"联网(?:查|搜索)|(?:查|搜索|检索|了解).{0,32}(?:最新|实时|天气|新闻|汇率|行情|网页|网上|网络|公开资料|"
     r"知识库|(?:公司)?内部.{0,12}(?:制度|政策|资料)|公司.{0,12}(?:制度|政策|规定)|员工手册))"
 )
@@ -426,6 +426,25 @@ def classify_office_dispatch(request: str, office_docs: list[dict] | None = None
         or _SCHEDULE_OR_TODO_ACTION_RE.search(text)
     ):
         return OfficeDispatch.WORKFLOW
+    # 文本改写/润色/翻译是模型原生能力。只有绑定了上传文件、明确要求
+    # 产出文件或实际发送消息时才进入执行边界；“改得适合发给同事”
+    # 不能因为包含“发给”而创建工作流。
+    if re.search(r"(?iu)(?:改写|润色|改得|改成更|翻译|概括|总结).{0,40}", text) and not re.search(
+        r"(?iu)(?:保存|导出|生成文件|写入|发送|发出|发邮件|上传)", text
+    ):
+        return OfficeDispatch.DIRECT
+    # 使用统一意图解析补足自然口语：用户未说“搜索/联网”，但明确询问
+    # 最近、当前或公开来源时，仍应把受控公网工具交给模型；背景+目标的
+    # 开放式排查则进入滚动执行，而不是退化为普通直答。
+    try:
+        from app.agents.orchestration.routing_intent import infer_route_intent
+        route = infer_route_intent(text, office_docs or [])
+        if route.requires_dynamic:
+            return OfficeDispatch.WORKFLOW
+        if route.external_source_required or route.requires_network:
+            return OfficeDispatch.TOOL_ASSISTED
+    except Exception:  # noqa: BLE001
+        pass
     if _EXPLICIT_READ_ASSIST_RE.search(text):
         return OfficeDispatch.TOOL_ASSISTED
     return OfficeDispatch.DIRECT

@@ -19,12 +19,17 @@ class PlannedTask(BaseModel):
     agent: str
     params: dict[str, Any] = Field(default_factory=dict)
     depends_on: list[str] = Field(default_factory=list)
+    domain: str = ""
+    mode: str = ""
 
 
 class PlannerOutput(BaseModel):
     plan: str = ""
     tasks: list[PlannedTask] = Field(default_factory=list)
     clarification: str = ""
+    # New planner contract: optional strategic stages.  ``tasks`` remains
+    # accepted during migration so persisted/legacy plans keep working.
+    stages: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _message_text(reply: Any) -> str:

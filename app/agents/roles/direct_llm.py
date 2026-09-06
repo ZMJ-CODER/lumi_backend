@@ -73,4 +73,13 @@ class DirectLlmAgent(WorkerAgent):
                 "error_code": "ROUTE_UPGRADE_RAG",
                 "retryable": False,
             }
+        # Never stream an internal routing sentinel or provider control token
+        # to the client, even if a model wraps it in whitespace/markdown.
+        if "ROUTE_UPGRADE_RAG" in content:
+            return {
+                "success": False,
+                "error": "当前任务需要受控资料检索，正在切换检索通道",
+                "error_code": "ROUTE_UPGRADE_RAG",
+                "retryable": False,
+            }
         return {"success": True, "content": content, "output": content, "step_title": "生成内容"}

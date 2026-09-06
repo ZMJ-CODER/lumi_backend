@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
+import hashlib
+import json
+import time
 from typing import Any, Annotated, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from loguru import logger
 
-from app.agents.langchain.models import get_chat_model
+from app.agents.langchain.models import get_chat_model, cached_tool_support, remember_tool_support
 from app.agents.langchain.tools import make_skill_tool
 from app.agents.skills.base import SkillResult
 from app.agents.skills.prompting import build_tool_selection_contract
@@ -20,6 +25,7 @@ from app.agents.skills.executor import (
 )
 from app.agents.skills.discovery import ToolDiscoverySession, search_tools
 from app.core.agent_security import redact_server_text, wrap_untrusted_tool_output
+from app.core.model_response import normalize_tool_response
 from app.services.tool_output_pipeline import clean_assistant_text
 
 
@@ -27,6 +33,7 @@ class ReactState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     rounds: int
     allowed_tools: list[str]
+    force_clarification: bool
 
 
 @dataclass
@@ -38,6 +45,7 @@ class ReactRunResult:
     records: list[dict] = field(default_factory=list)
     citations: list[dict] = field(default_factory=list)
     selection_traces: list[dict] = field(default_factory=list)
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 class OfficeReactRunner:
@@ -48,7 +56,12 @@ class OfficeReactRunner:
                  base_url: str | None = None, llm_config: dict[str, Any] | None = None,
                  max_rounds: int = 6,
                  on_progress=None, user_request: str = "",
-                 approval_context_sha256: str = "") -> None:
+                 approval_context_sha256: str = "",
+                 autonomous_mode: bool = False,
+                 max_elapsed_seconds: float | None = None,
+                 initial_domain: str = "",
+                 initial_mode: str = "read_only",
+                 domain_first: bool = False) -> None:
         self.user_id = user_id
         self.job_id = job_id
         self.user_role = user_role
@@ -56,10 +69,14 @@ class OfficeReactRunner:
         self.model_name = model
         self.base_url = base_url
         self.llm_config = llm_config
-        self.max_rounds = max(1, int(max_rounds))
+        # Keep a finite safety ceiling while allowing autonomous rolling
+        # tasks to perform explore -> act -> verify -> repair cycles.
+        self.max_rounds = min(20, max(1, int(max_rounds)))
         self.on_progress = on_progress
         self.user_request = str(user_request or "")
         self.approval_context_sha256 = str(approval_context_sha256 or "")
+        self.autonomous_mode = bool(autonomous_mode)
+        self.max_elapsed_seconds = float(max_elapsed_seconds or (900 if self.autonomous_mode else 600))
         self.records: list[dict] = []
         self.citations: list[dict] = []
         self._results: list[SkillResult] = []
@@ -67,6 +84,49 @@ class OfficeReactRunner:
         self.toolsets: list[list[str]] = []
         self.selection_traces: list[dict] = []
         self.discovery_session = ToolDiscoverySession()
+        self._call_attempts: dict[str, int] = {}
+        self._successful_reads: set[str] = set()
+        # Domains requested by the model during this rolling run.  A request
+        # is only an intent signal; the actual capabilities are still
+        # intersected with scene/role/user/Skill policy before injection.
+        self._requested_domains: set[str] = set()
+        self._active_domain: str | None = None
+        self._domain_history: list[str] = []
+        self.max_domain_transitions = 4
+        self._domain_mode = str(initial_mode or "read_only").casefold()
+        self.domain_first = bool(domain_first)
+        if initial_domain:
+            aliases = {"network": "research", "web": "research", "file": "document", "files": "document", "code": "development"}
+            normalized = aliases.get(str(initial_domain).strip().casefold(), str(initial_domain).strip().casefold())
+            self._requested_domains.add(normalized)
+            self._active_domain = normalized
+            self._domain_history.append(normalized)
+
+    @staticmethod
+    def _call_key(name: str, args: dict) -> str:
+        raw = json.dumps({"name": name, "args": args if isinstance(args, dict) else {}}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _is_read_tool(name: str) -> bool:
+        return str(name or "").casefold() in {"read", "glob", "grep", "filestat", "openfile", "read_document", "office_doc_read", "get_project_context", "inspect_document_set"}
+
+    @staticmethod
+    def _requires_prior_read(name: str) -> bool:
+        # Write may legitimately create a new file; in-place mutation and
+        # destructive operations must be preceded by a read of the same
+        # target. The client/server tool still performs its own path check.
+        return str(name or "").casefold() in {"edit", "delete", "rename", "office_doc_edit"}
+
+    @staticmethod
+    def _target_key(name: str, args: dict) -> str:
+        value = (args or {}).get("file_path") or (args or {}).get("path") or (args or {}).get("doc_id") or (args or {}).get("target_file")
+        return f"{name.casefold()}:{str(value or '').replace(chr(92), '/')}"
+
+    @staticmethod
+    def _read_target_key(args: dict) -> str:
+        value = (args or {}).get("file_path") or (args or {}).get("path") or (args or {}).get("doc_id") or (args or {}).get("target_file")
+        return str(value or "").replace("\\", "/").strip().casefold()
 
     def _emit(self, value: str | dict) -> None:
         if self.on_progress:
@@ -82,6 +142,51 @@ class OfficeReactRunner:
         self.discovery_session.add(found)
         return "已发现工具：" + ", ".join(item.name for item in found) if found else "未发现匹配工具"
 
+    async def _request_domain(self, domain: str, reason: str = "", mode: str = "read_only") -> str:
+        """Authorize a model-requested domain without executing a tool.
+
+        Domain names are normalized here, while authorization is performed by
+        loading the already-filtered scene capabilities.  The model can ask
+        for a domain, but cannot grant itself a tool or a write permission.
+        """
+        aliases = {
+            "network": "research", "web": "research", "联网": "research", "网络": "research",
+            "knowledge": "research", "知识": "research", "research": "research",
+            "file": "document", "files": "document", "文档": "document", "文件": "document",
+            "document": "document", "data": "data", "数据": "data",
+            "code": "development", "development": "development", "代码": "development",
+            "system": "system", "命令": "system", "desktop": "desktop", "桌面": "desktop",
+            "schedule": "schedule", "日程": "schedule", "communication": "communication",
+            "writing": "writing", "输出": "writing",
+        }
+        normalized = aliases.get(str(domain or "").strip().casefold(), str(domain or "").strip().casefold())
+        if normalized not in {"research", "document", "data", "development", "system", "desktop", "schedule", "communication", "writing"}:
+            return f"无法识别领域：{normalized or '（空）'}。请从 network/document/data/development/system 等领域中选择。"
+        from app.agents.skills.executor import get_capabilities_for_scene
+
+        legal = await get_capabilities_for_scene("office", self.user_role, self.user_id)
+        authorized = [item for item in legal if str(item.domain or item.category or "").casefold() == normalized]
+        # A read-only domain request must not widen into write capabilities.
+        # Write tools are injected only when the stage explicitly asks for
+        # write mode; normal approval/effect-journal gates still apply then.
+        if str(mode or "read_only").casefold() != "write":
+            authorized = [item for item in authorized if not item.write_op and not item.requires_confirmation]
+        if normalized not in self._requested_domains and len(self._domain_history) >= self.max_domain_transitions:
+            return "本任务已达到领域切换上限。请基于当前已授权领域完成任务，或先向用户说明需要继续扩展范围。"
+        self._requested_domains.add(normalized)
+        if normalized != self._active_domain:
+            self._domain_history.append(normalized)
+        self._active_domain = normalized
+        self._domain_mode = str(mode or self._domain_mode or "read_only").casefold()
+        self._emit({"type": "domain", "domain": normalized, "mode": self._domain_mode, "reason": str(reason or "")[:240]})
+        self.discovery_session.discovered_domains.add(normalized)
+        self.discovery_session.add(authorized)
+        await self.discovery_session.save(self.user_id, self.job_id)
+        names = ", ".join(item.name for item in authorized[:12])
+        if not authorized:
+            return f"未授权或不存在该领域：{normalized}。请改申请其他领域或向用户澄清。"
+        return f"已授权进入 {normalized} 域（模式：{mode or 'read_only'}），下一轮可用工具：{names}。原因已记录。"
+
     async def _on_result(self, result: SkillResult) -> None:
         self._results.append(result)
         citations = result.metadata.get("citations") if isinstance(result.metadata, dict) else None
@@ -96,27 +201,51 @@ class OfficeReactRunner:
                 model=self.model_name, base_url=self.base_url,
                 llm_config=self.llm_config,
             )
+            cache_model = self.model_name or getattr(model, "model_name", None) or getattr(model, "model", None)
+            cache_base = self.base_url or getattr(model, "openai_api_base", None) or getattr(model, "base_url", None)
+            native_tools_supported = cached_tool_support(cache_model, cache_base) is not False
             async def agent(state: ReactState) -> dict:
+                nonlocal native_tools_supported
+                if state.get("force_clarification"):
+                    clarification_prompt = SystemMessage(content=(
+                        "上一步工具调用缺少用户必须提供的信息。现在不要再调用业务工具、不要猜测或补全参数，"
+                        "只向用户提出一个简洁明确的问题，询问缺失信息；不要输出内部错误码或 JSON Schema。"
+                    ))
+                    reply = await model.ainvoke([clarification_prompt, *state.get("messages", [])])
+                    return {"messages": [AIMessage(content=clean_assistant_text(str(reply.content or "")))]}
                 # 每一轮重新按当前任务和已失败工具收窄函数定义。模型只能看见
                 # 本轮候选工具，不能依赖第一轮的宽工具包持续试错。
                 recent = state.get("messages") or []
                 observation = ""
                 for message in reversed(recent):
                     if isinstance(message, ToolMessage):
-                        observation = str(message.content or "")[:1200]
+                        # Feed the bounded, sanitized observation back into the
+                        # next decision.  Truncating to a few hundred chars
+                        # made compiler errors and missing-dependency hints
+                        # disappear, causing the agent to repeat the same
+                        # action instead of repairing it.
+                        observation = str(message.content or "")[:4000]
                         break
                 previous_tool = self.records[-1]["skill"] if self.records else ""
                 route_text = instruction + (
                     f"\n已执行工具：{previous_tool}\n最新观察：{observation}"
                     if previous_tool or observation else ""
                 )
-                selection = await get_office_react_capabilities_with_trace(
-                    route_text,
-                    self.user_role,
-                    limit=8,
-                    excluded_names=self._failed_tools,
-                    user_id=self.user_id,
-                )
+                if self.domain_first and not self._requested_domains:
+                    from app.agents.skills.executor import CapabilitySelection
+
+                    selection = CapabilitySelection(
+                        capabilities=[], candidates=[], scene="office",
+                        reason="awaiting_domain_request", routing_mode="domain_first",
+                    )
+                else:
+                    selection = await get_office_react_capabilities_with_trace(
+                        route_text,
+                        self.user_role,
+                        limit=8,
+                        excluded_names=self._failed_tools,
+                        user_id=self.user_id,
+                    )
                 # Keep the runner friendly to older in-process extensions
                 # which implemented the pre-trace list-only selector.
                 if isinstance(selection, list):
@@ -139,15 +268,70 @@ class OfficeReactRunner:
                         job_id=self.job_id,
                         selection_round=int(state.get("rounds") or 0) + 1,
                     ))
-                    return {
-                        "messages": [AIMessage(content="当前有多个候选工具无法区分，请明确要使用哪类能力后再继续。")],
-                        "allowed_tools": [],
-                    }
+                    # 只读候选冲突交给模型在候选契约内裁决，禁止把内部
+                    # margin 信号直接转换成面向用户的失败消息。
                 capabilities = selection.capabilities
+                # Once the model has explicitly requested a domain, constrain
+                # the next tool window to that domain.  This replaces the old
+                # flat semantic shortlist while retaining a compatibility
+                # fallback for runs that have not requested a domain yet.
+                if self._requested_domains:
+                    from app.agents.skills.executor import get_capabilities_for_scene
+
+                    legal_domain = [
+                        item for item in await get_capabilities_for_scene("office", self.user_role, self.user_id)
+                        if str(item.domain or item.category or "").casefold() == self._active_domain
+                    ]
+                    domain_capabilities = [
+                        item for item in capabilities
+                        if str(item.domain or item.category or "").casefold() == self._active_domain
+                    ]
+                    loaded_domain = [
+                        item for item in self.discovery_session.loaded_tools.values()
+                        if str(item.domain or item.category or "").casefold() == self._active_domain
+                    ]
+                    if domain_capabilities or loaded_domain or legal_domain:
+                        by_name = {item.name: item for item in [*loaded_domain, *legal_domain, *domain_capabilities]}
+                        if self._domain_mode != "write":
+                            by_name = {
+                                name: item for name, item in by_name.items()
+                                if not item.write_op and not item.requires_confirmation
+                            }
+                        capabilities = list(by_name.values())[:8]
+                if self.autonomous_mode and not (self.domain_first and not self._requested_domains):
+                    # Exploration tasks need a small stable bootstrap set. A
+                    # pure lexical top-k can otherwise omit Read/Bash because
+                    # the initial goal contains no file or command noun yet.
+                    from app.agents.skills.executor import get_tool_capability
+
+                    bootstrap_names = ("Read", "Glob", "Grep", "run_in_sandbox", "run_static_check")
+                    # Put exploration primitives first. The previous append
+                    # approach was ineffective when lexical recall had
+                    # already filled all eight available slots.
+                    bootstrap: list[Any] = []
+                    existing = {item.name for item in capabilities}
+                    for tool_name in bootstrap_names:
+                        candidate = next((item for item in capabilities if item.name == tool_name), None)
+                        if candidate is None:
+                            candidate = await get_tool_capability(tool_name, "office", self.user_role, self.user_id)
+                        if candidate is not None:
+                            bootstrap.append(candidate)
+                    bootstrap_names_found = {item.name for item in bootstrap}
+                    capabilities = [*bootstrap, *(item for item in capabilities if item.name not in bootstrap_names_found)][:8]
                 # L2 会话缓存：已发现工具在后续轮次保持可见，避免重复检索。
                 discovered = list(self.discovery_session.loaded_tools.values())
+                if self._active_domain:
+                    discovered = [
+                        item for item in discovered
+                        if str(item.domain or item.category or "").casefold() == self._active_domain
+                    ]
                 if discovered:
                     by_name = {item.name: item for item in [*discovered, *capabilities]}
+                    if self._domain_mode != "write":
+                        by_name = {
+                            name: item for name, item in by_name.items()
+                            if not item.write_op and not item.requires_confirmation
+                        }
                     capabilities = list(by_name.values())[:8]
                 if len(internal_docs) >= 2:
                     # Discovery is an operational prerequisite, not merely a
@@ -195,6 +379,28 @@ class OfficeReactRunner:
                     name="search_tools",
                     description="按任务描述发现当前已授权工具",
                 )))
+                tool_pairs.append(("discover_domain", StructuredTool.from_function(
+                    coroutine=self._request_domain,
+                    name="discover_domain",
+                    description=(
+                        "声明下一步需要进入的业务领域；只申请工具边界，不执行实际操作。"
+                        "可选领域：network、document、data、development、system、desktop、schedule、communication、writing。"
+                    ),
+                )))
+                # Registry extensions and deferred discovery can return the
+                # same capability more than once. LangChain/OpenAI rejects
+                # duplicate tool names at bind time, so deduplicate at the
+                # final boundary while preserving the first (highest-ranked)
+                # definition.
+                unique_pairs = []
+                seen_names: set[str] = set()
+                for tool_name, tool in tool_pairs:
+                    normalized_name = str(tool_name or "").strip()
+                    if not normalized_name or normalized_name in seen_names:
+                        continue
+                    seen_names.add(normalized_name)
+                    unique_pairs.append((normalized_name, tool))
+                tool_pairs = unique_pairs
                 if not tool_pairs:
                     return {"messages": [AIMessage(content="当前步骤没有可用工具，无法继续执行。")], "allowed_tools": []}
                 allowed = [name for name, _ in tool_pairs]
@@ -203,10 +409,51 @@ class OfficeReactRunner:
                 # The selection policy is generated from the same registry
                 # fields that shaped the candidate pool; it cannot drift from
                 # a separately hand-maintained prompt table.
-                reply = await model.bind_tools(tools).ainvoke([
+                prompt_messages = [
                     SystemMessage(content=build_tool_selection_contract(capabilities)),
                     *state["messages"],
-                ])
+                ]
+                if native_tools_supported:
+                    try:
+                        reply = await model.bind_tools(tools).ainvoke(prompt_messages)
+                        remember_tool_support(cache_model, cache_base, True)
+                    except Exception as exc:
+                        text = str(exc).casefold()
+                        if "does not support tools" not in text and "tool calling" not in text and "bind_tools" not in text:
+                            raise
+                        native_tools_supported = False
+                        remember_tool_support(cache_model, cache_base, False)
+                        logger.warning("办公模型不支持原生工具调用，切换文本决策适配: {}", str(exc)[:160])
+                if not native_tools_supported:
+                    fallback_prompt = SystemMessage(content=(
+                        "你当前不能使用原生工具协议。请只输出一个 JSON 对象："
+                        '{"name":"工具名","arguments":{}} 表示调用一个工具；或 '
+                        '{"answer":"最终回答"} 表示无需工具直接回答。不要输出 Markdown、解释或其他文本。'
+                    ))
+                    reply = await model.ainvoke([fallback_prompt, *state["messages"]])
+                clean_content, normalized_calls, _warnings = normalize_tool_response(
+                    reply.content, getattr(reply, "tool_calls", None)
+                )
+                if not normalized_calls and isinstance(reply.content, str):
+                    try:
+                        payload = json.loads(reply.content.strip())
+                        if isinstance(payload, dict) and payload.get("answer") is not None:
+                            clean_content = str(payload.get("answer") or "")
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
+                if normalized_calls:
+                    reply.content = clean_content
+                    reply.tool_calls = [
+                        {
+                            "name": str(call.get("function", {}).get("name") or ""),
+                            "args": call.get("function", {}).get("arguments") or {},
+                            "id": str(call.get("id") or ""),
+                            "type": "tool_call",
+                        }
+                        for call in normalized_calls
+                    ]
+                else:
+                    reply.content = clean_content
                 if reply.tool_calls:
                     # Keep provider-specific fields such as DeepSeek/Qwen
                     # ``reasoning_content``.  Some thinking-mode OpenAI
@@ -237,7 +484,7 @@ class OfficeReactRunner:
                     return {"rounds": int(state.get("rounds") or 0) + 1}
                 result = self._results.pop(0) if self._results else None
                 name = str(message.name or "执行工具")
-                if name == "search_tools" and result is None:
+                if name in {"search_tools", "discover_domain"} and result is None:
                     result = SkillResult(success=True, output="工具发现完成")
                 record = {"skill": name, "success": bool(result and result.success),
                           "error_code": result.error_code if result else "INVALID_ARGS",
@@ -260,13 +507,22 @@ class OfficeReactRunner:
                             "tool": name,
                             "output": result.output[:1000] if result and result.success else "",
                             "error": None if record["success"] else record["error"]})
-                return {"rounds": int(state.get("rounds") or 0) + 1}
+                needs_clarification = bool(
+                    result and result.error_code == "INVALID_PARAMS"
+                    and isinstance(result.metadata, dict)
+                    and result.metadata.get("user_action_required")
+                )
+                return {
+                    "rounds": int(state.get("rounds") or 0) + 1,
+                    "force_clarification": needs_clarification,
+                }
 
             async def execute_tool(state: ReactState) -> dict:
                 """执行本轮白名单工具；每轮动态工具集不能复用静态 ToolNode。"""
                 message = state["messages"][-1]
                 call = message.tool_calls[0]
                 name = str(call.get("name") or "")
+                args = call.get("args") or {}
                 call_id = str(call.get("id") or f"react-{len(self.records) + 1}")
                 if name not in set(state.get("allowed_tools") or []):
                     return {"messages": [ToolMessage(
@@ -279,6 +535,25 @@ class OfficeReactRunner:
                     output = await self._search_tools(str((call.get("args") or {}).get("query") or ""))
                     await self.discovery_session.save(self.user_id, self.job_id)
                     return {"messages": [ToolMessage(content=wrap_untrusted_tool_output(output), tool_call_id=call_id, name=name)]}
+                if name == "discover_domain":
+                    raw_args = call.get("args") or {}
+                    output = await self._request_domain(
+                        str(raw_args.get("domain") or ""),
+                        str(raw_args.get("reason") or ""),
+                        str(raw_args.get("mode") or "read_only"),
+                    )
+                    return {"messages": [ToolMessage(content=wrap_untrusted_tool_output(output), tool_call_id=call_id, name=name)]}
+                key = self._call_key(name, args)
+                attempts = self._call_attempts.get(key, 0)
+                if attempts >= 2:
+                    return {"messages": [ToolMessage(content="相同工具和参数已连续失败两次，已停止重复调用；请先读取更多信息或更换方法。", tool_call_id=call_id, name=name, status="error")]}
+                target_key = self._read_target_key(args)
+                if self._requires_prior_read(name) and (
+                    not self._successful_reads
+                    or (target_key and target_key not in self._successful_reads)
+                ):
+                    return {"messages": [ToolMessage(content="安全护栏：修改或删除文件前必须先读取目标内容；请先调用 Read/office_doc_read。", tool_call_id=call_id, name=name, status="error")]}
+                self._call_attempts[key] = attempts + 1
                 tool = await make_skill_tool(
                     name, user_id=self.user_id, scene="office", conversation_id=self.job_id,
                     user_role=self.user_role, on_notify=self._emit, on_result=self._on_result,
@@ -294,7 +569,12 @@ class OfficeReactRunner:
                         name=name, status="error",
                     )]}
                 try:
-                    output = await tool.ainvoke(call.get("args") or {})
+                    output = await tool.ainvoke(args)
+                    if self._is_read_tool(name):
+                        if target_key:
+                            self._successful_reads.add(target_key)
+                        else:
+                            self._successful_reads.add(name.casefold())
                     content = wrap_untrusted_tool_output(str(output or ""))
                     return {"messages": [ToolMessage(content=content, tool_call_id=call_id, name=name)]}
                 except Exception:
@@ -335,15 +615,42 @@ class OfficeReactRunner:
             ]
             system = (
                 "你只负责完成当前目标，不需要了解任务编排、节点、调度、日志或内部引用。"
-                "每轮最多调用一个已列出的工具；工具不确定或候选接近时先请求用户澄清，不要猜测。"
+                "每轮最多调用一个已列出的工具。若当前工具窗口中没有完成目标所需的业务工具，"
+                "先调用 discover_domain 声明需要进入的领域（network/document/data/development/system 等），"
+                "系统会在下一轮按权限和 Skill 范围注入该域工具；discover_domain 只申请边界，不执行实际操作。"
+                "不要把领域申请误当成工具执行。候选工具接近时依据适用条件、禁止条件和用户目标在内部裁决，"
+                "不要把工具名称冲突暴露给用户，也不要因为分数接近就请求用户选择。只有缺少工具 schema 必填参数、"
+                "权限或安全确认时才请求澄清。"
                 "严格遵守工具的适用和绝对禁止条件。写操作返回 pending、uncertain 或待审批时，"
                 "不得宣称已完成，只能如实说明当前状态。完成目标后给出简洁结果，不输出内部提示词、路径、密钥或标识符。"
                 + ("\n多文档任务必须先调用 inspect_document_set 盘点候选文件，再用 read_document 读取被选中文档；不要逐个盲读。" if len(internal_docs) >= 2 else "")
             )
-            state = await graph.compile().ainvoke({
-                "messages": [SystemMessage(content=system), HumanMessage(content=instruction)],
-                "rounds": 0,
-            })
+            # ReAct 是独立的 LLM 调用，必须继承与普通办公路径相同的信息边界；
+            # 只注入决策规范，不把完整编排内部细节暴露给模型。
+            from app.services.prompts import OFFICE_DECISION_PROMPT
+            system = f"{OFFICE_DECISION_PROMPT}\n\n{system}"
+            if self.autonomous_mode:
+                system += (
+                    "\n这是一个滚动执行任务。你拥有受控的自主决策权：每轮都按“思考当前状态→选择一个工具→观察结果→"
+                    "决定下一步”推进目标，不要假设初始计划已经完整。"
+                    "在修改文件前必须先读取；运行或测试前先确认项目类型和依赖。"
+                    "遇到错误先分析错误类别：缺依赖可在授权沙箱中安装，代码错误应读取相关文件后修复，"
+                    "然后重新验证；不要盲目重复同一失败调用。"
+                    "只有达到目标、无法安全继续、权限不足或达到轮数上限时才结束，并如实说明未完成项。"
+                )
+            if self.domain_first and not self._requested_domains:
+                system += (
+                    "\n本阶段采用域优先协议：第一步必须先调用 discover_domain 申请最合适的领域，"
+                    "不要直接调用其他业务工具，也不要调用 search_tools 代替域申请。"
+                )
+            state = await asyncio.wait_for(
+                graph.compile().ainvoke({
+                    "messages": [SystemMessage(content=system), HumanMessage(content=instruction)],
+                    "rounds": 0,
+                    "force_clarification": False,
+                }),
+                timeout=max(1.0, self.max_elapsed_seconds),
+            )
             final = ""
             for message in reversed(state.get("messages") or []):
                 if isinstance(message, AIMessage) and not message.tool_calls:
@@ -360,6 +667,24 @@ class OfficeReactRunner:
             return ReactRunResult(
                 bool(final or self.records), clean_assistant_text(redact_server_text(final)), records=self.records,
                 citations=self.citations, selection_traces=self.selection_traces,
+                metrics={
+                    "rounds": len(self.records),
+                    "tool_failures": sum(1 for item in self.records if not item.get("success")),
+                    "candidate_windows": len(self.toolsets),
+                    "autonomous_mode": self.autonomous_mode,
+                    "active_domain": self._active_domain,
+                    "domain_history": list(self._domain_history),
+                },
+            )
+        except asyncio.TimeoutError:
+            return ReactRunResult(
+                False,
+                error="自主执行超过时间预算，已安全停止；可缩小任务范围后继续。",
+                error_code="REACT_TIME_BUDGET_EXCEEDED",
+                records=self.records,
+                citations=self.citations,
+                selection_traces=self.selection_traces,
+                metrics={"rounds": len(self.records), "autonomous_mode": self.autonomous_mode, "timed_out": True},
             )
         except Exception as exc:  # noqa: BLE001
             try:

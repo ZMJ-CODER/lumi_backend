@@ -77,6 +77,11 @@ _EXPLICIT_OUTPUT_RE = re.compile(
 _OPEN_ENDED_RE = re.compile(
     r"(?iu)(?:分析原因|找出原因|诊断|给出建议|提出方案|深入研究|全面分析|自行决定|评估风险|为什么)"
 )
+# 这些动词表示用户只给出了目标，隐含的探索、执行和验证步骤需要由
+# Agent 根据现场结果滚动决定，而不是要求 Planner 预先枚举完整 DAG。
+_EXPLORATORY_RE = re.compile(
+    r"(?iu)(?:实现|开发|编写|写代码|修改代码|修复|排查|调试|定位问题|解决故障|完善|接入|集成|配置|迁移|重构|确保(?:能|可以)?(?:运行|通过)|跑通|验证)"
+)
 _HISTORY_RE = re.compile(r"(?iu)(?:上次|刚才|之前|继续|照旧|同样格式|按那个|再来一次)")
 _DEPENDENCY_RE = re.compile(
     r"(?iu)(?:然后|之后|再|最后|基于|根据.*结果|先.+再|第一步|第二步|第\s*\d+\s*步)"
@@ -86,6 +91,11 @@ _VAGUE_RE = re.compile(r"(?iu)(?:处理一下|弄一下|看一下|搞一下|优�
 _DATETIME_RE = re.compile(
     r"(?iu)(?:当前日期|当前时间|现在几点|现在时间|今天几号|今天日期|今天是几月几日)"
 )
+
+
+def is_exploratory_request(request: str) -> bool:
+    """Whether the goal implies observe/act/verify steps chosen at runtime."""
+    return bool(_EXPLORATORY_RE.search(str(request or "")))
 
 
 def _clamp(value: float) -> float:
@@ -157,6 +167,7 @@ class TaskComplexityAssessor:
 
         direct_conversion = resolve_direct_text_conversion(text, office_docs)
         intent = classify(text, office_docs)
+        exploratory = is_exploratory_request(text)
         if direct_conversion:
             level = ComplexityLevel.M0
             confidence = 0.99
@@ -165,7 +176,7 @@ class TaskComplexityAssessor:
             level = ComplexityLevel.M0
             confidence = 0.98
             reasons.append("确定性的系统信息查询")
-        elif intent.get("task_type") == "template" and dependency < 0.8:
+        elif intent.get("task_type") == "template" and dependency < 0.8 and not exploratory:
             level = ComplexityLevel.M1
             confidence = 0.9
             reasons.append("命中可复用规则流程")
@@ -187,7 +198,11 @@ class TaskComplexityAssessor:
                 dependency >= thresholds.explicit_workflow_dependency
                 and (has_output or has_named_file or entities >= 1)
             )
-            if _OPEN_ENDED_RE.search(text) or (
+            if exploratory:
+                level = ComplexityLevel.M3
+                confidence = 0.88
+                reasons.append("目标包含探索/执行/验证隐含步骤，启用滚动计划")
+            elif _OPEN_ENDED_RE.search(text) or (
                 ambiguity >= thresholds.m3_ambiguity and dependency >= 0.4 and not explicit_workflow
             ):
                 level = ComplexityLevel.M3

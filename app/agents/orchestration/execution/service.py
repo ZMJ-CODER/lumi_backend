@@ -117,8 +117,16 @@ class ApplicationTaskExecutionService:
         return False
 
     async def _apply_job_outcome(self, job: Job, outcome: JobExecutionResult) -> None:
+        # A clarification DecisionNode intentionally marks the execution as
+        # completed while carrying a user-facing question.  Preserve that
+        # envelope instead of replacing it with the runtime aggregate.
+        existing_result = job.result if isinstance(job.result, dict) else None
+        preserve_clarification = bool(
+            existing_result and existing_result.get("type") == "clarification"
+        )
         job.status = JobStatus(outcome.status)
-        job.result = outcome.result
+        if not preserve_clarification:
+            job.result = outcome.result
         job.error = outcome.error
         job.updated_at = time.time()
         await self._store.save_job(job)

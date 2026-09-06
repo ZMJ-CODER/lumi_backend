@@ -59,6 +59,10 @@ class RouteIntent:
     requires_dynamic: bool = False
     # L3 模型自报值仅作观测提示，不参与确定性置信度计算。
     classifier_confidence_hint: float = 0.0
+    research_intent: bool = False
+    freshness_required: bool = False
+    external_source_required: bool = False
+    private_source_required: bool = False
 
 
 _ROUTE_ACTIONS = {
@@ -105,13 +109,16 @@ _FEEDBACK_MARKERS = _INTENT_MARKERS.get("feedback", ())
 _IMPLICIT_HISTORY_MARKERS = _INTENT_MARKERS.get("implicit_history", ())
 _DYNAMIC_MARKERS = _INTENT_MARKERS.get("dynamic", ())
 _CONDITIONAL_MARKERS = _INTENT_MARKERS.get("conditional", ())
+_GOAL_STRUCTURE_MARKERS = _INTENT_MARKERS.get("goal_structure", ())
+_PUBLIC_TOPIC_MARKERS = _INTENT_MARKERS.get("public_topics", ())
 _NEGATION_MARKERS = _INTENT_MARKERS.get("negation", ())
 
 # 公开检索的泛化表达不能覆盖企业私有来源；命中这些词时优先进入
 # knowledge/RAG 路径，避免“查一下公司制度”被误发到公网。
 _PRIVATE_SOURCE_MARKERS = (
-    "知识库", "资料库", "内部", "公司制度", "公司政策", "员工手册",
-    "上传的", "上传内容", "附件", "文档中", "文件中", "根据我的资料",
+    "内部", "公司制度", "公司政策", "员工手册", "上传的", "上传内容",
+    "附件", "文档中", "文件中", "根据我的资料", "根据文档", "根据文件",
+    "我的知识库", "公司知识库", "内部知识库", "我的资料库", "公司资料库",
 )
 
 
@@ -181,7 +188,13 @@ def _matches_action(text: str, action: str, markers: tuple[str, ...]) -> bool:
         if action == "execute" and marker == "执行":
             # These are evaluation dimensions, not instructions to run a
             # program. Other explicit execute phrases remain fast-path hits.
-            if any(phrase in text for phrase in ("执行难度", "执行成本", "执行力", "执行方案")):
+            if any(phrase in text for phrase in ("执行难度", "执行成本", "执行力", "执行方案", "执行顺序", "执行结果", "执行情况", "执行过程", "执行逻辑", "执行安排", "执行计划", "执行排期")):
+                continue
+            # 描述系统现象时，“重复/自动/会/被执行”不是用户要求执行命令。
+            # 仅当“执行”处于祈使或明确运行目标中才授予 system_command 风险。
+            if re.search(r"(?iu)(?:重复|自动|会|可能|被|正在|已经).{0,4}执行", text) or re.search(
+                r"(?iu)执行(?:的|安排|计划|排期|起来|性)", text
+            ):
                 continue
         return True
     return False
@@ -278,28 +291,69 @@ def infer_route_intent(
     # 只有出现收件人/邮件/通知等消息对象，或明确的发送动词，才保留外部发送风险。
     if "send" in actions and "message" not in objects and not re.search(r"(?iu)(发送|发给|发出|邮件|通知)", text):
         actions = [item for item in actions if item != "send"]
+    # “适合发给同事/方便发给客户”描述的是文本用途，不是实际发送请求。
+    if "send" in actions and re.search(r"(?iu)(?:适合|方便|用于|准备).{0,6}发给", text):
+        actions = [item for item in actions if item != "send"]
     if _matches(text, _FEEDBACK_MARKERS) and "task_result" not in objects:
         objects.append("task_result")
 
     has_question_shape = bool(re.search(r"[?？]|吗[？?]?$|什么|多少|为何|为什么|如何|怎样|怎么|是否", text))
+    # Subjective/advice phrasing is conversational by default.  Words such as
+    # “怎么看/你觉得” must not force knowledge retrieval unless the request
+    # also names a document, source, or explicit lookup operation.
+    subjective_only = bool(re.search(r"(?iu)(?:你怎么看|你觉得|怎么看待|聊聊|说说|谈谈)", text)) and not bool(
+        re.search(r"(?iu)(?:查|检索|搜索|查询|文档|文件|资料|知识库|来源|网页)", text)
+    )
+    if subjective_only:
+        actions = [action for action in actions if action not in {"query", "read"}]
+        if "converse" not in actions:
+            actions.append("converse")
     if has_question_shape and "query" not in actions:
         actions.append("query")
     if "lookup_history" in actions and "task_history" not in objects:
         objects.append("task_history")
 
+    research_intent = bool(_matches(text, _NETWORK_MARKERS) or _matches(text, _NETWORK_CONTEXT_MARKERS))
+    freshness_required = bool(_matches(text, ("最新", "最近", "近期", "实时", "当前", "本周", "今年")))
+    # 天气/气温本身就是时效性事实。自然口语通常只说“今天上海天气”
+    # 或“明天会下雨”，不会额外写“实时查询”；这类请求必须进入公网
+    # 能力域，不能退回 direct_llm 让模型声称“需要查询”。
+    if re.search(r"(?iu)(?:天气|气温|温度|降雨|下雨|下雪).{0,10}(?:今天|现在|当前|明天|后天|本周)", text) or re.search(
+        r"(?iu)(?:今天|现在|当前|明天|后天|本周).{0,10}(?:天气|气温|温度|降雨|下雨|下雪)", text
+    ):
+        freshness_required = True
+    # 口语化的“最近汇率大概什么水平/当前价格如何”可能没有“查询/搜索”
+    # 动词，但明确要求时效性公开事实，仍应进入受控联网路径。
+    if freshness_required and _matches(text, _PUBLIC_TOPIC_MARKERS) and "query" not in actions:
+        actions.append("query")
+    private_source_required = _matches(text, _PRIVATE_SOURCE_MARKERS)
+    external_source_required = bool(
+        (research_intent or (freshness_required and _matches(text, _PUBLIC_TOPIC_MARKERS)))
+        and not private_source_required
+    )
     requires_network = bool(
         any(action in actions for action in ("query", "read"))
-        and (_matches(text, _NETWORK_MARKERS) or _matches(text, _NETWORK_CONTEXT_MARKERS) or "external_resource" in objects)
-        and not _matches(text, _PRIVATE_SOURCE_MARKERS)
+        and (external_source_required or "external_resource" in objects)
+        and not private_source_required
     )
+    # “分析/调研/排查/梳理”本身不能证明存在私有资料；只有出现内部、上传、
+    # 附件、员工手册等来源限定时才走 retrieval。
+    private_retrieval_markers = _RETRIEVAL_MARKERS
     requires_retrieval = bool(
         _matches(text, _RETRIEVAL_MARKERS)
         or ("document" in objects and any(action in actions for action in ("read", "analyze")))
+    ) and not subjective_only and (
+        private_source_required or _matches(text, private_retrieval_markers)
+        or (bool(office_docs) and "document" in objects)
     )
+    # “知识库协作/知识库产品”是公开产品主题，不等于访问用户私有知识库。
+    if not private_source_required and re.search(r"(?:Notion|飞书|语雀|知识库协作|产品对比|竞品)", text, re.I):
+        requires_retrieval = False
     # 仅把会改变外部状态或需要真正调用外部系统的动作标记为副作用。
     # “创建一篇说明”仍可由普通生成能力完成，不应自动获得写权限。
     requires_side_effect = bool(
         any(action in actions for action in ("send", "execute", "modify"))
+        or bool(re.search(r"(?iu)(另存|保存|导出|写入|覆盖|删除|修改)", text))
         or _matches(text, ("发消息", "调用系统", "操作系统"))
     )
     has_feedback = "task_result" in objects
@@ -307,7 +361,10 @@ def infer_route_intent(
     # the initial text: the next action depends on an intermediate result.
     # Route them to the bounded dynamic runner even when only one lexical
     # action was recognized.
-    requires_dynamic = _matches(text, _DYNAMIC_MARKERS) or _matches(text, _CONDITIONAL_MARKERS) or has_feedback
+    requires_dynamic = _matches(text, _DYNAMIC_MARKERS) or _matches(text, _CONDITIONAL_MARKERS) or has_feedback or bool(
+        _matches(text, _GOAL_STRUCTURE_MARKERS)
+        or re.search(r"(?iu)(了解现状|自行了解|定位|排查|修复|补完整|验证一下|处理好|找到问题)", text)
+    )
     # “看下现在什么情况”会同时命中 read + query，但它仍是一条查询链路；
     # 只有不同的执行动作才算多步骤，避免把网络查询误送进 ReAct。
     execution_actions = [action for action in actions if action not in {"read", "query", "converse"}]
@@ -338,6 +395,16 @@ def infer_route_intent(
         or (not actions and not objects and not text)
         or (not actions and not objects and len(text) < 4)
     )
+    # 有明确“了解现状→处理→验证”目标但没有行业对象时，交给动态 Agent
+    # 自主探索，而不是要求用户先替系统写出工具参数。
+    autonomous_goal = bool(
+        _matches(text, _GOAL_STRUCTURE_MARKERS)
+        or re.search(r"(?iu)(了解现状|自行了解|定位|排查|修复|补完整|验证一下|处理好|找到问题)", text)
+    )
+    if autonomous_goal and not (vague_reference and "document" in objects and len(docs) != 1):
+        needs_clarification = False
+    if "task_result" in objects and autonomous_goal:
+        needs_clarification = False
 
     if needs_clarification:
         reason = "请求包含未解析的指代或缺少可执行目标"
@@ -383,6 +450,10 @@ def infer_route_intent(
         resolution_notes=resolution_notes,
         risk_level=risk_level,
         requires_dynamic=requires_dynamic,
+        research_intent=research_intent,
+        freshness_required=freshness_required,
+        external_source_required=external_source_required,
+        private_source_required=private_source_required,
     )
 
 
@@ -579,7 +650,7 @@ def clarification_for_intent(intent: RouteIntent, request: str, office_docs: lis
         if docs:
             names = "、".join(str(item.get("filename") or "未命名文件") for item in docs[:5])
             return f"请明确要处理哪一份文件（当前可选：{names}）。"
-        return "请上传或明确要处理的文件，并说明希望执行的操作。"
+        return "请上传要处理的文件，或说明文件所在位置；同时告诉我希望提取、分析、整理还是转换什么内容。"
     if not intent.actions:
         return "请说明希望我完成什么动作，以及作用对象或资料来源。"
     return "请补充明确的目标、对象或期望输出，我再为你安排执行步骤。"

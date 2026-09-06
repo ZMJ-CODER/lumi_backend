@@ -57,6 +57,42 @@ def clean_assistant_text(value: str | None) -> str:
     return "\n".join(lines).strip()
 
 
+def _structured_output_text(data: Any, *, max_chars: int = 12000) -> str:
+    """从统一信封的 structured ``data`` 提取供 Workflow 消费的正文。
+
+    MCP/跨进程信封只传递 ``data``，不会携带旧的 ``output`` 字段。Workflow
+    Skill 仍需要一段受预算限制的可读材料继续进行抓取、归纳或比较，因此
+    在归一化边界补齐这个兼容投影；完整结构化数据仍保留在 ``data`` 中。
+    """
+    if isinstance(data, str):
+        return data[:max_chars]
+    if not isinstance(data, Mapping):
+        return _short(data, max_chars)
+    # Prefer semantic text fields over serializing the whole object.
+    for key in ("summary", "answer", "result", "text", "content", "value"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:max_chars]
+    sources = data.get("sources")
+    if isinstance(sources, list):
+        lines: list[str] = []
+        for index, item in enumerate(sources[:10], 1):
+            if not isinstance(item, Mapping):
+                continue
+            title = str(item.get("title") or "未命名来源").strip()
+            url = str(item.get("url") or item.get("source") or "").strip()
+            snippet = str(item.get("snippet") or item.get("summary") or item.get("content") or "").strip()
+            lines.append(f"[{index}] {title}\n{url}\n{snippet[:1000]}")
+        if lines:
+            return "\n\n".join(lines)[:max_chars]
+    facts = data.get("key_facts")
+    if isinstance(facts, list):
+        text = "\n".join(str(item) for item in facts if str(item).strip())
+        if text:
+            return text[:max_chars]
+    return _render_structured(data, max_chars=max_chars)
+
+
 def normalize_skill_result(result: Any, *, content_type: str | None = None) -> ToolOutput:
     """兼容旧 SkillResult，同时生成统一 ToolOutput。"""
     if isinstance(result, ToolOutput):
@@ -72,11 +108,16 @@ def normalize_skill_result(result: Any, *, content_type: str | None = None) -> T
             meta = OutputMeta.model_validate(raw_meta or {})
         except (TypeError, ValueError):
             meta = OutputMeta()
+        raw_data = result.get("data")
+        raw_output = str(result.get("output") or result.get("content") or "")
+        if not raw_output and str(result.get("content_type") or content_type or "text") == "structured":
+            raw_output = _structured_output_text(raw_data)
         return ToolOutput(
             status=str(result.get("status") or "failed"),
-            data=result.get("data"),
+            data=raw_data,
             content_type=str(result.get("content_type") or content_type or "text"),
             meta=meta,
+            output=raw_output,
             error=result.get("error"),
             error_code=result.get("error_code"),
             retryable=bool(result.get("retryable", False)),

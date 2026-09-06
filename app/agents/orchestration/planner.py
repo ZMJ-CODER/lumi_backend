@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 import re
 import ast
+from dataclasses import replace
 
 from loguru import logger
 
@@ -195,17 +196,21 @@ def _deterministic_read_tool_tree(request: str) -> TaskTree | None:
             params={"instruction": text, "preferred_tool": "Calculator", "fallback_tools": [], "inputs": {"expression": expression}},
             depends_on=[],
         )], plan_text="调用计算器完成精确计算。")
-    # 公开资料/网页信息的泛化查询走 web_research。涉及企业内部资料、知识库
+    # 公开资料/网页信息的泛化查询走规范 web_search 工具。涉及企业内部资料、知识库
     # 或上传文档时优先走 retrieval，避免把私有内容发送到公网搜索。
     private_markers = ("知识库", "资料库", "内部", "公司制度", "公司政策", "员工手册", "上传", "附件", "文档中", "文件中")
-    public_markers = ("天气", "新闻", "汇率", "行情", "股价", "网页", "网上", "联网", "公开资料", "查资料", "查信息", "检索资料", "检索信息", "查文献", "查官网", "官方资料")
-    if any(marker in lower for marker in public_markers) and not any(marker in lower for marker in private_markers):
+    public_markers = ("天气", "新闻", "汇率", "行情", "股价", "网页", "网上", "联网", "公开资料", "查资料", "查信息", "检索资料", "检索信息", "检索", "查一下", "调研", "研究一下", "找资料", "找来源", "查文献", "查官网", "官方资料", "官方文档")
+    # “Notion/飞书/语雀知识库”描述的是公开产品能力，不是访问用户私有知识库。
+    public_product_topic = bool(re.search(r"(?i)(notion|飞书|语雀|产品对比|竞品).{0,24}(知识库|协作|差异|比较|选择)", text))
+    if (any(marker in lower for marker in public_markers) or public_product_topic) and (
+        not any(marker in lower for marker in private_markers) or public_product_topic
+    ) and not public_product_topic:
         node_id = f"w{int(time.time())}-{uuid.uuid4().hex[:6]}"
         return TaskTree(nodes=[TaskNode(
             id=node_id,
             name="联网查询",
-            agent="web_research",
-            params={"query": text, "top_k": 5},
+            agent="atomic_step",
+            params={"instruction": text, "preferred_tool": "web_search", "fallback_tools": ["web_fetch"], "inputs": {"query": text, "max_results": 5}},
             depends_on=[],
         )], plan_text="按请求查询公开实时信息。")
     # 知识库/资料类查询走受控 retrieval；没有来源词时仍只对明确查询动词
@@ -330,6 +335,24 @@ def _direct_conversion_tree(request: str, conversion: dict) -> TaskTree:
     )
 
 
+def _workflow_skill_tree(skill, request: str) -> TaskTree:
+    """Build the uniform plan node for a declarative Workflow Skill."""
+    return TaskTree(
+        nodes=[TaskNode(
+            id=f"skill-{int(time.time())}-{uuid.uuid4().hex[:6]}",
+            name=f"执行技能：{skill.name}",
+            agent="workflow_skill",
+            params={
+                "skill_name": skill.name,
+                "inputs": {"question": request, "product": request},
+            },
+            metadata={"routing": {"reason": "workflow_skill_metadata_match", "skill": skill.name}},
+            depends_on=[],
+        )],
+        plan_text=f"使用 {skill.name} 技能完成任务。",
+    )
+
+
 def _new_office_document_tree(request: str, document: dict, office_docs: list[dict] | None = None) -> TaskTree:
     """Create one specialized node for a newly authored Office file."""
     filename = Path(str(document["filename"])).name
@@ -432,7 +455,26 @@ class RulePlanner(Planner):
         multi_calculation = _multi_calculation_tree(combined)
         if multi_calculation is not None:
             return multi_calculation
-        deterministic = _deterministic_read_tool_tree(combined)
+        # 产品对比/竞品调研中的“知识库”是公开产品主题，不应被私有 RAG
+        # 快捷路径拦截；交给动态研究流程决定搜索、抓取和汇总顺序。
+        public_product_topic = bool(re.search(r"(?i)(notion|飞书|语雀|产品对比|竞品).{0,24}(知识库|协作|差异|比较|选择)", combined))
+        # Multi-source public research is owned by the registered Workflow
+        # Skill. Keep one-step current facts on the atomic tool fast path, but
+        # route “资料/调研/比较/官方文档” requests through the Skill so its
+        # search→fetch→synthesis SOP, not planner code, controls the workflow.
+        if not office_docs:
+            from app.agents.skills.selection import select_workflow_skill
+            from app.agents.orchestration.routing_intent import infer_route_intent
+
+            # Skill selection is only eligible after the source contract says
+            # that public/current information is actually required.  Metadata
+            # alone must not turn a generic “analyze/compare/plan” request
+            # into an information-research workflow.
+            route = infer_route_intent(combined, office_docs, prior_summaries=prior_summaries)
+            selected_skill = select_workflow_skill(combined, scene="office", user_id=user_id)
+            if selected_skill is not None and route.external_source_required and not route.private_source_required:
+                return _workflow_skill_tree(selected_skill, combined)
+        deterministic = None if public_product_topic else _deterministic_read_tool_tree(combined)
         if deterministic is not None:
             return deterministic
         compound_plan = build_text_then_todo_plan(request)
@@ -449,6 +491,15 @@ class RulePlanner(Planner):
             )
         if has_named_docs:
             office_docs = selected_docs
+        # Preserve an explicitly declared read-only DAG (including parallel
+        # stages and dependency edges).  It is already a complete user-owned
+        # plan and must not be collapsed into a rolling ReAct node.
+        explicit_read_only = build_explicit_read_only_dag(request)
+        if explicit_read_only is not None:
+            return TaskTree(
+                nodes=explicit_read_only,
+                plan_text="按用户声明的只读阶段、并行关系和依赖顺序执行。",
+            )
         new_document = infer_new_office_document(request)
         # 已明确引用输入附件时，“生成一个新 Excel/PPT”通常是基于输入加工，
         # 不能被误判为从零创作文档；留给脚本/动态规划保留分析和交付约束。
@@ -546,6 +597,14 @@ class RulePlanner(Planner):
             if AgentRegistry.get("document_targeting") is not None and AgentRegistry.get("direct_llm") is not None:
                 return _multi_document_targeting_tree(request, office_docs or [])
         route = infer_route_intent(request, office_docs, prior_summaries=prior_summaries)
+        # 纯文本创作/头脑风暴不需要工具或滚动执行。即使 LLM 路由兜底把
+        # “建议/方案”误识别成动态任务，也必须保留直答通道。
+        pure_generation = bool(re.search(
+            r"(?iu)(?:帮我|请|给我|想要|写个|写一份|生成|列出).{0,24}(?:标题|口号|文案|祝福语|开场白|邮件正文|会议主题|点子|创意)",
+            request,
+        )) and not bool(re.search(r"(?iu)(?:查|检索|搜索|读取|附件|文件|执行|运行|修改|发送|保存|导出)", request))
+        if pure_generation:
+            route = replace(route, actions=(), objects=(), requires_dynamic=False, requires_network=False, requires_retrieval=False, requires_side_effect=False, needs_clarification=False)
         # Rules remain the fast path. A small, strict JSON classifier only fills
         # long-tail gaps; its candidate is merged and still goes through the
         # existing clarification, permission, approval, and compiler gates.
@@ -571,6 +630,12 @@ class RulePlanner(Planner):
             and route.risk_level != "read_only"
             and (not route.objects or route.needs_clarification)
         )
+        # 只有背景+目标、缺少具体对象时，允许自主 Agent 先探索环境/上下文；
+        # 这类请求不能因为没有词典对象就直接澄清，否则模型永远无法完成
+        # “先了解现状再处理”的真实办公任务。
+        autonomous_goal = bool(re.search(r"(?iu)(目标是|最后给出|推荐方案|准备|计划|关注|落地|共同问题|可能原因|验证顺序|修复建议|了解现状|自行了解|定位|排查|修复|补完整|验证一下|处理好|找到问题)", request))
+        if autonomous_goal and not route.needs_clarification:
+            route = replace(route, requires_dynamic=True)
         if route.needs_clarification or unresolved_risky:
             return TaskTree(
                 nodes=[],
@@ -580,6 +645,56 @@ class RulePlanner(Planner):
         from app.agents.core.registry import AgentRegistry, ensure_registered
 
         ensure_registered()
+        node_id = f"r{int(time.time())}-{uuid.uuid4().hex[:6]}"
+
+        # Multi-source procedures belong to Workflow Skills. The selector uses
+        # registered Skill metadata; the planner does not hard-code web tools.
+        if not route.requires_side_effect and not office_docs:
+            from app.agents.skills.selection import select_workflow_skill
+            selected_skill = select_workflow_skill(request, scene="office", user_id=user_id)
+            if selected_skill is not None and route.external_source_required and not route.private_source_required:
+                return TaskTree(
+                    nodes=[TaskNode(
+                        id=node_id,
+                        name=f"执行技能：{selected_skill.name}",
+                        agent="workflow_skill",
+                        params={"skill_name": selected_skill.name, "inputs": {"question": request, "product": request}},
+                        metadata={"routing": {"reason": "workflow_skill_metadata_match", "skill": selected_skill.name}},
+                        depends_on=[],
+                    )],
+                    plan_text=f"使用 {selected_skill.name} 技能完成任务。",
+                )
+
+        # 只给背景和目标的开放式排查/调研任务，优先交给自主 Agent，
+        # 不能因没有词典动作或对象而退化成普通直答。
+        if route.requires_dynamic and not route.requires_side_effect and not office_docs and AgentRegistry.get("react_step") is not None:
+            return TaskTree(
+                nodes=[TaskNode(
+                    id=node_id,
+                    name="动态编排并执行",
+                    agent="react_step",
+                    params={"instruction": route.resolved_request or request, "max_rounds": 6},
+                    metadata={"autonomous_mode": True, "routing": {"confidence": route.confidence, "risk_level": route.risk_level}},
+                    depends_on=[],
+                )],
+                plan_text="根据背景和目标滚动规划并执行。",
+            )
+
+        # 没有命中词典并不等于需要澄清：纯创作、建议和开放式分析仍可由
+        # 通用模型直接完成。只有缺少关键对象的副作用请求才应进入澄清。
+        if not route.actions and not route.objects and not route.requires_side_effect:
+            if AgentRegistry.get("direct_llm") is not None:
+                return TaskTree(
+                    nodes=[TaskNode(
+                        id=node_id,
+                        name="直接回答",
+                        agent="direct_llm",
+                        params={"instruction": request},
+                        metadata={"routing": {"confidence": route.confidence, "risk_level": route.risk_level}},
+                        depends_on=[],
+                    )],
+                    plan_text="未涉及外部数据或操作，直接完成文本任务。",
+                )
         static_nodes = compile_static_route(request, route, office_docs)
         if static_nodes:
             required_agents = {node.agent for node in static_nodes}
@@ -597,7 +712,7 @@ class RulePlanner(Planner):
                     nodes=static_nodes,
                     plan_text="按预先确定的动作顺序执行静态计划。",
                 )
-        node_id = f"r{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        inferred_write_intent = bool(re.search(r"(?iu)(?:修改|修复|修好|另存|保存|导出|写入|删除|发送|发给)", request))
         if (
             route.has_multiple_actions
             or route.requires_side_effect
@@ -635,8 +750,8 @@ class RulePlanner(Planner):
                         },
                     },
                     depends_on=[],
-                    approval=route.requires_side_effect,
-                    approval_note="该计划包含外部状态变化，执行前需要确认。" if route.requires_side_effect else "",
+                    approval=route.requires_side_effect or inferred_write_intent,
+                    approval_note="该计划包含外部状态变化，执行前需要确认。" if (route.requires_side_effect or inferred_write_intent) else "",
                 )],
                 plan_text="识别多个动作后动态编排执行步骤。",
             )
@@ -655,21 +770,64 @@ class RulePlanner(Planner):
                 plan_text="这是普通对话请求，直接生成回答。",
             )
         if route.requires_network:
-            if AgentRegistry.get("web_research") is None:
-                return TaskTree(nodes=[], clarification="当前没有可用的联网查询能力，请稍后重试或明确提供资料来源。")
             return TaskTree(
                 nodes=[TaskNode(
                     id=node_id,
                     name="联网查询",
-                    agent="web_research",
-                    params={"query": request, "top_k": 5},
+                    agent="atomic_step",
+                    params={
+                        "instruction": request,
+                        "preferred_tool": "web_search",
+                        "fallback_tools": ["web_fetch"],
+                        "inputs": {"query": request, "max_results": 5},
+                    },
                     depends_on=[],
                 )],
-                plan_text="按请求查询时效性外部信息。",
+                plan_text="按请求查询公开资料并返回来源。",
             )
         if route.requires_retrieval or "query" in route.actions:
+            # 普通知识/解释类问题不应被误送到知识库。只有明确引用了
+            # 用户资料、内部制度、附件或其他私有来源时才进入 retrieval；
+            # 否则保持 DirectLlmAgent 的通用回答能力。
+            if not route.requires_retrieval and not route.requires_network and not office_docs:
+                if AgentRegistry.get("direct_llm") is None:
+                    return TaskTree(nodes=[], clarification="当前没有可用的普通对话能力，请稍后重试。")
+                return TaskTree(
+                    nodes=[TaskNode(
+                        id=node_id,
+                        name="直接回答",
+                        agent="direct_llm",
+                        params={"instruction": request},
+                        metadata={"routing": {"confidence": route.confidence, "risk_level": route.risk_level, "source_required": False}},
+                        depends_on=[],
+                    )],
+                    plan_text="未要求私有资料或外部来源，直接使用通用知识回答。",
+                )
             if AgentRegistry.get("retrieval") is None:
                 return TaskTree(nodes=[], clarification="当前没有可用的知识检索能力，请稍后重试。")
+            # A document-backed review is a two-stage read→reason flow.  Keep
+            # retrieval scoped to the authorized attachment, then let the
+            # language model interpret it; returning only the retrieval node
+            # would strand the user's actual “怎么看/过一遍” request.
+            if office_docs and re.search(r"(?iu)(?:分析|总结|概括|评审|风险|成本|过一遍|说明|解释|判断)", request):
+                read_id = node_id
+                answer_id = f"a{int(time.time())}-{uuid.uuid4().hex[:6]}"
+                return TaskTree(nodes=[
+                    TaskNode(
+                        id=read_id,
+                        name="读取相关资料",
+                        agent="retrieval",
+                        params={"query": request, "top_k": 5, "doc_ids": [str(d.get("doc_id")) for d in office_docs if d.get("doc_id")]},
+                        depends_on=[],
+                    ),
+                    TaskNode(
+                        id=answer_id,
+                        name="基于资料生成分析",
+                        agent="direct_llm",
+                        params={"instruction": "仅依据前序检索结果完成用户请求；资料不足时明确说明，不要编造。\n用户请求：" + request},
+                        depends_on=[read_id],
+                    ),
+                ], plan_text="先读取已授权资料，再基于资料完成分析。")
             return TaskTree(
                 nodes=[TaskNode(
                     id=node_id,
@@ -858,6 +1016,38 @@ class LlmPlanner(Planner):
             )
         if has_named_docs:
             office_docs = selected_docs
+        # Explicit compound office requests have a deterministic, auditable
+        # shape (produce text first, then perform the confirmed todo write).
+        # Resolve this before invoking the LLM so a planner model cannot drop
+        # the second side-effecting action or reinterpret its dependency.
+        compound_plan = build_text_then_todo_plan(request)
+        if compound_plan is not None:
+            return TaskTree(nodes=compound_plan.nodes, plan_text=compound_plan.plan_text)
+        # Let declarative Workflow Skills own multi-tool procedures (for
+        # example, public-information research). A simple current fact can
+        # still be planned as an atomic web_search below; only a decisive
+        # Skill metadata match takes this path.
+        if not office_docs:
+            from app.agents.skills.selection import select_workflow_skill
+            from app.agents.orchestration.routing_intent import infer_route_intent
+
+            selected_skill = select_workflow_skill(request, scene="office", user_id=user_id)
+            route = infer_route_intent(request, office_docs, prior_summaries=prior_summaries)
+            if selected_skill is not None and route.external_source_required and not route.private_source_required:
+                return TaskTree(
+                    nodes=[TaskNode(
+                        id=f"skill-{int(time.time())}-{uuid.uuid4().hex[:6]}",
+                        name=f"执行技能：{selected_skill.name}",
+                        agent="workflow_skill",
+                        params={
+                            "skill_name": selected_skill.name,
+                            "inputs": {"question": request, "product": request},
+                        },
+                        metadata={"routing": {"reason": "workflow_skill_metadata_match", "skill": selected_skill.name}},
+                        depends_on=[],
+                    )],
+                    plan_text=f"使用 {selected_skill.name} 技能完成任务。",
+                )
         projects = await self._list_projects(user_id)
         try:
             tree = await self._plan_with_llm(
@@ -865,13 +1055,222 @@ class LlmPlanner(Planner):
                 clarification_answer, office_docs, prior_summaries, llm_config=llm_config,
             )
         except PlannerModelError as exc:
+            # Planner is an optimization layer, not a prerequisite for a
+            # read-only exploratory task.  If structured planning is
+            # unavailable, preserve the task boundary and let the bounded
+            # rolling agent decide one step at a time from observations.  Any
+            # side-effecting or document-targeted request remains fail-closed.
+            from app.agents.orchestration.routing_intent import infer_route_intent
+            from app.agents.core.registry import AgentRegistry, ensure_registered
+
+            route = infer_route_intent(request, office_docs, prior_summaries=prior_summaries)
+            ensure_registered()
+            # Planner provider failures must not turn a request that requires
+            # public/current sources into a direct-LLM fallback.  Use the
+            # governed read-only network atom so the request still reaches
+            # web_search without exposing an internal route sentinel.
+            if (
+                route.requires_network
+                and not route.requires_side_effect
+                and not office_docs
+                and AgentRegistry.get("atomic_step") is not None
+            ):
+                node = TaskNode(
+                    id=f"fallback-network-{int(time.time())}-{uuid.uuid4().hex[:6]}",
+                    name="联网查询",
+                    agent="atomic_step",
+                    params={
+                        "instruction": request,
+                        "preferred_tool": "web_search",
+                        "fallback_tools": ["web_fetch"],
+                        "inputs": {"query": request, "max_results": 5},
+                    },
+                    metadata={"route_channel": "agent", "planner_fallback": True,
+                              "planner_error_code": exc.code},
+                    depends_on=[],
+                )
+                return TaskTree(nodes=[node], plan_text="规划服务暂不可用，改为受控联网查询并整理结果。")
+            if (
+                not route.requires_side_effect
+                and not office_docs
+                and route.requires_dynamic
+                and AgentRegistry.get("react_step") is not None
+            ):
+                node = TaskNode(
+                    id=f"fallback-{int(time.time())}-{uuid.uuid4().hex[:6]}",
+                    name="自主滚动执行（规划服务不可用时兜底）",
+                    agent="react_step",
+                    params={"instruction": request, "max_rounds": 6},
+                    metadata={"autonomous_mode": True, "planner_fallback": True,
+                              "planner_error_code": exc.code},
+                    depends_on=[],
+                )
+                return TaskTree(
+                    nodes=[node],
+                    plan_text="规划服务暂不可用，改为按观察结果逐步执行只读任务。",
+                )
+            # A read-only request with an explicit research/query intent can
+            # still be handled by the bounded autonomous worker when the
+            # structured planner is unavailable.  This keeps external-source
+            # and analysis tasks from becoming an immediate terminal error.
+            if (
+                not route.requires_side_effect
+                and not office_docs
+                and route.requires_network
+                and AgentRegistry.get("react_step") is not None
+            ):
+                node = TaskNode(
+                    id=f"fallback-research-{int(time.time())}-{uuid.uuid4().hex[:6]}",
+                    name="联网调研（规划服务不可用时兜底）",
+                    agent="react_step",
+                    params={"instruction": request, "max_rounds": 4},
+                    metadata={"autonomous_mode": True, "planner_fallback": True,
+                              "planner_error_code": exc.code, "research_mode": True},
+                    depends_on=[],
+                )
+                return TaskTree(
+                    nodes=[node],
+                    plan_text="规划服务暂不可用，改为按公网资料检索结果逐步汇总。",
+                )
             return TaskTree(nodes=[], error=str(exc), error_code=exc.code)
         if tree is None:
+            # A structured response that is unavailable or malformed may be
+            # safely retried through the deterministic planner.  This keeps
+            # explicit project/code requests usable without fabricating an
+            # LLM-generated DAG; provider/authentication errors are handled
+            # separately above and never reach this fallback.
+            explicit_read_only = build_explicit_read_only_dag(request)
+            if explicit_read_only is not None:
+                return TaskTree(
+                    nodes=explicit_read_only,
+                    plan_text="按用户声明的只读阶段、并行关系和依赖顺序执行。",
+                )
+            fallback_tree = await RulePlanner(project_repository=self._project_repository).plan(
+                user_id=user_id,
+                request=request,
+                scene="office",
+                project_id=project_id,
+                project_ids=project_ids,
+                clarification_answer=clarification_answer,
+                office_docs=office_docs,
+                prior_summaries=prior_summaries,
+            )
+            # Rule fallback can legally return a single direct answer for an
+            # open-ended background/goal request.  Preserve the autonomous
+            # execution boundary in that case as well; otherwise a planner
+            # outage silently turns a multi-step task into blind prose.
+            from app.agents.orchestration.routing_intent import infer_route_intent
+            from app.agents.core.registry import AgentRegistry, ensure_registered
+            route = infer_route_intent(request, office_docs, prior_summaries=prior_summaries)
+            ensure_registered()
+            if (
+                fallback_tree.nodes
+                and len(fallback_tree.nodes) <= 1
+                and route.requires_dynamic
+                and not route.requires_side_effect
+                and not office_docs
+                and AgentRegistry.get("react_step") is not None
+            ):
+                fallback_tree.nodes = [TaskNode(
+                    id=f"fallback-roll-{int(time.time())}-{uuid.uuid4().hex[:6]}",
+                    name="自主滚动执行",
+                    agent="react_step",
+                    params={"instruction": request, "max_rounds": 6},
+                    metadata={"autonomous_mode": True, "planner_fallback": True},
+                    depends_on=[],
+                )]
+                fallback_tree.plan_text = "按背景和目标逐步观察、执行并汇总。"
+            if fallback_tree.nodes or fallback_tree.clarification:
+                return fallback_tree
             return TaskTree(
                 nodes=[],
                 error="任务规划未生成可执行步骤，请补充目标或稍后重试。",
                 error_code="PLANNER_EMPTY",
             )
+        # Approval is a safety property, not an LLM choice.  Preserve the gate
+        # for any plan that can mutate files or deliver externally, including
+        # dynamic ReAct plans generated from colloquial requests.
+        from app.agents.orchestration.routing_intent import infer_route_intent
+        inferred_route = infer_route_intent(request, office_docs, prior_summaries=prior_summaries)
+        # A request whose source contract requires public/current information
+        # must never degrade to a direct-LLM node.  If a provider returns an
+        # incomplete plan (or a legacy fallback emits direct_llm), normalize
+        # it to the governed read-only web search atom before materialization.
+        if not office_docs and not inferred_route.requires_side_effect:
+            from app.agents.skills.selection import select_workflow_skill
+
+            selected_skill = select_workflow_skill(request, scene="office", user_id=user_id)
+            if selected_skill is not None and inferred_route.external_source_required and not inferred_route.private_source_required:
+                return _workflow_skill_tree(selected_skill, request)
+        if inferred_route.requires_network and not office_docs and AgentRegistry.get("atomic_step") is not None:
+            has_network_node = any(
+                str(node.params.get("preferred_tool") or "") in {"web_search", "web_fetch"}
+                or node.agent in {"react_step", "retrieval"}
+                for node in tree.nodes
+            )
+            if not has_network_node:
+                tree.nodes = [TaskNode(
+                    id=f"network-{int(time.time())}-{uuid.uuid4().hex[:6]}",
+                    name="联网查询",
+                    agent="atomic_step",
+                    params={
+                        "instruction": request,
+                        "preferred_tool": "web_search",
+                        "fallback_tools": ["web_fetch"],
+                        "inputs": {"query": request, "max_results": 5},
+                    },
+                    depends_on=[],
+                    metadata={"route_channel": "agent", "routing": {"reason": "network_source_required"}},
+                )]
+                tree.plan_text = "按公开来源检索并基于结果回答。"
+        if inferred_route.requires_side_effect:
+            for node in tree.nodes:
+                node.approval = True
+                node.approval_note = node.approval_note or "该计划包含外部状态变化，执行前需要确认。"
+        # Rolling-plan mode: for implementation/diagnostic goals the initial
+        # LLM plan is only a hint. Collapse it to one bounded autonomous
+        # worker so later tool choices are driven by observations (including
+        # newly discovered dependencies and test failures), not by a frozen
+        # upfront DAG.
+        from app.agents.orchestration.tca import is_exploratory_request
+        if (
+            (
+                # Background + goal requests are inherently open-ended even
+                # when they do not contain implementation verbs such as
+                # “修复/开发”.  A planner-produced direct_llm node would
+                # collapse them into one blind answer and lose the ability to
+                # inspect observations between steps.  Keep the rolling agent
+                # bounded to read-only, no-attachment requests.
+                inferred_route.requires_dynamic
+                or (
+                    str(getattr(level, "value", level)).lower() == "m3"
+                    and is_exploratory_request(request)
+                )
+            )
+            and not tree.clarification
+            and not tree.error
+            and not inferred_route.requires_side_effect
+            and not office_docs
+            and not any(node.agent == "react_step" for node in tree.nodes)
+            and len(tree.nodes) <= 1
+        ):
+            tree.nodes = [TaskNode(
+                id=f"auto-{int(time.time())}-{uuid.uuid4().hex[:6]}",
+                name="自主滚动执行",
+                agent="react_step",
+                params={
+                    "instruction": request,
+                    "max_rounds": 12,
+                    "max_elapsed_seconds": 900,
+                    "office_docs": [
+                        {"doc_id": str(item.get("doc_id")), "filename": str(item.get("filename") or "")}
+                        for item in (office_docs or []) if item.get("doc_id")
+                    ],
+                },
+                depends_on=[],
+                metadata={"autonomous_mode": True, "rolling_plan": True},
+            )]
+            tree.plan_text = "先执行目标并根据每轮观察滚动决定下一步；遇到错误先修复再验证。"
         for node in tree.nodes:
             node.metadata = {
                 **(node.metadata or {}),
@@ -880,6 +1279,11 @@ class LlmPlanner(Planner):
                 "complexity_level": str(getattr(level, "value", level)).lower(),
                 "planning_complexity": str(getattr(level, "value", level)).lower(),
             }
+            # Exploration/implementation goals are intentionally executed as
+            # a rolling ReAct loop.  The planner supplies the initial intent;
+            # subsequent tool choices come from observations at runtime.
+            if str(getattr(level, "value", level)).lower() == "m3":
+                node.metadata["autonomous_mode"] = True
         _apply_output_contract(tree.nodes, request)
         return tree
 
@@ -994,6 +1398,34 @@ class LlmPlanner(Planner):
 
         clarification = str(data.get("clarification") or "").strip()
         nodes: list[TaskNode] = []
+        # Strategic planner output: compile stage/domain paths into bounded
+        # ReAct or direct nodes.  The stage never names a concrete tool; the
+        # runner performs domain authorization and in-domain tool selection.
+        stages = data.get("stages") or []
+        if isinstance(stages, list) and stages and not (data.get("tasks") or []):
+            for stage in stages:
+                if not isinstance(stage, dict):
+                    continue
+                goal = str(stage.get("goal") or stage.get("name") or "").strip()
+                domain = str(stage.get("domain") or "").strip()
+                if not goal:
+                    continue
+                mode = str(stage.get("mode") or "read_only").strip().casefold()
+                agent = "direct_llm" if mode == "direct" else "react_step"
+                params = {
+                    "instruction": goal,
+                    "domain": domain,
+                    "mode": mode,
+                    "max_rounds": 6,
+                }
+                nodes.append(TaskNode(
+                    id=str(stage.get("stage_id") or f"s{len(nodes) + 1}"),
+                    name=str(stage.get("name") or goal[:80]),
+                    agent=agent,
+                    params=params,
+                    depends_on=[str(d) for d in (stage.get("depends_on") or [])],
+                    metadata={"planner_generated": True, "domain_stage": True},
+                ))
         for t in data.get("tasks") or []:
             if not isinstance(t, dict):
                 continue
@@ -1010,7 +1442,13 @@ class LlmPlanner(Planner):
                 # The model may choose bounded ReAct for a genuinely dynamic
                 # node, but it never controls the loop budget itself.
                 params["instruction"] = str(params.get("instruction") or t.get("name") or request)
-                params["max_rounds"] = min(6, max(1, int(params.get("max_rounds") or 6)))
+                params["max_rounds"] = min(20, max(1, int(params.get("max_rounds") or 6)))
+            elif agent == "decision_node":
+                params["decision"] = str(params.get("decision") or "continue").strip().casefold()
+                if params["decision"] == "request_domain":
+                    params["domain"] = str(params.get("domain") or "").strip().casefold()
+                elif params["decision"] == "clarify":
+                    params["question"] = str(params.get("question") or "").strip()
             elif agent == "retrieval":
                 params.setdefault("query", request)
             elif agent.startswith("code"):

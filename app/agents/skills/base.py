@@ -67,6 +67,9 @@ class SkillContext:
     # Executor-only policy.  Never hydrate this from tool arguments, document
     # text or persisted conversation state.
     execution_policy: dict | None = None
+    # Optional declarative Workflow Skill prompt loaded from Prompt-as-Code.
+    # It is advisory business guidance and never replaces system safety rules.
+    skill_prompt: str = ""
     # Server-injected documents authorized for this single task. Tool
     # arguments can narrow this set but can never expand it.
     office_doc_ids: tuple[str, ...] = ()
@@ -292,9 +295,19 @@ class WorkflowSkill:
     owner_user_id: str | None = None
     visibility: str = "public"  # public / private
     source: str = "developer"   # developer / user
+    # Prompt-as-Code: optional external Markdown body for developer skills.
+    # The Python class remains the compatibility/runtime adapter while the
+    # business procedure can be edited without changing orchestration code.
+    prompt_body: str = ""
+    prompt_version: str = ""
+    prompt_file: str = ""
 
     def supports_scene(self, scene: str) -> bool:
         return not self.scenes or scene in self.scenes
+
+    def effective_prompt(self) -> str:
+        """Return the declarative prompt body, if one was supplied."""
+        return str(self.prompt_body or "").strip()
 
     def validate_lifecycle(self) -> None:
         if not self.name:

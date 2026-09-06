@@ -55,6 +55,12 @@ def test_open_ended_analysis_is_m3():
     assert score.mode.value == "react"
 
 
+def test_implementation_goal_uses_rolling_react_mode():
+    score = assess("帮我实现登录功能，运行测试并修复报错")
+    assert score.level == ComplexityLevel.M3
+    assert score.mode.value == "react"
+
+
 def test_history_reference_raises_complexity():
     score = assess("按上次那个格式再来", history="上次生成了季度报告")
     assert score.history_dependency >= 0.8

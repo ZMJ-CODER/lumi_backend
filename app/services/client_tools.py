@@ -147,5 +147,9 @@ async def await_result(
         if status and status not in ("pending",):
             return None
         await asyncio.sleep(1)
+    # A timed-out request must leave the pending queue as well. Otherwise an
+    # offline desktop can execute a stale command after its workflow already
+    # continued or failed.
     await r.hset(key, mapping={"status": "timeout"})
+    await r.lrem(_pending_key(user_id), 1, request_id)
     return None

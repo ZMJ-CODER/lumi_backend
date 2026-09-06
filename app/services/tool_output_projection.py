@@ -26,6 +26,17 @@ def project_tool_output(result, *, max_chars: int = MODEL_OUTPUT_MAX_CHARS) -> s
     """
     text = render_for_model(normalize_skill_result(result), max_chars=max_chars)
 
+    # Parameter failures are an interaction state, not a generic system
+    # error.  Expose only the user-action signal and field names so the agent
+    # can ask a natural clarification without leaking JSON Schema internals.
+    normalized = normalize_skill_result(result)
+    if normalized.error_code == "INVALID_PARAMS":
+        missing = normalized.metadata.get("missing_fields") if isinstance(normalized.metadata, dict) else None
+        if isinstance(missing, list) and missing:
+            text += "\n[需要用户补充] " + "、".join(str(item) for item in missing[:8])
+        else:
+            text += "\n[需要用户补充] 请补充工具所需信息"
+
     signals = result.decision_signals()
     hints: list[str] = []
     if isinstance(signals.get("result_count"), int):

@@ -105,8 +105,8 @@ class Settings(BaseSettings):
 
     # ── LLM: 千问 (Qwen) ──
     QWEN_API_KEY: str = ""
-    QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    QWEN_MODEL: str = "qwen-turbo"
+    QWEN_BASE_URL: str = "http://127.0.0.1:11434/v1"
+    QWEN_MODEL: str = "qwen2.5vl:7b"
     QWEN_VL_MODEL: str = "qwen-vl-plus"  # 多模态模型（普通聊天场景默认）
     QWEN_TURBO_MODEL: str = "qwen-turbo"  # 对话摘要等轻量任务
 
@@ -137,7 +137,7 @@ class Settings(BaseSettings):
 
     # ── LLM 默认选用 ──
     # 纯文本默认走 DeepSeek V4 Flash；本地 Ollama 的 qwen2.5vl 仅用于图像转文字。
-    LLM_PROVIDER: str = "deepseek"  # qwen / deepseek
+    LLM_PROVIDER: str = "qwen"  # qwen / deepseek
     LLM_FALLBACK_PROVIDER: str = ""  # 主供应商失败时自动切换（deepseek/qwen；空=不降级）
     # Python/OpenAI 客户端使用的显式 HTTP(S) 代理；为空时沿用系统环境变量。
     # 浏览器能访问而后端进程不能访问时，可填 http://127.0.0.1:端口。
@@ -181,6 +181,9 @@ class Settings(BaseSettings):
     TAVILY_SEARCH_DEPTH: str = "basic"  # basic / advanced
     TAVILY_TIMEOUT_SECONDS: int = 15
     WEB_SEARCH_TOOL_ENABLED: bool = True  # 模型自主决策是否联网（总开关）
+    # 网页正文分级投影阈值（按字符近似 token，便于不同模型部署调整）
+    WEB_FETCH_DIRECT_MAX_CHARS: int = 16000
+    WEB_FETCH_RELEVANT_MAX_CHARS: int = 8000
 
     # ── 角色提示词（可插拔：app/prompts/*.md，frontmatter 定义元信息）──
     PROMPTS_DIR: str = "app/prompts"
@@ -312,7 +315,7 @@ class Settings(BaseSettings):
     AGENT_MANIFEST_SUMMARY_MAX_TOKENS: int = 1200
     # 清单在执行前的保守 token 预算。超过时不启动，要求用户确认/拆分，
     # 防止一次上千项任务把模型与沙箱队列拖入雪崩。
-    AGENT_MANIFEST_TOKEN_BUDGET: int = 80000
+    AGENT_MANIFEST_TOKEN_BUDGET: int = 12000
     # A complex ordinary task uses an external logical plan and materializes
     # only its ready frontier.  Small tasks keep the lower-overhead full DAG.
     AGENT_LOGICAL_PLAN_ENABLED: bool = True
@@ -450,7 +453,7 @@ class Settings(BaseSettings):
     # 普通模式每次请求仅注入最近的注意力质量窗口，并不发送整个热窗口。
     LLM_HISTORY_MAX_TOKENS: int = 12000
     # 办公模式短期记忆：只保证当次任务连贯，不需要长窗口
-    LLM_HISTORY_MAX_TOKENS_WORK: int = 60000
+    LLM_HISTORY_MAX_TOKENS_WORK: int = 6000
     # 普通聊天热窗口：达到 25 万 token 后，摘要并物理淘汰最早部分，
     # 保留最近约 15 万 token 的服务端原文。客户端本地历史独立留存。
     CONVERSATION_SUMMARY_TRIGGER_TOKENS: int = 250000

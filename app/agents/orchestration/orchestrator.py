@@ -13,6 +13,7 @@
 import asyncio
 import hashlib
 import json
+import uuid
 
 from app.agents.orchestration.backends.legacy import LegacyDagBackend
 from app.agents.orchestration.backends.temporal_logical_effects import TemporalLogicalEffectsBackend
@@ -429,25 +430,43 @@ class AgentOrchestrator:
             json.dumps(submission_material, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
         # Submission admission is owned by SubmissionGuard.
-        return await self._submission_guard.submit(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            submission_key=submission_key,
-            create_job=lambda admission_token: self._submit_job_unlocked(
+        try:
+            return await self._submission_guard.submit(
                 user_id=user_id,
-                request=request,
-                scene=scene,
                 conversation_id=conversation_id,
-                project_id=project_id,
-                project_ids=project_ids,
-                llm_api_key=llm_api_key,
-                clarification_answer=clarification_answer,
-                office_docs=office_docs,
-                user_role=user_role,
                 submission_key=submission_key,
-                admission_token=admission_token,
-            ),
-        )
+                create_job=lambda admission_token: self._submit_job_unlocked(
+                    user_id=user_id,
+                    request=request,
+                    scene=scene,
+                    conversation_id=conversation_id,
+                    project_id=project_id,
+                    project_ids=project_ids,
+                    llm_api_key=llm_api_key,
+                    clarification_answer=clarification_answer,
+                    office_docs=office_docs,
+                    user_role=user_role,
+                    submission_key=submission_key,
+                    admission_token=admission_token,
+                ),
+            )
+        except Exception as exc:
+            # 规划/物化发生在 Job 创建前，统一生成可查询的失败快照，避免
+            # 对话接口因内部异常直接返回 500。
+            from app.core.error_mapping import map_task_error
+            from app.agents.orchestration.models import JobStatus
+
+            public = map_task_error(exc)
+            failed = Job(
+                job_id=str(uuid.uuid4()), user_id=user_id, user_role=user_role,
+                request=request, scene=scene, conversation_id=conversation_id,
+                submission_key=submission_key, status=JobStatus.FAILED,
+                error=public.message,
+                result={"type": "execution_error", "status": "failed", "error_code": public.code, "message": public.message, "retryable": public.retryable},
+                routing={"error_code": public.code},
+            )
+            await self._store.create_job(failed)
+            return failed
 
     async def _submit_job_unlocked(
         self,

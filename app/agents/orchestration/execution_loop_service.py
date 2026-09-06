@@ -169,6 +169,12 @@ class ExecutionLoopService:
                         "agent": node.agent,
                         "title": node.name or node.agent,
                         "content": str(content)[:30000],
+                        # The finalizer needs to distinguish a deliverable
+                        # answer from a retrieval observation.  In particular,
+                        # returning the one ``web_search`` node verbatim
+                        # bypasses synthesis and exposes search snippets as
+                        # the assistant's answer.
+                        "tool": str(value.get("tool") or ""),
                     }
                 )
         # A rolling logical plan keeps completed batches outside ``job.nodes``
@@ -199,12 +205,20 @@ class ExecutionLoopService:
                             "agent": str(source.get("agent") or ""),
                             "title": str(source.get("name") or node_id),
                             "content": content[:30000],
+                            "tool": str(value.get("tool") or ""),
                         })
                 if restored:
                     results = restored
             except Exception as exc:  # noqa: BLE001
                 logger.debug("恢复逻辑计划完整结果失败 {}: {}", job.job_id, exc)
-        if len(results) == 1:
+        # A lone retrieval result is evidence, not the final response.  It
+        # must pass through the final-answer agent so that it is compared,
+        # summarized and presented as an answer rather than as raw tool
+        # output.  Keep the zero-extra-LLM fast path for direct answers and
+        # deterministic tools.
+        retrieval_tools = {"web_search", "web_fetch", "kb_search", "query_knowledge"}
+        needs_synthesis = any(str(item.get("tool") or "") in retrieval_tools for item in results)
+        if len(results) == 1 and not needs_synthesis:
             job.result = {"final_answer": results[0]["content"]}
             await self._store.save_job(job)
             return
@@ -256,11 +270,19 @@ class ExecutionLoopService:
                 # large/batched DAG into a failed job or discard its outputs.
                 # Return a bounded deterministic envelope and expose the
                 # formatting degradation separately for the UI/telemetry.
-                fallback = "\n\n".join(
-                    f"{item['title']}：{item['content']}"
-                    for item in results
-                    if str(item.get("content") or "").strip()
-                )[:60000]
+                retrieval_tools = {"web_search", "web_fetch", "kb_search", "query_knowledge"}
+                if any(str(item.get("tool") or "") in retrieval_tools for item in results):
+                    # Retrieval observations are not a safe deterministic
+                    # fallback: they contain snippets, prompt-shaped text and
+                    # provider formatting.  Never dump them into the user
+                    # bubble when the synthesis model is unavailable.
+                    fallback = "已完成资料检索，但当前归纳服务暂时不可用；请稍后重试以获取整理后的结论。"
+                else:
+                    fallback = "\n\n".join(
+                        f"{item['title']}：{item['content']}"
+                        for item in results
+                        if str(item.get("content") or "").strip()
+                    )[:60000]
                 job.status = JobStatus.COMPLETED
                 job.error = None
                 job.result = {

@@ -85,8 +85,27 @@ async def choose_single_tool(
         temperature=0,
         llm_config=llm_config,
     )
-    runnable = model.bind_tools([tool], tool_choice=tool.name)
-    reply = await runnable.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
+    messages = [SystemMessage(content=system), HumanMessage(content=user)]
+    try:
+        runnable = model.bind_tools([tool], tool_choice=tool.name)
+        reply = await runnable.ainvoke(messages)
+    except Exception as exc:
+        text = str(exc).casefold()
+        if "does not support tools" not in text and "tool calling" not in text and "bind_tools" not in text:
+            raise
+        reply = await model.ainvoke([
+            SystemMessage(content=(
+                system + "\n当前模型不支持原生工具调用，只输出一个 JSON 对象："
+                + json.dumps({"name": tool.name, "arguments": {}}, ensure_ascii=False)
+                + "。将 arguments 替换为实际参数，不要输出其他文本。"
+            )),
+            HumanMessage(content=user),
+        ])
+        try:
+            payload = _json_object(reply.content)
+            return "", [{"id": "text-json-1", "type": "function", "function": {"name": str(payload.get("name") or tool.name), "arguments": payload.get("arguments") or payload.get("args") or {}}}]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return str(reply.content or ""), []
     calls = []
     for call in reply.tool_calls or []:
         calls.append(

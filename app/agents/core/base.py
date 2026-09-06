@@ -125,6 +125,7 @@ class WorkerAgent(ABC):
                     on_output=ctx.on_output,
                     office_doc_ids=ctx.office_doc_ids,
                     authorized_project_ids=ctx.authorized_project_ids,
+                    skill_prompt=workflow.effective_prompt(),
                 ),
                 user_role=ctx.user_role,
                 user_message=ctx.user_request,
@@ -138,9 +139,16 @@ class WorkerAgent(ABC):
                     "success": False, "error": result.error, "error_code": result.error_code,
                     "retryable": result.retryable, "execution": result.to_execution_envelope(), "skill": skill_name,
                 }
+            # Workflow Skill 的 output/data 已是流程内生成的最终交付内容。
+            # 不能再走面向原子检索工具的 render_for_model：该渲染器看到
+            # citations 时会优先拼接来源列表，覆盖 Skill 的归纳正文。
+            if result.content_type == "text":
+                workflow_content = str(result.output or result.data or "").strip()
+            else:
+                workflow_content = render_for_model(result)
             return {
                 "success": True,
-                "content": render_for_model(result),
+                "content": workflow_content,
                 "execution": result.to_execution_envelope(),
             }
 

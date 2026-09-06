@@ -22,6 +22,7 @@ from app.agents.orchestration.submission_context_service import SubmissionContex
 from app.agents.orchestration.admission import job_admission
 from app.agents.orchestration.task_manifest import record_manifest_route_decisions
 from app.repositories.job_repository import JobRepository
+from app.core.error_mapping import map_task_error
 
 
 class JobSubmissionService:
@@ -380,7 +381,21 @@ class JobSubmissionService:
                 request[:40],
             )
             return job
-        except Exception:
+        except Exception as exc:
+            # 提交边界负责释放准入资源，并把规划/物化/后端提交异常收敛为
+            # 一个可查询的终态 Job；异常不再冒泡成对话接口 500。
             await job_admission.release(job_id=job.job_id, user_id=user_id)
             await self._stop_heartbeat(job.job_id)
-            raise
+            public = map_task_error(exc)
+            job.status = getattr(type(job.status), "FAILED", "failed")
+            job.error = public.message
+            job.result = {
+                "type": "execution_error",
+                "status": "failed",
+                "error_code": public.code,
+                "message": public.message,
+                "retryable": public.retryable,
+            }
+            job.routing = {**(job.routing or {}), "error_code": public.code}
+            await self._store.save_job(job)
+            return job

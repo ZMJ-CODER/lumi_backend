@@ -193,7 +193,7 @@ class OpenUrlTool(Tool):
     write_op = True
     parameters_schema = {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
     use_when = ["用户明确要求打开网页地址"]
-    do_not_use_when = ["需要抓取内容时使用 WebFetch"]
+    do_not_use_when = ["需要抓取网页内容时使用 web_fetch"]
     result_contract = "返回浏览器打开状态。"
 
     async def execute(self, params: dict, context: SkillContext | None = None) -> ToolOutput:

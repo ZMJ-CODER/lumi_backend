@@ -52,7 +52,7 @@ def apply_generation_runtime_hints(nodes: MutableSequence[PlanNode], request: st
 
 def prefer_atomic_steps(nodes: MutableSequence[PlanNode], request: str) -> None:
     """将历史办公角色收束为声明能力的原子工具节点。"""
-    tool_map = {"retrieval": "query_knowledge", "web_research": "web_search", "office_todo": "todo_manager", "office_calendar": "calendar_manager"}
+    tool_map = {"retrieval": "query_knowledge", "office_todo": "todo_manager", "office_calendar": "calendar_manager"}
     text_tools = {"email": "compose_email", "doc": "compose_official_doc", "rewrite": "rewrite_text", "summary": "summarize_text", "minutes": "meeting_minutes", "extract": "extract_info", "invoice": "invoice_parse", "compliance": "compliance_check"}
     research_tools = {"competitor": "competitor_analysis", "document_qa": "document_qa", "customer_service": "customer_service", "daily_report": "daily_report"}
     doc_tools = {"read": "office_doc_read", "edit": "office_doc_edit", "analyze": "office_doc_analyze"}

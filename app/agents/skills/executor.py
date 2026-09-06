@@ -24,6 +24,7 @@ from app.agents.skills.capability import ToolCapability, role_allows
 from app.agents.skills.registry import ToolRegistry
 from app.core.config import settings
 from app.core.agent_security import redact_server_text, sanitize_server_result, wrap_untrusted_tool_output
+from app.core.resource_policy import ResourcePolicyError, validate_client_path, validate_command
 from app.core.database import async_session_factory
 from app.models.db_models import ControlLog
 from app.services import client_tools
@@ -41,7 +42,7 @@ _WRITE_NAME_HINTS = (
 # ``chat``，也不能因此获得本机操作、写入、日程或文件管理等能力。文档检索、
 # 可信的当前时间与联网查询属于“问答”范畴，保留在聊天白名单中。
 _CHAT_SKILL_ALLOWLIST = {
-    "WebSearch", "WebFetch", "DateTime", "Calculator", "AskUserQuestion",
+    "web_search", "web_fetch", "DateTime", "Calculator", "AskUserQuestion",
 }
 
 _PROJECT_SCOPED_SKILLS = {
@@ -57,7 +58,7 @@ _OFFICE_REACT_ALLOWED_CATEGORIES = {
     "shell", "network", "interaction", "productivity", "orchestration",
 }
 _OFFICE_REACT_ALLOWED_SKILLS = {
-    "WebFetch", "WebSearch", "Calculator", "DateTime", "SystemInfo",
+    "web_fetch", "web_search", "Calculator", "DateTime", "SystemInfo",
     "OpenFile", "OpenApp", "OpenUrl", "ProcessList", "ProcessSignal",
     "python_exec", "create_office_document", "query_knowledge", "web_search",
     "inspect_document_set", "read_document",
@@ -65,6 +66,11 @@ _OFFICE_REACT_ALLOWED_SKILLS = {
     "Bash", "BashOutput", "KillShell",
     "AskUserQuestion", "TodoWrite", "Task", "Skill", "SlashCommand",
     "EnterPlanMode", "ExitPlanMode", "NotebookEdit",
+    # Autonomous implementation/diagnostic tasks need a bounded execution
+    # bridge for tests, builds and dependency checks.  These remain subject
+    # to the normal client/sandbox permission and confirmation gates.
+    "run_in_sandbox", "check_new_dependencies", "install_new_dependencies",
+    "rollback_dependency_manifests", "run_static_check",
 }
 _OFFICE_REACT_DENIED_SKILLS = {"env"}
 _bootstrap_expiry_alerts: set[tuple[str, str]] = set()
@@ -282,7 +288,7 @@ def get_skills_for_scene(
         for s in ToolRegistry.list(include_internal=include_internal)
         if s.supports_scene(scene)
         and s.status != "disabled"
-        and (settings.WEB_SEARCH_TOOL_ENABLED or s.name != "WebSearch")
+        and (settings.WEB_SEARCH_TOOL_ENABLED or s.name != "web_search")
         and (
             scene != "chat"
             or s.name in _CHAT_SKILL_ALLOWLIST
@@ -297,6 +303,17 @@ def get_skills_for_scene(
         and (allow_write or not _skill_is_write(s))
         and role_allows(s.permission, user_role)
     ]
+    if include_internal:
+        # Skill-owned execution implementations are kept out of discovery and
+        # Function Calling, but remain addressable by trusted Workflow/Worker
+        # code through the explicit internal path.
+        tools.extend(
+            s for s in getattr(ToolRegistry, "_skill_implementations", {}).values()
+            if s.supports_scene(scene)
+            and s.status != "disabled"
+            and (allow_write or not _skill_is_write(s))
+            and role_allows(s.permission, user_role)
+        )
     return tools
 
 
@@ -772,7 +789,13 @@ def selection_requires_escalation(selection: CapabilitySelection, request: str) 
     """
     # 候选分数过近时不让模型盲猜。即使是只读工具，错误选择也会造成
     # 语义漂移或把私有数据请求误送到公开搜索，因此统一升级澄清/复核。
-    return bool(selection.ambiguous)
+    # 只读候选的 margin 只用于遥测和模型内部裁决，不再阻断请求。写入或
+    # 需要确认的候选仍然保留安全闸门：在无法唯一判断副作用时，必须等待
+    # 明确授权/确认，不能让模型自行猜测。
+    return any(
+        bool(item.write_op or item.requires_confirmation)
+        for item in selection.capabilities
+    ) and bool(selection.ambiguous)
 
 
 def record_candidate_selection(
@@ -1045,6 +1068,30 @@ def _validate_mcp_arguments(schema: dict, args: dict) -> str | None:
     return None
 
 
+def _validate_tool_arguments(schema: dict, args: dict) -> tuple[str | None, list[str]]:
+    """Validate every native tool call with the same contract as MCP tools."""
+    if not isinstance(schema, dict):
+        return None, []
+    try:
+        from jsonschema import Draft202012Validator
+
+        validator = Draft202012Validator(schema)
+        errors = sorted(validator.iter_errors(args or {}), key=lambda item: list(item.path))
+        if not errors:
+            return None, []
+        missing: list[str] = []
+        for error in errors:
+            if error.validator == "required":
+                for field in error.validator_value:
+                    if field not in (args or {}):
+                        missing.append(str(field))
+        return str(errors[0].message)[:300], sorted(set(missing))
+    except Exception:
+        # A malformed legacy schema must not take down the executor; the tool
+        # implementation remains responsible for its own defensive checks.
+        return None, []
+
+
 async def execute_tool_call(
     tool_call: dict,
     user_id: str,
@@ -1107,6 +1154,21 @@ async def execute_tool_call(
             metadata={"tool": name, "scene": scene, "role": user_role},
         )
 
+    validation_error, missing_fields = _validate_tool_arguments(capability.parameters, args)
+    if validation_error:
+        return SkillResult(
+            success=False,
+            error="工具参数不完整或格式不正确",
+            error_code="INVALID_PARAMS",
+            retryable=False,
+            metadata={
+                "tool": name,
+                "validation_message": validation_error,
+                "missing_fields": missing_fields,
+                "user_action_required": bool(missing_fields),
+            },
+        )
+
     # 项目/代码工具必须绑定到提交时由服务端注入的项目范围。模型不能仅
     # 通过传入 project_id，或在提示词中声称“这是我的项目”，扩大授权。
     # 旧项目工具规范化为 Read/Write/Glob/Grep/Bash 后，仍必须保留项目
@@ -1126,6 +1188,22 @@ async def execute_tool_call(
                 retryable=False,
                 metadata={"tool": name},
             )
+
+    # 客户端文件/命令参数也必须经过统一资源策略。该校验发生在创建
+    # Redis 客户端请求之前，网页或模型无法借参数把后端源码、凭据目录
+    # 伪装成普通工作区资源。
+    if name in {"Read", "Write", "Edit", "Glob", "Grep", "NotebookEdit"}:
+        path_value = args.get("file_path") or args.get("notebook_path") or args.get("path")
+        if path_value:
+            try:
+                validate_client_path(str(path_value), field="file_path")
+            except ResourcePolicyError as exc:
+                return SkillResult(success=False, error=str(exc), error_code="RESOURCE_FORBIDDEN", retryable=False, metadata={"tool": name})
+    if name == "Bash":
+        try:
+            validate_command(str(args.get("command") or ""), cwd=str(args.get("cwd") or ""))
+        except ResourcePolicyError as exc:
+            return SkillResult(success=False, error=str(exc), error_code="RESOURCE_FORBIDDEN", retryable=False, metadata={"tool": name})
 
     mcp_target = _parse_mcp_name(name)
     if mcp_target:
@@ -1404,6 +1482,13 @@ async def run_client_skill_request(
         bool(result and result.get("success")),
     )
     if result is None:
+        # Best effort: the timeout may race a late client result. Marking the
+        # request cancelled makes clients discard it even if they poll after
+        # the server-side workflow has already moved on.
+        try:
+            await client_tools.cancel_request(user_id, req["request_id"])
+        except Exception:  # noqa: BLE001
+            pass
         return SkillResult(
             success=False,
             error="等待用户响应超时，操作已取消",

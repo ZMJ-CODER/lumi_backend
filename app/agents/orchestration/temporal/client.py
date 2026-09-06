@@ -7,14 +7,25 @@ workflow history），改为存 Redis（短 TTL），执行 Activity 时按 job_
 
 import asyncio
 import json
+from typing import Any
 
 from loguru import logger
-from temporalio.client import Client
-from temporalio.common import WorkflowIDReusePolicy
+try:  # Temporal is an optional production backend; legacy/in-memory runs need no SDK.
+    from temporalio.client import Client
+    from temporalio.common import WorkflowIDReusePolicy
+except ImportError:  # pragma: no cover - exercised in environments without Temporal SDK
+    Client = Any  # type: ignore[misc,assignment]
 
-from app.agents.temporal_workflows import AgentDagWorkflow
+    class WorkflowIDReusePolicy:  # type: ignore[no-redef]
+        REJECT_DUPLICATE = "REJECT_DUPLICATE"
+
 from app.core.config import settings
 from app.core.redis import get_redis
+
+try:
+    from app.agents.temporal_workflows import AgentDagWorkflow
+except ImportError:  # Temporal SDK is optional for legacy/in-memory execution.
+    AgentDagWorkflow = None  # type: ignore[assignment]
 
 _client: Client | None = None
 _client_lock = asyncio.Lock()
@@ -34,6 +45,8 @@ def _replan_context_key(job_id: str) -> str:
 
 async def get_temporal_client() -> Client:
     """懒连接 Temporal 前端（单例；连接失败向上抛，由编排器回退 legacy）."""
+    if Client is Any:
+        raise RuntimeError("Temporal SDK 未安装")
     global _client
     if _client is None:
         async with _client_lock:
@@ -47,6 +60,8 @@ async def get_temporal_client() -> Client:
 
 async def start_agent_workflow(payload: dict, job_id: str) -> None:
     """以 job_id 作为 workflow id 启动 AgentDagWorkflow."""
+    if AgentDagWorkflow is None:
+        raise RuntimeError("Temporal SDK 未安装")
     client = await get_temporal_client()
     await client.start_workflow(
         AgentDagWorkflow,

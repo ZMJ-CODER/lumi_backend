@@ -9,6 +9,7 @@ LangChain 绕过 Lumi 的场景白名单或访问其他用户资源。
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
 from typing import Annotated, TypedDict
 from typing import Any
 
@@ -17,8 +18,9 @@ from langchain_core.runnables import Runnable
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
+from loguru import logger
 
-from app.agents.langchain.models import get_chat_model
+from app.agents.langchain.models import get_chat_model, cached_tool_support, remember_tool_support
 from app.agents.langchain.tools import make_skill_tool
 from app.agents.skills.discovery import (
     ToolDiscoverySession,
@@ -37,7 +39,9 @@ from app.agents.skills.executor import (
     select_capabilities_with_trace,
 )
 from app.core.agent_security import redact_server_text, wrap_untrusted_tool_output
+from app.core.model_response import normalize_tool_response
 from app.services.tool_output_pipeline import clean_assistant_text
+from app.services.tool_output_projection import project_tool_output
 
 
 class ChatGraphState(TypedDict, total=False):
@@ -86,6 +90,7 @@ class LangGraphChatRunner:
         self.citations: list[dict] = []
         self._tool_results: list[SkillResult] = []
         self.discovery_session = ToolDiscoverySession()
+        self._clarification_requested = False
 
     def _emit(self, value: str | dict) -> None:
         if self.on_progress:
@@ -93,8 +98,14 @@ class LangGraphChatRunner:
 
     async def _on_tool_result(self, result: SkillResult) -> None:
         self._tool_results.append(result)
-        if isinstance(result.metadata.get("citations"), list):
-            self.citations.extend(result.metadata["citations"])
+        # ToolOutput 的正式元数据位于 ``meta.citations``；metadata 只为旧
+        # 插件构造输入保留。这里必须从规范信封读取，否则工具虽已执行，
+        # 最终 SSE 的 citations 会被错误地置空。
+        citations = list(getattr(getattr(result, "meta", None), "citations", None) or [])
+        if not citations and isinstance(getattr(result, "metadata", None), dict):
+            citations = list(result.metadata.get("citations") or [])
+        if citations:
+            self.citations.extend(citations)
 
     async def run(self, messages: list[dict] | list[BaseMessage]) -> tuple[str, list[dict], list[dict]]:
         """执行串行工具循环，返回旧 ``run_skill_loop`` 保持的三元组契约。"""
@@ -138,6 +149,36 @@ class LangGraphChatRunner:
                 item for item in capabilities
                 if not item.write_op and not item.requires_confirmation
             ]
+            # 公开资料请求先定位 L1 域，再在 research 域内展开动作工具。
+            # 这里不再依赖一份“联网关键词”正则；领域描述和 intent_tags
+            # 是唯一召回依据，命中失败才回退到兼容候选池。
+            import re
+            legal_public = [
+                item for item in await get_capabilities_for_scene(self.scene, self.user_role, self.user_id)
+                if not item.write_op and not item.requires_confirmation
+            ]
+            groups = build_domain_groups(legal_public)
+            from app.agents.skills.discovery import search_domains
+            matched_domains = search_domains(current_user_message, groups, limit=2)
+            research_hit = any(group.name == "research" for group in matched_domains)
+            if research_hit:
+                has_url = bool(re.search(r"https?://|www\\.", current_user_message, re.I))
+                allowed_public = {"web_search", "web_fetch"} if has_url else {"web_search"}
+                narrowed = [item for item in legal_public if item.domain == "research" and item.name in allowed_public]
+                if narrowed:
+                    by_name = {item.name: item for item in narrowed}
+                    capabilities = list(by_name.values())
+                    selection = CapabilitySelection(
+                        capabilities=capabilities,
+                        candidates=[
+                            {"name": item.name, "domain": "research", "version": item.version,
+                             "score": 1.0, "bootstrap": False, "availability_hint": "available"}
+                            for item in capabilities
+                        ],
+                        scene=self.scene, top_score=1.0, second_score=0.0,
+                        score_margin=1.0, ambiguous=False, low_confidence=False,
+                        reason="domain_match_research", routing_mode="domain_first",
+                    )
         # 会话级 L2 缓存可恢复此前已展开的稳定工具；仍受本轮场景和授权池限制。
         if self.discovery_session.loaded_tools:
             legal_names = {item.name for item in await get_capabilities_for_scene(self.scene, self.user_role, self.user_id)}
@@ -150,38 +191,51 @@ class LangGraphChatRunner:
             by_name = {item.name: item for item in [*capabilities, *cached]}
             capabilities = list(by_name.values())[:8]
         if self.chat_model is None:
+            # Domain-first discovery for the production path.  RAG/flat tool
+            # search no longer chooses the final callable; it only supplies a
+            # bounded domain namespace.  The model still makes the concrete
+            # tool decision from the injected schemas.  Keep the old selector
+            # result as a compatibility fallback when no domain evidence is
+            # available (for generic conversational turns).
             legal_capabilities = await get_capabilities_for_scene(self.scene, self.user_role, self.user_id)
             if self.scene == "office":
                 legal_capabilities = [
                     item for item in legal_capabilities
                     if not item.write_op and not item.requires_confirmation
                 ]
-            discovered = search_tools(
-                current_user_message,
-                legal_capabilities,
-                limit=5,
-                allowed_tools={item.name for item in capabilities},
-            )
-            if discovered:
-                self.discovery_session.add(discovered)
-                record_discovery(
-                    current_user_message,
-                    groups=build_domain_groups(legal_capabilities),
-                    results=discovered,
-                    scene=self.scene,
-                    user_id=self.user_id,
-                    job_id=self.conversation_id,
-                    session=self.discovery_session,
-                )
-                await self.discovery_session.save(self.user_id, self.conversation_id)
-                by_name = {item.name: item for item in [*capabilities, *discovered]}
-                capabilities = list(by_name.values())[: max(1, min(8, len(by_name)))]
+            groups = build_domain_groups(legal_capabilities)
+            from app.agents.skills.discovery import search_domains
+
+            matched_domains = search_domains(current_user_message, groups, limit=2)
+            if matched_domains:
+                domain_names = {group.name for group in matched_domains}
+                discovered = [
+                    item for item in legal_capabilities
+                    if item.domain in domain_names
+                    and item.status == "stable"
+                    and (self.scene != "office" or (not item.write_op and not item.requires_confirmation))
+                ][:8]
+                if discovered:
+                    self.discovery_session.add(discovered)
+                    record_discovery(
+                        current_user_message,
+                        groups=groups,
+                        results=discovered,
+                        scene=self.scene,
+                        user_id=self.user_id,
+                        job_id=self.conversation_id,
+                        session=self.discovery_session,
+                    )
+                    await self.discovery_session.save(self.user_id, self.conversation_id)
+                    by_name = {item.name: item for item in [*capabilities, *discovered]}
+                    capabilities = list(by_name.values())[: max(1, min(8, len(by_name)))]
         if selection_requires_escalation(selection, current_user_message):
             record_candidate_selection(
                 selection, request=current_user_message, user_id=self.user_id,
                 job_id=self.conversation_id, selection_round=1,
             )
-            return "当前有多个候选工具无法区分，请明确要使用哪类能力后再继续。", [], []
+            # 候选接近是内部路由信号，不应把实现细节暴露给用户并中止请求。
+            # 保留有限的只读候选，交给模型依据工具契约完成最终裁决。
         tools = []
         for capability in capabilities:
             tool = await make_skill_tool(
@@ -213,7 +267,13 @@ class LangGraphChatRunner:
             base_url=self.base_url,
             llm_config=self.llm_config,
         )
-        bound_model = model.bind_tools(tools)
+        # Some local Ollama models (notably qwen2.5vl:7b) reject bind_tools.
+        # Keep a request-scoped fallback that asks the text model for a tiny
+        # JSON decision, then feeds the same normalized call into ToolNode.
+        bound_model = None
+        cache_model = self.model_name or getattr(model, "model_name", None) or getattr(model, "model", None)
+        cache_base = self.base_url or getattr(model, "openai_api_base", None) or getattr(model, "base_url", None)
+        native_tools_supported = cached_tool_support(cache_model, cache_base) is not False
         # Keep chat on the same generated, registry-derived boundary contract
         # as Office ReAct.  Tool descriptions alone are not enough to explain
         # why adjacent candidates should or should not be used.
@@ -233,7 +293,61 @@ class LangGraphChatRunner:
         )
 
         async def agent(state: ChatGraphState) -> dict:
-            reply = await bound_model.ainvoke([selection_contract, *state["messages"]])
+            nonlocal bound_model, native_tools_supported
+            if self._clarification_requested:
+                self._clarification_requested = False
+                clarification = SystemMessage(content=(
+                    "上一步工具调用缺少必要输入或参数不合法。请不要再次调用工具、不要猜测值，"
+                    "只向用户提出一个简洁明确的问题，询问需要补充的信息；不要输出内部错误码、"
+                    "JSON Schema 或工具实现细节。"
+                ))
+                reply = await model.ainvoke([clarification, *state["messages"]])
+                return {"messages": [AIMessage(content=clean_assistant_text(str(reply.content or "")))]}
+            prompt_messages = [selection_contract, *state["messages"]]
+            if native_tools_supported:
+                try:
+                    if bound_model is None:
+                        bound_model = model.bind_tools(tools)
+                    reply = await bound_model.ainvoke(prompt_messages)
+                    remember_tool_support(cache_model, cache_base, True)
+                except Exception as exc:
+                    text = str(exc).casefold()
+                    if "does not support tools" not in text and "tool calling" not in text and "bind_tools" not in text:
+                        raise
+                    native_tools_supported = False
+                    remember_tool_support(cache_model, cache_base, False)
+                    logger.warning("当前模型不支持原生工具调用，切换文本决策适配: {}", str(exc)[:160])
+            if not native_tools_supported:
+                fallback_contract = SystemMessage(content=(
+                    str(selection_contract.content)
+                    + "\n当前模型不支持原生工具调用。请只输出一个 JSON 对象："
+                    + '{"name":"工具名","arguments":{}} 表示调用工具；或 '
+                    + '{"answer":"最终回答"} 表示无需工具直接回答。不要输出 Markdown、解释或其他文本。'
+                ))
+                reply = await model.ainvoke([fallback_contract, *state["messages"]])
+            clean_content, normalized_calls, _warnings = normalize_tool_response(
+                reply.content, getattr(reply, "tool_calls", None)
+            )
+            if not normalized_calls and isinstance(reply.content, str):
+                try:
+                    payload = json.loads(reply.content.strip())
+                    if isinstance(payload, dict) and payload.get("answer") is not None:
+                        clean_content = str(payload.get("answer") or "")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+            if normalized_calls:
+                reply.content = clean_content
+                reply.tool_calls = [
+                    {
+                        "name": str(call.get("function", {}).get("name") or ""),
+                        "args": call.get("function", {}).get("arguments") or {},
+                        "id": str(call.get("id") or ""),
+                        "type": "tool_call",
+                    }
+                    for call in normalized_calls
+                ]
+            else:
+                reply.content = clean_content
             # 工具调用一律串行。即使供应商返回多个调用，也每轮只放行第一个，
             # 其余调用由下一轮在已获得结果的上下文中重新判断，避免办公写操作
             # 或客户端请求之间发生竞争。
@@ -276,6 +390,8 @@ class LangGraphChatRunner:
                 "error": result.error if result else "工具参数不符合要求",
             }
             self.records.append(record)
+            if result and result.error_code in {"INVALID_PARAMS", "MISSING_PARAMETER", "INVALID_ARGS", "VALIDATION_ERROR"}:
+                self._clarification_requested = True
             self._emit(
                 {
                     "type": "step",
@@ -283,7 +399,9 @@ class LangGraphChatRunner:
                     "title": name,
                     "status": "completed" if record["success"] else "failed",
                     "tool": name,
-                    "output": (result.output[:1000] if result and result.success else ""),
+                    # structured ToolOutput 通常没有 legacy ``output`` 字段；
+                    # 使用统一投影生成可展示的短摘要，避免把网页原文带入 SSE。
+                    "output": (project_tool_output(result)[:1000] if result and result.success else ""),
                     "error": None if record["success"] else record["error"],
                 }
             )

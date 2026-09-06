@@ -51,7 +51,7 @@ def load_skill_plugins() -> int:
     if errors:
         raise RuntimeError("Skill 契约静态检查失败：" + " | ".join(errors[:8]))
     logger.info(
-        "插件加载完成: {} 个公共基础工具，{} 个内部工具，{} 个工作流 Skill（插件实例 {}）",
+        "插件加载完成: {} 个基础工具，{} 个内部工具已禁用，{} 个工作流 Skill（插件实例 {}）",
         len(ToolRegistry.list()),
         len(ToolRegistry.internal_list()),
         len(SkillRegistry.list()),
@@ -177,6 +177,7 @@ def _register_plugin(instance: Tool | WorkflowSkill) -> None:
     """按类型注册：Tool 进原子工具表，WorkflowSkill 进工作流表。"""
     name = instance.name
     if isinstance(instance, WorkflowSkill):
+        _load_workflow_prompt(instance)
         existing = SkillRegistry.get_workflow(name)
         if existing is not None and SkillRegistry.get_source(name) == "builtin" and name not in _builtin_backup:
             _builtin_backup[name] = existing
@@ -198,3 +199,28 @@ def _register_plugin(instance: Tool | WorkflowSkill) -> None:
         public_names = base_tool_names()
         ToolRegistry.register(instance, source="plugin", public=(not public_names or name in public_names))
         _loaded_tool_names.append(name)
+
+
+def _load_workflow_prompt(instance: WorkflowSkill) -> None:
+    """Load an optional Prompt-as-Code body without changing runtime logic.
+
+    A developer workflow may provide ``plugins/workflows/prompts/<skill>.md``
+    (or set ``prompt_file`` to a relative path).  The prompt is data only: the
+    Skill's allowed tools, permissions and confirmation policy remain enforced
+    by the existing runner and cannot be overridden by Markdown.
+    """
+    try:
+        root = workflow_plugins_dir()
+        candidates = []
+        if getattr(instance, "prompt_file", ""):
+            candidates.append(root / str(instance.prompt_file))
+        candidates.extend((root / "prompts" / f"{instance.name}.md", root / "prompts" / f"{instance.name}.prompt.md"))
+        for path in candidates:
+            if path.is_file():
+                text = path.read_text(encoding="utf-8").strip()
+                if text:
+                    instance.prompt_body = text
+                    instance.prompt_version = str(int(path.stat().st_mtime_ns))
+                return
+    except (OSError, ValueError):
+        return

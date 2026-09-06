@@ -38,7 +38,7 @@ from app.services.scene_manager import get_scene_config, get_scene_knowledge_tag
 from app.services.memory.retrieval import search_user_memories
 from app.services.memory.privacy import resolve_decrypt_candidates
 from app.services.conversation_memory import ConversationRecall, retrieve_conversation_recall
-from app.services.prompts import get_base_system_prompt, get_prompt_content
+from app.services.prompts import OFFICE_DECISION_PROMPT, get_base_system_prompt, get_prompt_content
 from app.services.usage import CATEGORY_CHAT, CATEGORY_SKILL, CATEGORY_TITLE
 from app.services.tool_output_projection import project_citations
 
@@ -64,17 +64,17 @@ _MULTIMODAL_KEYWORDS = ("vl", "vision", "4o", "gemini", "llava")
 _MAX_IMAGE_BYTES = 15 * 1024 * 1024  # 单图 ≤ 15MB（base64 后约 20MB，贴近接口上限）
 _MAX_IMAGES_PER_MESSAGE = 10
 _WEB_DECISION_PROMPT = (
-    "你是受控的联网工具选择器。web_search 只是可选的只读工具，不是所有问题的预处理器。\n"
-    "仅当回答需要核实公开互联网中的外部事实、新闻、政策或用户明确要求搜索/网页来源时才调用。\n"
+    "你是受控的公网资料工具选择器。web_search 负责按关键词发现来源，web_fetch 负责读取用户指定 URL 并提取事实。\n"
+    "当用户说查一下、检索、调研、找资料、官方资料、给来源或要求最新/近期信息时，应优先进行公网检索；普通常识解释无需工具。\n"
     "用户自己的任务状态、对话历史、上传附件、知识库内容、总结、改写、创作、计算和普通问答，绝不调用。\n"
-    "‘今天/当前/实时’等词本身不是充分条件；例如‘我今天的待办’属于私有上下文，不应联网。\n"
-    "不确定时不要调用，改为基于已有上下文回答或向用户澄清。"
+    "天气、气温、降雨、汇率、股价、行情、新闻等带有‘今天/当前/实时/最新’限定的公开事实，必须先调用 web_search；‘我今天的待办’属于私有上下文，不应联网。\n"
+    "不确定时不要调用；搜索失败时必须如实说明未完成来源核验，不得用模型记忆伪装成已联网。"
 )
 
 # 这些词只用于显式联网意图的快速候选判断，绝不代表后端强制执行搜索。
 _WEB_INTENT_KEYWORDS = (
     "联网", "网上搜", "网页搜索", "搜索网页", "检索公开资料", "查网页", "给我来源",
-    "搜索新闻", "最新新闻", "公开资料", "web search", "search the web", "browse the web",
+    "搜索新闻", "最新新闻", "公开资料", "查资料", "查信息", "检索", "调研", "研究一下", "找资料", "官方资料", "官方文档", "web search", "search the web", "browse the web",
 )
 
 # 这些词只决定是否给模型展示受控工具目录，绝不决定是否联网。避免让一般
@@ -193,6 +193,8 @@ def _append_office_read_tool_contract(messages: list[dict]) -> list[dict]:
         "\n\n[办公轻量工具]\n"
         "本轮仅在确有必要时使用一个只读工具来取得精确计算、实时公开信息或用户明确指定的内部资料。"
         "如果你已经能用通用知识可靠回答，直接回答，不要调用工具。"
+        "如果用户询问天气、气温、降雨、汇率、股价、行情、新闻，或要求查资料、调研、官方文档，"
+        "不得只回复‘需要查询’或‘我可以搜索’；必须先调用当前可见的联网工具，拿到结果后再回答。"
         "不得创建任务、写入文件、修改待办、访问未授权附件，工具失败时如实说明限制。"
     )
     enriched = [dict(message) for message in messages]
@@ -1130,19 +1132,31 @@ class Orchestrator:
     def _job_answer(job) -> str:
         result = job.result or {}
         answer = str(result.get("final_answer") or result.get("answer") or "").strip()
+        # Internal route-upgrade sentinels are execution control data, never a
+        # user-facing answer.  Prefer the durable error/clarification text.
+        if "ROUTE_UPGRADE_" in answer:
+            answer = ""
         if answer:
             return answer
         if result.get("type") == "clarification":
             return str(result.get("question") or "请补充任务信息。")
         if result.get("type") == "planning_error":
             return str(result.get("message") or job.error or "办公任务规划失败，请稍后重试。")
+        if result.get("type") == "execution_error":
+            return str(result.get("message") or job.error or "办公任务执行失败，请稍后重试。")
         blocks = []
+        retrieval_only = True
         for node in job.nodes:
             node_result = node.result or {}
             content = str(node_result.get("content") or node_result.get("output") or "").strip()
             if content:
                 blocks.append(content)
+                tool_name = str(node_result.get("tool") or node.params.get("preferred_tool") or "").strip()
+                if tool_name not in {"web_search", "web_fetch", "kb_search", "query_knowledge"}:
+                    retrieval_only = False
         if blocks:
+            if retrieval_only:
+                return "已完成资料检索，但当前归纳服务暂时不可用；请稍后重试以获取整理后的结论。"
             return "\n\n".join(blocks)
         failed = next((node for node in job.nodes if node.error), None)
         if failed and failed.error:
@@ -1158,7 +1172,11 @@ class Orchestrator:
         llm_api_key: str | None,
         user_role: str = "user",
     ) -> tuple[str, list[dict], list[dict]]:
-        from app.agents.orchestration import orchestrator as agent_orchestrator
+        # Import the singleton from the concrete module.  ``from package import
+        # orchestrator`` can resolve to the submodule object (because a module
+        # with that name exists) instead of the package ``__getattr__`` export,
+        # which would make ``submit_job`` unavailable at runtime.
+        from app.agents.orchestration.orchestrator import orchestrator as agent_orchestrator
         from app.agents.orchestration.models import JobStatus
 
         job = await agent_orchestrator.submit_job(
@@ -1243,7 +1261,7 @@ class Orchestrator:
         citations: list[dict],
         user_role: str = "user",
     ):
-        from app.agents.orchestration import orchestrator as agent_orchestrator
+        from app.agents.orchestration.orchestrator import orchestrator as agent_orchestrator
         from app.agents.orchestration.models import JobStatus
 
         job = await agent_orchestrator.submit_job(
@@ -1270,6 +1288,7 @@ class Orchestrator:
             JobStatus.INTERRUPTED,
         }
         missing_snapshots = 0
+        completion_waits = 0
         output_cursor = 0
         streamed_answer = ""
         try:
@@ -1325,6 +1344,29 @@ class Orchestrator:
                         streamed_answer += text
                         yield {"type": "delta", "content": text, "job_id": job.job_id}
                 if job.status in terminal:
+                    # A completed DAG can briefly be visible before the
+                    # execution loop finishes its user-facing answer
+                    # synthesis.  Do not terminate SSE on that intermediate
+                    # snapshot, otherwise _job_answer falls back to the raw
+                    # web_search observation.  Failed/cancelled jobs remain
+                    # terminal immediately; only wait for completed jobs
+                    # lacking final_answer.
+                    if job.status == JobStatus.COMPLETED:
+                        result = job.result if isinstance(job.result, dict) else {}
+                        if not str(result.get("final_answer") or "").strip():
+                            completion_waits += 1
+                            # Final-answer synthesis is a separate LLM call
+                            # that may legitimately take tens of seconds
+                            # after the last tool completes.  Keep the SSE
+                            # open long enough for it instead of exposing the
+                            # retrieval observation as a premature answer.
+                            if completion_waits <= 800:
+                                await asyncio.sleep(0.15)
+                                current = await agent_orchestrator.get_job(job.job_id)
+                                if current is not None:
+                                    job = current
+                                    continue
+                    completion_waits = 0
                     break
                 await asyncio.sleep(0.15)
                 current = await agent_orchestrator.get_job(job.job_id)
@@ -1536,7 +1578,10 @@ class Orchestrator:
         """
         base = get_base_system_prompt()
         role = await self._resolve_role_prompt(user_id, scene)
-        return f"{base}\n\n[角色设定]\n{role}"
+        prompt = f"{base}\n\n[角色设定]\n{role}"
+        if scene == "office":
+            prompt += f"\n\n{OFFICE_DECISION_PROMPT}"
+        return prompt
 
     async def _resolve_role_prompt(self, user_id: str, scene: str) -> str:
         """二级提示词：用户选定角色优先，否则场景默认（可插拔角色目录）."""

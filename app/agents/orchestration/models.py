@@ -66,6 +66,11 @@ class TaskNode(BaseModel):
     # Business-owned reliability facts consumed by the execution engine.
     execution: NodeExecutionSpec = Field(default_factory=NodeExecutionSpec)
 
+    @property
+    def is_decision_node(self) -> bool:
+        """Whether this node is a bounded orchestrator decision gate."""
+        return self.agent == "decision_node"
+
 
 class Job(BaseModel):
     """一次多智能体协作任务（含任务树）."""

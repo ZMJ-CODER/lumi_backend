@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 from httpx import AsyncClient
-from langchain_core.messages import AIMessage, BaseMessage, convert_to_messages
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, convert_to_messages
 from loguru import logger
 
 from app.agents.langchain.models import get_chat_model
@@ -23,6 +23,7 @@ from app.core.model_catalog import normalize_provider_base_url
 from app.core.network import resolve_http_proxy
 from app.core.resilience import get_breaker, is_transient_dependency_error
 from app.services.usage import estimate_tokens, record_usage
+from app.core.model_response import normalize_tool_response
 
 
 class LLMClient:
@@ -63,6 +64,27 @@ class LLMClient:
     @staticmethod
     def _has_tool_messages(messages: list[dict]) -> bool:
         return any(isinstance(m, dict) and (m.get("role") == "tool" or m.get("tool_calls")) for m in messages or [])
+
+    @staticmethod
+    def _tool_fallback_messages(messages: list[dict], tools: list[dict]) -> list[BaseMessage]:
+        names = []
+        for item in tools or []:
+            fn = item.get("function") if isinstance(item, dict) else {}
+            if isinstance(fn, dict) and fn.get("name"):
+                names.append(str(fn["name"]))
+        contract = (
+            "当前模型不支持原生 Function Calling。请严格只输出一个 JSON 对象："
+            '{"name":"工具名","arguments":{}} 表示调用一个工具；或 '
+            '{"answer":"最终回答"} 表示无需工具直接回答。可用工具：'
+            + ", ".join(names)
+            + "。不要输出 Markdown、解释或其他文本。"
+        )
+        return [SystemMessage(content=contract), *convert_to_messages(messages)]
+
+    @staticmethod
+    def _is_tool_capability_error(exc: Exception) -> bool:
+        text = str(exc).casefold()
+        return "does not support tools" in text or "tool calling" in text or "bind_tools" in text
 
     async def start(self) -> None:
         """兼容保留：短生命周期 LangChain 模型无需显式启动。"""
@@ -208,13 +230,21 @@ class LLMClient:
                 llm_config=llm_config,
             )
             breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
-            bound = chat_model.bind_tools(tools, parallel_tool_calls=False)
-            reply: AIMessage = await breaker.call(lambda: bound.ainvoke(convert_to_messages(messages)))
-            calls = [
-                {"id": str(call.get("id") or ""), "type": "function", "function": {"name": str(call.get("name") or ""), "arguments": call.get("args") or {}}}
-                for call in (reply.tool_calls or [])
-            ]
-            return reply, self._message_text(reply), calls, used_model
+            try:
+                bound = chat_model.bind_tools(tools, parallel_tool_calls=False)
+                reply: AIMessage = await breaker.call(lambda: bound.ainvoke(convert_to_messages(messages)))
+                calls = [
+                    {"id": str(call.get("id") or ""), "type": "function", "function": {"name": str(call.get("name") or ""), "arguments": call.get("args") or {}}}
+                    for call in (reply.tool_calls or [])
+                ]
+            except Exception as exc:
+                if not self._is_tool_capability_error(exc):
+                    raise
+                logger.warning("模型不支持原生工具调用，使用文本 JSON 决策适配: {}", str(exc)[:160])
+                reply = await breaker.call(lambda: chat_model.ainvoke(self._tool_fallback_messages(messages, tools)))
+                calls = []
+            normalized_text, normalized_calls, _warnings = normalize_tool_response(self._message_text(reply), calls)
+            return reply, normalized_text, normalized_calls, used_model
 
         try:
             reply, content, tool_calls, used_model = await invoke(base_url, api_key, model)
@@ -262,13 +292,21 @@ class LLMClient:
                 llm_config=llm_config,
             )
             breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
-            bound = chat_model.bind_tools(tools, parallel_tool_calls=False)
-            reply: AIMessage = await breaker.call(lambda: bound.ainvoke(convert_to_messages(messages)))
-            calls = [
-                {"id": str(call.get("id") or ""), "type": "function", "function": {"name": str(call.get("name") or ""), "arguments": call.get("args") or {}}}
-                for call in (reply.tool_calls or [])
-            ]
-            return reply, self._message_text(reply), calls, used_model
+            try:
+                bound = chat_model.bind_tools(tools, parallel_tool_calls=False)
+                reply: AIMessage = await breaker.call(lambda: bound.ainvoke(convert_to_messages(messages)))
+                calls = [
+                    {"id": str(call.get("id") or ""), "type": "function", "function": {"name": str(call.get("name") or ""), "arguments": call.get("args") or {}}}
+                    for call in (reply.tool_calls or [])
+                ]
+            except Exception as exc:
+                if not self._is_tool_capability_error(exc):
+                    raise
+                logger.warning("模型不支持原生工具调用，使用文本 JSON 决策适配: {}", str(exc)[:160])
+                reply = await breaker.call(lambda: chat_model.ainvoke(self._tool_fallback_messages(messages, tools)))
+                calls = []
+            normalized_text, normalized_calls, _warnings = normalize_tool_response(self._message_text(reply), calls)
+            return reply, normalized_text, normalized_calls, used_model
 
         try:
             reply, content, tool_calls, used_model = await invoke(base_url, api_key, model)

@@ -17,10 +17,10 @@ def _plan(
     ))
 
 
-def test_explicit_public_web_query_routes_to_web_research():
+def test_explicit_public_web_query_routes_to_web_search_atomic_step():
     tree = _plan("请联网搜索今天上海天气，并给我网页来源")
-    assert [node.agent for node in tree.nodes] == ["web_research"]
-    assert tree.nodes[0].params["query"] == "请联网搜索今天上海天气，并给我网页来源"
+    assert [node.agent for node in tree.nodes] == ["atomic_step"]
+    assert tree.nodes[0].params["preferred_tool"] == "web_search"
 
 
 def test_multi_action_routes_to_react_without_domain_keywords():
@@ -48,9 +48,9 @@ def test_unknown_request_does_not_default_to_retrieval():
     assert tree.clarification
 
 
-def test_clear_question_still_routes_to_retrieval():
+def test_clear_general_knowledge_question_stays_direct():
     tree = _plan("唐朝长安城有多少人")
-    assert [node.agent for node in tree.nodes] == ["retrieval"]
+    assert [node.agent for node in tree.nodes] == ["direct_llm"]
 
 
 def test_multiple_adjacent_filenames_compile_to_static_dag():

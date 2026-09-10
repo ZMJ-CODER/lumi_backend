@@ -8,13 +8,22 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import time
+import uuid
 from collections.abc import Awaitable, Callable
 
 from app.agents.skills.base import SkillContext, ToolOutput, WorkflowSkill
 from app.agents.skills.executor import execute_tool_call
+from app.core.config import settings
 
 
 ToolInvoker = Callable[[str, dict], Awaitable[ToolOutput]]
+
+
+def _monotonic() -> float:
+    """Local clock seam; tests must not replace the process-wide time module."""
+    return time.monotonic()
 
 
 async def run_workflow_skill(
@@ -28,12 +37,41 @@ async def run_workflow_skill(
     confirmed_tool_calls: frozenset[str] | set[str] | None = None,
     approval_context_sha256: str = "",
     authorized_project_ids: tuple[str, ...] = (),
+    workspace_id: str = "",
 ) -> ToolOutput:
     """执行一个已由编排层选定的组合 Skill。"""
 
     allowed = set(skill.allowed_tools)
+    allowed.update(
+        str(item.get("name") or "")
+        for item in skill.effective_dependencies().get("tools", [])
+        if isinstance(item, dict) and str(item.get("name") or "")
+    )
+
+    client_approval_wait_s = max(5.0, float(settings.MCP_CLIENT_APPROVAL_WAIT_S))
 
     async def invoke_tool(name: str, arguments: dict) -> ToolOutput:
+        # Workspace IDs are a server-side authority, not a model-selectable
+        # parameter.  A workflow may omit it; it may never switch it.
+        target_args = dict(arguments or {})
+        raw_name = name.split("__", 2)[-1] if name.startswith("mcp__") else name
+        if raw_name.startswith(("workspace_", "sandbox_")):
+            if not workspace_id:
+                return ToolOutput(
+                    success=False,
+                    error="当前任务没有已选择的工作区；请先在办公模式中新建或打开项目",
+                    error_code="WORKSPACE_SCOPE_REQUIRED",
+                    retryable=False,
+                )
+            supplied = str(target_args.get("workspace_id") or "").strip()
+            if supplied and supplied != workspace_id:
+                return ToolOutput(
+                    success=False,
+                    error="工具请求的工作区不属于当前任务",
+                    error_code="WORKSPACE_SCOPE_FORBIDDEN",
+                    retryable=False,
+                )
+            target_args["workspace_id"] = workspace_id
         # query_knowledge is a Skill-owned service capability, not a public
         # atomic tool.  Keep it available to the developer workflows without
         # re-registering it in the model-visible ToolRegistry.
@@ -42,7 +80,7 @@ async def run_workflow_skill(
             from app.core.database import async_session_factory
             from app.services.scene_manager import get_scene_knowledge_tags
 
-            query = str(arguments.get("query") or "").strip()
+            query = str(target_args.get("query") or "").strip()
             if not query or not context.user_id:
                 return ToolOutput(success=False, error="知识库检索缺少用户或 query", error_code="INVALID_ARGS")
             try:
@@ -50,37 +88,72 @@ async def run_workflow_skill(
                     text, citations = await search_user_knowledge(
                         session, user_id=context.user_id, query=query,
                         space_tags=get_scene_knowledge_tags(context.scene),
-                        top_k=int(arguments.get("top_k") or 5), exclude_categories=["code"],
+                        top_k=int(target_args.get("top_k") or 5), exclude_categories=["code"],
                     )
                 if not text:
                     return ToolOutput(success=False, error="知识库中未检索到相关内容", error_code="EXEC_ERROR")
                 return ToolOutput(success=True, output=text, data={"matches": citations}, metadata={"citations": citations})
             except Exception as exc:  # noqa: BLE001
                 return ToolOutput(success=False, error=f"知识库检索失败: {exc}", error_code="EXEC_ERROR", retryable=True)
-        result = await execute_tool_call(
-            {
-                "id": f"workflow-{skill.name}-{name}",
-                "type": "function",
-                "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
-            },
-            context.user_id,
-            context.scene,
-            context.conversation_id or context.job_id,
-            on_notify=context.on_notify,
-            on_output=context.on_output,
-            user_role=user_role,
-            user_message=user_message,
-            llm_api_key=context.llm_api_key,
-            llm_config=context.llm_config,
-            confirmed_tools=confirmed_tools,
-            confirmed_tool_calls=confirmed_tool_calls,
-            approval_context_sha256=approval_context_sha256,
-            office_doc_ids=context.office_doc_ids,
-            authorized_project_ids=authorized_project_ids or context.authorized_project_ids,
-            execution_scope=context.job_id,
-            allowed_tools=allowed,
-            allow_internal=False,
-        )
+        # One logical client action keeps one call id across local approval.
+        # Electron records the decision/result under this id; changing it on
+        # retry would open a second dialog and could execute a commit twice.
+        mcp_call_id = str(uuid.uuid4())
+        tool_call = {
+            "id": mcp_call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(target_args, ensure_ascii=False)},
+        }
+
+        async def execute_once() -> ToolOutput:
+            return await execute_tool_call(
+                tool_call,
+                context.user_id,
+                context.scene,
+                context.conversation_id or context.job_id,
+                on_notify=context.on_notify,
+                on_output=context.on_output,
+                user_role=user_role,
+                user_message=user_message,
+                llm_api_key=context.llm_api_key,
+                llm_config=context.llm_config,
+                confirmed_tools=confirmed_tools,
+                confirmed_tool_calls=confirmed_tool_calls,
+                approval_context_sha256=approval_context_sha256,
+                office_doc_ids=context.office_doc_ids,
+                authorized_project_ids=authorized_project_ids or context.authorized_project_ids,
+                authorized_workspace_id=workspace_id or context.workspace_id,
+                execution_scope=context.job_id,
+                allowed_tools=allowed,
+                allow_internal=False,
+                mcp_call_id=mcp_call_id,
+            )
+
+        result = await execute_once()
+        raw_name = name.split("__", 2)[-1] if name.startswith("mcp__") else name
+        client_workspace_call = name.startswith("mcp__") and raw_name.startswith(("workspace_", "sandbox_"))
+        if result.status == "pending_approval" and client_workspace_call:
+            if context.on_notify:
+                notice = "变更已准备，正在等待你在客户端确认…"
+                maybe = context.on_notify(notice)
+                if hasattr(maybe, "__await__"):
+                    await maybe
+            deadline = _monotonic() + client_approval_wait_s
+            poll_seconds = 1.0
+            while result.status == "pending_approval" and _monotonic() < deadline:
+                await asyncio.sleep(poll_seconds)
+                result = await execute_once()
+                poll_seconds = min(3.0, poll_seconds + 0.5)
+            if result.status == "pending_approval":
+                return ToolOutput(
+                    status="cancelled",
+                    call_id=mcp_call_id,
+                    data=result.data,
+                    error="等待客户端确认超时，本次操作尚未执行",
+                    error_code="CLIENT_APPROVAL_TIMEOUT",
+                    retryable=False,
+                    meta=result.meta,
+                )
         # The unified execution envelope carries structured tool payloads in
         # ``data``.  Normalize the text projection here as a second defensive
         # boundary so Workflow implementations can consume search/fetch
@@ -106,5 +179,41 @@ async def run_workflow_skill(
                     if lines:
                         result = result.model_copy(update={"output": "\n\n".join(lines)[:12000]})
         return result
+
+    from app.agents.skills.dependencies import resolve_dependencies
+    from app.agents.skills.executor import get_capabilities_for_scene, get_desktop_mcp_capabilities
+
+    capability_rows = await get_capabilities_for_scene(
+        context.scene, user_role, context.user_id, include_internal=True
+    )
+    capability_rows.extend(
+        await get_desktop_mcp_capabilities(context.user_id, context.scene, user_role)
+    )
+    capability_map = {
+        item.name: {
+            "version": item.version,
+            "provider": str((item.annotations or {}).get("provider") or ("external_mcp" if item.source == "mcp" else item.environment)),
+            "environment": item.environment,
+            "annotations": dict(item.annotations or {}),
+        }
+        for item in capability_rows
+    }
+    dependency_report = resolve_dependencies(
+        skill.effective_dependencies(), capability_map,
+        execution_scope=str(getattr(skill, "execution_scope", "backend") or "backend"),
+    )
+    if dependency_report.required_issues:
+        first = dependency_report.required_issues[0]
+        return ToolOutput(
+            success=False,
+            error=first.message,
+            error_code=f"WORKFLOW_DEPENDENCY_{first.code}",
+            retryable=first.code in {"CLIENT_OFFLINE", "PROVIDER_UNAVAILABLE"},
+            metadata={
+                "skill": skill.name,
+                "fallback_policy": str(getattr(skill, "fallback_policy", "clarify") or "clarify"),
+                "dependency_report": dependency_report.as_dict(),
+            },
+        )
 
     return await skill.run(params, context, invoke_tool)

@@ -6,6 +6,7 @@ owns the runtime-neutral control sequence and backend fallback policy.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 
 from loguru import logger
@@ -14,7 +15,6 @@ from app.agents.orchestration.approval_service import ApprovalService
 from app.agents.orchestration.backends.legacy import LegacyDagBackend
 from app.agents.orchestration.backends.temporal_logical_effects import TemporalLogicalEffectsBackend
 from app.agents.orchestration.backends.temporal_logical_read import TemporalLogicalReadBackend
-from app.agents.orchestration.backends.temporal_manifest import TemporalManifestBackend
 from app.agents.orchestration.backends.temporal_static import TemporalStaticBackend
 from app.agents.orchestration.job_finalizer import JobFinalizer
 from app.agents.orchestration.models import Job, JobStatus
@@ -45,7 +45,6 @@ class JobControlService:
         *,
         repository: JobRepository,
         approval: ApprovalService,
-        temporal_backend: TemporalManifestBackend,
         static_backend: TemporalStaticBackend,
         legacy_backend: LegacyDagBackend,
         finalizer: JobFinalizer,
@@ -55,7 +54,6 @@ class JobControlService:
     ) -> None:
         self._repository = repository
         self._approval = approval
-        self._temporal = temporal_backend
         self._static = static_backend
         self._logical_read = logical_read_backend or _UnavailableBackend()
         self._logical_effects = logical_effects_backend or _UnavailableBackend()
@@ -91,11 +89,6 @@ class JobControlService:
                 raise RuntimeError(static_result.error)
             await self._release_cancelled_capacity(static_result.job, static_result.release_capacity)
             return static_result.job
-        temporal_result = await self._temporal.cancel(stored_job, keep_completed)
-        if temporal_result is not None and temporal_result.handled:
-            await self._release_cancelled_capacity(temporal_result.job, temporal_result.release_capacity)
-            return temporal_result.job
-
         legacy_result = await self._legacy.cancel(
             await self._repository.get_job(job_id), keep_completed
         )
@@ -138,6 +131,13 @@ class JobControlService:
             except Exception as exc:  # noqa: BLE001
                 logger.debug("审批前同步 Temporal 快照失败 {}: {}", job_id, exc)
         result = await self._approval.resolve(job_id, node_id, approved)
+        # 计划优先 step_confirm：审批只解开步骤门闩，不自动恢复整 DAG。
+        # 门闩解开后任务回到 waiting_next，由 /jobs/{id}/resume（action=run_next）
+        # 重新进入单步执行；拒绝审批则任务直接终态失败。
+        if self._is_plan_step_approval(result.job):
+            if approved:
+                await self._park_plan_step_approval(result.job)
+            return
         if approved and self._ensure_active_capacity is not None and not await self._ensure_active_capacity(result.job):
             # Approval is durable and bound to the exact fingerprint, but a
             # newly active task still needs ordinary admission. Do not retain
@@ -156,9 +156,7 @@ class JobControlService:
             if effects_result.error:
                 raise RuntimeError(effects_result.error)
             return
-        temporal_result = await self._temporal.approve(result.job, node_id, approved)
-        if temporal_result is None:
-            await self._legacy.approve(result.job, node_id, approved)
+        await self._legacy.approve(result.job, node_id, approved)
 
     async def pause(self, job_id: str) -> Job | None:
         stored_job = await self._repository.get_job(job_id)
@@ -177,11 +175,33 @@ class JobControlService:
             if static_result.error:
                 raise RuntimeError(static_result.error)
             return static_result.job
-        temporal_result = await self._temporal.pause(stored_job)
-        if temporal_result is not None and temporal_result.handled:
-            return temporal_result.job
         legacy_result = await self._legacy.pause(await self._repository.get_job(job_id))
         return legacy_result.job if legacy_result is not None else None
+
+    @staticmethod
+    def _is_plan_step_approval(job: Job | None) -> bool:
+        """计划优先 step_confirm 任务的审批门（canonical waiting_approval）。"""
+        if job is None:
+            return False
+        routing = job.routing if isinstance(job.routing, dict) else {}
+        return (
+            str(routing.get("execution_mode") or "") == "step_confirm"
+            and str(routing.get("execution_state") or "") == "waiting_approval"
+        )
+
+    async def _park_plan_step_approval(self, job: Job) -> None:
+        """审批通过后把任务停放回 waiting_next（释放单步准入槽）。"""
+        routing = dict(job.routing or {})
+        # 审批发生在某个步骤执行过程中：解开步骤门闩后统一回到 waiting_next，
+        # 由 run_next 重新进入单步执行（含首步审批场景）。
+        routing["execution_state"] = "waiting_next"
+        job.routing = routing
+        if job.status == JobStatus.RUNNING:
+            job.status = JobStatus.PENDING
+        job.error = None
+        job.updated_at = time.time()
+        await self._repository.save_job(job)
+        await self._finalizer.suspend_capacity(job)
 
     async def resume(self, job_id: str) -> Job | None:
         stored_job = await self._repository.get_job(job_id)
@@ -207,8 +227,5 @@ class JobControlService:
             if static_result.error:
                 raise RuntimeError(static_result.error)
             return static_result.job
-        temporal_result = await self._temporal.resume(stored_job)
-        if temporal_result is not None and temporal_result.handled:
-            return temporal_result.job
         legacy_result = await self._legacy.resume(await self._repository.get_job(job_id))
         return legacy_result.job if legacy_result is not None else None

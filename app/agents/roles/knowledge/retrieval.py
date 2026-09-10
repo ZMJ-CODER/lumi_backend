@@ -26,9 +26,8 @@ class RetrievalAgent(WorkerAgent):
         if not query:
             return {"success": False, "error": "检索任务缺少 query 参数", "error_code": "INVALID_ARGS"}
         top_k = int(node.params.get("top_k") or 5)
-        # Safety net: even if an upstream phrase classifier missed a
-        # multi-document fact request, never query the unrestricted knowledge
-        # index before narrowing the server-authorized attachment scope.
+        # Authorization is independent from planning: multiple supplied
+        # documents are narrowed before querying a broader knowledge index.
         if len(ctx.office_doc_ids) >= 2:
             from app.agents.roles.knowledge.document_targeting import DocumentTargetingAgent
 
@@ -42,11 +41,7 @@ class RetrievalAgent(WorkerAgent):
             "query_knowledge", {"query": query, "top_k": top_k}, ctx
         )
         if not result.get("success"):
-            # A search miss is not automatically an Agent problem: Agent must
-            # not invent private/system access.  Only a capability signal from
-            # the narrow retrieval path asks the scheduler to broaden the
-            # read-only atom, and it remains bounded by the manifest upgrade
-            # policy.
+            # A search miss is not permission to invent private/system access.
             code = str(result.get("error_code") or "").upper()
             if code in {"CAPABILITY_UNAVAILABLE", "MCP_UNAVAILABLE", "SKILL_NOT_FOUND"}:
                 return {

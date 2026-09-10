@@ -75,8 +75,8 @@ def evaluate_static_temporal(
 ) -> StaticTemporalDecision:
     """Explain whether a frozen, no-side-effect DAG may enter Temporal."""
     routing = getattr(job, "routing", {}) or {}
-    if routing.get("manifest") or routing.get("logical_plan"):
-        return StaticTemporalDecision(False, "rolling_plan", "任务包含滚动清单或逻辑计划")
+    if routing.get("logical_plan"):
+        return StaticTemporalDecision(False, "rolling_plan", "任务包含滚动逻辑计划")
     return evaluate_static_temporal_nodes(
         list(getattr(job, "nodes", None) or []),
         max_nodes=max_nodes,

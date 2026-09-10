@@ -39,7 +39,6 @@ def resolve_node_timeout(
     node: Any,
     *,
     default_seconds: int,
-    channel_timeouts: Mapping[str, int],
     tool_timeouts: Mapping[str, int],
 ) -> int:
     """Choose a positive timeout without reading global configuration."""
@@ -52,12 +51,7 @@ def resolve_node_timeout(
             return max(1, int(tool_timeout))
         except (TypeError, ValueError):
             pass
-    channel = str(_node_mapping(node, "metadata").get("route_channel") or "agent")
-    try:
-        configured = int(channel_timeouts.get(channel, 0))
-    except (TypeError, ValueError):
-        configured = 0
-    resolved = max(1, configured) if configured > 0 else fallback
+    resolved = fallback
     hint = str(params.get("timeout_hint") or "").strip().lower()
     if hint in {"short_qa", "short", "fast"}:
         resolved = min(resolved, 20)

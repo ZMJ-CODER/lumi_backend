@@ -1,7 +1,9 @@
-"""多智能体协作 API —— 提交任务 / 查询状态 / 终止 / 暂停 / 恢复."""
+"""多智能体协作 API —— 提交任务 / 查询状态 / 终止 / 暂停 / 恢复 / 单步执行."""
+
+import json
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
 from app.agents.orchestration import orchestrator
@@ -24,6 +26,8 @@ from app.models.agent import (
     CancelAgentJobRequest,
     CreateAgentJobRequest,
     ForkAgentJobRequest,
+    RESUME_ACTION_RUN_NEXT,
+    ResumeAgentJobRequest,
 )
 
 router = APIRouter()
@@ -35,6 +39,47 @@ async def _get_owned_job(job_id: str, user_id: str):
     if not job or job.user_id != user_id:
         raise NotFoundException("任务不存在")
     return job
+
+
+@router.post("/plan-preview")
+async def preview_agent_plan(
+    request: Request,
+    req: CreateAgentJobRequest,
+    payload: dict = Depends(require_auth),
+):
+    """验证真实路由、规划和编译结果，不创建或执行办公任务。"""
+    if req.workspace_id and req.conversation_id:
+        from app.services import workspaces
+
+        try:
+            workspaces.bind_workspace_to_conversation(payload["sub"], req.workspace_id, req.conversation_id)
+        except (LookupError, ValueError) as exc:
+            raise BadRequestException(str(exc), error_code="WORKSPACE_BINDING_INVALID") from exc
+    tree, routing = await orchestrator.preview_plan(
+        user_id=payload["sub"],
+        request=req.request,
+        scene=req.scene,
+        conversation_id=req.conversation_id,
+        project_id=req.project_id,
+        project_ids=req.project_ids,
+        llm_api_key=request.headers.get("x-llm-api-key") or None,
+        clarification_answer=req.clarification_answer,
+        office_docs=req.office_docs,
+        workspace_id=req.workspace_id,
+        user_role=payload.get("role", "user"),
+    )
+    return {
+        "code": 0,
+        "data": {
+            "preview": True,
+            "plan_text": tree.plan_text,
+            "clarification": tree.clarification,
+            "error": tree.error,
+            "error_code": tree.error_code,
+            "routing": routing,
+            "nodes": [node.model_dump(mode="json") for node in tree.nodes],
+        },
+    }
 
 
 @router.post("/jobs")
@@ -49,6 +94,13 @@ async def create_agent_job(
     仅任务执行期间保存在内存，任务结束即释放，不落库不写日志。
     """
     llm_api_key = request.headers.get("x-llm-api-key") or None
+    if req.workspace_id and req.conversation_id:
+        from app.services import workspaces
+
+        try:
+            workspaces.bind_workspace_to_conversation(payload["sub"], req.workspace_id, req.conversation_id)
+        except (LookupError, ValueError) as exc:
+            raise BadRequestException(str(exc), error_code="WORKSPACE_BINDING_INVALID") from exc
     rate = await consume_route_limit(request, payload, "office_submit")
     if not rate.allowed:
         return JSONResponse(
@@ -62,16 +114,18 @@ async def create_agent_job(
         )
     try:
         job = await orchestrator.submit_job(
-            payload["sub"],
-            req.request,
-            req.scene,
-            req.conversation_id,
-            req.project_id,
-            req.project_ids,
-            llm_api_key,
-            req.clarification_answer,
-            req.office_docs,
-            payload.get("role", "user"),
+            user_id=payload["sub"],
+            request=req.request,
+            scene=req.scene,
+            conversation_id=req.conversation_id,
+            project_id=req.project_id,
+            project_ids=req.project_ids,
+            llm_api_key=llm_api_key,
+            clarification_answer=req.clarification_answer,
+            office_docs=req.office_docs,
+            workspace_id=req.workspace_id,
+            user_role=payload.get("role", "user"),
+            execution_preference=req.execution_preference,
         )
     except ActiveConversationJobError as exc:
         raise ConflictException(str(exc), error_code="OFFICE_JOB_CONFLICT") from exc
@@ -104,7 +158,14 @@ async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     if job.user_id != payload["sub"]:
         logger.warning("查询办公任务归属不匹配: job={} owner={} requester={}", str(job_id)[:12], str(job.user_id)[:12], str(payload.get("sub", ""))[:12])
         raise NotFoundException("任务不存在")
-    return {"code": 0, "data": job.model_dump()}
+    # 前端页面刷新后需恢复 计划/步骤/当前状态/按钮数据：在原有 Job 快照上
+    # 附带 run_view（execution_mode/plan_revision/current_step_index/steps/
+    # canonical status/dsml_pending/task_completed/task_failed）。
+    from app.agents.orchestration.job_run_view import run_view
+
+    data = job.model_dump()
+    data["run_view"] = run_view(job)
+    return {"code": 0, "data": data}
 
 
 @router.get("/jobs/{job_id}/spans")
@@ -181,12 +242,23 @@ async def cancel_agent_job(
     req: CancelAgentJobRequest,
     payload: dict = Depends(require_auth),
 ):
-    """终止任务：立即停止调度，可选择保留已完成节点."""
+    """终止任务：立即停止调度，可选择保留已完成节点/步骤与暂存成果."""
     await _get_owned_job(job_id, payload["sub"])
-    job = await orchestrator.cancel_job(job_id, req.keep_completed)
+    effective_keep = (
+        req.keep_completed_steps
+        if req.keep_completed_steps is not None
+        else req.keep_completed
+    )
+    job = await orchestrator.cancel_job(job_id, effective_keep)
     if not job:
         raise NotFoundException("任务不存在")
-    return {"code": 0, "data": job.model_dump(), "message": "任务已终止"}
+    from app.agents.orchestration.job_run_view import run_view
+
+    data = job.model_dump()
+    data["run_view"] = run_view(job, status_override="cancelled")
+    data["cancel_reason"] = req.reason
+    data["keep_completed_steps"] = bool(effective_keep)
+    return {"code": 0, "data": data, "message": "任务已终止"}
 
 
 @router.post("/jobs/{job_id}/approve")
@@ -215,13 +287,65 @@ async def pause_agent_job(job_id: str, payload: dict = Depends(require_auth)):
 
 
 @router.post("/jobs/{job_id}/resume")
-async def resume_agent_job(job_id: str, payload: dict = Depends(require_auth)):
-    """恢复被暂停的任务."""
+async def resume_agent_job(
+    job_id: str,
+    req: ResumeAgentJobRequest | None = None,
+    payload: dict = Depends(require_auth),
+):
+    """恢复任务 / 单步执行。
+
+    - action=resume（默认）：恢复被暂停的任务，返回 JSON；
+    - action=run_next：step_confirm 计划优先任务逐步骤执行，本接口即为
+      SSE 事件流（step_started / delta / step_completed+waiting_next /
+      waiting_approval / task_completed / task_failed / error / view），
+      执行完“下一步”后收敛；前端在此连接的同一个气泡上消费过程事件。
+    """
     await _get_owned_job(job_id, payload["sub"])
+    action = str((req.action if req is not None else "") or "resume").strip() or "resume"
+    if action == RESUME_ACTION_RUN_NEXT:
+        return _run_next_sse_response(
+            job_id,
+            expected_step_id=(req.expected_step_id if req else "") or "",
+            plan_revision=(req.plan_revision if req else None),
+            idempotency_key=(req.idempotency_key if req else "") or "",
+        )
     job = await orchestrator.resume_job(job_id)
     if not job:
         raise NotFoundException("任务不存在")
     return {"code": 0, "data": job.model_dump(), "message": "任务已恢复"}
+
+
+def _run_next_sse_response(job_id: str, *, expected_step_id: str, plan_revision: int | None, idempotency_key: str):
+    """构造 run_next 的 SSE 响应（事件流见 orchestrator.stream_run_next）。"""
+
+    async def event_gen():
+        try:
+            async for evt in orchestrator.stream_run_next(
+                job_id=job_id,
+                expected_step_id=expected_step_id,
+                plan_revision=plan_revision,
+                idempotency_key=idempotency_key,
+            ):
+                yield _sse_line(evt)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("run_next SSE 中断 job={} err={}", str(job_id)[:12], str(exc)[:200])
+            yield _sse_line({
+                "type": "error",
+                "message": "单步执行流中断，请刷新任务状态后重试",
+                "status": 500,
+                "code": "RUN_NEXT_STREAM_INTERRUPTED",
+            })
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _sse_line(obj: dict) -> str:
+    """构造 SSE 事件行（与 /chat/stream 相同的编码兜底）。"""
+    return f"data: {json.dumps(obj, ensure_ascii=False, default=str)}\n\n"
 
 
 @router.post("/jobs/{job_id}/plan-patches")

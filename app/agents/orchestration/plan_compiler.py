@@ -16,7 +16,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.agents.orchestration.models import TaskNode
-from app.agents.orchestration.task_routing import RouteChannel, estimate_tokens
+from app.agents.orchestration.execution_budget import estimate_node_tokens
 
 
 class CompileDecision(str, Enum):
@@ -324,6 +324,9 @@ async def build_capability_snapshot(
         capabilities = await get_capabilities_for_scene(
             scene, user_role, user_id, include_internal=True
         )
+        from app.agents.skills.executor import get_desktop_mcp_capabilities
+
+        capabilities.extend(await get_desktop_mcp_capabilities(user_id, scene, user_role))
         for capability in capabilities:
             tools[capability.name] = {
                 "parameters": capability.parameters if isinstance(capability.parameters, dict) else {},
@@ -334,6 +337,10 @@ async def build_capability_snapshot(
                 "status": capability.status,
                 "description": capability.description,
                 "plan_required_fields": list(capability.plan_required_fields),
+                "version": capability.version,
+                "provider": str((capability.annotations or {}).get("provider") or ("external_mcp" if capability.source == "mcp" else capability.environment)),
+                "environment": capability.environment,
+                "annotations": dict(capability.annotations or {}),
             }
     except Exception:
         # Local workers can still be compiled if an optional MCP discovery
@@ -349,9 +356,22 @@ async def build_capability_snapshot(
                 "source": workflow.source,
                 "allowed_tools": list(workflow.allowed_tools),
                 "prompt_version": str(getattr(workflow, "prompt_version", "") or ""),
+                "dependencies": workflow.effective_dependencies(),
+                "execution_scope": str(getattr(workflow, "execution_scope", "backend") or "backend"),
+                "availability_policy": str(getattr(workflow, "availability_policy", "fail_if_missing") or "fail_if_missing"),
+                "fallback_policy": str(getattr(workflow, "fallback_policy", "clarify") or "clarify"),
+                "approval_policy": str(getattr(workflow, "approval_policy", "none") or "none"),
             }
     except Exception:
         workflows = {}
+    if workflows:
+        from app.agents.skills.dependencies import resolve_dependencies
+
+        for workflow in workflows.values():
+            workflow["availability"] = resolve_dependencies(
+                workflow.get("dependencies"), tools,
+                execution_scope=str(workflow.get("execution_scope") or "backend"),
+            ).as_dict()
     encoded = json.dumps(
         {"scene": scene, "role": user_role, "workers": sorted(workers), "tools": tools, "workflows": workflows},
         ensure_ascii=False, sort_keys=True, default=str,
@@ -385,6 +405,13 @@ async def compile_plan(
         scene=scene, user_role=user_role, user_id=user_id, workers=workers,
     )
     compiled_nodes = [node.model_copy(deep=True) for node in nodes]
+    # A plan can reach this low-level compiler from more than one submission
+    # path (including recovery/replan flows).  Keep legacy tool aliases from
+    # leaking into the capability check even when the higher-level submission
+    # normalizer was bypassed.
+    from app.agents.orchestration.planning.normalizer import normalize_tool_aliases
+
+    normalize_tool_aliases(compiled_nodes)
     violations: list[PlanViolation] = []
     warnings: list[PlanViolation] = []
 
@@ -495,6 +522,24 @@ async def compile_plan(
                 violations.append(PlanViolation(
                     code="WORKFLOW_INPUTS_TYPE", message="工作流 inputs 必须是对象", node_id=node.id,
                 ))
+            elif workflow is not None:
+                from app.agents.skills.dependencies import resolve_dependencies
+
+                report = resolve_dependencies(
+                    workflow.get("dependencies"), snapshot.tools,
+                    execution_scope=str(workflow.get("execution_scope") or "backend"),
+                )
+                workflow["availability"] = report.as_dict()
+                if report.required_issues:
+                    policy = str(workflow.get("availability_policy") or "fail_if_missing")
+                    severity = "warning" if policy in {"allow_server_fallback"} else "error"
+                    for issue in report.required_issues:
+                        violations.append(PlanViolation(
+                            code=f"WORKFLOW_DEPENDENCY_{issue.code}",
+                            message=issue.message,
+                            node_id=node.id,
+                            severity=severity,
+                        ))
     if node.agent == "react_step":
             rounds = params.get("max_rounds", 6)
             # Rolling plans need enough turns to explore, act, repair and
@@ -526,15 +571,7 @@ async def compile_plan(
     # to reject an otherwise executable plan.
     warnings.extend(item for item in violations if item.severity == "warning")
     violations = [item for item in violations if item.severity != "warning"]
-    total_tokens = sum(
-        estimate_tokens(
-            str((node.params or {}).get("instruction") or (node.params or {}).get("task") or node.name),
-            RouteChannel.AGENT if node.agent not in {"retrieval", "direct_llm"} else (
-                RouteChannel.RAG if node.agent == "retrieval" else RouteChannel.DIRECT_LLM
-            ),
-        )
-        for node in compiled_nodes
-    )
+    total_tokens = sum(estimate_node_tokens(node) for node in compiled_nodes)
     cost = PlanCost(
         estimated_tokens=total_tokens,
         critical_path_ms=_critical_path(compiled_nodes),

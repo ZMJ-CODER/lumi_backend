@@ -42,7 +42,6 @@ class ExecutionLoopService:
         llm_configs: dict[str, dict],
         plan_context: dict[str, dict],
         context_getter: Callable[[str], dict],
-        continue_manifest: Callable[[Job], Awaitable[bool]],
         continue_logical_plan: Callable[[Job], Awaitable[bool]],
         maybe_replan: Callable[[Job, str | None], Awaitable[bool]],
         node_concurrency: int,
@@ -61,7 +60,6 @@ class ExecutionLoopService:
         self._llm_configs = llm_configs
         self._plan_context = plan_context
         self._context_getter = context_getter
-        self._continue_manifest = continue_manifest
         self._continue_logical_plan = continue_logical_plan
         self._maybe_replan = maybe_replan
         self._node_concurrency = node_concurrency
@@ -86,6 +84,17 @@ class ExecutionLoopService:
             job = await self._store.get_job(job_id) or self._live_jobs.get(job_id)
             if job is None:
                 return
+            # v2 观测：进入 Agent/节点执行（指标默认关闭时零开销）。
+            try:
+                from app.core.observability import inc_agent_invoked
+
+                routing = job.routing if isinstance(job.routing, dict) else {}
+                inc_agent_invoked(
+                    str(routing.get("execution_policy") or ""),
+                    str(routing.get("complexity") or ""),
+                )
+            except Exception:  # noqa: BLE001 - 观测失败不影响执行
+                pass
             while True:
                 await self._task_execution_service.execute(
                     job,
@@ -97,10 +106,6 @@ class ExecutionLoopService:
                 )
                 job = await self._store.get_job(job_id) or job
                 self._live_jobs[job_id] = job
-                if await self._continue_manifest(job):
-                    job = await self._store.get_job(job_id) or job
-                    self._live_jobs[job_id] = job
-                    continue
                 if await self._continue_logical_plan(job):
                     job = await self._store.get_job(job_id) or job
                     self._live_jobs[job_id] = job
@@ -294,3 +299,18 @@ class ExecutionLoopService:
                 await self._store.save_job(job)
             else:
                 logger.debug("legacy DAG 最终答案汇总失败 {}: {}", job.job_id, exc)
+                # Synthesis is presentation-only.  Even an unclassified local
+                # formatter failure must not leave a completed job without a
+                # deliverable final_answer.
+                fallback = "\n\n".join(
+                    f"{item['title']}：{item['content']}"
+                    for item in results
+                    if str(item.get("content") or "").strip()
+                )[:60000]
+                job.result = {
+                    "final_answer": fallback or "任务已完成，但未产生可展示内容。",
+                    "delivery_status": "degraded",
+                    "delivery_error_code": code,
+                    "delivery_error": message,
+                }
+                await self._store.save_job(job)

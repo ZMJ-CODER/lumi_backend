@@ -273,6 +273,7 @@ async def get_bound_capabilities(user_id: str, scene: str, user_role: str) -> li
             intent_tags=list(binding.intent_tags or []),
             parameters=schema,
             source="mcp",
+            environment="server",
             server=binding.server_name,
             raw_name=binding.raw_tool_name,
             permission=binding.permission,

@@ -42,33 +42,39 @@ def agent_prompt_lines() -> str:
 
 
 def build_planner_prompt() -> str:
-    """构建结构化规划提示词；运行时工具候选由另一函数单独注入。"""
+    """Build the business-neutral office planning contract.
+
+    The planner deliberately has no Tool or Skill names in its vocabulary.  It
+    describes *what capability is needed*, while the dispatcher binds that
+    capability to a user-visible Skill afterwards.  Keeping this boundary here
+    prevents every new business workflow from becoming another planner branch.
+    """
     from app.core.agent_security import UNTRUSTED_CONTENT_RULES
 
     return (
-        "你是办公任务规划器，只输出可校验的 JSON 计划。优先输出 stages（阶段/领域路径），"
-        "不要在 stages 中指定具体工具；具体工具由运行中的 Agent 在已授权领域内选择。"
-        "每个 stage 至少包含 stage_id、domain、goal、mode、depends_on；mode 为 read_only、write、llm 或 direct。"
-        "需要补充信息或切换领域时，可使用受控 decision_node；只允许 request_domain、clarify、continue、finish，不得生成任意 PlanPatch。\n"
-        "先在内部用自然语言梳理完成目标所需的最少步骤，再把步骤映射为 JSON；不要把思维链写入输出。\n"
-        "信息边界：你没有实时数据、用户私有文件或本机状态。涉及实时/近期/官方信息必须规划 web_search；"
-        "涉及授权文件/内部资料必须规划本轮提供的读取工具；静态常识、解释、创作和一般建议直接使用 direct_llm。\n"
-        "决策示例：‘现在的股价’→web_search；‘项目 README 内容’→授权文件读取；‘法国首都’→direct_llm。\n"
-        "把用户目标拆成最少的原子步骤；每个 atomic_step 只有一个目标和一次工具调用。"
-        "读后写、搜索后总结、或同一资源的读写必须拆步；互不依赖的读取/检索/分析保持 depends_on=[]。"
-        "只从下方候选能力中选择工具。atomic_step 的 params 必须是 "
-        "{\"instruction\":\"唯一目标\",\"preferred_tool\":\"候选工具名\",\"fallback_tools\":[],\"inputs\":{}}。"
-        "目标文档、项目、账户或候选工具要求的字段不明确时，返回 clarification，绝不编造 ID 或参数。"
-        "若候选中明确列出 Workflow Skill，才可使用 workflow_skill，params 为 "
-        "{\"skill_name\":\"候选工作流名\",\"inputs\":{}}。"
-        "只有下一步必须使用上一步结果、共享资源有先后关系，或用户明确要求顺序时填写 depends_on。"
-        "同一批无依赖节点最多生成 5 个；超过 5 个相似子任务时，拆成后续滚动批次，"
-        "不要一次性扇出大量模型或外部请求。"
-        "不得为了形式完整虚构步骤，也不得把多个独立操作吞进一个节点。\n"
-        "可用执行 agent：\n" + agent_prompt_lines()
-        + "\n严格输出 JSON（不要代码块围栏、不要解释）：\n"
-        "{\"plan\":\"给用户看的执行计划\",\"stages\":[{\"stage_id\":\"s1\",\"domain\":\"research\",\"goal\":\"获取公开资料\",\"mode\":\"read_only\",\"depends_on\":[]}],\"tasks\":[],\"clarification\":\"\"}\n"
-        "意图不明确或缺少关键信息时，stages/tasks 留空、clarification 填需要确认的问题。\n\n"
+        "你是办公任务的抽象规划器，只输出可校验的 JSON。你不认识业务类别，"
+        "也不知道任何 Skill、Tool、Agent、工作流或内部实现名称；绝不猜测它们。\n"
+        "你的职责是把用户目标表达为通用能力画像和逻辑步骤，之后由系统的能力调度器匹配实现。\n"
+        "任务画像字段：goal 只能为 GENERATE/RETRIEVE/ANALYZE/EXECUTE/INTERACT；"
+        "required_sources 只能由 USER_INPUT/ATTACHED_FILE/LOCAL_KNOWLEDGE/PUBLIC_WEB/"
+        "EXTERNAL_API/SYSTEM_STATE 组成；complexity 为 ATOMIC/SEQUENTIAL/DYNAMIC；"
+        "safety_level 为 READ_ONLY/SAFE_WRITE/RISKY_WRITE/CRITICAL；confidence 为 0 到 1。\n"
+        "信息边界：实时、近期、官方公开事实需要 PUBLIC_WEB 或 EXTERNAL_API；"
+        "已上传附件需要 ATTACHED_FILE；内部知识或业务记录需要 LOCAL_KNOWLEDGE；"
+        "仅根据用户给出的背景即可完成的写作、解释和分析使用 USER_INPUT。"
+        "不要因为用户没说“搜索”就把实时或可验证事实当成通用常识。\n"
+        "abstract_tasks 中每项只描述一个逻辑步骤：id、name、instruction、profile、depends_on、is_critical。"
+        "不得出现业务名、Skill 名、Tool 名、Agent 名、domain、stage、params 或具体调用方式。"
+        "读后分析、获取后汇总、或同一对象的读写必须拆成步骤；无依赖的步骤可以并行；"
+        "单批最多 5 项。步骤的 depends_on 只能引用先前步骤 id。\n"
+        "可逆文本交付在资料不完整时，仍规划 GENERATE + USER_INPUT 的初稿步骤；"
+        "只有写入、发送、审批、提交、删除或其他不可逆/高风险操作缺少明确对象或授权时，"
+        "才使用 clarification，且此时 abstract_tasks 必须为空。不要编造对象 ID。\n"
+        "示例：‘比较两项最新公开规范并给建议’应先规划 RETRIEVE + PUBLIC_WEB，再规划 "
+        "ANALYZE + USER_INPUT，后者依赖前者；‘根据这段背景写延期说明’是一个 "
+        "GENERATE + USER_INPUT 步骤。\n"
+        "严格输出 JSON（不要代码围栏、不要解释）：\n"
+        "{\"plan\":\"简短执行计划\",\"task_profile\":{\"goal\":\"RETRIEVE\",\"required_sources\":[\"PUBLIC_WEB\"],\"complexity\":\"SEQUENTIAL\",\"safety_level\":\"READ_ONLY\",\"confidence\":0.9,\"entities\":{}},\"abstract_tasks\":[{\"id\":\"n1\",\"name\":\"获取公开事实\",\"instruction\":\"围绕用户问题获取可验证的公开事实\",\"profile\":{\"goal\":\"RETRIEVE\",\"required_sources\":[\"PUBLIC_WEB\"],\"complexity\":\"ATOMIC\",\"safety_level\":\"READ_ONLY\",\"confidence\":0.9,\"entities\":{}},\"depends_on\":[],\"is_critical\":true}],\"clarification\":\"\"}\n\n"
         + UNTRUSTED_CONTENT_RULES
     )
 
@@ -87,11 +93,13 @@ async def runtime_capability_note(
     user_id: str = "",
     office_docs: list[dict] | None = None,
 ) -> str:
-    """提供已鉴权的候选工具摘要，避免模型提出不可执行计划。"""
-    try:
-        from app.agents.skills.executor import select_capabilities_for_request
+    """Provide only runtime source boundaries to the abstract planner.
 
-        capabilities = await select_capabilities_for_request(request, "office", user_id=user_id)
+    Concrete Tool/Skill lists belong to the dispatcher, not the model that
+    creates abstract nodes.  This function intentionally retains its public
+    name for callers and tests from the prior contract.
+    """
+    try:
         # 文档工具只有在本次 Job 已经注入了经授权的附件时才是可执行能力。
         # 不能仅因用户说了“文档”就把编辑工具交给规划模型，否则模型容易
         # 为普通文本分析臆造 doc_id，之后才由编译器拒绝，白白创建失败任务。
@@ -100,50 +108,12 @@ async def runtime_capability_note(
             isinstance(item, dict) and str(item.get("doc_id") or "").strip()
             for item in (office_docs or [])
         )
-        if not authorized_documents:
-            capabilities = [
-                capability
-                for capability in capabilities
-                if capability.name not in _DOCUMENT_SCOPED_TOOL_NAMES
-                and "doc_id" not in set(getattr(capability, "plan_required_fields", None) or [])
-            ]
-        entries: list[str] = []
-        for capability in capabilities:
-            schema = capability.parameters if isinstance(capability.parameters, dict) else {}
-            required = schema.get("required") if isinstance(schema, dict) else []
-            flags = (["required=" + ",".join(str(item) for item in required[:8])] if required else [])
-            plan_required = list(getattr(capability, "plan_required_fields", None) or [])
-            if plan_required:
-                flags.append("plan_required=" + ",".join(str(item) for item in plan_required[:8]))
-            if capability.write_op:
-                flags.append("write=true")
-            if capability.requires_confirmation:
-                flags.append("confirmation=true")
-            entries.append(f"{capability.name}({'; '.join(flags) or 'read'}): {str(capability.description or '').replace(chr(10), ' ')[:120]}")
-        from app.services.user_workflow_skills import get_visible_workflow_skills
-
-        workflows = await get_visible_workflow_skills(user_id)
-        workflow_entries = [
-            f"{item.name}(workflow; source={item.source}; tools={','.join(item.allowed_tools) or 'none'}): "
-            f"{str(item.description or '').replace(chr(10), ' ')[:120]}"
-            for item in workflows
-            if item.supports_scene("office")
-        ]
         scope_note = (
-            "本次没有已授权办公附件；严禁规划需要 doc_id 的读取、分析或编辑工具。"
-            if not authorized_documents
-            else "本次已注入授权办公附件；涉及文档工具时必须使用清单中的真实 doc_id。"
+            "本次没有已授权附件。不得把 ATTACHED_FILE 作为可执行来源，也不得编造文件标识。"
+            if not authorized_documents else
+            "本次存在已授权附件。需要附件内容时将 required_sources 标为 ATTACHED_FILE；"
+            "不输出任何文件标识或实现名称。"
         )
-        tool_note = (
-            "\n" + scope_note
-            + "\n当前请求可用的候选 Tool（已按权限、场景和运行时状态收窄；atomic_step.preferred_tool 必须从此列表选择）：\n- "
-            + "\n- ".join(entries)
-        )
-        workflow_note = (
-            "\n当前用户可见的 Workflow Skill（仅可作为 workflow_skill.skill_name，不可作为 Tool 调用）：\n- "
-            + "\n- ".join(workflow_entries)
-            if workflow_entries else ""
-        )
-        return tool_note + workflow_note
+        return "\n运行时来源边界：" + scope_note
     except Exception:  # noqa: BLE001
         return ""

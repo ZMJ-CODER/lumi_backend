@@ -22,7 +22,6 @@ from sqlalchemy import select
 from app.agents.base import AgentContext
 from app.agents.registry import AgentRegistry
 from app.agents.skills.executor import run_skill_loop
-from app.agents.orchestration.intent import OfficeDispatch, classify_office_dispatch
 from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.llm import LLMClient
@@ -187,24 +186,6 @@ def _append_chat_tool_contract(messages: list[dict], *, web_search_preferred: bo
     return [{"role": "system", "content": contract.strip()}] + enriched
 
 
-def _append_office_read_tool_contract(messages: list[dict]) -> list[dict]:
-    """轻量办公工具路径：只辅助事实获取，绝不升级为任务编排。"""
-    contract = (
-        "\n\n[办公轻量工具]\n"
-        "本轮仅在确有必要时使用一个只读工具来取得精确计算、实时公开信息或用户明确指定的内部资料。"
-        "如果你已经能用通用知识可靠回答，直接回答，不要调用工具。"
-        "如果用户询问天气、气温、降雨、汇率、股价、行情、新闻，或要求查资料、调研、官方文档，"
-        "不得只回复‘需要查询’或‘我可以搜索’；必须先调用当前可见的联网工具，拿到结果后再回答。"
-        "不得创建任务、写入文件、修改待办、访问未授权附件，工具失败时如实说明限制。"
-    )
-    enriched = [dict(message) for message in messages]
-    for message in enriched:
-        if message.get("role") == "system" and isinstance(message.get("content"), str):
-            message["content"] += contract
-            return enriched
-    return [{"role": "system", "content": contract.strip()}] + enriched
-
-
 def _requires_fresh_web_data(content: str) -> bool:
     """Deprecated compatibility helper; live data is selected by the model/tool gate.
 
@@ -265,15 +246,71 @@ _TITLE_SYSTEM_PROMPT = (
     "不要引号、不要句号结尾、不要任何多余解释，只输出标题本身。"
 )
 
-# 纯文本生成不应被办公编排或某个专业 Skill 的格式覆盖。这个规则描述产品
-# 行为而非某个文体的模板：保留用户的目标、约束和表达方式，按需直接交付。
-_DIRECT_GENERATION_PROMPT = (
-    "\n\n[直接生成]\n"
-    "本轮不需要任何外部工具或文件操作。请直接完成用户要求的内容，"
-    "以用户给出的题目、体裁、受众、语气、长度和格式为最高创作约束。"
-    "不要把普通内容擅自改写成公文、通知或固定模板；未要求标题、称谓、落款、"
-    "提纲或说明时不要额外添加。只交付用户需要的成品。"
-)
+
+async def _office_workspace_summary_text(
+    user_id: str, conversation_id: str | None, workspace_id: str | None
+) -> str:
+    """为办公直接回答路径加载绑定工作区的目录/状态摘要。
+
+    只读、无副作用；不可用/降级时同样返回带边界说明的摘要文本，
+    让模型既能继续不依赖工作区的部分，也不会假装看到文件。
+    """
+    if not (conversation_id or workspace_id):
+        return ""
+    try:
+        from app.services.workspace_context import (
+            load_workspace_context,
+            workspace_summary_text,
+        )
+
+        wctx = await load_workspace_context(
+            user_id,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+        )
+        return workspace_summary_text(wctx)
+    except Exception:  # noqa: BLE001 - 摘要失败不阻断直接回答
+        return ""
+
+
+def _workspace_content_question(content: str) -> bool:
+    """只读问题的粗略判定：内容指向本地工作区文件/目录时才开启读取窗口。
+
+    仅作为提示信号；真正的调用仍受 workspace 授权门与只读工具白名单约束。
+    """
+    value = (content or "").casefold()
+    markers = (
+        "文件", "目录", "文件夹", "内容", "项目代码", "项目结构", "结构",
+        "代码", "读取", "查看", "查找", "搜索", "打开", "看看", "读一下",
+        "里有什么", "这份", "该文件", "附件", "资料", "文档", "正文",
+        "主要讲", "概括", "总结", "摘要", "说明", "介绍", "其中",
+        "readme", "workspace", "project", "src/", ".py",
+        ".md", ".json", ".toml", ".yaml", ".cfg", ".txt", ".pdf",
+        ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".csv",
+        "ppt", "pptx", "pdf", "docx", "xlsx", "演示文稿", "幻灯片",
+    )
+    return any(marker in value for marker in markers)
+
+
+def _resolve_workspace_tool_name(name: str, names: set[str]) -> str | None:
+    """Resolve provider-emitted bare workspace names to qualified MCP names.
+
+    Desktop capabilities are exposed to the model as ``mcp__server__tool``
+    names, while some OpenAI-compatible/DeepSeek DSML responses emit only the
+    raw ``tool`` part (for example ``workspace_read``).  Treating that as an
+    unknown tool used to terminate the read window before the tool result was
+    appended, leaving only the model's introductory sentence visible.  The
+    mapping is deliberately suffix-based and only succeeds when exactly one
+    authorized capability matches, so it cannot broaden the workspace scope.
+    """
+    requested = str(name or "").strip()
+    if not requested:
+        return None
+    if requested in names:
+        return requested
+    suffix = requested.split("__")[-1]
+    matches = [candidate for candidate in names if candidate.split("__")[-1] == suffix]
+    return matches[0] if len(matches) == 1 else None
 
 
 class Orchestrator:
@@ -703,15 +740,48 @@ class Orchestrator:
         retrieval_query: str | None = None,
         attachments: list | None = None,
         office_docs: list[dict] | None = None,
+        workspace_id: str | None = None,
         web_search_enabled: bool = False,
         llm_api_key: str | None = None,
         thinking_mode: str = "fast",
         reply_style: str | None = None,
         user_role: str = "user",
+        execution_preference: str = "use_workspace_policy",
     ) -> dict:
         """处理用户消息的核心流程（阻塞版，供旧接口/降级路径使用）."""
         transcript = await self._resolve_transcript(content, attachments)
         content = transcript
+
+        # The conversation is the office workspace selector.  Recover the
+        # server-bound workspace before any task-shape or planner decision so
+        # a stale/omitted client workspace_id cannot drop the authorization
+        # scope and later surface as WORKSPACE_NOT_REGISTERED.
+        if scene == "office" and conversation_id and not workspace_id:
+            try:
+                from app.services.workspaces import workspace_for_conversation
+
+                bound = workspace_for_conversation(user_id, conversation_id)
+                workspace_id = str((bound or {}).get("workspace_id") or "") or None
+            except (LookupError, ValueError, OSError):
+                workspace_id = None
+
+        if scene == "office":
+            from app.agents.orchestration.task_preflight import preflight_external_effect
+
+            preflight = preflight_external_effect(
+                content,
+                workspace_id=workspace_id,
+                office_docs=office_docs,
+            )
+            if preflight.needs_clarification:
+                answer = preflight.question
+                await self._finalize_reply(conversation_id, user_id, answer, scene)
+                return {
+                    "message_id": str(uuid.uuid4()), "content": answer,
+                    "citations": [], "scene": scene, "local_mode": False,
+                    "title": "", "transcript": transcript, "steps": [],
+                    "task_shape": {"orchestrated": False, "reasons": [preflight.reason]},
+                }
 
         if scene == "chat" and _is_internal_project_question(content):
             # 这是权限边界而不是模型自评；不调用 LLM，避免产生看似来自
@@ -755,62 +825,85 @@ class Orchestrator:
         )
         image_uris = await self._load_image_data_uris(user_id, attachments)
 
-        office_dispatch = (
-            classify_office_dispatch(content, office_docs)
-            if scene == "office"
-            else OfficeDispatch.DIRECT
-        )
-        logger.info(
-            "办公请求路由判定: scene={} dispatch={} content={}",
-            scene,
-            office_dispatch.value,
-            content[:120].replace("\n", " "),
-        )
-        if scene == "office" and office_dispatch == OfficeDispatch.DIRECT:
-            # 办公模式也可以是纯文本创作/问答。不要为此生成虚假的任务、工具
-            # 步骤或公文模板；直接使用完整对话上下文获得正常 C 端生成体验。
-            prep["messages"][0]["content"] += _DIRECT_GENERATION_PROMPT
-            reply = await self._call_llm_auto(
-                user_id, prep["messages"], scene, image_uris, content, prep["citations"],
-                conversation_id, llm_api_key, thinking_mode=thinking_mode,
-                force_web_search=web_search_enabled,
-            )
-            title = await self.get_conversation_title(conversation_id)
-            if prep["is_first"] and not title:
-                title = await self._generate_title(content, user_id, llm_api_key)
-                if title:
-                    await self.save_conversation_title(conversation_id, title)
-            await self._finalize_reply(conversation_id, user_id, reply, scene)
-            return {
-                "message_id": str(uuid.uuid4()), "content": reply,
-                "citations": project_citations(prep["citations"]), "scene": scene, "local_mode": False,
-                "title": title or "", "transcript": transcript, "steps": [],
-            }
-
-        if scene == "office" and office_dispatch == OfficeDispatch.TOOL_ASSISTED:
-            reply, _tool_records, tool_citations = await run_skill_loop(
-                self._llm,
-                user_id,
-                _append_office_read_tool_contract(prep["messages"]),
-                scene="office",
-                conversation_id=conversation_id,
-                llm_api_key=llm_api_key,
-            )
-            prep["citations"].extend(tool_citations)
-            if not reply:
-                reply = await self._call_llm_auto(
-                    user_id, prep["messages"], scene, image_uris, content, prep["citations"],
-                    conversation_id, llm_api_key, thinking_mode=thinking_mode,
-                )
-            title = await self.get_conversation_title(conversation_id)
-            await self._finalize_reply(conversation_id, user_id, reply, scene)
-            return {
-                "message_id": str(uuid.uuid4()), "content": reply,
-                "citations": project_citations(prep["citations"]), "scene": scene, "local_mode": False,
-                "title": title or "", "transcript": transcript, "steps": [],
-            }
-
         if scene == "office":
+            # The office scene is not synonymous with orchestration.  First
+            # evaluate the shape of the request across all capability domains
+            # (documents are only one possible context source).  Read-only
+            # context questions go straight to the model; Skills/Planner are
+            # reserved for external capabilities, side effects and dynamic
+            # multi-step work.
+            from app.agents.orchestration.task_shape import assess_task_shape_with_skills
+            from app.services.office_context import (
+                OfficeContext,
+                append_office_context,
+                load_office_context,
+            )
+
+            office_context = await load_office_context(
+                user_id, content, office_docs=office_docs, workspace_id=workspace_id
+            )
+            shape = await assess_task_shape_with_skills(
+                content,
+                context_chars=len(office_context.text),
+                user_id=user_id,
+                scene=scene,
+            )
+            if not shape.requires_orchestration:
+                # 项目对话先把工作区目录/状态摘要注入模型，再决定是否只读回答；
+                # 摘要缺失/设备离线时同样注入降级边界说明（不假装看到文件）。
+                workspace_summary = await _office_workspace_summary_text(
+                    user_id, conversation_id, workspace_id
+                )
+                direct_messages = append_office_context(prep["messages"], office_context, content)
+                if workspace_summary:
+                    direct_messages = append_office_context(
+                        direct_messages, OfficeContext(text=workspace_summary), content
+                    )
+                # 只读项目问题：可访问工作区 + 明确读取意图时，先用受限读取窗口
+                # （少量 workspace read/search 调用）查证内容，再收敛回答。
+                workspace_reply, _read_records = await self._bounded_workspace_read(
+                    user_id=user_id,
+                    user_role=user_role,
+                    conversation_id=conversation_id,
+                    content=content,
+                    workspace_id=workspace_id or "",
+                    workspace_summary=workspace_summary,
+                    llm_api_key=llm_api_key,
+                )
+                if workspace_reply is not None:
+                    reply = workspace_reply
+                else:
+                    reply = await self._call_llm_auto(
+                        user_id,
+                        direct_messages,
+                        scene,
+                        image_uris,
+                        content,
+                        prep["citations"],
+                        conversation_id,
+                        llm_api_key,
+                        thinking_mode=thinking_mode,
+                        force_web_search=False,
+                        allow_tools=False,
+                    )
+                prep["citations"].extend(office_context.citations)
+                title = await self.get_conversation_title(conversation_id)
+                if prep["is_first"] and not title:
+                    title = await self._generate_title(content, user_id, llm_api_key)
+                    if title:
+                        await self.save_conversation_title(conversation_id, title)
+                await self._finalize_reply(conversation_id, user_id, reply, scene)
+                return {
+                    "message_id": str(uuid.uuid4()),
+                    "content": reply,
+                    "citations": project_citations(prep["citations"]),
+                    "scene": scene,
+                    "local_mode": False,
+                    "title": title or "",
+                    "transcript": transcript,
+                    "steps": [],
+                    "task_shape": {"orchestrated": False, "reasons": list(shape.reasons), "used_rag": office_context.used_rag},
+                }
             reply, office_steps, office_citations = await self._run_office_job(
                 user_id,
                 conversation_id,
@@ -818,6 +911,8 @@ class Orchestrator:
                 office_docs or [],
                 llm_api_key,
                 user_role,
+                workspace_id,
+                execution_preference,
             )
             prep["citations"].extend(office_citations)
             title = await self.get_conversation_title(conversation_id)
@@ -896,11 +991,13 @@ class Orchestrator:
         retrieval_query: str | None = None,
         attachments: list | None = None,
         office_docs: list[dict] | None = None,
+        workspace_id: str | None = None,
         web_search_enabled: bool = False,
         llm_api_key: str | None = None,
         thinking_mode: str = "fast",
         reply_style: str | None = None,
         user_role: str = "user",
+        execution_preference: str = "use_workspace_policy",
     ):
         """流式处理用户消息：准备流程同 handle_message，LLM 走工具调用 + SSE 流式.
 
@@ -908,6 +1005,34 @@ class Orchestrator:
         """
         transcript = await self._resolve_transcript(content, attachments)
         content = transcript
+
+        if scene == "office" and conversation_id and not workspace_id:
+            try:
+                from app.services.workspaces import workspace_for_conversation
+
+                bound = workspace_for_conversation(user_id, conversation_id)
+                workspace_id = str((bound or {}).get("workspace_id") or "") or None
+            except (LookupError, ValueError, OSError):
+                workspace_id = None
+
+        if scene == "office":
+            from app.agents.orchestration.task_preflight import preflight_external_effect
+
+            preflight = preflight_external_effect(
+                content,
+                workspace_id=workspace_id,
+                office_docs=office_docs,
+            )
+            if preflight.needs_clarification:
+                answer = preflight.question
+                yield {"type": "delta", "content": answer}
+                yield {
+                    "type": "done", "message_id": str(uuid.uuid4()),
+                    "content": answer, "citations": [], "scene": scene,
+                    "title": "", "steps": [],
+                    "task_shape": {"orchestrated": False, "reasons": [preflight.reason]},
+                }
+                return
 
         if scene == "chat" and _is_internal_project_question(content):
             yield {"type": "delta", "content": _INTERNAL_PROJECT_BOUNDARY_REPLY}
@@ -947,6 +1072,43 @@ class Orchestrator:
         message_id = str(uuid.uuid4())
         title = await self.get_conversation_title(conversation_id)
 
+        # ── v2 统一任务画像/执行策略（灰度开关；默认关闭保持旧语义）──
+        policy_meta = None
+        policy_public = None
+        if getattr(settings, "EXECUTION_POLICY_V2_ENABLED", False):
+            from app.agents.orchestration.execution_policy import (
+                TaskEntrySignals,
+                policy_meta_from_signals,
+                policy_meta_public,
+            )
+            from app.agents.orchestration.task_shape import assess_task_shape
+            from app.core.observability import observe_policy_route
+
+            signals = TaskEntrySignals(
+                request=content,
+                scene=scene,
+                reasons=tuple(assess_task_shape(content).reasons),
+                has_attachments=bool(attachments),
+                has_office_docs=bool(office_docs),
+                workspace_available=bool(workspace_id),
+                web_search_enabled=bool(web_search_enabled),
+                conversation_has_workspace=bool(workspace_id),
+            )
+            policy_meta = policy_meta_from_signals(signals, enabled=True)
+            policy_public = policy_meta_public(policy_meta)
+            if policy_public:
+                observe_policy_route(
+                    str(policy_public.get("execution_policy") or "direct_stream"),
+                    str((policy_public.get("task_profile") or {}).get("complexity") or "ATOMIC"),
+                )
+        # v2 验收追踪：单请求 SSE 证据（开关开启时每用例一条 JSON 日志）。
+        trace = None
+        job_stream_used = False
+        if getattr(settings, "EXECUTION_POLICY_V2_ENABLED", False):
+            from app.services.policy_acceptance import new_trace
+
+            trace = new_trace(enabled=True)
+
         # 首条消息：标题生成与回复流并行
         title_task = None
         if prep["is_first"] and not title:
@@ -954,43 +1116,121 @@ class Orchestrator:
 
         full_text = ""
         atomic_steps: dict[str, dict] = {}
-        office_dispatch = (
-            classify_office_dispatch(content, office_docs)
-            if scene == "office"
-            else OfficeDispatch.DIRECT
-        )
-        logger.info(
-            "办公请求路由判定: scene={} dispatch={} content={}",
-            scene,
-            office_dispatch.value,
-            content[:120].replace("\n", " "),
-        )
-        if scene == "office" and office_dispatch == OfficeDispatch.DIRECT:
-            prep["messages"][0]["content"] += _DIRECT_GENERATION_PROMPT
-        stream = (
-            self._stream_office_job(
-                user_id,
-                conversation_id,
+        stream = None
+        if scene == "office":
+            from app.agents.orchestration.task_shape import assess_task_shape_with_skills
+            from app.services.office_context import (
+                OfficeContext,
+                append_office_context,
+                load_office_context,
+            )
+
+            office_context = await load_office_context(
+                user_id, content, office_docs=office_docs, workspace_id=workspace_id
+            )
+            shape = await assess_task_shape_with_skills(
                 content,
-                office_docs or [],
-                llm_api_key,
-                prep["citations"],
-                user_role,
+                context_chars=len(office_context.text),
+                user_id=user_id,
+                scene=scene,
             )
-            if office_dispatch == OfficeDispatch.WORKFLOW
-            else self._stream_office_read_tools(
-                user_id, conversation_id, content, prep["messages"], prep["citations"], llm_api_key
-            )
-            if office_dispatch == OfficeDispatch.TOOL_ASSISTED
-            else self._stream_llm_auto(
+            if not shape.requires_orchestration:
+                prep["citations"].extend(office_context.citations)
+                # 只读项目问题：注入工作区目录/状态摘要（或降级边界说明），
+                # 并让可访问工作区走受限读取窗口（少量 read/search 调用）。
+                workspace_summary = await _office_workspace_summary_text(
+                    user_id, conversation_id, workspace_id
+                )
+                direct_messages = append_office_context(prep["messages"], office_context, content)
+                if workspace_summary:
+                    direct_messages = append_office_context(
+                        direct_messages, OfficeContext(text=workspace_summary), content
+                    )
+                # v2 灰度：ATOMIC 只读快路径（受控读取 → 真实 chat_stream）。
+                # 默认关闭时保留旧安全路径（chat_with_tools 收敛 + 切段模拟）。
+                if bool(getattr(settings, "EXECUTION_POLICY_V2_ENABLED", False)):
+                    stream = self._stream_v2_atomic_read(
+                        user_id=user_id,
+                        user_role=user_role,
+                        conversation_id=conversation_id,
+                        content=content,
+                        direct_messages=direct_messages,
+                        workspace_id=workspace_id or "",
+                        workspace_summary=workspace_summary,
+                        llm_api_key=llm_api_key,
+                        thinking_mode=thinking_mode,
+                    )
+                else:
+                    workspace_reply, _read_records = await self._bounded_workspace_read(
+                        user_id=user_id,
+                        user_role=user_role,
+                        conversation_id=conversation_id,
+                        content=content,
+                        workspace_id=workspace_id or "",
+                        workspace_summary=workspace_summary,
+                        llm_api_key=llm_api_key,
+                    )
+                    if workspace_reply is not None:
+                        stream = self._text_delta_stream(workspace_reply)
+                    else:
+                        stream = self._stream_llm_auto(
+                            user_id,
+                            direct_messages,
+                            scene,
+                            image_uris,
+                            content,
+                            prep["citations"],
+                            conversation_id,
+                            llm_api_key,
+                            thinking_mode=thinking_mode,
+                            force_web_search=False,
+                            allow_tools=False,
+                        )
+            else:
+                job_stream_used = True
+                stream = self._stream_office_job(
+                    user_id,
+                    conversation_id,
+                    content,
+                    office_docs or [],
+                    llm_api_key,
+                    prep["citations"],
+                    user_role,
+                    workspace_id,
+                    execution_preference,
+                )
+        else:
+            stream = self._stream_llm_auto(
                 user_id, prep["messages"], scene, image_uris, content, prep["citations"], conversation_id, llm_api_key,
                 thinking_mode=thinking_mode,
                 force_web_search=web_search_enabled,
             )
-        )
+        # v2 灰度：政策元数据作为首个 SSE 事件（前端可不依赖再次推断）。
+        answer_stage_at = time.perf_counter()
+        first_response_at: float | None = None
+        first_delta_at: float | None = None
+        last_delta_at: float | None = None
+        # 内部流（如 plan_first 的 plan_ready/done）若已发出终态 done，
+        # 外层不再补发第二个 done，保证“每次回复只有一个 done”。
+        done_emitted_inner = False
+        if policy_public is not None:
+            base_stream = stream
+
+            async def stream_with_policy_meta():
+                yield {"type": "task_policy", **policy_public}
+                async for evt in base_stream:
+                    yield evt
+
+            stream = stream_with_policy_meta()
         async for evt in stream:
+            if evt["type"] != "task_policy" and first_response_at is None:
+                first_response_at = time.perf_counter()
             if evt["type"] == "delta":
                 full_text += evt["content"]
+                now = time.perf_counter()
+                if first_delta_at is None:
+                    first_delta_at = now
+                last_delta_at = now
             elif evt["type"] == "step":
                 step = evt.get("step") or {}
                 if step.get("id"):
@@ -998,7 +1238,48 @@ class Orchestrator:
                         **atomic_steps.get(str(step["id"]), {}),
                         **step,
                     }
+            elif evt["type"] == "done":
+                done_emitted_inner = True
+            if trace is not None:
+                from app.services.policy_acceptance import record_trace_event
+
+                record_trace_event(trace, evt)
             yield evt
+        # v2 观测：route / first_delta / stream 时长（metrics 关闭时零开销）。
+        if policy_public is not None:
+            from app.core.observability import (
+                observe_answer_first_delta,
+                observe_answer_stream_duration,
+                observe_policy_route_latency,
+            )
+
+            policy_label = str(policy_public.get("execution_policy") or "direct_stream")
+            complexity_label = str(
+                (policy_public.get("task_profile") or {}).get("complexity") or "ATOMIC"
+            )
+            if first_response_at is not None:
+                observe_policy_route_latency(
+                    policy_label, complexity_label, first_response_at - answer_stage_at
+                )
+            if first_delta_at is not None:
+                observe_answer_first_delta(
+                    policy_label, complexity_label, first_delta_at - answer_stage_at
+                )
+            if first_delta_at is not None and last_delta_at is not None:
+                observe_answer_stream_duration(
+                    policy_label, complexity_label, last_delta_at - first_delta_at
+                )
+        # v2 验收追踪输出（每用例一条 JSON；关闭开关时 trace 为 None 直接跳过）。
+        if trace is not None:
+            from app.services.policy_acceptance import finish_trace
+
+            finish_trace(
+                trace,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                policy_public=policy_public,
+                planner_hint=job_stream_used,
+            )
 
         if title_task is not None:
             try:
@@ -1032,7 +1313,7 @@ class Orchestrator:
             # client must receive ``done`` rather than a misleading interrupt.
             logger.warning("回复上下文持久化失败（不影响已完成回复）：{}", str(exc)[:200])
 
-        yield {
+        done_event = {
             "type": "done",
             "message_id": message_id,
             "content": full_text,
@@ -1042,6 +1323,11 @@ class Orchestrator:
             "segments": segments,
             "steps": list(atomic_steps.values()),
         }
+        if policy_public is not None:
+            # done 携带最终完整内容与任务元数据（v2 契约）。
+            done_event.update(policy_public)
+        if not done_emitted_inner:
+            yield done_event
 
     @staticmethod
     def _job_step(node) -> dict:
@@ -1163,6 +1449,434 @@ class Orchestrator:
             return str(failed.error)
         return str(job.error or "办公任务未能完成，请检查失败步骤后重试。")
 
+    # ── 只读工作区问答（受限读取工具窗口）─────────────────
+
+    @staticmethod
+    async def _text_delta_stream(text: str):
+        """把最终文本切成有限段落长度的 delta 事件，供 SSE 使用。"""
+        if not text:
+            return
+        current = ""
+        for para in str(text).splitlines():
+            if not para.strip():
+                continue
+            if len(current) + len(para) + 1 > 2000 and current:
+                yield {"type": "delta", "content": current + "\n"}
+                current = para
+            else:
+                current = (current + "\n" + para).strip("\n")
+        if current:
+            yield {"type": "delta", "content": current}
+
+    async def _bounded_workspace_read(
+        self,
+        *,
+        user_id: str,
+        user_role: str,
+        conversation_id: str,
+        content: str,
+        workspace_id: str,
+        workspace_summary: str,
+        llm_api_key: str | None,
+    ) -> tuple[str | None, list[dict]]:
+        """只读项目问题：注入摘要后，允许少量工作区读取工具调用再收敛回答。
+
+        仅在“工作区可访问 + 问题指向本地内容 + 读取域工具可用”时启用；
+        其它情况返回 ``(None, [])``，由调用方走原直接回答路径。绝不让写工具
+        进入此窗口，也不在窗口内提交/回滚/运行。
+        """
+        if not str(workspace_id or "").strip() or not str(content or "").strip():
+            return None, []
+        if "已注册且可访问" not in str(workspace_summary or ""):
+            return None, []
+        if not _workspace_content_question(content):
+            return None, []
+        from app.agents.skills.executor import (
+            execute_tool_call,
+            get_workspace_reading_capabilities,
+        )
+
+        caps = await get_workspace_reading_capabilities(user_id, "office", user_role, workspace_id)
+        if not caps:
+            return None, []
+        await self._ensure_llm_started()
+        definitions: list[dict] = []
+        names: set[str] = set()
+        for capability in caps:
+            name = str(capability.name or "")
+            names.add(name)
+            definitions.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": str(capability.description or ""),
+                    "parameters": capability.parameters
+                    if isinstance(capability.parameters, dict)
+                    else {"type": "object", "properties": {}},
+                },
+            })
+        system = (
+            "你是只读工作区问答助手。允许调用给出的工作区读取工具"
+            "（workspace_catalog / workspace_list / workspace_read / workspace_search）查证目录或文件内容，"
+            "除此之外不要调用任何其它工具，也不要写入、运行或提交。"
+            "目录摘要是定位线索，不等于文件正文：只有真正读到的内容才能引用；"
+            "读不到、设备离线或根目录缺失时，明确说明无法访问，绝不编造文件内容。"
+            "回答应当基于实际读取结果并保持简明。"
+        )
+        messages: list[dict] = [
+            {"role": "system", "content": system + "\n\n[当前授权工作区]\n" + str(workspace_summary or "")},
+            {"role": "user", "content": str(content or "")},
+        ]
+        from app.services.workspace_context import (
+            WORKSPACE_DEVICE_OFFLINE,
+            WORKSPACE_NOT_REGISTERED,
+            WORKSPACE_READ_FAILED,
+            WORKSPACE_ROOT_MISSING,
+        )
+
+        degrade_codes = {
+            WORKSPACE_DEVICE_OFFLINE, WORKSPACE_NOT_REGISTERED,
+            WORKSPACE_ROOT_MISSING, WORKSPACE_READ_FAILED,
+            "MCP_UNAVAILABLE", "MCP_TIMEOUT", "WORKSPACE_DIFF_FAILED",
+        }
+        max_calls = max(1, int(getattr(settings, "WORKSPACE_READ_MAX_CALLS", 4)))
+        records: list[dict] = []
+        used = 0
+        last_tool_text = ""
+        while True:
+            tool_text, calls = await self._llm.chat_with_tools(
+                messages, definitions, scene="office", api_key=llm_api_key,
+                usage_user_id=user_id, usage_category=CATEGORY_SKILL,
+            )
+            if not calls:
+                final = str(tool_text or "") or last_tool_text
+                return final.strip() or None, records
+            call = calls[0]
+            function = call.get("function") or {}
+            requested_name = str(function.get("name") or "")
+            name = _resolve_workspace_tool_name(requested_name, names)
+            if not name:
+                final = str(tool_text or "") or last_tool_text
+                return final.strip() or None, records
+            # Keep the assistant history internally consistent with the
+            # qualified capability schema.  Some providers emit the bare
+            # DSML name; feeding that bare name back in the next turn can make
+            # the provider repeat the same call instead of consuming the tool
+            # result.
+            if requested_name != name:
+                call = dict(call)
+                call_function = dict(function)
+                call_function["name"] = name
+                call["function"] = call_function
+            raw_args = function.get("arguments") or {}
+            if isinstance(raw_args, str):
+                try:
+                    raw_args = json.loads(raw_args or "{}")
+                except (TypeError, ValueError):
+                    raw_args = {}
+            if not isinstance(raw_args, dict):
+                raw_args = {}
+            used += 1
+            records.append({"tool": name})
+            result = await execute_tool_call(
+                {
+                    "id": f"ws-read-{used}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(raw_args, ensure_ascii=False)},
+                },
+                user_id, "office", conversation_id,
+                user_role=user_role,
+                user_message=str(content or ""),
+                llm_api_key=llm_api_key,
+                office_doc_ids=(),
+                authorized_workspace_id=str(workspace_id),
+                allowed_tools=set(names),
+            )
+            last_tool_text = str(
+                (getattr(result, "output", "") or getattr(result, "error", "") or "") or ""
+            )
+            assistant_message = {
+                "role": "assistant",
+                "content": (str(tool_text or "") or None),
+                "tool_calls": [call],
+            }
+            if call.get("reasoning_content") is not None:
+                assistant_message["reasoning_content"] = call.get("reasoning_content")
+            messages.append(assistant_message)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": str(call.get("id") or f"ws-read-{used}"),
+                "content": json.dumps({
+                    "status": "ok" if getattr(result, "success", False) else "error",
+                    "error_code": getattr(result, "error_code", "") or "",
+                    "output": last_tool_text[:8000],
+                }, ensure_ascii=False),
+            })
+            if not getattr(result, "success", False) and str(getattr(result, "error_code", "") or "") in degrade_codes:
+                break
+            if used >= max_calls:
+                break
+        try:
+            if not messages or messages[-1].get("role") != "user":
+                messages.append({
+                    "role": "user",
+                    "content": "请仅基于上述读取结果给出最终回答，不要再调用工具；若内容不足请明确说明。",
+                })
+            final = await self._llm.chat(
+                messages, scene="office", api_key=llm_api_key,
+                usage_user_id=user_id, usage_category=CATEGORY_SKILL,
+            )
+        except Exception:  # noqa: BLE001 - 总结失败时用最后一次读取输出兜底
+            final = last_tool_text
+        text = str(final or "") or last_tool_text
+        return text.strip() or None, records
+
+    # ── v2 ATOMIC 只读快路径（受控读取 → 真实 chat_stream）──────────
+
+    async def read_workspace_context(
+        self,
+        *,
+        user_id: str,
+        user_role: str,
+        conversation_id: str,
+        content: str,
+        workspace_id: str,
+        workspace_summary: str,
+        llm_api_key: str | None,
+    ) -> tuple[str, list[dict]]:
+        """受控读取资料（v2 ATOMIC 只读前半段）。
+
+        只负责“读资料并返回”，不做任何最终回答：模型只被允许在少量确定性
+        读取轮次内选择 read/search/catalog 类工具；读取失败返回降级空资料。
+        """
+        if not str(workspace_id or "").strip() or not str(content or "").strip():
+            return "", []
+        if "已注册且可访问" not in str(workspace_summary or ""):
+            return "", []
+        if not _workspace_content_question(content):
+            return "", []
+        from app.agents.skills.executor import (
+            execute_tool_call,
+            get_workspace_reading_capabilities,
+        )
+
+        caps = await get_workspace_reading_capabilities(user_id, "office", user_role, workspace_id)
+        if not caps:
+            return "", []
+        await self._ensure_llm_started()
+        definitions: list[dict] = []
+        names: set[str] = set()
+        for capability in caps:
+            name = str(capability.name or "")
+            names.add(name)
+            definitions.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": str(capability.description or ""),
+                    "parameters": capability.parameters
+                    if isinstance(capability.parameters, dict)
+                    else {"type": "object", "properties": {}},
+                },
+            })
+        system = (
+            "你是只读工作区资料读取器。允许调用给出的工作区读取工具"
+            "（workspace_catalog / workspace_list / workspace_read / workspace_search）定位并读取"
+            "与问题直接相关的文件正文；除此之外不要调用任何工具，也不要写入、运行或提交。"
+            "目录摘要是定位线索，不等于文件正文：只有真正读到的内容才算资料。"
+            "读不到、设备离线或根目录缺失时停止读取。"
+        )
+        messages: list[dict] = [
+            {"role": "system", "content": system + "\n\n[当前授权工作区]\n" + str(workspace_summary or "")},
+            {"role": "user", "content": str(content or "")},
+        ]
+        from app.services.workspace_context import (
+            WORKSPACE_DEVICE_OFFLINE,
+            WORKSPACE_NOT_REGISTERED,
+            WORKSPACE_READ_FAILED,
+            WORKSPACE_ROOT_MISSING,
+        )
+
+        degrade_codes = {
+            WORKSPACE_DEVICE_OFFLINE, WORKSPACE_NOT_REGISTERED,
+            WORKSPACE_ROOT_MISSING, WORKSPACE_READ_FAILED,
+            "MCP_UNAVAILABLE", "MCP_TIMEOUT", "WORKSPACE_DIFF_FAILED",
+        }
+        max_calls = max(1, int(getattr(settings, "WORKSPACE_READ_MAX_CALLS", 4)))
+        records: list[dict] = []
+        pieces: list[str] = []
+        used = 0
+        while used < max_calls:
+            _tool_text, calls = await self._llm.chat_with_tools(
+                messages, definitions, scene="office", api_key=llm_api_key,
+                usage_user_id=user_id, usage_category=CATEGORY_SKILL,
+            )
+            if not calls:
+                break
+            call = calls[0]
+            function = call.get("function") or {}
+            requested_name = str(function.get("name") or "")
+            name = _resolve_workspace_tool_name(requested_name, names)
+            if not name:
+                break
+            if requested_name != name:
+                call = dict(call)
+                call_function = dict(function)
+                call_function["name"] = name
+                call["function"] = call_function
+            raw_args = function.get("arguments") or {}
+            if isinstance(raw_args, str):
+                try:
+                    raw_args = json.loads(raw_args or "{}")
+                except (TypeError, ValueError):
+                    raw_args = {}
+            if not isinstance(raw_args, dict):
+                raw_args = {}
+            used += 1
+            records.append({"tool": name, "sequence": used})
+            result = await execute_tool_call(
+                {
+                    "id": f"ws-read-{used}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(raw_args, ensure_ascii=False)},
+                },
+                user_id, "office", conversation_id,
+                user_role=user_role,
+                user_message=str(content or ""),
+                llm_api_key=llm_api_key,
+                office_doc_ids=(),
+                authorized_workspace_id=str(workspace_id),
+                allowed_tools=set(names),
+            )
+            output = str(
+                (getattr(result, "output", "") or getattr(result, "error", "") or "") or ""
+            ).strip()
+            if getattr(result, "success", False) and output:
+                pieces.append(output)
+            assistant_message = {
+                "role": "assistant",
+                "content": (str(_tool_text or "") or None),
+                "tool_calls": [call],
+            }
+            if call.get("reasoning_content") is not None:
+                assistant_message["reasoning_content"] = call.get("reasoning_content")
+            messages.append(assistant_message)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": str(call.get("id") or f"ws-read-{used}"),
+                "content": json.dumps({
+                    "status": "ok" if getattr(result, "success", False) else "error",
+                    "error_code": getattr(result, "error_code", "") or "",
+                    "output": output[:8000],
+                }, ensure_ascii=False),
+            })
+            if not getattr(result, "success", False) and str(getattr(result, "error_code", "") or "") in degrade_codes:
+                break
+        evidence = "\n\n".join(pieces)[:20000]
+        return evidence, records
+
+    async def stream_answer_from_context(
+        self,
+        *,
+        user_id: str,
+        messages: list[dict],
+        content: str = "",
+        conversation_id: str = "",
+        llm_api_key: str | None = None,
+        thinking_mode: str = "fast",
+        scene: str = "office",
+    ):
+        """由已放入上下文的资料生成答案（v2 ATOMIC 只读后半段）。
+
+        只调用一次真实 chat_stream（统一协议流出口），逐段产出
+        delta/process/warning；不阻塞总结、不切段模拟、不发起多轮工具决策。
+        """
+        async for evt in self._protocol_llm_stream(
+            messages=messages,
+            scene=scene or "office",
+            usage_user_id=user_id,
+            usage_category=CATEGORY_CHAT,
+            api_key=llm_api_key,
+            reasoning_effort=_chat_reasoning_effort(thinking_mode),
+        ):
+            yield evt
+
+    async def _stream_v2_atomic_read(
+        self,
+        *,
+        user_id: str,
+        user_role: str,
+        conversation_id: str,
+        content: str,
+        direct_messages: list[dict],
+        workspace_id: str,
+        workspace_summary: str,
+        llm_api_key: str | None,
+        thinking_mode: str,
+    ):
+        """ATOMIC 只读任务完整快路径：受控读取 → process → 真实 chat_stream。
+
+        工作区意图时先做有限次确定性读取；读取结果进上下文后直接流式作答。
+        读取不可用/无正文时回退为基于注入摘要的普通 chat_stream 直答。
+        """
+        workspace_intent = bool(
+            workspace_id
+            and "已注册且可访问" in str(workspace_summary or "")
+            and _workspace_content_question(content)
+        )
+        answer_messages = list(direct_messages)
+        if workspace_intent:
+            yield {"type": "process", "content": "正在读取工作区资料…"}
+            started = time.perf_counter()
+            evidence, records = await self.read_workspace_context(
+                user_id=user_id,
+                user_role=user_role,
+                conversation_id=conversation_id,
+                content=content,
+                workspace_id=workspace_id,
+                workspace_summary=workspace_summary,
+                llm_api_key=llm_api_key,
+            )
+            from app.core.observability import observe_workspace_read_duration
+
+            observe_workspace_read_duration(time.perf_counter() - started)
+            if evidence:
+                from app.services.office_context import OfficeContext, append_office_context
+
+                answer_messages = append_office_context(
+                    answer_messages,
+                    OfficeContext(text="[受限读取到的工作区资料正文]\n" + evidence),
+                    content,
+                )
+                yield {"type": "process", "content": "已完成资料整理，正在生成回答…"}
+            elif records:
+                yield {"type": "process", "content": "未能读取到文件正文，将基于工作区目录摘要回答。"}
+        # The read window above is the only place where workspace tools may be
+        # executed for an atomic question.  Make that fact explicit in the
+        # final model turn: some providers otherwise emit a second textual
+        # DSML invocation when they see the workspace summary, which the
+        # protocol firewall correctly strips and leaves only the lead sentence
+        # ("我来读取…") visible to the user.
+        answer_messages.append({
+            "role": "system",
+            "content": (
+                "这是资料问答的最终回答阶段。工作区读取已由系统受控完成；"
+                "请仅依据当前上下文中的实际资料和目录摘要回答用户问题。"
+                "不要调用工具，不要输出任何 DSML/XML/tool_calls/function_call 协议，"
+                "直接输出完整、可读的最终答案；若资料不足，明确说明不足之处。"
+            ),
+        })
+        async for evt in self.stream_answer_from_context(
+            user_id=user_id,
+            messages=answer_messages,
+            content=content,
+            conversation_id=conversation_id,
+            llm_api_key=llm_api_key,
+            thinking_mode=thinking_mode,
+            scene="office",
+        ):
+            yield evt
+
     async def _run_office_job(
         self,
         user_id: str,
@@ -1171,6 +1885,8 @@ class Orchestrator:
         office_docs: list[dict],
         llm_api_key: str | None,
         user_role: str = "user",
+        workspace_id: str | None = None,
+        execution_preference: str = "use_workspace_policy",
     ) -> tuple[str, list[dict], list[dict]]:
         # Import the singleton from the concrete module.  ``from package import
         # orchestrator`` can resolve to the submodule object (because a module
@@ -1186,7 +1902,9 @@ class Orchestrator:
             conversation_id,
             llm_api_key=llm_api_key,
             office_docs=office_docs,
+            workspace_id=workspace_id,
             user_role=user_role,
+            execution_preference=execution_preference,
         )
         terminal = {
             JobStatus.COMPLETED,
@@ -1199,58 +1917,6 @@ class Orchestrator:
             job = await agent_orchestrator.get_job(job.job_id) or job
         return self._job_answer(job), [self._job_step(n) for n in job.nodes], self._job_citations(job)
 
-    async def _stream_office_read_tools(
-        self,
-        user_id: str,
-        conversation_id: str,
-        content: str,
-        messages: list[dict],
-        citations: list[dict],
-        llm_api_key: str | None,
-    ):
-        """以一次短生命周期工具循环处理只读事实请求，不创建 Job。"""
-        progress_queue: asyncio.Queue[object] = asyncio.Queue()
-
-        def on_progress(event: object) -> None:
-            progress_queue.put_nowait(event)
-
-        task = asyncio.create_task(
-            run_skill_loop(
-                self._llm,
-                user_id,
-                _append_office_read_tool_contract(messages),
-                scene="office",
-                conversation_id=conversation_id,
-                llm_api_key=llm_api_key,
-                on_progress=on_progress,
-            )
-        )
-        while not task.done():
-            next_progress = asyncio.create_task(progress_queue.get())
-            done, _ = await asyncio.wait({task, next_progress}, return_when=asyncio.FIRST_COMPLETED)
-            if next_progress in done:
-                event = next_progress.result()
-                if isinstance(event, dict) and event.get("type") == "step":
-                    yield {"type": "step", "step": event}
-            else:
-                next_progress.cancel()
-                await asyncio.gather(next_progress, return_exceptions=True)
-        while not progress_queue.empty():
-            event = progress_queue.get_nowait()
-            if isinstance(event, dict) and event.get("type") == "step":
-                yield {"type": "step", "step": event}
-        reply, _records, tool_citations = task.result()
-        citations.extend(tool_citations)
-        if not reply:
-            reply = await self._llm.chat(
-                messages,
-                scene="office",
-                usage_user_id=user_id,
-                usage_category=CATEGORY_CHAT,
-                api_key=llm_api_key,
-            )
-        yield {"type": "delta", "content": reply}
-
     async def _stream_office_job(
         self,
         user_id: str,
@@ -1260,6 +1926,8 @@ class Orchestrator:
         llm_api_key: str | None,
         citations: list[dict],
         user_role: str = "user",
+        workspace_id: str | None = None,
+        execution_preference: str = "use_workspace_policy",
     ):
         from app.agents.orchestration.orchestrator import orchestrator as agent_orchestrator
         from app.agents.orchestration.models import JobStatus
@@ -1271,7 +1939,9 @@ class Orchestrator:
             conversation_id,
             llm_api_key=llm_api_key,
             office_docs=office_docs,
+            workspace_id=workspace_id,
             user_role=user_role,
+            execution_preference=execution_preference,
         )
         yield {
             "type": "job",
@@ -1294,6 +1964,20 @@ class Orchestrator:
         try:
             while True:
                 routing = getattr(job, "routing", None) or {}
+                # 计划优先（step_confirm）：提交只生成计划并置 waiting_run，
+                # 不自动派发执行；SSE 在展示计划后收敛，后续由
+                # /agents/jobs/{id}/resume（action=run_next）逐步骤驱动。
+                if isinstance(routing, dict) and routing.get("execution_state") == "waiting_run":
+                    from app.agents.orchestration.job_run_view import (
+                        done_payload,
+                        plan_ready_payload,
+                        run_view,
+                    )
+
+                    view = run_view(job)
+                    yield {"type": "plan_ready", **plan_ready_payload(job_id=job.job_id, view=view)}
+                    yield done_payload(job_id=job.job_id, view=view)
+                    return
                 plan_revision = int(routing.get("plan_revision") or 1)
                 if plan_revision > last_plan_revision:
                     if last_plan_revision:
@@ -1478,7 +2162,18 @@ class Orchestrator:
         summary = await self.get_conversation_summary(conversation_id)
         conversation_recall = ConversationRecall(global_summary=summary or "")
         if scene == "office":
-            # 办公模式：无长期记忆注入，只靠短期窗口保证当次任务连贯
+            # 办公模式使用独立、受控的近期任务摘要。它只包含请求摘要、
+            # 结果摘要和产物元数据，不把完整工具输出或私有画像注入模型。
+            try:
+                from app.agents.orchestration.memory_service import OfficeMemoryService
+
+                office_summary = await OfficeMemoryService().load_summaries(conversation_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("读取办公近期摘要失败: {}", exc)
+                office_summary = ""
+            if office_summary:
+                summary = (summary + "\n" if summary else "") + "[近期办公任务]\n" + office_summary
+            # 办公模式不读取通用长期身份/事实记忆，避免跨场景污染。
             profile, memory_facts = None, []
             retrieval_scope = RetrievalScope.NONE
         else:
@@ -1639,6 +2334,7 @@ class Orchestrator:
         llm_api_key: str | None = None,
         thinking_mode: str = "fast",
         force_web_search: bool = False,
+        allow_tools: bool = True,
     ) -> str:
         """阻塞版：技能循环（开启时）或 模型自主联网 + 场景模型回复."""
         # 先确定本次实际使用的模型（快速/思考档覆盖优先），再决定图片直传还是 VL 描述成文本
@@ -1659,7 +2355,8 @@ class Orchestrator:
         # 始终由办公 DAG 负责，不能从这里旁路进入。图片、语音和 RAG 已在上方
         # 预处理完成，图只看 chat 场景白名单（web_search/query_knowledge/get_datetime）。
         if (
-            scene == "chat"
+            allow_tools
+            and scene == "chat"
             and settings.AGENT_SKILLS_ENABLED
             and (force_web_search or _needs_chat_tool_graph(user_content))
         ):
@@ -1721,6 +2418,7 @@ class Orchestrator:
         llm_api_key: str | None = None,
         thinking_mode: str = "fast",
         force_web_search: bool = False,
+        allow_tools: bool = True,
     ):
         """流式版：技能循环（开启时）或 模型自主联网，最终回复流式产出."""
         # 先确定本次实际使用的模型（快速/思考档覆盖优先），再决定图片直传还是 VL 描述成文本
@@ -1741,7 +2439,8 @@ class Orchestrator:
         # tool_calls 混入 SSE。完成后按原 SSE 协议一次性投递正文；普通闲聊模型
         # 不调用工具时仍会在第一轮直接返回，且不会接触办公能力。
         if (
-            scene == "chat"
+            allow_tools
+            and scene == "chat"
             and settings.AGENT_SKILLS_ENABLED
             and (force_web_search or _needs_chat_tool_graph(user_content))
         ):
@@ -1797,8 +2496,8 @@ class Orchestrator:
         # 普通模式快速/思考档：显式切换模型（fast=DS Flash / think=强模型）
         if override:
             try:
-                async for delta in self._llm.chat_stream(
-                    messages,
+                async for evt in self._protocol_llm_stream(
+                    messages=messages,
                     base_url=override["base_url"],
                     api_key=override["api_key"],
                     model=override["model"],
@@ -1807,22 +2506,97 @@ class Orchestrator:
                     usage_user_id=user_id,
                     usage_category=CATEGORY_CHAT,
                 ):
-                    yield {"type": "delta", "content": delta}
+                    yield evt
                 return
             except Exception as exc:  # noqa: BLE001 - 本地/强模型不可用时回退默认模型
                 logger.warning(
                     "普通模式 {} 档模型 {} 流式调用失败，回退默认模型: {}",
                     thinking_mode, override["model"], str(exc)[:160],
                 )
-        async for delta in self._llm.chat_stream(
-            messages,
+        async for evt in self._protocol_llm_stream(
+            messages=messages,
             scene=scene,
             usage_user_id=user_id,
             usage_category=CATEGORY_CHAT,
             api_key=llm_api_key,
             reasoning_effort=_chat_reasoning_effort(thinking_mode),
         ):
-            yield {"type": "delta", "content": delta}
+            yield evt
+
+    async def _protocol_llm_stream(self, messages: list[dict], **stream_kwargs):
+        """普通闲聊/直答路径的流式出口（增量即发 + 工具残留剥离）。
+
+        规则：
+          - 每条模型增量先经 TextToolStripper 去掉 workspace_read 类 XML/DSML
+            残留（跨增量、低滞留），再交 ModelStreamProtocolParser 解析；
+          - 解析出的 delta 立即转发（保持真实流式体感）；解析出的
+            tool/warning/process 不外发、不执行，也不触发第二次模型调用；
+          - 结尾冲刷残留文本。
+        """
+        from app.services.model_output_protocol import (
+            ModelStreamProtocolParser,
+            TextToolStripper,
+            chunk_to_events,
+            strip_tool_markup,
+        )
+
+        parser = ModelStreamProtocolParser()
+        stripper = TextToolStripper()
+        try:
+            async for raw_delta in self._llm.chat_stream(messages, **stream_kwargs):
+                for piece in stripper.feed(str(raw_delta or "")):
+                    process_prefix = stripper.drain_process()
+                    if process_prefix:
+                        yield {"type": "process", "content": process_prefix}
+                    for chunk in parser.feed(piece):
+                        for event in chunk_to_events(chunk):
+                            if event["type"] == "delta":
+                                clean = strip_tool_markup(str(event.get("content") or ""))
+                                if clean:
+                                    yield {"type": "delta", "content": clean}
+                            elif event["type"] == "process":
+                                yield {"type": "process", "content": str(event.get("content") or "")}
+            # 结尾：冲刷剥离器与解析器残留的干净文本。
+            for piece in stripper.flush():
+                process_prefix = stripper.drain_process()
+                if process_prefix:
+                    yield {"type": "process", "content": process_prefix}
+                for chunk in parser.feed(piece):
+                    for event in chunk_to_events(chunk):
+                        if event["type"] == "delta":
+                            clean = strip_tool_markup(str(event.get("content") or ""))
+                            if clean:
+                                yield {"type": "delta", "content": clean}
+                        elif event["type"] == "process":
+                            yield {"type": "process", "content": str(event.get("content") or "")}
+            for chunk in parser.finalize():
+                for event in chunk_to_events(chunk):
+                    if event["type"] == "delta":
+                        clean = strip_tool_markup(str(event.get("content") or ""))
+                        if clean:
+                            yield {"type": "delta", "content": clean}
+                    elif event["type"] == "process":
+                        yield {"type": "process", "content": str(event.get("content") or "")}
+        except asyncio.CancelledError:
+            raise
+
+    @staticmethod
+    def _protocol_event_to_sse(event: dict) -> dict:
+        """把协议解析事件归一化为现有 SSE 载荷。
+
+        delta/process/warning/tool 保持协议名直出（前端按需消费）；其中
+        tool 仅做记录，普通闲聊路径不自动执行未请求的工具。
+        """
+        event_type = str(event.get("type") or "")
+        if event_type == "delta":
+            return {"type": "delta", "content": str(event.get("content") or "")}
+        if event_type == "process":
+            return {"type": "process", "content": str(event.get("content") or "")}
+        if event_type == "warning":
+            return {"type": "warning", "content": str(event.get("content") or "")}
+        if event_type == "tool":
+            return {"type": "tool", "tool_call": event.get("tool_call") or {}}
+        return event
 
     # ── 内部方法 ────────────────────────────────────────
 

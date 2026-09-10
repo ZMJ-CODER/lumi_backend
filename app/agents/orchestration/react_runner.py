@@ -61,7 +61,9 @@ class OfficeReactRunner:
                  max_elapsed_seconds: float | None = None,
                  initial_domain: str = "",
                  initial_mode: str = "read_only",
-                 domain_first: bool = False) -> None:
+                 domain_first: bool = False,
+                 workspace_id: str = "",
+                 workspace_summary: str = "") -> None:
         self.user_id = user_id
         self.job_id = job_id
         self.user_role = user_role
@@ -95,6 +97,13 @@ class OfficeReactRunner:
         self.max_domain_transitions = 4
         self._domain_mode = str(initial_mode or "read_only").casefold()
         self.domain_first = bool(domain_first)
+        # Server-authorized local workspace.  When set, the generic read
+        # domain (workspace_catalog/list/read/search) may enter the tool
+        # window for workspace-related steps; every MCP call is bound to this
+        # workspace and routed to its registered desktop.
+        self.workspace_id = str(workspace_id or "").strip()
+        self.workspace_summary = str(workspace_summary or "")
+        self._workspace_read_caps: list[Any] | None = None
         if initial_domain:
             aliases = {"network": "research", "web": "research", "file": "document", "files": "document", "code": "development"}
             normalized = aliases.get(str(initial_domain).strip().casefold(), str(initial_domain).strip().casefold())
@@ -109,14 +118,22 @@ class OfficeReactRunner:
 
     @staticmethod
     def _is_read_tool(name: str) -> bool:
-        return str(name or "").casefold() in {"read", "glob", "grep", "filestat", "openfile", "read_document", "office_doc_read", "get_project_context", "inspect_document_set"}
+        return str(name or "").casefold() in {
+            "read", "glob", "grep", "filestat", "openfile", "read_document", "office_doc_read",
+            "get_project_context", "inspect_document_set",
+            # workspace 通用读取域
+            "workspace_read", "workspace_search", "workspace_list", "workspace_catalog",
+        }
 
     @staticmethod
     def _requires_prior_read(name: str) -> bool:
         # Write may legitimately create a new file; in-place mutation and
         # destructive operations must be preceded by a read of the same
         # target. The client/server tool still performs its own path check.
-        return str(name or "").casefold() in {"edit", "delete", "rename", "office_doc_edit"}
+        return str(name or "").casefold() in {
+            "edit", "delete", "rename", "office_doc_edit",
+            "workspace_stage_write", "workspace_stage_delete",
+        }
 
     @staticmethod
     def _target_key(name: str, args: dict) -> str:
@@ -127,6 +144,72 @@ class OfficeReactRunner:
     def _read_target_key(args: dict) -> str:
         value = (args or {}).get("file_path") or (args or {}).get("path") or (args or {}).get("doc_id") or (args or {}).get("target_file")
         return str(value or "").replace("\\", "/").strip().casefold()
+
+    @staticmethod
+    def _uses_workspace_vocab(text: str) -> bool:
+        """保守判断当前步骤是否可能面向本地工作区内容。
+
+        仅作为“是否给工作区读取域留窗口”的提示信号；真正能否调用仍由
+        workspace 授权门（execute_tool_call WORKSPACE_SCOPE_*）决定。
+        """
+        value = (text or "").casefold()
+        markers = (
+            "工作区", "目录", "文件夹", "文件", "项目代码", "本地项目",
+            "workspace", "project file", "readme", "src/", ".py", ".md",
+            ".txt", ".json", ".toml", ".cfg", "读取", "查看", "查找", "搜索文件",
+        )
+        return any(marker in value for marker in markers)
+
+    async def _workspace_caps_for_group(self, group: frozenset[str]) -> list[Any]:
+        from app.agents.skills.executor import get_workspace_action_capabilities
+
+        return await get_workspace_action_capabilities(
+            self.user_id, "office", self.user_role, self.workspace_id, group
+        )
+
+    async def _maybe_inject_workspace_stage_window(self, capabilities: list[Any], route_text: str) -> list[Any]:
+        """按阶段把工作区能力并入候选窗，不因 write_op 永久隐藏写工具。
+
+        读取域：任何面向工作区内容的步骤都可见；
+        暂存写：出现修改/创建/删除/移动等意图时注入（仍只写暂存层）；
+        沙箱：出现测试/运行/构建/验证意图时注入；
+        提交域：出现提交/回滚意图时注入（实际提交仍由 ApprovalPolicyEngine
+        决定是否需要确认，回滚始终确认）。
+        """
+        if not self.workspace_id or not self._uses_workspace_vocab(route_text):
+            return capabilities
+        from app.services.workspace_context import (
+            WORKSPACE_COMMIT_CAPABILITIES,
+            WORKSPACE_READ_CAPABILITIES,
+            WORKSPACE_SANDBOX_CAPABILITIES,
+            WORKSPACE_STAGE_WRITE_CAPABILITIES,
+        )
+
+        desired: list[Any] = []
+        value = (route_text or "").casefold()
+        modify_tokens = ("修改", "写入", "创建", "新建", "删除", "移动", "重命名", "复制", "暂存", "覆盖",
+                         "write", "create", "delete", "rename", "move", "copy", "stage")
+        verify_tokens = ("测试", "运行", "执行", "构建", "验证", "沙箱", "test", "run", "build", "check")
+        commit_tokens = ("提交", "回滚", "commit", "rollback")
+
+        groups: list[tuple[frozenset[str], bool]] = [
+            (WORKSPACE_READ_CAPABILITIES, True),
+            (WORKSPACE_STAGE_WRITE_CAPABILITIES, any(token in value for token in modify_tokens)),
+            (WORKSPACE_SANDBOX_CAPABILITIES, any(token in value for token in verify_tokens)),
+            (WORKSPACE_COMMIT_CAPABILITIES, any(token in value for token in commit_tokens)),
+        ]
+        for group, enabled in groups:
+            if not enabled:
+                continue
+            desired.extend(await self._workspace_caps_for_group(group))
+        injected = [item for item in desired if item.name not in {c.name for c in capabilities}]
+        if not injected:
+            return capabilities
+        keep = [
+            item for item in capabilities
+            if item.name not in {candidate.name for candidate in injected}
+        ][: max(0, 8 - len(injected))]
+        return [*keep, *injected]
 
     def _emit(self, value: str | dict) -> None:
         if self.on_progress:
@@ -196,6 +279,19 @@ class OfficeReactRunner:
     async def run(self, instruction: str, office_docs: list[dict] | None = None) -> ReactRunResult:
         try:
             await self.discovery_session.load(self.user_id, self.job_id)
+            if self.workspace_id and not self.workspace_summary:
+                try:
+                    from app.services.workspace_context import (
+                        load_workspace_context,
+                        workspace_summary_text,
+                    )
+
+                    wctx = await load_workspace_context(
+                        self.user_id, workspace_id=self.workspace_id
+                    )
+                    self.workspace_summary = workspace_summary_text(wctx)
+                except Exception:  # noqa: BLE001 - 摘要缺失时仍可运行，只读工具调用受授权门约束
+                    self.workspace_summary = ""
             model = await get_chat_model(
                 scene="office", user_id=self.user_id, api_key=self.api_key,
                 model=self.model_name, base_url=self.base_url,
@@ -357,6 +453,9 @@ class OfficeReactRunner:
                             low_confidence=selection.low_confidence,
                             reason="document_discovery_prerequisite",
                         )
+                # 绑定了工作区且步骤面向本地内容时，按阶段把工作区能力并入候选窗
+                # （读取→暂存修改→沙箱验证→提交），不再因 write_op 永久隐藏写工具。
+                capabilities = await self._maybe_inject_workspace_stage_window(capabilities, route_text)
                 tool_pairs = []
                 for capability in capabilities:
                     tool = await make_skill_tool(
@@ -366,6 +465,7 @@ class OfficeReactRunner:
                         user_message=self.user_request, llm_config=self.llm_config,
                         approval_context_sha256=self.approval_context_sha256,
                         office_doc_ids=[str(item.get("doc_id")) for item in internal_docs],
+                        authorized_workspace_id=self.workspace_id,
                         execution_scope=self.job_id,
                         allowed_tools={item.name for item in capabilities},
                     )
@@ -560,6 +660,7 @@ class OfficeReactRunner:
                     user_message=self.user_request, llm_config=self.llm_config,
                     approval_context_sha256=self.approval_context_sha256,
                     office_doc_ids=[str(item.get("doc_id")) for item in internal_docs],
+                    authorized_workspace_id=self.workspace_id,
                     execution_scope=self.job_id,
                     allowed_tools=set(state.get("allowed_tools") or []),
                 )
@@ -642,6 +743,13 @@ class OfficeReactRunner:
                 system += (
                     "\n本阶段采用域优先协议：第一步必须先调用 discover_domain 申请最合适的领域，"
                     "不要直接调用其他业务工具，也不要调用 search_tools 代替域申请。"
+                )
+            if self.workspace_summary:
+                system += (
+                    "\n\n[授权工作区状态]\n"
+                    + self.workspace_summary
+                    + "\n规则：只有当当前步骤需要工作区内容时才调用读取域工具（catalog/list/read/search）。"
+                    "目录摘要不等于文件正文；禁止把目录名当作已读内容引用，禁止编造文件或路径。"
                 )
             state = await asyncio.wait_for(
                 graph.compile().ainvoke({

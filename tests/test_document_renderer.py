@@ -105,19 +105,6 @@ def test_document_skill_returns_generic_output_without_path(monkeypatch, tmp_pat
     assert (tmp_path / "uploads" / "office_outputs" / "user-1" / "job-1" / "交付.docx").is_file()
 
 
-def test_new_document_intent_and_planner_node():
-    from app.agents.orchestration.intent import infer_new_office_document, select_named_office_documents
-    from app.agents.orchestration.planner import _new_office_document_tree
-
-    document = infer_new_office_document("制作一份现代风格的项目启动演示文稿，生成文件名为启动会.pptx")
-    assert document == {"format": "pptx", "filename": "启动会.pptx"}
-    assert select_named_office_documents("生成文件名为启动会.pptx", []) == ([], [], False)
-    assert infer_new_office_document("将 scores.csv 转为 txt") is None
-    tree = _new_office_document_tree("制作演示文稿", document)
-    assert tree.nodes[0].agent == "office_document"
-    assert tree.nodes[0].params["output_contract"]["expected_output_names"] == ["启动会.pptx"]
-
-
 def test_document_agent_keeps_planner_file_identity(monkeypatch):
     from app.agents.core.base import WorkerContext
     from app.agents.orchestration.models import TaskNode

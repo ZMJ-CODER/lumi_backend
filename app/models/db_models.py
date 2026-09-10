@@ -435,7 +435,19 @@ class UserWorkflowSkill(Base, UUIDMixin):
     scenes: Mapped[list] = mapped_column(JSONB, nullable=False, default=lambda: ["office"])
     allowed_tools: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     steps: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    dependencies: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    execution_scope: Mapped[str] = mapped_column(String(40), nullable=False, default="backend")
+    availability_policy: Mapped[str] = mapped_column(String(40), nullable=False, default="fail_if_missing")
+    fallback_policy: Mapped[str] = mapped_column(String(40), nullable=False, default="clarify")
+    approval_policy: Mapped[str] = mapped_column(String(40), nullable=False, default="none")
+    prompt_body: Mapped[str] = mapped_column(Text, nullable=False, default="")
     input_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Capability-first dispatcher declaration.  These are intentionally
+    # independent of the Skill title/description so a user-created Skill can
+    # enter office planning without adding planner code or keywords.
+    provided_goals: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    provided_sources: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    safety_level: Mapped[str] = mapped_column(String(20), nullable=False, default="READ_ONLY")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="enabled")
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

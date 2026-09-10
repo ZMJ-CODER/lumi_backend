@@ -871,6 +871,11 @@ class AgentDagWorkflow:
             "scene": self._job.get("scene", "office"),
             "user_request": self._job.get("request", ""),
             "authorized_project_ids": list((self._job.get("routing") or {}).get("authorized_project_ids") or []),
+            "office_doc_ids": [
+                str(item.get("doc_id") or "")
+                for item in ((self._job.get("routing") or {}).get("input_refs") or [])
+                if isinstance(item, dict) and str(item.get("doc_id") or "").strip()
+            ],
             "node": node,
             "dependency_results": dependency_results,
             "config": cfg,

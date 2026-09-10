@@ -31,6 +31,7 @@ from app.api.v1 import (
     usage,
     user,
     workflow_skills,
+    workspaces,
 )
 
 api_router = APIRouter()
@@ -83,6 +84,7 @@ api_router.include_router(prompts.router, prefix="/prompts", tags=["prompts"])
 
 # 本地项目（方案 A：结构索引，代码留本地）
 api_router.include_router(projects.router, prefix="/projects", tags=["projects"])
+api_router.include_router(workspaces.router, prefix="/workspaces", tags=["workspaces"])
 
 # 操控日志
 api_router.include_router(control_logs.router, prefix="/control-logs", tags=["control-logs"])

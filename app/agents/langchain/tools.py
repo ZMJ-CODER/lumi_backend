@@ -83,6 +83,7 @@ async def make_skill_tool(
     approval_context_sha256: str = "",
     office_doc_ids: tuple[str, ...] | list[str] | None = None,
     authorized_project_ids: tuple[str, ...] | list[str] | None = None,
+    authorized_workspace_id: str = "",
     execution_scope: str = "",
     allowed_tools: set[str] | None = None,
 ) -> StructuredTool | None:
@@ -108,6 +109,7 @@ async def make_skill_tool(
             approval_context_sha256=approval_context_sha256,
             office_doc_ids=office_doc_ids,
             authorized_project_ids=authorized_project_ids,
+            authorized_workspace_id=authorized_workspace_id,
             execution_scope=execution_scope,
             allowed_tools=allowed_tools,
         )

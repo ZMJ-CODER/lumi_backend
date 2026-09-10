@@ -22,7 +22,7 @@ from lumi_orch.logical_plan import (
 )
 
 from app.agents.orchestration.models import TaskNode, TaskStatus
-from app.agents.orchestration.task_routing import RouteChannel, estimate_tokens
+from app.agents.orchestration.execution_budget import estimate_node_tokens
 from app.core.config import settings
 
 
@@ -82,32 +82,6 @@ def logical_plan_execution_fingerprint(plan: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _channel_for(node: TaskNode) -> RouteChannel:
-    raw = str((node.metadata or {}).get("route_channel") or "")
-    try:
-        return RouteChannel(raw)
-    except ValueError:
-        pass
-    if node.agent in {"office_script", "office_document"}:
-        return RouteChannel.DETERMINISTIC_SCRIPT
-    if node.agent in {"retrieval"}:
-        return RouteChannel.RAG
-    if node.agent in {"direct_llm"}:
-        return RouteChannel.DIRECT_LLM
-    return RouteChannel.AGENT
-
-
-def _instruction_for(node: TaskNode) -> str:
-    params = node.params or {}
-    return str(
-        params.get("instruction")
-        or params.get("task")
-        or params.get("query")
-        or node.name
-        or node.id
-    )
-
-
 def _node_record(node: TaskNode) -> dict[str, Any]:
     snapshot = node.model_copy(deep=True)
     snapshot.status = TaskStatus.PENDING
@@ -121,11 +95,10 @@ def _node_record(node: TaskNode) -> dict[str, Any]:
     metadata.pop("dependency_results", None)
     metadata.pop("result_ref", None)
     snapshot.metadata = metadata
-    channel = _channel_for(snapshot)
     return {
         "node": snapshot.model_dump(mode="json"),
         "status": "pending",
-        "estimated_tokens": estimate_tokens(_instruction_for(snapshot), channel),
+        "estimated_tokens": estimate_node_tokens(snapshot),
         "result_ref": None,
         "error": "",
         "error_code": "",

@@ -13,23 +13,13 @@ from app.agents.langchain.models import get_chat_model
 from app.core.config import settings
 
 
-class PlannedTask(BaseModel):
-    id: str = ""
-    name: str = ""
-    agent: str
-    params: dict[str, Any] = Field(default_factory=dict)
-    depends_on: list[str] = Field(default_factory=list)
-    domain: str = ""
-    mode: str = ""
-
-
 class PlannerOutput(BaseModel):
     plan: str = ""
-    tasks: list[PlannedTask] = Field(default_factory=list)
+    # Generalized office contract: business-neutral capability profile and
+    # logical steps. Concrete Skills/Tools are bound after planning.
+    task_profile: dict[str, Any] = Field(default_factory=dict)
+    abstract_tasks: list[dict[str, Any]] = Field(default_factory=list)
     clarification: str = ""
-    # New planner contract: optional strategic stages.  ``tasks`` remains
-    # accepted during migration so persisted/legacy plans keep working.
-    stages: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _message_text(reply: Any) -> str:

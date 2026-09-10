@@ -27,6 +27,19 @@ class SendMessageRequest(BaseModel):
         default_factory=list,
         description="办公模式挂载的结构化文档，仅 office 场景交给 DAG Planner",
     )
+    workspace_id: str | None = Field(
+        default=None,
+        description="办公模式当前项目工作区 ID；仅允许访问当前用户拥有的工作区",
+    )
+    execution_preference: str = Field(
+        default="use_workspace_policy",
+        description="办公任务执行方式偏好：use_workspace_policy（默认，由工作区“帮我确认”设置决定）/"
+                    "step_confirm（计划后逐步骤运行） / auto_routine（展示计划后普通步骤自动连续执行）",
+    )
+    attachment_ids: list[str] = Field(
+        default_factory=list,
+        description="会话级只读附件标识，不能直接修改原始文件",
+    )
     guest_id: str | None = Field(default=None, description="游客身份标识（未登录时由前端生成，登录后忽略）")
     retrieval_query: str | None = Field(
         default=None,

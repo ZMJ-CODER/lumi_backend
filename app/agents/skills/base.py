@@ -76,6 +76,10 @@ class SkillContext:
     # Server-injected project scope. Project/code tools must never infer this
     # from the user prompt or tool arguments.
     authorized_project_ids: tuple[str, ...] = ()
+    # The active desktop workspace is selected by the authenticated request,
+    # never by a model tool argument.  Workspace workflows use this value to
+    # bind every Electron MCP call to one local project.
+    workspace_id: str = ""
 
 
 class Tool(ABC):
@@ -290,6 +294,11 @@ class WorkflowSkill:
     intent_tags: list[str] = []
     bootstrap_intents: list[str] = []
     bootstrap_until: str = ""
+    # Capability-first dispatcher contract. Legacy Skills can be migrated
+    # gradually; absent fields receive a conservative derived capability.
+    provided_goals: list[str] = []
+    provided_sources: list[str] = []
+    safety_level: str = "READ_ONLY"
     input_schema: dict[str, Any] = Field(default_factory=dict)
     # ``None`` 表示开发者预置的公共 Skill；用户自建 Skill 必须绑定 UUID。
     owner_user_id: str | None = None
@@ -301,6 +310,26 @@ class WorkflowSkill:
     prompt_body: str = ""
     prompt_version: str = ""
     prompt_file: str = ""
+    # Declarative execution manifest.  Legacy Skills derive dependencies from
+    # allowed_tools, so introducing the manifest does not invalidate persisted
+    # jobs or developer plugins that have not migrated yet.
+    dependencies: dict[str, Any] = {}
+    execution_scope: str = "backend"
+    availability_policy: str = "fail_if_missing"
+    fallback_policy: str = "clarify"
+    approval_policy: str = "none"
+
+    def effective_dependencies(self) -> dict[str, Any]:
+        manifest = dict(self.dependencies or {})
+        tools = list(manifest.get("tools") or [])
+        declared = {str(item.get("name") or "") for item in tools if isinstance(item, dict)}
+        for name in self.allowed_tools:
+            if name and name not in declared:
+                tools.append({"name": name, "min_version": "0.0.0", "required": True, "provider": "any"})
+        manifest["tools"] = tools
+        manifest.setdefault("providers", [])
+        manifest.setdefault("sources", [])
+        return manifest
 
     def supports_scene(self, scene: str) -> bool:
         return not self.scenes or scene in self.scenes
@@ -324,6 +353,14 @@ class WorkflowSkill:
             raise ValueError(f"用户 Skill {self.name} 必须绑定 owner_user_id")
         if self.source == "user" and self.visibility != "private":
             raise ValueError(f"用户 Skill {self.name} 只能是 private")
+        if self.execution_scope not in {"backend", "client", "backend_orchestrates_client"}:
+            raise ValueError(f"WorkflowSkill {self.name} 的 execution_scope 无效")
+        if self.availability_policy not in {"require_online_client", "allow_server_fallback", "fail_if_missing"}:
+            raise ValueError(f"WorkflowSkill {self.name} 的 availability_policy 无效")
+        if self.fallback_policy not in {"fail", "clarify", "direct_answer", "alternate_tool"}:
+            raise ValueError(f"WorkflowSkill {self.name} 的 fallback_policy 无效")
+        if self.approval_policy not in {"none", "before_write", "before_submit"}:
+            raise ValueError(f"WorkflowSkill {self.name} 的 approval_policy 无效")
 
     async def run(self, params: dict, context: SkillContext, invoke_tool: Callable[..., Any]) -> ToolOutput:
         """组合流程入口；迁移中的旧实现可暂时通过 ``execute`` 适配。"""

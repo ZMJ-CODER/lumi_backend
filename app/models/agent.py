@@ -26,14 +26,60 @@ class CreateAgentJobRequest(BaseModel):
     )
     office_docs: list[dict] | None = Field(
         default=None,
-        description="当前办公文档会话列表 [{doc_id, filename, kind}]；规划器按文件名匹配，给 office_doc 节点带正确 doc_id",
+        description="当前办公文档会话列表 [{doc_id, filename, kind}]；规划器按文件名匹配，为真实文档工具带上正确 doc_id",
+    )
+    workspace_id: str | None = Field(
+        default=None,
+        description="兼容字段；正常情况下由 conversation_id 自动解析唯一工作区",
+    )
+    execution_preference: str = Field(
+        default="use_workspace_policy",
+        description="办公任务执行方式：use_workspace_policy / step_confirm / auto_routine",
+    )
+
+
+RESUME_ACTION_RESUME = "resume"
+RESUME_ACTION_RUN_NEXT = "run_next"
+RESUME_ACTIONS = frozenset({RESUME_ACTION_RESUME, RESUME_ACTION_RUN_NEXT})
+
+
+class ResumeAgentJobRequest(BaseModel):
+    """恢复任务 / 单步执行（run_next）.
+
+    - action=resume：恢复被暂停的任务（默认，兼容旧调用方，无需请求体）。
+    - action=run_next：step_confirm 计划优先任务的“运行下一步”：
+      后端校验通过后从 routing.steps/current_step_index 定位步骤，执行
+      Job.nodes 中同 id 的 TaskNode，并以 SSE 事件流返回本步执行过程与
+      落点（waiting_next / waiting_approval / task_completed / task_failed）。
+    """
+
+    action: str = Field(default=RESUME_ACTION_RESUME, description="resume | run_next")
+    expected_step_id: str = Field(
+        default="",
+        max_length=200,
+        description="run_next：客户端持有的当前步骤 id（用于并发/陈旧视图检测；空则取服务端 current_step_index）",
+    )
+    plan_revision: int | None = Field(
+        default=None,
+        ge=1,
+        description="run_next：客户端持有的计划版本；缺省时兼容旧客户端并由服务端取当前版本",
+    )
+    idempotency_key: str = Field(
+        default="",
+        max_length=200,
+        description="run_next：本轮步骤执行的幂等键（同一键不重复执行）",
     )
 
 
 class CancelAgentJobRequest(BaseModel):
-    """终止任务：是否保留已完成节点."""
+    """终止任务：是否保留已完成节点/步骤与暂存成果."""
 
+    reason: str = Field(default="user_cancelled", max_length=200, description="取消原因（user_cancelled 等）")
     keep_completed: bool = Field(default=True, description="保留已完成任务节点")
+    keep_completed_steps: bool | None = Field(
+        default=None,
+        description="前端契约名 keepCompletedSteps：优先于 keep_completed（默认保留已完成步骤与暂存成果）",
+    )
 
 
 class ApproveAgentJobRequest(BaseModel):

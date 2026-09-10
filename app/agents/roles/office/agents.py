@@ -303,7 +303,7 @@ class OfficeScriptAgent(WorkerAgent):
         await _report_progress(ctx.job_id, node.id, "正在编写并执行脚本…")
         try:
             from app.services import office_docs
-            from app.agents.orchestration.intent import extract_output_contract
+            from app.agents.orchestration.document_scope import extract_output_contract
 
             conversion = node.params.get("conversion")
             output_contract = node.params.get("output_contract")

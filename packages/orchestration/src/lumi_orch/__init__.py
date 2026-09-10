@@ -10,7 +10,6 @@ from lumi_orch.escalation import EscalationLevel, EscalationReason, EscalationSi
 from lumi_orch.errors import ErrorCategory, ErrorInfo, OrchestrationError, classify_error
 from lumi_orch.lifecycle import InvalidStateTransition, can_transition, transition
 from lumi_orch.logical_plan import FrontierSelection, LogicalPlanProgress, logical_plan_progress, select_budgeted_frontier
-from lumi_orch.manifest import ManifestProgress, advance_cursor, manifest_progress, next_manifest_batch
 from lumi_orch.plan_dsl import InputRef, OutputContract, PlanStep
 from lumi_orch.job_spec import (
     IdempotencySpec,
@@ -53,10 +52,6 @@ __all__ = [
     "LogicalPlanProgress",
     "logical_plan_progress",
     "select_budgeted_frontier",
-    "ManifestProgress",
-    "advance_cursor",
-    "manifest_progress",
-    "next_manifest_batch",
     "InputRef",
     "OutputContract",
     "PlanStep",

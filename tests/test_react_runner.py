@@ -96,7 +96,7 @@ def test_office_react_preserves_reasoning_payload_after_tool_call(monkeypatch):
     assert replayed.additional_kwargs["reasoning_content"] == "tool selection reasoning"
 
 
-def test_m3_planner_leaves_react_choice_to_structured_planner(monkeypatch):
+def test_m3_planner_requires_abstract_capability_contract(monkeypatch):
     from app.agents.orchestration.planner import LlmPlanner
     from app.agents.orchestration.tca import ComplexityLevel
 
@@ -105,7 +105,11 @@ def test_m3_planner_leaves_react_choice_to_structured_planner(monkeypatch):
     async def fake_structured(*_args, **_kwargs):
         return {
             "plan": "需要根据中间结果处理",
-            "tasks": [{"id": "r1", "name": "动态处理", "agent": "react_step", "params": {"instruction": "分析销售下滑"}, "depends_on": []}],
+            "abstract_tasks": [{
+                "id": "r1", "name": "动态处理", "instruction": "分析销售下滑",
+                "profile": {"goal": "ANALYZE", "required_sources": ["USER_INPUT"], "complexity": "DYNAMIC", "safety_level": "READ_ONLY"},
+                "depends_on": [],
+            }],
         }
 
     async def fake_projects(_user_id):
@@ -117,8 +121,7 @@ def test_m3_planner_leaves_react_choice_to_structured_planner(monkeypatch):
         ComplexityLevel.M3, "u1", "分析销售下滑原因并给出建议", "office",
     ))
     assert len(tree.nodes) == 1
-    assert tree.nodes[0].agent == "react_step"
-    assert tree.nodes[0].params["max_rounds"] == 6
+    assert tree.nodes[0].agent == "direct_llm"
 
 
 def test_react_worker_requires_instruction():
@@ -166,7 +169,7 @@ def test_react_kept_for_m3():
     assert node.agent == "react_step"
 
 
-def test_planner_accepts_stage_domain_path(monkeypatch):
+def test_planner_rejects_removed_stage_domain_path(monkeypatch):
     from app.agents.orchestration.planner import LlmPlanner
     from app.agents.orchestration.tca import ComplexityLevel
 
@@ -190,13 +193,11 @@ def test_planner_accepts_stage_domain_path(monkeypatch):
     tree = asyncio.run(planner.plan_for_level(
         ComplexityLevel.M3, "比较两个公开方案", "u1", "office",
     ))
-    assert [node.params["domain"] for node in tree.nodes] == ["research", "writing"]
-    assert tree.nodes[0].agent == "react_step"
-    assert tree.nodes[1].agent == "direct_llm"
-    assert tree.nodes[1].depends_on == ["research"]
+    assert tree.nodes == []
+    assert tree.error_code == "PLANNER_EMPTY"
 
 
-def test_react_worker_injects_manifest_predecessor_results(monkeypatch):
+def test_react_worker_injects_prior_results(monkeypatch):
     received = {}
 
     class FakeRunner:
@@ -216,7 +217,7 @@ def test_react_worker_injects_manifest_predecessor_results(monkeypatch):
             agent="react_step",
             params={
                 "instruction": "检查第1项结果",
-                "manifest_context": {"item-1": {"instruction": "生成摘要", "result": "摘要内容"}},
+                "prior_context": {"step-1": {"instruction": "生成摘要", "result": "摘要内容"}},
                 "office_docs": [{"doc_id": "d1", "filename": "tasks.txt"}],
             },
         ),

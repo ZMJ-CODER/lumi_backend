@@ -20,13 +20,9 @@ _ACQUIRE = CHANNEL_ACQUIRE_SCRIPT
 _RENEW = CHANNEL_RENEW_SCRIPT
 
 
-def _limit(channel: str) -> int:
-    return max(1, {
-        "direct_llm": settings.AGENT_CHANNEL_DIRECT_LLM_CONCURRENCY,
-        "deterministic_script": settings.AGENT_CHANNEL_SCRIPT_CONCURRENCY,
-        "rag": settings.AGENT_CHANNEL_RAG_CONCURRENCY,
-        "agent": settings.AGENT_CHANNEL_AGENT_CONCURRENCY,
-    }.get(channel, settings.AGENT_CHANNEL_AGENT_CONCURRENCY))
+def _limit(_channel: str) -> int:
+    """Use the DAG concurrency ceiling for non-provider execution leases."""
+    return max(1, int(settings.AGENT_NODE_CONCURRENCY or 1))
 
 
 def _llm_limit() -> int:

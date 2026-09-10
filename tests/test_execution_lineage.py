@@ -62,7 +62,6 @@ def test_result_reference_is_owner_scoped_and_hash_verified():
 
     asyncio.run(scenario())
 
-
 def test_missing_result_reference_has_an_explicit_dependency_error_code():
     async def scenario():
         from app.agents.orchestration.context import build_dependency_context_from_refs
@@ -75,8 +74,6 @@ def test_missing_result_reference_has_an_explicit_dependency_error_code():
         assert context["prior"]["error_code"] == "RESULT_REF_EXPIRED"
 
     asyncio.run(scenario())
-
-
 def test_node_spans_are_redacted_lifecycle_metadata_only():
     async def scenario():
         node = _node("span-node")
@@ -95,8 +92,6 @@ def test_node_spans_are_redacted_lifecycle_metadata_only():
         assert "api_key" not in span
 
     asyncio.run(scenario())
-
-
 def test_fork_reuses_body_free_prefix_and_reruns_selected_node():
     async def scenario():
         store = InMemoryStateStore()
@@ -177,28 +172,5 @@ def test_fork_rejects_crossing_committed_prefix_effect():
         )
         with pytest.raises(RuntimeError, match="副作用"):
             await orchestrator.fork_job(source.job_id, node_id="follow-up")
-
-    asyncio.run(scenario())
-
-
-def test_fork_rejects_manifest_execution():
-    async def scenario():
-        store = InMemoryStateStore()
-        source = Job(
-            job_id="manifest-source",
-            user_id="manifest-owner",
-            request="task",
-            status=JobStatus.COMPLETED,
-            routing={"runtime": "manifest_temporal"},
-            nodes=[_node("only")],
-        )
-        await store.create_job(source)
-        orchestrator = AgentOrchestrator(
-            store=store,
-            workers={"test_worker": _RecordingWorker()},
-            temporal_enabled=False,
-        )
-        with pytest.raises(RuntimeError, match="滚动清单"):
-            await orchestrator.fork_job(source.job_id, node_id="only")
 
     asyncio.run(scenario())

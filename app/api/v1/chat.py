@@ -39,6 +39,7 @@ from app.agents.orchestration.orchestrator import (
 from app.agents.orchestration.state import StatePersistenceError
 from app.models.conversation import SendMessageRequest
 from app.services.orchestrator import orchestrator
+from app.services import workspaces
 from app.agents.skills.recovery import classify_model_error
 
 router = APIRouter()
@@ -65,6 +66,25 @@ async def chat_stream(
     user_id = payload.get("sub") or req.guest_id or "guest"
     is_guest = not payload
     uid = _uid(payload)
+    # Conversation is the authoritative workspace selector in office mode:
+    # one conversation owns at most one workspace.  Accept a legacy explicit
+    # id for compatibility, but recover the bound id when the client cache is
+    # stale or omitted.
+    if req.scene == "office" and not req.workspace_id and req.conversation_id and not is_guest:
+        bound = workspaces.workspace_for_conversation(user_id, req.conversation_id)
+        if bound:
+            req.workspace_id = str(bound.get("workspace_id") or "") or None
+    if req.workspace_id:
+        if is_guest or req.scene != "office":
+            raise UnauthorizedException("项目工作区需要登录并在办公模式使用")
+        try:
+            workspaces.ensure_workspace(user_id, req.workspace_id)
+            if req.conversation_id:
+                workspaces.bind_workspace_to_conversation(user_id, req.workspace_id, req.conversation_id)
+        except LookupError as exc:
+            raise UnauthorizedException("工作区不存在或无权访问") from exc
+        except ValueError as exc:
+            raise UnauthorizedException(str(exc)) from exc
     conversation_id = req.conversation_id or ""
     # BYOK：用户自备 API key 每次请求临时携带，用完即弃（不落库、不打印日志）
     llm_api_key = request.headers.get("x-llm-api-key") or None
@@ -125,11 +145,13 @@ async def chat_stream(
                 retrieval_query=req.retrieval_query,
                 attachments=req.attachments,
                 office_docs=req.office_docs,
+                workspace_id=req.workspace_id,
                 web_search_enabled=req.web_search,
                 llm_api_key=llm_api_key,
                 thinking_mode=req.thinking_mode,
                 reply_style=req.reply_style,
                 user_role=payload.get("role", "user"),
+                execution_preference=req.execution_preference,
             ):
                 if evt["type"] == "delta":
                     full_text += evt["content"]

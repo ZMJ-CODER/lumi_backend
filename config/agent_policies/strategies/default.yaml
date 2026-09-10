@@ -1,0 +1,25 @@
+# 策略引擎默认策略。只允许任务画像、候选元数据和标准错误类别；
+# 不允许出现业务关键词、工具/Skill 名称、代码或表达式。
+version: 1
+id: default-office
+priority: 100
+enabled: true
+selection:
+  mode: balanced
+  weights:
+    capability_specificity: 1.0
+    declared_capability_bonus: 10.0
+    reliability: 4.0
+    cost: 1.0
+interaction:
+  confidence_below: 0.4
+  safety_at_or_above: RISKY_WRITE
+  require_no_prior_context: true
+failure:
+  actions:
+    transient: retry
+    capability_unavailable: alternative_or_replan
+    execution: alternative_or_replan
+    input: replan
+    permission: user_action
+    model_action_required: user_action

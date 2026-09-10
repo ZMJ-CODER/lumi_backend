@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
 
@@ -15,6 +15,13 @@ class PlanRequestContext:
     scene: str = "office"
     project_id: str | None = None
     project_ids: tuple[str, ...] = ()
+    workspace_id: str | None = None
+    # 工作区目录/状态摘要（只读、无文件内容），由 WorkspaceContext 生成后注入
+    # Planner 与入口上下文；空串表示本任务不携带工作区摘要。
+    workspace_summary: str = ""
+    # 执行授权快照（approval_mode/policy_version/issued_at/expires_at 等），
+    # 写入 Job.routing["workspace_grant"] 供执行期与审计复用。
+    workspace_grant: dict = field(default_factory=dict)
     llm_api_key: str | None = None
     llm_config: dict[str, Any] | None = None
     clarification_answer: str | None = None
@@ -31,6 +38,13 @@ class PlanRequestContext:
         object.__setattr__(self, "scene", str(self.scene or "office"))
         if self.project_id is not None:
             object.__setattr__(self, "project_id", str(self.project_id))
+        if self.workspace_id is not None:
+            object.__setattr__(self, "workspace_id", str(self.workspace_id))
+        object.__setattr__(self, "workspace_summary", str(self.workspace_summary or ""))
+        grant = self.workspace_grant or {}
+        if not isinstance(grant, Mapping):
+            grant = {}
+        object.__setattr__(self, "workspace_grant", dict(grant))
         object.__setattr__(self, "project_ids", tuple(str(value) for value in (self.project_ids or ()) if str(value).strip()))
         object.__setattr__(self, "office_docs", tuple(dict(item) for item in (self.office_docs or ()) if isinstance(item, Mapping)))
         object.__setattr__(self, "prior_summaries", str(self.prior_summaries or ""))
@@ -53,10 +67,15 @@ class PlanRequestContext:
         recent_messages: list[str] | tuple[str, ...] | None = None,
         recent_artifacts: list[dict] | tuple[dict, ...] | None = None,
         previous_plan: Mapping[str, Any] | None = None, permissions: list[str] | tuple[str, ...] | None = None,
+        workspace_id: str | None = None, workspace_summary: str = "",
+        workspace_grant: Mapping[str, Any] | None = None,
     ) -> "PlanRequestContext":
         return cls(
             user_id=user_id, request=request, scene=scene, project_id=project_id,
-            project_ids=tuple(project_ids or ()), llm_api_key=llm_api_key,
+            project_ids=tuple(project_ids or ()), workspace_id=workspace_id,
+            workspace_summary=str(workspace_summary or ""),
+            workspace_grant=dict(workspace_grant or {}),
+            llm_api_key=llm_api_key,
             llm_config=dict(llm_config) if llm_config else None, clarification_answer=clarification_answer,
             office_docs=tuple(office_docs or ()), prior_summaries=prior_summaries,
             recent_messages=tuple(recent_messages or ()), recent_artifacts=tuple(recent_artifacts or ()),
@@ -67,11 +86,13 @@ class PlanRequestContext:
     def from_mapping(cls, values: Mapping[str, Any]) -> "PlanRequestContext":
         return cls.from_legacy_args(
             user_id=values.get("user_id", ""), request=values.get("request", ""), scene=values.get("scene", "office"),
-            project_id=values.get("project_id"), project_ids=values.get("project_ids"), llm_api_key=values.get("llm_api_key"),
+            project_id=values.get("project_id"), project_ids=values.get("project_ids"), workspace_id=values.get("workspace_id"), llm_api_key=values.get("llm_api_key"),
             llm_config=values.get("llm_config"), clarification_answer=values.get("clarification_answer"),
             office_docs=values.get("office_docs"), prior_summaries=values.get("prior_summaries", ""),
             recent_messages=values.get("recent_messages"), recent_artifacts=values.get("recent_artifacts"),
             previous_plan=values.get("previous_plan"), permissions=values.get("permissions"),
+            workspace_summary=values.get("workspace_summary", ""),
+            workspace_grant=values.get("workspace_grant"),
         )
 
     def with_prior_summaries(self, prior_summaries: str) -> "PlanRequestContext":

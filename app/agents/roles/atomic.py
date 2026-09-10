@@ -110,6 +110,23 @@ class AtomicStepAgent(WorkerAgent):
                 "arguments": json.dumps(direct_args, ensure_ascii=False),
             },
         }
+        # A desktop staged commit first returns a non-blocking pending result.
+        # Once the orchestrator's existing approval gate resumes this node,
+        # the exact same tool call is reissued with an explicit approval bit.
+        if selected_tool == "sandbox_commit":
+            # Keep the exact version that the user reviewed.  Node lifecycle
+            # preserves the pending execution envelope while the Job is in
+            # WAITING_APPROVAL, so a resumed node must not silently obtain a
+            # newer version and commit a different workspace state.
+            pending_execution = (node.result or {}).get("execution") if isinstance(node.result, dict) else {}
+            pending_data = pending_execution.get("data") if isinstance(pending_execution, dict) else {}
+            if ctx.confirmed_tool_calls:
+                direct_args = {
+                    **direct_args,
+                    "approved": True,
+                    "base_version": (pending_data or {}).get("base_version", direct_args.get("base_version")),
+                    "idempotency_key": str(direct_args.get("idempotency_key") or f"{ctx.job_id}:{node.id}:workspace_commit"),
+                }
         result = await execute_tool_call(
             call,
             ctx.user_id,
@@ -123,10 +140,28 @@ class AtomicStepAgent(WorkerAgent):
             confirmed_tool_calls=ctx.confirmed_tool_calls,
             approval_context_sha256=ctx.approval_context_sha256,
             on_output=ctx.on_output,
+            office_doc_ids=ctx.office_doc_ids,
             authorized_project_ids=ctx.authorized_project_ids,
+            authorized_workspace_id=ctx.workspace_id,
             execution_scope=ctx.job_id,
             allow_internal=True,
         )
+        if result.status == "pending_approval":
+            from app.agents.skills.executor import tool_call_fingerprint
+
+            fingerprint = tool_call_fingerprint(selected_tool, direct_args, ctx.approval_context_sha256)
+            return {
+                "success": False,
+                "error": result.meta.summary or "变更正在等待用户审批",
+                "error_code": "NEEDS_CONFIRMATION",
+                "tool": selected_tool,
+                "attempt": node.retries + 1,
+                "method_chain": planned_tools,
+                "retryable": False,
+                "approval_fingerprint": fingerprint,
+                "tool_metadata": {"approval_fingerprint": fingerprint, "call_id": result.call_id or ""},
+                "execution": result.to_execution_envelope(),
+            }
         if result.status == "failed":
             decision = decide_failure(
                 result.error_code,

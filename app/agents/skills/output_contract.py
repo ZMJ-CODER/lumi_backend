@@ -33,6 +33,15 @@ class OutputMeta(BaseModel):
     summary: str = ""
     quality_hints: dict[str, Any] = Field(default_factory=dict)
     citations: list[dict[str, Any]] = Field(default_factory=list)
+    # The following fields are deliberately transport-neutral.  They let an
+    # execution node describe a desktop workspace without leaking its local
+    # absolute path to the model or to a remote API worker.
+    workspace_id: str | None = None
+    workspace_version: int | None = None
+    transport: str | None = None
+    sandbox: bool | None = None
+    revision: int | None = None
+    idempotency_key: str | None = None
 
 
 class ToolOutput(BaseModel):
@@ -44,7 +53,10 @@ class ToolOutput(BaseModel):
     ``metadata`` 等散字段。
     """
 
-    status: Literal["success", "partial", "failed", "empty", "pending", "pending_approval", "uncertain"] = "success"
+    status: Literal["success", "partial", "failed", "empty", "pending", "pending_approval", "uncertain", "cancelled"] = "success"
+    # A call id is an execution correlation id, not an agent/node id.  It is
+    # stable across an MCP hop, legacy desktop queue fallback and approval.
+    call_id: str | None = None
     data: Any = None
     content_type: Literal["text", "structured", "artifact", "streaming"] = "text"
     meta: OutputMeta = Field(default_factory=OutputMeta)
@@ -109,10 +121,12 @@ class ToolOutput(BaseModel):
     def to_execution_envelope(self) -> dict[str, Any]:
         """Serialize the stable execution contract for MCP/DAG/SSE boundaries."""
         return {
+            "call_id": self.call_id,
             "status": self.status,
             "data": self.data,
             "content_type": self.content_type,
             "meta": self.meta.model_dump(mode="json", exclude_none=True),
+            "artifacts": [item.model_dump(mode="json", exclude_none=True) for item in self.meta.artifact_refs],
             "error": self.error,
             "error_code": self.error_code,
             "retryable": self.retryable,

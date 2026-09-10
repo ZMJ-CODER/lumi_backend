@@ -119,7 +119,7 @@ def test_temporal_static_gate_accepts_reviewed_read_only_agents_and_uses_its_own
             TaskNode(id="target", agent="document_targeting"),
             TaskNode(id="write", agent="office_text"),
             TaskNode(id="answer", agent="direct_llm"),
-            TaskNode(id="web", agent="web_research"),
+            TaskNode(id="web", agent="office_research"),
             TaskNode(id="rag", agent="retrieval"),
         ],
     )

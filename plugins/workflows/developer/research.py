@@ -20,6 +20,11 @@ class InformationResearchSkill(WorkflowSkill):
     environment = "server"
     scenes = ["office", "chat"]
     allowed_tools = ["web_search", "web_fetch"]
+    # Capability declaration consumed by the abstract-task dispatcher.  The
+    # planner never needs to know this Skill's business-facing name.
+    provided_goals = ["RETRIEVE"]
+    provided_sources = ["PUBLIC_WEB"]
+    safety_level = "READ_ONLY"
     intent_tags = [
         "检索", "查资料", "查信息", "公开资料", "公开网页", "官方资料",
         "官方文档", "多个来源", "交叉核对", "比较", "对比", "研究", "调研",
@@ -78,6 +83,9 @@ class DocumentQaSkill(WorkflowSkill):
     environment = "server"
     scenes = ["office", "chat"]
     allowed_tools = ["query_knowledge"]
+    provided_goals = ["RETRIEVE"]
+    provided_sources = ["LOCAL_KNOWLEDGE"]
+    safety_level = "READ_ONLY"
     use_when = ["需要检索知识库后再基于片段生成受引用约束的回答"]
     do_not_use_when = ["用户只要求返回原始检索片段"]
     parameters_schema = {

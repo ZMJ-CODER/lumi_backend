@@ -21,7 +21,7 @@ class PlanCompilationService:
 
     def _normalize_for_workers(self, nodes, request: str, *, preserve_dependencies: bool = True, adapt_workers: bool = True) -> None:
         from app.agents.orchestration.planning.normalizer import (
-            adapt_unavailable_manifest_workers,
+            adapt_unavailable_workers,
             apply_generation_runtime_hints,
             prefer_atomic_steps,
             serialize_steps,
@@ -30,7 +30,7 @@ class PlanCompilationService:
         prefer_atomic_steps(nodes, request)
         apply_generation_runtime_hints(nodes, request)
         if adapt_workers:
-            adapt_unavailable_manifest_workers(nodes, self._workers)
+            adapt_unavailable_workers(nodes, self._workers)
         if not preserve_dependencies:
             serialize_steps(nodes)
 

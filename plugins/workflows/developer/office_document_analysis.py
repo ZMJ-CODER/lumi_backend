@@ -12,6 +12,9 @@ class OfficeDocumentAnalysisSkill(WorkflowSkill):
     category = "office"
     environment = "server"
     scenes = ["office"]
+    provided_goals = ["RETRIEVE", "ANALYZE"]
+    provided_sources = ["ATTACHED_FILE"]
+    safety_level = "READ_ONLY"
     use_when = ["已明确指定一份已授权文档，需要总结、解读或问答"]
     do_not_use_when = ["目标文档未知时，先使用 inspect_document_set", "需要修改文档时，使用 office_doc_edit"]
     parameters_schema = {

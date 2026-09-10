@@ -21,6 +21,16 @@ async def _emit_output(context: SkillContext | None, text: str) -> None:
         await result
 
 
+async def _emit_process(context: SkillContext | None, text: str) -> None:
+    """Send model-side progress to the process channel, never to answer text."""
+    callback = context.on_notify if context else None
+    if not callback or not text:
+        return
+    result = callback(text)
+    if hasattr(result, "__await__"):
+        await result
+
+
 async def office_llm(
     context: SkillContext | None,
     system: str,
@@ -55,6 +65,18 @@ async def office_llm(
     }
     if not stream or not (context and context.on_output):
         return await llm.chat(messages, **kwargs)
+    # Workflow skills also have a real streaming path.  It must use the same
+    # protocol firewall as direct chat: DeepSeek-compatible providers may emit
+    # full-width DSML and a ``tool_calls`` wrapper as plain text.  Passing those
+    # chunks straight to office_stream makes the protocol visible in the user
+    # bubble and appears as a blocked/non-streaming response.
+    from app.services.model_output_protocol import (
+        ModelStreamProtocolParser,
+        TextToolStripper,
+        chunk_to_events,
+        strip_tool_markup,
+    )
+
     parts: list[str] = []
     # Keep a small tail buffered so internal route sentinels cannot leak one
     # token at a time through SSE before DirectLlmAgent classifies the result.
@@ -62,6 +84,8 @@ async def office_llm(
     sentinel = "ROUTE_UPGRADE_"
     started = time.perf_counter()
     first_delta_at: float | None = None
+    parser = ModelStreamProtocolParser()
+    stripper = TextToolStripper()
     # Do not accidentally remove the caller's output budget while switching to
     # astream.  Previously chat_stream ignored max_tokens, which let a simple
     # writing request consume the provider default and appear to run forever.
@@ -75,8 +99,24 @@ async def office_llm(
                 str(context.job_id or context.conversation_id or "")[:8],
                 int((first_delta_at - started) * 1000),
             )
-        parts.append(delta)
-        pending += delta
+        # Normalize/strip provider protocol incrementally.  Only ``delta``
+        # events reach the answer stream; tool/process events are internal.
+        for piece in stripper.feed(str(delta or "")):
+            process_prefix = stripper.drain_process()
+            if process_prefix:
+                await _emit_process(context, process_prefix)
+            for chunk in parser.feed(piece):
+                for event in chunk_to_events(chunk):
+                    event_type = str(event.get("type") or "")
+                    if event_type == "process":
+                        await _emit_process(context, str(event.get("content") or ""))
+                    elif event_type == "delta":
+                        clean = strip_tool_markup(str(event.get("content") or ""))
+                        if clean:
+                            parts.append(clean)
+                            pending += clean
+        # Keep a small tail buffered so internal route sentinels cannot leak one
+        # token at a time through SSE before DirectLlmAgent classifies the result.
         if sentinel in pending:
             # The caller will convert this into a controlled reroute result;
             # never stream the control marker to the client.
@@ -85,6 +125,30 @@ async def office_llm(
         if safe_len:
             await _emit_output(context, pending[:safe_len])
             pending = pending[safe_len:]
+    # Flush both protocol layers at end-of-stream.  Any incomplete DSML is
+    # discarded by the firewall rather than being returned as answer text.
+    for piece in stripper.flush():
+        process_prefix = stripper.drain_process()
+        if process_prefix:
+            await _emit_process(context, process_prefix)
+        for chunk in parser.feed(piece):
+            for event in chunk_to_events(chunk):
+                if event.get("type") == "delta":
+                    clean = strip_tool_markup(str(event.get("content") or ""))
+                    if clean:
+                        parts.append(clean)
+                        pending += clean
+                elif event.get("type") == "process":
+                    await _emit_process(context, str(event.get("content") or ""))
+    for chunk in parser.finalize():
+        for event in chunk_to_events(chunk):
+            if event.get("type") == "delta":
+                clean = strip_tool_markup(str(event.get("content") or ""))
+                if clean:
+                    parts.append(clean)
+                    pending += clean
+            elif event.get("type") == "process":
+                await _emit_process(context, str(event.get("content") or ""))
     output = "".join(parts)
     if sentinel not in output and pending:
         await _emit_output(context, pending)

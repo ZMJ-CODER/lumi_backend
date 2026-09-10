@@ -30,6 +30,7 @@ class ToolCapability(BaseModel):
     bootstrap_until: str = ""
     parameters: dict = Field(default_factory=lambda: {"type": "object", "properties": {}})
     source: str = "skill"  # skill / mcp
+    environment: str = "server"  # server / sandbox / client
     server: str | None = None
     raw_name: str | None = None
     permission: str = "user"

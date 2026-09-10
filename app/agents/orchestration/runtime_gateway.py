@@ -116,34 +116,6 @@ class RuntimeGateway:
             logger.warning("Temporal 重规划上下文未保存，自动重规划将不可用: {}", exc)
         await start_agent_workflow(payload, job.job_id)
 
-    async def submit_manifest(self, job: Job, llm_api_key: str | None, llm_config: dict | None = None) -> None:
-        """Persist a compact job reference and start the rolling manifest workflow."""
-        from app.agents.orchestration.temporal.client import start_manifest_workflow, store_job_llm_config, store_byok_key
-
-        job.routing = {
-            **(job.routing or {}),
-            "runtime": "manifest_temporal",
-            "runtime_version": 1,
-        }
-        await self.store.create_job(job)
-        if llm_config:
-            await store_job_llm_config(job.job_id, llm_config)
-        elif llm_api_key:
-            await store_byok_key(job.job_id, llm_api_key)
-        await start_manifest_workflow(
-            {
-                "job_id": job.job_id,
-                "heartbeat_seconds": settings.TEMPORAL_ACTIVITY_HEARTBEAT_SECONDS,
-                "batch_timeout_seconds": max(
-                    300,
-                    int(settings.AGENT_NODE_TIMEOUT_SECONDS)
-                    * max(2, int((job.routing.get("manifest") or {}).get("batch_size") or 1)),
-                ),
-                "continue_after_batches": settings.TEMPORAL_MANIFEST_CONTINUE_AS_NEW_BATCHES,
-            },
-            job.job_id,
-        )
-
     async def submit_logical_read(
         self,
         job: Job,
@@ -245,31 +217,6 @@ class RuntimeGateway:
             job.job_id,
         )
 
-    async def _signal_manifest(self, job_id: str, signal: str, arg=None) -> None:
-        from app.agents.orchestration.temporal.client import signal_manifest_workflow
-
-        await signal_manifest_workflow(job_id, signal, arg)
-
-    async def cancel_manifest(self, job_id: str, keep_completed: bool = True) -> None:
-        await self._signal_manifest(job_id, "cancel_request", keep_completed)
-
-    async def pause_manifest(self, job_id: str) -> None:
-        await self._signal_manifest(job_id, "pause")
-
-    async def resume_manifest(self, job_id: str) -> None:
-        await self._signal_manifest(job_id, "resume")
-
-    @staticmethod
-    def can_run_manifest(job: Job) -> bool:
-        manifest = (job.routing or {}).get("manifest")
-        if not isinstance(manifest, dict):
-            return False
-        for item in list(manifest.get("items") or []):
-            route = str(item.get("route") or item.get("estimated_type") or "")
-            if route not in {"direct_llm", "rag"} or list(item.get("subtasks") or []):
-                return False
-        return True
-
     @staticmethod
     def can_run_static(job: Job) -> bool:
         """Return whether a job preserves all semantics in the static worker.
@@ -333,17 +280,12 @@ class RuntimeGateway:
             return capability
         if allowlist:
             return StaticTemporalDecision(False, "rollout_not_allowlisted", "用户不在 Temporal 灰度白名单")
-        allowed_types = {
+        allowed_agents = {
             value.strip() for value in settings.TEMPORAL_STATIC_TASK_TYPES.split(",") if value.strip()
         }
-        if allowed_types:
-            task_types = {
-                str(node.agent) for node in job.nodes
-            } | {
-                str((node.metadata or {}).get("route_channel") or "") for node in job.nodes
-            }
-            task_types.discard("")
-            if not task_types.issubset(allowed_types):
+        if allowed_agents:
+            agents = {str(node.agent) for node in job.nodes}
+            if not agents.issubset(allowed_agents):
                 return StaticTemporalDecision(False, "rollout_task_type", "任务类型不在 Temporal 灰度范围")
         percentage = max(0, min(100, int(settings.TEMPORAL_STATIC_PERCENTAGE)))
         if percentage <= 0:
@@ -426,10 +368,6 @@ class RuntimeGateway:
         if bucket >= percentage:
             return StaticTemporalDecision(False, "rollout_percentage", f"任务未命中 {percentage}% Temporal 逻辑计划副作用灰度桶")
         return capability
-
-    @staticmethod
-    def is_manifest_job(job: Job | None) -> bool:
-        return bool(job and str((job.routing or {}).get("runtime") or "") == "manifest_temporal")
 
     @staticmethod
     def is_static_job(job: Job | None) -> bool:

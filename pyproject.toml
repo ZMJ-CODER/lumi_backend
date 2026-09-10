@@ -58,13 +58,14 @@ dependencies = [
     "sentry-sdk>=2.68.0",
     "prometheus-client>=0.26.0",
     "flagembedding>=1.4.0",
-    # Routing policy files are explicit runtime input, not an accidental
-    # transitive dependency of another package.
+    # Tool-domain and execution policy files are explicit runtime input, not
+    # an accidental transitive dependency of another package.
     "PyYAML>=6.0",
     # Business adapters import the deterministic kernel through the local
     # workspace package; Docker installs it before this application package.
     "lumi-orchestration>=0.1.0",
     "lumi-execution>=0.1.0",
+    "agentregistry>=0.1.0",
 ]
 
 [project.optional-dependencies]

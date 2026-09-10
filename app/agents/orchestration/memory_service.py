@@ -63,7 +63,7 @@ class OfficeMemoryService:
         if named:
             candidates = named
         try:
-            from app.agents.orchestration.planner import select_named_office_documents
+            from app.agents.orchestration.document_scope import select_named_office_documents
 
             selected, _unresolved, has_named = select_named_office_documents(request, office_docs)
             if has_named:
@@ -82,6 +82,15 @@ class OfficeMemoryService:
                 meta = await ensure_session(user_id, doc_id)
             except (LookupError, ValueError):
                 logger.info("办公附件未通过会话归属校验: {}", doc_id[:8])
+                continue
+            # A project upload is admitted immediately so the UI can show it,
+            # but its parser runs asynchronously.  Do not hand an unfinished
+            # body to a read worker: it produces misleading empty answers.
+            # Failed parsing remains an explicit document diagnostic rather
+            # than a Planner/LLM failure.
+            status = str(meta.get("status") or "ready").strip().lower()
+            if status != "ready":
+                logger.info("办公附件尚不可读: {} status={}", doc_id[:8], status)
                 continue
             seen.add(doc_id)
             verified.append({

@@ -117,6 +117,9 @@ async def _execute_node_activity_inner(payload: dict) -> dict:
             str(value) for value in ((node.metadata or {}).get("confirmed_tool_calls") or [])
         ),
         approval_context_sha256=str((node.metadata or {}).get("approval_upstream_sha256") or ""),
+        office_doc_ids=tuple(
+            str(value) for value in (payload.get("office_doc_ids") or []) if str(value).strip()
+        ),
         authorized_project_ids=tuple(
             str(value) for value in (payload.get("authorized_project_ids") or []) if str(value).strip()
         ),
@@ -269,7 +272,9 @@ async def execute_node_activity(payload: dict) -> dict:
     try:
         from app.agents.orchestration.channel_limits import channel_limiter
 
-        channel = str((node.metadata or {}).get("route_channel") or "agent")
+        channel = "node_execution"
+        if node.agent in {"direct_llm", "atomic_step", "react_step", "collect_results", "office_text", "office_research"}:
+            channel = "llm_provider"
         async with channel_limiter.claim(channel, lease_seconds=max(60, timeout + 60)):
             async with resource_coordinator.claim(node.resource_claims, ttl=max(60, timeout + 60)):
                 out = await _execute_node_activity_inner(payload)

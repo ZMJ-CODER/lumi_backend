@@ -98,6 +98,50 @@ def test_compiler_rejects_unavailable_preferred_tool(monkeypatch):
     assert any(item.code == "TOOL_UNAVAILABLE" for item in result.violations)
 
 
+def test_compiler_normalizes_legacy_office_doc_tool_alias(monkeypatch):
+    """旧 planner 输出 office_doc 时，编译前应落到真实只读工具。"""
+    snapshot = _snapshot(tools={
+        "office_doc_read": {
+            "parameters": {
+                "type": "object",
+                "properties": {"doc_id": {"type": "string"}},
+                "required": ["doc_id"],
+            },
+            "plan_required_fields": ["doc_id"],
+        },
+    })
+    result = _compile(
+        monkeypatch,
+        [_node("read", "office_doc", inputs={"doc_id": "authorized-doc", "mode": "read"})],
+        snapshot,
+    )
+
+    assert result.decision in {CompileDecision.ACCEPTED, CompileDecision.NORMALIZED}
+    assert result.nodes[0].params["preferred_tool"] == "office_doc_read"
+
+
+def test_compiler_normalizes_legacy_office_doc_edit_alias_by_mode(monkeypatch):
+    snapshot = _snapshot(tools={
+        "office_doc_edit": {
+            "parameters": {
+                "type": "object",
+                "properties": {"doc_id": {"type": "string"}, "instruction": {"type": "string"}},
+                "required": ["doc_id", "instruction"],
+            },
+            "plan_required_fields": ["doc_id"],
+            "write_op": True,
+        },
+    })
+    result = _compile(
+        monkeypatch,
+        [_node("edit", "office_doc", inputs={"doc_id": "authorized-doc", "mode": "edit", "instruction": "修改标题"})],
+        snapshot,
+    )
+
+    assert result.decision in {CompileDecision.ACCEPTED, CompileDecision.NORMALIZED}
+    assert result.nodes[0].params["preferred_tool"] == "office_doc_edit"
+
+
 def test_compiler_rejects_malformed_explicit_tool_input(monkeypatch):
     result = _compile(
         monkeypatch,

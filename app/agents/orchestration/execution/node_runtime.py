@@ -16,6 +16,25 @@ NodeGraphOutcome = ExecutionOutcome
 AttemptHook = Callable[[int], Awaitable[None]]
 
 
+def _node_profile(node):
+    """Recover the abstract profile persisted by the dispatcher, if present."""
+    try:
+        from app.agents.orchestration.task_profiles import TaskProfile
+
+        raw = (getattr(node, "metadata", None) or {}).get("abstract_profile")
+        return TaskProfile.model_validate(raw) if isinstance(raw, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _node_strategy_snapshot(node):
+    from app.agents.orchestration.strategy_engine import strategy_engine
+
+    metadata = getattr(node, "metadata", None) or {}
+    saved = strategy_engine.snapshot_from_payload(metadata.get("strategy_snapshot"))
+    return saved or strategy_engine.current_snapshot()
+
+
 class NodeExecutionRunner:
     """Lumi adapter backed by ``lumi_execution.ExecutionEngine``."""
 
@@ -46,7 +65,9 @@ class NodeExecutionRunner:
             def decide(self, error_code, error, *, retryable, effectful, alternatives_remaining):
                 decision = decide_failure(error_code, error, retryable=retryable,
                                           effectful=effectful,
-                                          alternatives_remaining=alternatives_remaining)
+                                          alternatives_remaining=alternatives_remaining,
+                                          profile=_node_profile(outer.node),
+                                          strategy_snapshot=_node_strategy_snapshot(outer.node))
                 recovery = {"category": decision.category,
                             "replan_required": decision.replan_required,
                             "user_action_required": decision.user_action_required,

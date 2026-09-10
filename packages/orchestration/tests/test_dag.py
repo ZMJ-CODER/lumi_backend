@@ -11,7 +11,6 @@ from lumi_orch.lifecycle import InvalidStateTransition, can_transition, transiti
 from lumi_orch.policies import is_terminal, may_escalate, may_retry
 from lumi_orch.replanning import decide_failed_job_replan, decide_logical_plan_replan
 from lumi_orch.logical_plan import logical_plan_progress, select_budgeted_frontier
-from lumi_orch.manifest import advance_cursor, manifest_progress as manifest_progress_kernel, next_manifest_batch
 from lumi_orch.plan_dsl import PlanStep
 from lumi_orch.resources import ResourceClaim, ResourceCoordinator
 from lumi_orch.runner import ChannelLimiter, resolve_node_timeout
@@ -39,9 +38,8 @@ def test_validate_dag_rejects_invalid_graphs(nodes):
 
 def test_kernel_timeout_selection_never_reads_global_settings():
     timeout = resolve_node_timeout(
-        {"params": {"preferred_tool": "read_document"}, "metadata": {"route_channel": "rag"}},
+        {"params": {"preferred_tool": "read_document"}},
         default_seconds=60,
-        channel_timeouts={"rag": 90},
         tool_timeouts={"read_document": 20},
     )
 
@@ -50,9 +48,8 @@ def test_kernel_timeout_selection_never_reads_global_settings():
 
 def test_kernel_timeout_hint_expands_long_generation():
     timeout = resolve_node_timeout(
-        {"params": {"timeout_hint": "long_generation", "max_tokens": 3000}, "metadata": {"route_channel": "direct_llm"}},
+        {"params": {"timeout_hint": "long_generation", "max_tokens": 3000}},
         default_seconds=60,
-        channel_timeouts={},
         tool_timeouts={},
     )
     assert timeout >= 120
@@ -245,15 +242,6 @@ def test_logical_plan_frontier_requires_completed_dependencies_and_honors_budget
     assert selected.node_ids == ("analyse",)
     assert selected.reserved_increment == 20
     assert logical_plan_progress(records).pending == 2
-
-
-def test_manifest_cursor_math_is_bounded_and_does_not_advance_on_non_pending_items():
-    items = [{"status": "completed"}, {"status": "pending"}, {"status": "pending"}]
-    progress = manifest_progress_kernel(items, -10)
-
-    assert progress.cursor == 0
-    assert next_manifest_batch(items, cursor=1, batch_size=1) == [items[1]]
-    assert advance_cursor(1, total=3, settled_items=8) == 3
 
 
 def test_plan_dsl_rejects_an_unbounded_or_invalid_risk_contract():

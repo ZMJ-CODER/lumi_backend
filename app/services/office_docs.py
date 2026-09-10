@@ -15,6 +15,7 @@ import hashlib
 import shutil
 import time
 import uuid
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -354,9 +355,7 @@ def _legacy_extract_text(path: Path, kind: str) -> str:
         # 纯解析无结果（加密/损坏）：兜底尝试本机 Word COM
         return _extract_legacy_com(path, "doc")
     if kind == "rtf":
-        from striprtf.striprtf import rtf_to_text
-
-        return rtf_to_text(path.read_text(encoding="latin-1", errors="replace")) or ""
+        return _rtf_to_text_safe(path.read_text(encoding="latin-1", errors="replace"))
     return _extract_legacy_com(path, kind)
 
 
@@ -367,9 +366,7 @@ def _extract_doc_text(path: Path) -> str:
         return ""
     # 伪装成 .doc 的 RTF / 纯文本
     if raw[:5].lower().startswith(b"{\\rtf"):
-        from striprtf.striprtf import rtf_to_text
-
-        return rtf_to_text(raw.decode("latin-1", errors="replace")) or ""
+        return _rtf_to_text_safe(raw.decode("latin-1", errors="replace"))
     try:
         text = raw.decode("utf-8")
         if text and (text.isprintable() or "\n" in text or "\r" in text):
@@ -449,6 +446,21 @@ def _extract_doc_text(path: Path) -> str:
             ole.close()
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _rtf_to_text_safe(value: str) -> str:
+    """Extract readable text from RTF even when optional striprtf is absent."""
+    try:
+        from striprtf.striprtf import rtf_to_text
+
+        return rtf_to_text(value) or ""
+    except ImportError:
+        import re
+
+        text = re.sub(r"\\'[0-9a-fA-F]{2}", "", value)
+        text = re.sub(r"\\[a-zA-Z]+-?\\d* ?", "", text)
+        text = re.sub(r"[{}]", "", text)
+        return re.sub(r"\\\n|\\\r", "\n", text).strip()
 
 
 def _extract_legacy_com(path: Path, kind: str) -> str:
@@ -536,9 +548,72 @@ def create_session(user_id: str, filename: str, content: bytes) -> dict:
         "kind": detect_kind(filename),
         "created_at": None,
         "committed": False,
+        "status": "queued",
+        "parser": None,
+        "text_available": False,
+        "structure_available": False,
+        "error_code": None,
+        "error_message": None,
     }
     _meta_path(session).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     return meta
+
+
+def _update_meta(user_id: str, doc_id: str, **values) -> dict:
+    """原子更新解析状态，状态本身不依赖数据库，重启后可恢复。"""
+    session = _session_dir(user_id, doc_id)
+    meta_path = _meta_path(session)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.update(values)
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return meta
+
+
+async def parse_session_background(user_id: str, doc_id: str, content: bytes) -> None:
+    """后台解析上传文档；失败只记录为文档解析失败，不冒泡成模型错误。"""
+    try:
+        meta = _update_meta(user_id, doc_id, status="parsing")
+        info = await asyncio.to_thread(read_structure, user_id, doc_id)
+        _update_meta(
+            user_id,
+            doc_id,
+            status="ready",
+            parser=meta.get("kind") or "text",
+            text_available=bool(info.get("structure")),
+            structure_available=True,
+            error_code=None,
+            error_message=None,
+        )
+        await persist_session_record(user_id, meta, content, content_text=info.get("structure"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("办公文档解析失败 doc={} err={}", doc_id, exc)
+        try:
+            _update_meta(
+                user_id,
+                doc_id,
+                status="failed",
+                error_code="DOCUMENT_PARSE_FAILED",
+                error_message=str(exc)[:500],
+                text_available=False,
+                structure_available=False,
+            )
+        except Exception:
+            pass
+
+
+def get_parse_status(user_id: str, doc_id: str) -> dict:
+    meta = load_session(user_id, doc_id)
+    return {
+        "doc_id": doc_id,
+        "filename": meta.get("filename", ""),
+        "kind": meta.get("kind", "text"),
+        "status": meta.get("status", "ready"),
+        "parser": meta.get("parser"),
+        "text_available": bool(meta.get("text_available")),
+        "structure_available": bool(meta.get("structure_available")),
+        "error_code": meta.get("error_code"),
+        "error_message": meta.get("error_message"),
+    }
 
 
 def load_session(user_id: str, doc_id: str) -> dict:

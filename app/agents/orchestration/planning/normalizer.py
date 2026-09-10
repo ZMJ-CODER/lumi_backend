@@ -19,6 +19,57 @@ class PlanNode(Protocol):
 _OUTPUT_LENGTH = re.compile(r"(?:不少于|至少|约|大约|控制在|写|生成)?\s*(\d{3,6})\s*(?:字|字符)")
 
 
+def _canonical_document_tool_name(name: Any, params: MutableMapping[str, Any]) -> str:
+    """Normalize legacy document aliases emitted by older planners.
+
+    ``office_doc`` used to be exposed as both a worker and a tool-like name.
+    The current execution namespace contains mode-specific capabilities, so a
+    structured plan that puts the legacy name in ``atomic_step.preferred_tool``
+    must be resolved before capability validation.  This is intentionally a
+    small, deterministic compatibility shim; it does not add another tool.
+    """
+    value = str(name or "").strip()
+    if value != "office_doc":
+        return value
+    inputs = params.get("inputs") if isinstance(params.get("inputs"), dict) else {}
+    mode = str(params.get("mode") or inputs.get("mode") or "read").strip().casefold()
+    if mode in {"edit", "write", "update", "modify"}:
+        return "office_doc_edit"
+    if mode in {"analyze", "analysis", "analyse"}:
+        return "office_doc_analyze"
+    return "office_doc_read"
+
+
+def normalize_tool_aliases(nodes: MutableSequence[PlanNode]) -> None:
+    """Canonicalize tool aliases in already-atomic planner output.
+
+    Legacy ``office_doc`` values can arrive directly from an LLM task rather
+    than through the legacy worker conversion below.  Normalize both the
+    preferred tool and fallbacks while retaining the original input payload
+    for the executor and audit trail.
+    """
+    for node in nodes:
+        params = node.params or {}
+        if node.agent != "atomic_step":
+            continue
+        preferred = _canonical_document_tool_name(params.get("preferred_tool"), params)
+        fallbacks = params.get("fallback_tools") or []
+        if not isinstance(fallbacks, list):
+            fallbacks = []
+        normalized_fallbacks = [
+            _canonical_document_tool_name(item, params)
+            for item in fallbacks
+            if str(item or "").strip()
+        ]
+        # Keep order stable and avoid validating/executing the same capability
+        # twice after alias expansion.
+        params["preferred_tool"] = preferred
+        params["fallback_tools"] = list(dict.fromkeys(
+            item for item in normalized_fallbacks if item and item != preferred
+        ))[:2]
+        node.params = params
+
+
 def apply_generation_runtime_hints(nodes: MutableSequence[PlanNode], request: str) -> None:
     """为文本生成节点补齐可审计的输出预算和动态超时提示。
 
@@ -74,6 +125,10 @@ def prefer_atomic_steps(nodes: MutableSequence[PlanNode], request: str) -> None:
         node.agent = "atomic_step"
         node.params = {"instruction": instruction, "preferred_tool": preferred, "fallback_tools": ["office_doc_read"] if preferred == "office_doc_analyze" else [], "inputs": original}
         node.metadata = {**(node.metadata or {}), "legacy_agent": old_agent}
+    # LLM-generated atomic steps may already have bypassed the legacy worker
+    # conversion.  Apply the same compatibility normalization to those nodes
+    # before the plan compiler checks the capability snapshot.
+    normalize_tool_aliases(nodes)
 
 
 def enforce_react_complexity_policy(
@@ -104,7 +159,7 @@ def enforce_react_complexity_policy(
         node.metadata = metadata
 
 
-def adapt_unavailable_manifest_workers(nodes: MutableSequence[PlanNode], workers: dict[str, Any]) -> None:
+def adapt_unavailable_workers(nodes: MutableSequence[PlanNode], workers: dict[str, Any]) -> None:
     """仅在裁剪部署中将不可用角色收敛到受限 React Worker。"""
     if "react_step" not in workers:
         return
@@ -114,7 +169,7 @@ def adapt_unavailable_manifest_workers(nodes: MutableSequence[PlanNode], workers
             node.agent = "react_step"
             node.params.setdefault("max_rounds", 2)
         if node.agent == "collect_results" and node.agent not in workers:
-            node.metadata = {**(node.metadata or {}), "manifest_collect_skipped": True}
+            node.metadata = {**(node.metadata or {}), "collect_worker_fallback": True}
             node.agent = "react_step"
             node.params = {"instruction": "汇集并简要列出本批清单的已完成、失败和取消结果。", "max_rounds": 1}
 

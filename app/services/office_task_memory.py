@@ -84,11 +84,7 @@ def _input_refs(job: Job) -> list[dict]:
             for item in verified
             if isinstance(item, dict) and item.get("doc_id")
         ][:12]
-    refs: list[dict] = []
-    source = context.get("manifest_source") or {}
-    if isinstance(source, dict) and source.get("doc_id"):
-        refs.append({"doc_id": str(source["doc_id"]), "filename": str(source.get("filename") or "")[:500]})
-    return refs[:12]
+    return []
 
 
 def _artifact_refs(job: Job) -> list[dict]:

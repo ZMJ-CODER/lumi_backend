@@ -93,6 +93,10 @@ class JobMaterializationService:
             from app.agents.orchestration.runtime_gateway import RuntimeGateway
 
             static_temporal_candidate = RuntimeGateway.can_run_static(job)
+        # 计划优先的 step_confirm 任务（waiting_run）逐步骤由
+        # /jobs/{id}/resume run_next 驱动：Job.nodes 必须保留完整计划图，
+        # 不能折叠进逻辑计划滚动窗口（否则单步执行找不到后续节点）。
+        plan_first_parked = bool(routing.get("execution_state") == "waiting_run")
         # 计划图的依赖关系已由编译器验证。无论计划是模型生成还是旧的显式
         # 并行格式，都必须保留完整图形；否则逻辑计划窗口会把互不依赖的节点
         # 退化成串行前沿，改变用户任务的语义并浪费并发能力。
@@ -119,7 +123,7 @@ class JobMaterializationService:
         if (
             scene == "office"
             and settings.AGENT_LOGICAL_PLAN_ENABLED
-            and not routing.get("manifest")
+            and not plan_first_parked
             and (
                 len(job.nodes) >= settings.AGENT_LOGICAL_PLAN_MIN_NODES
                 or bool(getattr(tree, "expansion_slots", []) or [])

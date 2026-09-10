@@ -39,3 +39,9 @@ class LLMResetRequest(BaseModel):
     """重置 LLM 动态配置，回落 .env 默认值."""
 
     scene: str | None = Field(default=None, description="场景标识；缺省表示全局默认")
+
+
+class StrategyPolicyToggleRequest(BaseModel):
+    """动态启用或卸载一条已校验的策略文件。"""
+
+    policy_id: str = Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_-]{0,79}$")

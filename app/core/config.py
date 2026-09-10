@@ -289,11 +289,6 @@ class Settings(BaseSettings):
     # Provider 429 或本地连接池排队。
     AGENT_LLM_MAX_CONCURRENCY: int = 5
     AGENT_MAX_PARALLEL_FRONTIER: int = 5
-    # 0 表示回退到 AGENT_NODE_TIMEOUT_SECONDS；可按通道收紧/放宽硬超时。
-    AGENT_NODE_TIMEOUT_DIRECT_LLM_SECONDS: int = 0
-    AGENT_NODE_TIMEOUT_SCRIPT_SECONDS: int = 0
-    AGENT_NODE_TIMEOUT_RAG_SECONDS: int = 0
-    AGENT_NODE_TIMEOUT_AGENT_SECONDS: int = 0
     # 可选 JSON，例如 {"send_email":30,"office_doc_read":45}。
     AGENT_NODE_TOOL_TIMEOUTS_JSON: str = "{}"
     # 写资源必须由 Redis 证明跨进程所有权；Redis 不可用时任务进入
@@ -312,10 +307,6 @@ class Settings(BaseSettings):
     AGENT_PLANNER_MAX_TOKENS: int = 2048
     AGENT_PLANNER_TIMEOUT_SECONDS: int = 45
     AGENT_FINAL_ANSWER_MAX_TOKENS: int = 2500
-    AGENT_MANIFEST_SUMMARY_MAX_TOKENS: int = 1200
-    # 清单在执行前的保守 token 预算。超过时不启动，要求用户确认/拆分，
-    # 防止一次上千项任务把模型与沙箱队列拖入雪崩。
-    AGENT_MANIFEST_TOKEN_BUDGET: int = 12000
     # A complex ordinary task uses an external logical plan and materializes
     # only its ready frontier.  Small tasks keep the lower-overhead full DAG.
     AGENT_LOGICAL_PLAN_ENABLED: bool = True
@@ -324,18 +315,11 @@ class Settings(BaseSettings):
     AGENT_LOGICAL_PLAN_TOKEN_BUDGET: int = 80000
     # 单次普通 DAG 的编译窗口上限；超过时转为逻辑计划/清单，不截断用户动作。
     AGENT_PLAN_MAX_NODES: int = 6
-    # L3 needs a stateful graph that can mount a validated replacement
-    # subgraph. The default remains the persisted DAG runtime until the
-    # Temporal manifest workflow has completed its local rollout.
+    # L3 can mount a validated replacement subgraph after orchestration review.
     AGENT_DYNAMIC_SUBGRAPH_ENABLED: bool = True
     # React worker 仅负责执行当前节点，稳定前不得自行生成或提交补图。
     AGENT_REACT_PLAN_PATCH_ENABLED: bool = False
     AGENT_SUBGRAPH_MAX_REPLANS: int = 2
-    # 通道级全局并发上限：真正的外部执行由 B/D 受控；A 通常在服务层直出。
-    AGENT_CHANNEL_DIRECT_LLM_CONCURRENCY: int = 32
-    AGENT_CHANNEL_SCRIPT_CONCURRENCY: int = 20
-    AGENT_CHANNEL_RAG_CONCURRENCY: int = 12
-    AGENT_CHANNEL_AGENT_CONCURRENCY: int = 2
     # 办公任务准入背压（Redis 原子集合，跨 API worker 共享）。它们是准入上限，
     # 不是内存排队：达到上限立即返回 429，让 Temporal/legacy 执行器自然消化任务。
     AGENT_GLOBAL_ACTIVE_JOB_LIMIT: int = 32
@@ -345,8 +329,7 @@ class Settings(BaseSettings):
     # ── Temporal 编排（多智能体任务执行引擎）──
     # legacy remains the default. ``temporal`` moves only static read-only
     # DAGs to the external worker; dynamic/ReAct/write paths remain legacy.
-    # ``manifest_temporal`` is the rolling task-manifest runtime.
-    AGENT_ORCHESTRATION: str = "legacy"           # legacy / temporal / manifest_temporal
+    AGENT_ORCHESTRATION: str = "legacy"           # legacy / temporal
     # Frozen read-only DAGs have a separate Temporal limit. It does not alter
     # the generic planning window or cause dynamic/rolling plans to migrate.
     TEMPORAL_STATIC_MAX_NODES: int = 12
@@ -357,8 +340,7 @@ class Settings(BaseSettings):
     TEMPORAL_STATIC_LONG_DAG_MAX_NODES: int = 64
     TEMPORAL_STATIC_CONTINUE_AS_NEW_AFTER_NODES: int = 20
     TEMPORAL_STATIC_CHILD_WORKFLOW_ENABLED: bool = True
-    # 静态 Temporal 灰度：用户白名单非空时优先于比例；类型使用 agent 名或
-    # route_channel，逗号分隔。默认 100 保持 temporal 模式的既有全量语义。
+    # 静态 Temporal 灰度：用户白名单非空时优先于比例；类型使用 agent 名。
     TEMPORAL_STATIC_ALLOWLIST: str = ""
     TEMPORAL_STATIC_PERCENTAGE: int = 100
     TEMPORAL_STATIC_TASK_TYPES: str = ""
@@ -379,18 +361,13 @@ class Settings(BaseSettings):
     TEMPORAL_LOGICAL_EFFECTS_TASK_TYPES: str = ""
     TEMPORAL_LOGICAL_EFFECTS_TASK_QUEUE: str = "lumi-logical-effects"
     TEMPORAL_LOGICAL_EFFECTS_CONTINUE_AFTER_FRONTIERS: int = 20
-    # 策略文件按部署版本加载；shadow 仅计算并审计差异，不影响当前路由。
-    AGENT_ROUTING_POLICY_MODE: str = "shadow"     # legacy / shadow / enforce
-    AGENT_ROUTING_POLICY_PATH: str = "config/agent_policies/routing_rules.yaml"
     # TCA policy can tune only bounded numeric weights/thresholds; patterns
     # and execution decisions remain code and do not become YAML expressions.
     AGENT_TCA_POLICY_PATH: str = "config/agent_policies/tca_rules.yaml"
-    # Vocabulary is deployment data with a fixed, schema-validated action and
-    # object set; matching semantics and safety checks stay in application code.
-    AGENT_ROUTING_LEXICON_PATH: str = "config/agent_policies/routing_lexicon.yaml"
     AGENT_EXECUTION_DEFAULTS_PATH: str = "config/agent_policies/execution_defaults.yaml"
-    AGENT_ROUTING_INTENT_PATTERN_PATH: str = "config/agent_policies/route_intent_patterns.yaml"
-    AGENT_PLANNING_POLICY_PATH: str = "config/agent_policies/planning_rules.yaml"
+    # 策略文件独立于 Skill/Tool 注册表。运行时可加载或卸载单条策略；无可用
+    # 文件时 StrategyEngine 永远回退到内置安全策略。
+    AGENT_STRATEGY_POLICY_DIR: str = "config/agent_policies/strategies"
     AGENT_TOOL_DOMAIN_POLICY_PATH: str = "config/agent_policies/tool_domains.yaml"
     AGENT_TOOL_REGISTRY_POLICY_PATH: str = "config/agent_policies/tool_registry.yaml"
     AGENT_BASE_TOOLS_POLICY_PATH: str = "config/agent_policies/base_tools.yaml"
@@ -398,8 +375,6 @@ class Settings(BaseSettings):
     TEMPORAL_ADDRESS: str = "localhost:7233"      # Temporal 前端 gRPC 地址
     TEMPORAL_NAMESPACE: str = "default"           # Temporal namespace
     TEMPORAL_TASK_QUEUE: str = "lumi-agents"      # Temporal 任务队列（worker 与客户端必须一致）
-    TEMPORAL_MANIFEST_TASK_QUEUE: str = "lumi-office-manifest"
-    TEMPORAL_MANIFEST_CONTINUE_AS_NEW_BATCHES: int = 40
     TEMPORAL_ACTIVITY_HEARTBEAT_SECONDS: int = 15
     TEMPORAL_BYOK_TTL_SECONDS: int = 43200        # BYOK key 临时存放 TTL（12h；任务正常结束即删除）
     # 自定义 BYOK endpoint 默认只允许公网 http(s) 地址，避免云端部署被用作 SSRF。
@@ -436,6 +411,40 @@ class Settings(BaseSettings):
     MCP_SESSION_IDLE_TIMEOUT_S: float = 600.0
     MCP_MAX_SESSIONS_PER_SERVER: int = 8
     MCP_TOOL_TIMEOUT_S: float = 180.0
+    # Electron 本地审批使用稳定 call_id 轮询结果；该等待属于用户交互而非
+    # Provider 超时，默认给 10 分钟，部署时可独立调大。
+    MCP_CLIENT_APPROVAL_WAIT_S: float = 600.0
+
+    # ── 工作区上下文（Electron 本地工作区目录/内容摘要缓存）──
+    # 工作区目录扫描结果按 {workspace_id}:{version} 缓存；version 来自
+    # Electron workspace_diff 的 base_version，文件变化后自动失配重建。
+    WORKSPACE_CONTEXT_CACHE_TTL_SECONDS: int = 30
+    # 版本探测（workspace_diff）同样有冷却，避免每个 LLM 轮次都发起 MCP 调用。
+    WORKSPACE_VERSION_PROBE_TTL_SECONDS: int = 10
+    # 单次只读工作区问答允许的读取类工具调用上限（写入/运行走 Planner/Agent）。
+    WORKSPACE_READ_MAX_CALLS: int = 4
+
+    # ── 计划优先执行（step_confirm）──
+    # 计划优先启用判定（execution_mode.plan_first_eligible）：
+    #   显式 execution_preference=step_confirm → 恒启用（首轮只出计划置
+    #   waiting_run，由 /jobs/{id}/resume action=run_next 逐步骤驱动；
+    #   StepRunService / AgentOrchestrator.stream_run_next，审批只解门闩）；
+    #   显式 auto_routine/direct → 不启用；未显式指定时，仅当本全局开关开启
+    #   且工作区授权快照 approval_mode=manual_commit 才计划优先（无授权快照
+    #   默认不自动启用）。auto_routine 任务始终展示计划后自动连续执行。
+    # 默认开启：未显式指定偏好时，manual_commit（关闭“帮我确认”）工作区会话
+    # 采用计划优先 + run_next 逐步骤驱动；auto_routine/直答/无授权快照会话
+    # 仍按各自语义执行（plan_first_eligible 判定，见上方说明）。
+    EXECUTION_PLAN_FIRST: bool = True
+
+    # ── v2 统一任务画像 / 执行策略映射（灰度）──
+    # 开启后：入口处评估 task_profile（goal/required_sources/complexity/
+    # safety_level/has_side_effect/needs_runtime_decision/confidence），按
+    # execution_policy 映射（direct_stream / single_tool_then_stream /
+    # single_action_skill / planner_dag / react）写入 Job routing 与
+    # /chat/stream 事件元数据，并上报 route/first_delta 等观测指标。
+    # 关闭时保留旧 M0-M3/旧 DAG 语义；新策略异常回退旧安全路径。
+    EXECUTION_POLICY_V2_ENABLED: bool = False
 
     # ── 文档类别与按类别半衰期（不同知识时效性不同）──
     RAG_DEFAULT_CATEGORY: str = "general"   # 默认类别
@@ -535,12 +544,8 @@ class Settings(BaseSettings):
         "PROMPTS_DIR",
         "TOOL_PLUGINS_DIR",
         "WORKFLOW_SKILLS_DIR",
-        "AGENT_ROUTING_POLICY_PATH",
         "AGENT_TCA_POLICY_PATH",
-        "AGENT_ROUTING_LEXICON_PATH",
         "AGENT_EXECUTION_DEFAULTS_PATH",
-        "AGENT_ROUTING_INTENT_PATTERN_PATH",
-        "AGENT_PLANNING_POLICY_PATH",
         mode="after",
     )
     @classmethod

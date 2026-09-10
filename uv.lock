@@ -37,6 +37,18 @@ wheels = [
 ]
 
 [[package]]
+name = "agentregistry"
+version = "0.1.0"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e4/01/079a78b82558fb76bf2d3794dda1f9487dfacbb315b039d8e72e7c9c5df9/agentregistry-0.1.0.tar.gz", hash = "sha256:223f428c3187f983c297336030227c6dc74198f1ef4bb803b24717c50ee56977", size = 5316, upload-time = "2026-05-21T18:51:44.078Z" }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/d1/69/e699d9ad5124b87af6aeff1bd5cd50d43e39295d9b0efa22a52312c4f398/agentregistry-0.1.0-py3-none-any.whl", hash = "sha256:0955b9143fd2383aca466c5d6652255454ebd62cab4b32331a660c937d1188a0", size = 6210, upload-time = "2026-05-21T18:51:42.817Z" },
+]
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -1554,6 +1566,7 @@ name = "lumi-backend"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "agentregistry" },
     { name = "alembic" },
     { name = "argon2-cffi" },
     { name = "asyncpg" },
@@ -1621,6 +1634,7 @@ rag-eval = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agentregistry", specifier = ">=0.1.0" },
     { name = "alembic", specifier = ">=1.13.0" },
     { name = "argon2-cffi", specifier = ">=23.1.0" },
     { name = "asyncpg", specifier = ">=0.29.0" },
@@ -1702,7 +1716,6 @@ version = "0.1.0"
 source = { editable = "packages/orchestration" }
 dependencies = [
     { name = "pydantic" },
-    { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
@@ -1717,7 +1730,6 @@ redis = [
 requires-dist = [
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0.0" },
 ]
 provides-extras = ["redis", "langgraph"]

@@ -14,7 +14,13 @@ from app.core.exceptions import BadRequestException, ForbiddenException, NotFoun
 from app.core.rag_config import set_rag_overrides
 from app.core.read_view_cache import invalidate_user_view
 from app.core.security import create_admin_verified_token, verify_admin_verified_token, verify_password
-from app.models.admin import LLMConfigRequest, LLMResetRequest, RAGConfigRequest, UpdateUserRequest
+from app.models.admin import (
+    LLMConfigRequest,
+    LLMResetRequest,
+    RAGConfigRequest,
+    StrategyPolicyToggleRequest,
+    UpdateUserRequest,
+)
 from app.models.db_models import ControlLog, Document, KnowledgeSpace, User
 from app.models.knowledge import AdminPasswordVerifyRequest, RebuildIndexRequest
 from app.services.rag import knowledge as kb
@@ -387,6 +393,68 @@ async def reset_llm_config_view(
     await reset_llm_config(req.scene)
     scope = f"场景 {req.scene}" if req.scene else "全局"
     return {"code": 0, "message": f"已重置{scope} LLM 配置，回落 .env 默认值"}
+
+
+# ── 编排策略管理（管理员 + 二次验证） ─────────────────
+
+@router.get("/strategy-policies")
+async def list_strategy_policies(
+    x_admin_token: str | None = Depends(get_admin_verified_token),
+    payload: dict = Depends(require_admin),
+):
+    """查看独立策略文件及当前加载状态。"""
+    _require_admin_verified(x_admin_token, payload)
+    from app.agents.orchestration.strategy_engine import strategy_engine
+
+    return {"code": 0, "data": await strategy_engine.inspect()}
+
+
+@router.post("/strategy-policies/reload")
+async def reload_strategy_policies(
+    x_admin_token: str | None = Depends(get_admin_verified_token),
+    payload: dict = Depends(require_admin),
+):
+    """重新校验并原子加载策略目录；无可用策略时自动使用内置安全兜底。"""
+    _require_admin_verified(x_admin_token, payload)
+    from app.agents.orchestration.strategy_engine import strategy_engine
+
+    return {"code": 0, "data": await strategy_engine.reload(), "message": "策略已重新加载"}
+
+
+@router.post("/strategy-policies/unload")
+async def unload_strategy_policy(
+    req: StrategyPolicyToggleRequest,
+    x_admin_token: str | None = Depends(get_admin_verified_token),
+    payload: dict = Depends(require_admin),
+):
+    """卸载一条策略；若没有其他策略，引擎继续使用内置安全兜底。"""
+    _require_admin_verified(x_admin_token, payload)
+    from app.agents.orchestration.strategy_engine import strategy_engine
+
+    try:
+        data = await strategy_engine.unload(req.policy_id)
+    except KeyError as exc:
+        raise NotFoundException("策略不存在") from exc
+    except ValueError as exc:
+        raise BadRequestException(str(exc)) from exc
+    return {"code": 0, "data": data, "message": f"策略 {req.policy_id} 已卸载"}
+
+
+@router.post("/strategy-policies/load")
+async def load_strategy_policy(
+    req: StrategyPolicyToggleRequest,
+    x_admin_token: str | None = Depends(get_admin_verified_token),
+    payload: dict = Depends(require_admin),
+):
+    """恢复一条已卸载的策略文件。"""
+    _require_admin_verified(x_admin_token, payload)
+    from app.agents.orchestration.strategy_engine import strategy_engine
+
+    try:
+        data = await strategy_engine.load(req.policy_id)
+    except KeyError as exc:
+        raise NotFoundException("策略不存在") from exc
+    return {"code": 0, "data": data, "message": f"策略 {req.policy_id} 已加载"}
 
 
 # ── 技能插件管理（热更新） ─────────────────────────────

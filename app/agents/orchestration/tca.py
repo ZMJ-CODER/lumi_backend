@@ -15,12 +15,7 @@ from typing import Awaitable, Callable
 
 from pydantic import BaseModel, Field
 
-from app.agents.orchestration.intent import (
-    MULTI_STEP_RE,
-    classify,
-    resolve_direct_text_conversion,
-    select_named_office_documents,
-)
+from app.agents.orchestration.document_scope import select_named_office_documents
 
 
 class ComplexityLevel(str, Enum):
@@ -31,15 +26,15 @@ class ComplexityLevel(str, Enum):
 
 
 class ExecutionMode(str, Enum):
-    DETERMINISTIC = "deterministic"
-    RULE_DAG = "rule_dag"
+    """Execution budget shape; it does not select a planner or route."""
+
     PLAN_EXECUTE = "plan_execute"
     REACT = "react"
 
 
 _MODE_BY_LEVEL = {
-    ComplexityLevel.M0: ExecutionMode.DETERMINISTIC,
-    ComplexityLevel.M1: ExecutionMode.RULE_DAG,
+    ComplexityLevel.M0: ExecutionMode.PLAN_EXECUTE,
+    ComplexityLevel.M1: ExecutionMode.PLAN_EXECUTE,
     ComplexityLevel.M2: ExecutionMode.PLAN_EXECUTE,
     ComplexityLevel.M3: ExecutionMode.REACT,
 }
@@ -88,9 +83,7 @@ _DEPENDENCY_RE = re.compile(
 )
 _MULTI_ACTION_RE = re.compile(r"(?iu)(?:并且|同时|还要|另外|以及|分别|且|然后)")
 _VAGUE_RE = re.compile(r"(?iu)(?:处理一下|弄一下|看一下|搞一下|优化一下|那个文件|相关内容|自行处理)")
-_DATETIME_RE = re.compile(
-    r"(?iu)(?:当前日期|当前时间|现在几点|现在时间|今天几号|今天日期|今天是几月几日)"
-)
+_MULTI_STEP_RE = re.compile(r"第\s*[0-9一二三四五六七八九十百]+\s*步")
 
 
 def is_exploratory_request(request: str) -> bool:
@@ -145,7 +138,7 @@ class TaskComplexityAssessor:
         explicitness = _clamp(explicitness)
 
         dependency = 0.0
-        if MULTI_STEP_RE.search(text):
+        if _MULTI_STEP_RE.search(text):
             dependency = 0.9
         elif _DEPENDENCY_RE.search(text):
             dependency = 0.65
@@ -165,102 +158,7 @@ class TaskComplexityAssessor:
         if _HISTORY_RE.search(text):
             history_dependency = 0.85 if prior_summaries else 0.65
 
-        direct_conversion = resolve_direct_text_conversion(text, office_docs)
-        intent = classify(text, office_docs)
         exploratory = is_exploratory_request(text)
-        if direct_conversion:
-            level = ComplexityLevel.M0
-            confidence = 0.99
-            reasons.append("明确的单文件确定性转换")
-        elif _DATETIME_RE.search(text) and dependency == 0:
-            level = ComplexityLevel.M0
-            confidence = 0.98
-            reasons.append("确定性的系统信息查询")
-        elif intent.get("task_type") == "template" and dependency < 0.8 and not exploratory:
-            level = ComplexityLevel.M1
-            confidence = 0.9
-            reasons.append("命中可复用规则流程")
-        else:
-            total = _clamp(
-                entity_score * weights.entity_count
-                + (1 - explicitness) * weights.implicitness
-                + dependency * weights.dependency
-                + ambiguity * weights.ambiguity
-                + history_dependency * weights.history_dependency
-            )
-            # Explicit workflows should stay on the plan/execute path even if
-            # they contain conversational fillers such as "看一下" or
-            # "处理一下".  Sending these requests to the single-node ReAct
-            # shortcut collapses a concrete conversion -> validation -> system
-            # action DAG into one 120s-bounded node.  ReAct is reserved for
-            # genuinely open-ended decisions or history-dependent requests.
-            explicit_workflow = bool(
-                dependency >= thresholds.explicit_workflow_dependency
-                and (has_output or has_named_file or entities >= 1)
-            )
-            if exploratory:
-                level = ComplexityLevel.M3
-                confidence = 0.88
-                reasons.append("目标包含探索/执行/验证隐含步骤，启用滚动计划")
-            elif _OPEN_ENDED_RE.search(text) or (
-                ambiguity >= thresholds.m3_ambiguity and dependency >= 0.4 and not explicit_workflow
-            ):
-                level = ComplexityLevel.M3
-                confidence = 0.82
-                reasons.append("成功标准开放或需根据中间结果动态决策")
-            elif history_dependency >= thresholds.history_dynamic:
-                level = ComplexityLevel.M3
-                confidence = 0.78
-                reasons.append("请求依赖跨任务历史上下文")
-            elif dependency >= thresholds.m2_dependency or entities >= 2 or intent.get("task_type") == "semi_structured":
-                level = ComplexityLevel.M2
-                confidence = 0.82
-                reasons.append("包含多实体或有依赖的可规划步骤")
-            elif ambiguity >= 0.55:
-                level = ComplexityLevel.M3
-                confidence = 0.68
-                reasons.append("请求依赖上下文或关键信息不明确")
-            else:
-                level = ComplexityLevel.M2
-                confidence = 0.58
-                reasons.append("规则无法确定最小充分路径，采用受控规划")
-
-            if confidence < thresholds.classifier_confidence and self._fallback_classifier is not None:
-                payload = {
-                    "request": text[:1000],
-                    "entity_count": entities,
-                    "parameter_explicitness": explicitness,
-                    "dependency": dependency,
-                    "ambiguity": ambiguity,
-                    "history_dependency": history_dependency,
-                }
-                classified = self._fallback_classifier(payload)
-                if inspect.isawaitable(classified):
-                    classified = await classified
-                level = (
-                    classified
-                    if isinstance(classified, ComplexityLevel)
-                    else ComplexityLevel(str(classified).lower())
-                )
-                confidence = 0.8
-                reasons.append("低置信规则结果由分类器复核")
-                stage = "classifier"
-            else:
-                stage = "rules"
-            return ComplexityScore(
-                entity_count=entity_score,
-                parameter_explicitness=explicitness,
-                dependency=dependency,
-                ambiguity=ambiguity,
-                history_dependency=history_dependency,
-                total=total,
-                confidence=confidence,
-                level=level,
-                mode=_MODE_BY_LEVEL[level],
-                stage=stage,
-                reasons=reasons,
-            )
-
         total = _clamp(
             entity_score * weights.entity_count
             + (1 - explicitness) * weights.implicitness
@@ -268,6 +166,68 @@ class TaskComplexityAssessor:
             + ambiguity * weights.ambiguity
             + history_dependency * weights.history_dependency
         )
+        explicit_workflow = bool(
+            dependency >= thresholds.explicit_workflow_dependency
+            and (has_output or has_named_file or entities >= 1)
+        )
+        if exploratory:
+            level = ComplexityLevel.M3
+            confidence = 0.88
+            reasons.append("目标包含探索/执行/验证隐含步骤，扩大滚动执行预算")
+        elif _OPEN_ENDED_RE.search(text) or (
+            ambiguity >= thresholds.m3_ambiguity and dependency >= 0.4 and not explicit_workflow
+        ):
+            level = ComplexityLevel.M3
+            confidence = 0.82
+            reasons.append("成功标准开放或需根据中间结果动态决策")
+        elif history_dependency >= thresholds.history_dynamic:
+            level = ComplexityLevel.M3
+            confidence = 0.78
+            reasons.append("请求依赖跨任务历史上下文")
+        elif dependency >= thresholds.m2_dependency or entities >= 2:
+            level = ComplexityLevel.M2
+            confidence = 0.82
+            reasons.append("包含多实体或有依赖的可规划步骤")
+        elif ambiguity >= 0.55:
+            level = ComplexityLevel.M3
+            confidence = 0.68
+            reasons.append("请求依赖上下文或关键信息不明确")
+        elif entities == 1 and not dependency and not history_dependency and not has_output:
+            # A single trusted source is a bounded read/answer task, not a
+            # request for a fully precomputed workflow.  The actual source is
+            # still resolved server-side before a worker sees it.
+            level = ComplexityLevel.M1
+            confidence = 0.78
+            reasons.append("单一受控来源可通过最小读取路径完成")
+        elif has_output:
+            # Explicit artifact/conversion requests retain the planner budget:
+            # they can entail a staged write even with a single input file.
+            level = ComplexityLevel.M2
+            confidence = 0.58
+            reasons.append("存在显式产出，交由能力规划确认可执行边界")
+        else:
+            level = ComplexityLevel.M0
+            confidence = 0.58
+            reasons.append("仅需基于当前用户输入进行可逆回答")
+
+        if confidence < thresholds.classifier_confidence and self._fallback_classifier is not None:
+            payload = {
+                "request": text[:1000],
+                "entity_count": entities,
+                "parameter_explicitness": explicitness,
+                "dependency": dependency,
+                "ambiguity": ambiguity,
+                "history_dependency": history_dependency,
+            }
+            classified = self._fallback_classifier(payload)
+            if inspect.isawaitable(classified):
+                classified = await classified
+            level = classified if isinstance(classified, ComplexityLevel) else ComplexityLevel(str(classified).lower())
+            confidence = 0.8
+            reasons.append("低置信复杂度结果由分类器复核")
+            stage = "classifier"
+        else:
+            stage = "rules"
         return ComplexityScore(
             entity_count=entity_score,
             parameter_explicitness=explicitness,
@@ -278,7 +238,7 @@ class TaskComplexityAssessor:
             confidence=confidence,
             level=level,
             mode=_MODE_BY_LEVEL[level],
-            stage="rules",
+            stage=stage,
             reasons=reasons,
         )
 

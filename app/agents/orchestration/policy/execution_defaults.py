@@ -16,14 +16,6 @@ from pydantic import ValidationError
 from app.core.config import settings
 
 
-_CHANNEL_TIMEOUT_SETTINGS = {
-    "direct_llm": "AGENT_NODE_TIMEOUT_DIRECT_LLM_SECONDS",
-    "deterministic_script": "AGENT_NODE_TIMEOUT_SCRIPT_SECONDS",
-    "rag": "AGENT_NODE_TIMEOUT_RAG_SECONDS",
-    "agent": "AGENT_NODE_TIMEOUT_AGENT_SECONDS",
-}
-
-
 @lru_cache(maxsize=1)
 def load_execution_defaults() -> ExecutionDefaultsDocument:
     path = Path(settings.AGENT_EXECUTION_DEFAULTS_PATH)
@@ -88,17 +80,9 @@ def resolve_node_execution_spec(
         dynamic_timeout = resolve_node_timeout(
             {"params": node_params, "metadata": node_metadata or {}},
             default_seconds=int(resolved.timeout_seconds or defaults.timeout_seconds),
-            channel_timeouts={
-                channel: int(getattr(settings, setting_name, 0) or 0)
-                for channel, setting_name in _CHANNEL_TIMEOUT_SETTINGS.items()
-            },
             tool_timeouts=tool_overrides if isinstance(tool_overrides, dict) else {},
         )
         resolved = resolved.model_copy(update={"timeout_seconds": dynamic_timeout})
     raw = json.dumps(resolved.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     policy_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return resolved, {"version": document.version, "sha256": policy_hash, "resolved": resolved.model_dump(mode="json")}
-
-
-def channel_concurrency(channel: str) -> int:
-    return max(1, int(load_execution_defaults().concurrency.get(channel, 1)))

@@ -114,6 +114,7 @@ def normalize_skill_result(result: Any, *, content_type: str | None = None) -> T
             raw_output = _structured_output_text(raw_data)
         return ToolOutput(
             status=str(result.get("status") or "failed"),
+            call_id=str(result.get("call_id") or "") or None,
             data=raw_data,
             content_type=str(result.get("content_type") or content_type or "text"),
             meta=meta,
@@ -251,6 +252,8 @@ def render_for_model(tool_output: ToolOutput, *, max_chars: int = DEFAULT_MAX_CH
         code = bounded.meta.quality_hints.get("error_code")
         suffix = f"（{code}）" if code else ""
         return f"工具未完成{suffix}：{_short(bounded.data or '执行失败', max_chars)}"
+    if bounded.status == "cancelled":
+        return "该操作已取消，未对工作区作出更改。"
     if bounded.status == "empty":
         return "工具已执行，但没有找到可交付结果。"
     prefix = ""

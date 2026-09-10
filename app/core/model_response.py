@@ -9,8 +9,7 @@ from typing import Any
 
 
 _DSML_INVOKE_RE = re.compile(
-    r"<｜｜DSML｜｜\s*invoke\b(?P<attrs>.*?)(?:/\s*>|>\s*</｜｜DSML｜｜\s*invoke\s*>)|"
-    r"<\|DSML\|>\s*invoke\b(?P<attrs_ascii>.*?)(?:/\s*>|>\s*</\|DSML\|>\s*invoke\s*>)",
+    r"<(?:｜｜DSML｜｜|\|\|DSML\|\|)\s*invoke\b(?P<attrs>.*?)(?:/\s*>|>\s*.*?</(?:｜｜DSML｜｜|\|\|DSML\|\|)\s*invoke\s*>)",
     re.IGNORECASE | re.DOTALL,
 )
 _ATTR_RE = re.compile(
@@ -41,7 +40,7 @@ def _decode_arguments(value: str | None) -> tuple[dict[str, Any], str | None]:
 
 def normalize_tool_response(content: object, tool_calls: list[dict] | None = None) -> tuple[str, list[dict], list[str]]:
     """统一标准 tool_calls 与 DeepSeek DSML 调用。"""
-    text = str(content or "")
+    text = str(content or "").replace("｜", "|")
     normalized: list[dict] = []
     warnings: list[str] = []
     for index, call in enumerate(tool_calls or []):
@@ -56,11 +55,18 @@ def normalize_tool_response(content: object, tool_calls: list[dict] | None = Non
         if not isinstance(args, dict):
             args = {}
             warnings.append(f"{name or '未知工具'}：工具参数必须是对象")
-        normalized.append({
+        normalized_item = {
             "id": str(call.get("id") or f"call-{index + 1}"),
             "type": "function",
             "function": {"name": name, "arguments": args},
-        })
+        }
+        # Thinking-mode providers (notably DeepSeek) require the opaque
+        # reasoning_content to be replayed on the assistant tool-call message
+        # that precedes the tool result.  Keep it as transport metadata; it is
+        # never rendered in the user-facing answer.
+        if isinstance(call, dict) and call.get("reasoning_content") is not None:
+            normalized_item["reasoning_content"] = call.get("reasoning_content")
+        normalized.append(normalized_item)
 
     for match in _DSML_INVOKE_RE.finditer(text):
         attrs = match.group("attrs") or match.group("attrs_ascii") or ""
@@ -68,6 +74,19 @@ def normalize_tool_response(content: object, tool_calls: list[dict] | None = Non
         name_match = _NAME_RE.search(attrs)
         name = str(name_match.group("value") if name_match else parsed_attrs.get("name") or "").strip()
         args, warning = _decode_arguments(parsed_attrs.get("arguments") or parsed_attrs.get("args"))
+        # Nested DeepSeek parameter tags are not JSON arguments. Convert the
+        # string-valued parameter elements into the standard arguments object.
+        nested_args = {}
+        for param in re.finditer(
+            r"<\|\|DSML\|\|\s*(?:参数|param|parameter)\s+([^>]*)>(.*?)</\|\|DSML\|\|\s*(?:参数|param|parameter)\s*>",
+            match.group(0), re.IGNORECASE | re.DOTALL,
+        ):
+            attrs = {m.group(1).casefold(): m.group(3) for m in re.finditer(r'([\w.-]+)\s*=\s*(["\'])(.*?)\2', param.group(1))}
+            key = str(attrs.get("name") or "").strip()
+            if key:
+                nested_args[key] = param.group(2).strip()
+        if nested_args:
+            args.update(nested_args)
         if warning:
             warnings.append(f"{name or '未知工具'}：{warning}")
         normalized.append({
@@ -117,7 +136,8 @@ def normalize_tool_response(content: object, tool_calls: list[dict] | None = Non
                     text = str(payload.get("answer") or "")
 
     clean = _DSML_INVOKE_RE.sub("", text)
-    clean = re.sub(r"<(?:｜｜DSML｜｜|\|DSML\|)\s*(?:tool_calls|/tool_calls)\s*>", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"</?\|\|DSML\|\|\s*(?:tool_calls|/tool_calls)\s*>", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"</?\|DSML\|\s*(?:tool_calls|/tool_calls)\s*>", "", clean, flags=re.IGNORECASE)
     return clean.strip(), normalized, warnings
 
 

@@ -37,6 +37,7 @@ class ToolRegistry:
         # 中的基础工具；这里保留 public 参数仅为插件加载 API 的平滑过渡。
         if not public:
             cls._skill_implementations[tool.name] = tool
+            cls._sources[tool.name] = source
             logger.debug("记录 Skill 执行实现（不进入工具注册表）: {}", tool.name)
             return
         target = cls._tools

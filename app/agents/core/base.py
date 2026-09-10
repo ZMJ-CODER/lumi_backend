@@ -49,6 +49,8 @@ class WorkerContext:
     office_doc_ids: tuple[str, ...] = ()
     # Explicit project scope supplied by the authenticated task request.
     authorized_project_ids: tuple[str, ...] = ()
+    # Trusted active desktop workspace supplied by the task submission.
+    workspace_id: str = ""
 
 
 class WorkerAgent(ABC):
@@ -125,6 +127,7 @@ class WorkerAgent(ABC):
                     on_output=ctx.on_output,
                     office_doc_ids=ctx.office_doc_ids,
                     authorized_project_ids=ctx.authorized_project_ids,
+                    workspace_id=ctx.workspace_id,
                     skill_prompt=workflow.effective_prompt(),
                 ),
                 user_role=ctx.user_role,
@@ -133,11 +136,16 @@ class WorkerAgent(ABC):
                 confirmed_tool_calls=ctx.confirmed_tool_calls,
                 approval_context_sha256=ctx.approval_context_sha256,
                 authorized_project_ids=ctx.authorized_project_ids,
+                workspace_id=ctx.workspace_id,
             )
-            if result.status == "failed":
+            if result.status in {"failed", "pending_approval", "uncertain", "cancelled"}:
+                fallback_policy = str(getattr(workflow, "fallback_policy", "clarify") or "clarify")
                 return {
-                    "success": False, "error": result.error, "error_code": result.error_code,
+                    "success": False, "error": result.error or result.meta.summary or "工作流未完成", "error_code": result.error_code or ("NEEDS_CONFIRMATION" if result.status == "pending_approval" else "EXEC_ERROR"),
                     "retryable": result.retryable, "execution": result.to_execution_envelope(), "skill": skill_name,
+                    "fallback_policy": fallback_policy,
+                    "user_action_required": fallback_policy == "clarify" or result.error_code == "INVALID_PARAMS",
+                    "allow_direct_answer": fallback_policy == "direct_answer",
                 }
             # Workflow Skill 的 output/data 已是流程内生成的最终交付内容。
             # 不能再走面向原子检索工具的 render_for_model：该渲染器看到
@@ -172,8 +180,9 @@ class WorkerAgent(ABC):
             llm_config=ctx.llm_config,
             on_output=ctx.on_output,
             office_doc_ids=ctx.office_doc_ids,
-            authorized_project_ids=ctx.authorized_project_ids,
-            execution_scope=ctx.job_id,
+                authorized_project_ids=ctx.authorized_project_ids,
+                authorized_workspace_id=ctx.workspace_id,
+                execution_scope=ctx.job_id,
             allow_internal=True,
         )
         if result.status == "failed":

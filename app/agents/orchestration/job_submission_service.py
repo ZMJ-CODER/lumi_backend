@@ -13,14 +13,12 @@ from typing import Any
 from loguru import logger
 
 from app.agents.orchestration.job_materialization_service import JobMaterializationService
-from app.agents.orchestration.manifest_submission_service import ManifestSubmissionService
-from app.agents.orchestration.models import Job
+from app.agents.orchestration.models import Job, JobStatus
 from app.agents.orchestration.office_plan_selection_service import OfficePlanSelectionService
 from app.agents.orchestration.planning.compilation import PlanCompilationService
 from app.agents.orchestration.planning.context import PlanRequestContext
 from app.agents.orchestration.submission_context_service import SubmissionContextService
 from app.agents.orchestration.admission import job_admission
-from app.agents.orchestration.task_manifest import record_manifest_route_decisions
 from app.repositories.job_repository import JobRepository
 from app.core.error_mapping import map_task_error
 
@@ -33,18 +31,14 @@ class JobSubmissionService:
         *,
         store: JobRepository,
         context_service: SubmissionContextService,
-        manifest_submission: ManifestSubmissionService,
         office_plan_selection: OfficePlanSelectionService,
         plan_compilation: PlanCompilationService,
         materialization: JobMaterializationService,
-        temporal_mode: bool,
         temporal_static_mode: bool,
         temporal_logical_read_mode: bool,
         temporal_logical_effects_mode: bool,
-        can_run_manifest_temporal: Callable[[Job], bool],
         can_run_static_temporal: Callable[[Job], bool],
         probe_temporal: Callable[[], Awaitable[bool]],
-        manifest_backend: Any,
         static_backend: Any,
         logical_read_backend: Any,
         logical_effects_backend: Any,
@@ -57,18 +51,14 @@ class JobSubmissionService:
     ) -> None:
         self._store = store
         self._context_service = context_service
-        self._manifest_submission = manifest_submission
         self._office_plan_selection = office_plan_selection
         self._plan_compilation = plan_compilation
         self._materialization = materialization
-        self._temporal_mode = temporal_mode
         self._temporal_static_mode = temporal_static_mode
         self._temporal_logical_read_mode = temporal_logical_read_mode
         self._temporal_logical_effects_mode = temporal_logical_effects_mode
-        self._can_run_manifest_temporal = can_run_manifest_temporal
         self._can_run_static_temporal = can_run_static_temporal
         self._probe_temporal = probe_temporal
-        self._manifest_backend = manifest_backend
         self._static_backend = static_backend
         self._logical_read_backend = logical_read_backend
         self._logical_effects_backend = logical_effects_backend
@@ -94,9 +84,11 @@ class JobSubmissionService:
         llm_api_key: str | None,
         clarification_answer: str | None,
         office_docs: list[dict] | None,
+        workspace_id: str | None,
         user_role: str,
         submission_key: str,
         admission_token: str,
+        execution_preference: str = "use_workspace_policy",
     ) -> Job:
         """Create and dispatch one job while an admission reservation is held."""
         prepared = await self._context_service.prepare(
@@ -109,6 +101,7 @@ class JobSubmissionService:
             request_api_key=llm_api_key,
             clarification_answer=clarification_answer,
             office_docs=office_docs,
+            workspace_id=workspace_id,
         )
         office_docs = prepared.office_docs
         effective_llm = prepared.effective_llm
@@ -117,22 +110,7 @@ class JobSubmissionService:
         planning_context = prepared.planning_context
         routing: dict = {"llm": routing_model} if scene == "office" else {}
 
-        manifest_submission = (
-            await self._manifest_submission.prepare(
-                user_id=user_id,
-                request=request,
-                office_docs=office_docs,
-                llm_api_key=effective_llm.api_key,
-                llm_config=llm_config,
-                routing_model=routing_model,
-            )
-            if scene == "office"
-            else None
-        )
-        if manifest_submission is not None:
-            tree = manifest_submission.tree
-            routing = manifest_submission.routing
-        elif scene == "office":
+        if scene == "office":
             selection = await self._office_plan_selection.select(
                 user_id=user_id,
                 request=request,
@@ -160,7 +138,7 @@ class JobSubmissionService:
             preserve_dependencies=True,
             complexity_level=str(routing.get("level") or ""),
         )
-        if scene == "office" and tree.nodes and not tree.error and not routing.get("manifest"):
+        if scene == "office" and tree.nodes and not tree.error:
             tree = await self._plan_compilation.compile_with_feedback(
                 tree,
                 routing=routing,
@@ -168,6 +146,65 @@ class JobSubmissionService:
                 context=planning_context,
             )
         if scene == "office":
+            routing["workspace_id"] = str(workspace_id or "") or None
+            # 执行授权快照写入 Job 元数据（含 user/conversation/device/policy）。
+            workspace_grant = dict(getattr(planning_context, "workspace_grant", {}) or {})
+            if workspace_grant:
+                routing["workspace_grant"] = workspace_grant
+            # 由工作区 approval_mode 推导 execution_mode（use_workspace_policy 语义），
+            # 并记录本轮规范执行状态（计划优先时 step_confirm → waiting_run）。
+            from app.agents.orchestration.execution_mode import (
+                initial_execution_state,
+                plan_first_eligible,
+                resolve_execution_mode,
+            )
+
+            from app.core.config import settings as _settings
+
+            grant_mode = str(workspace_grant.get("approval_mode") or "") or ""
+            # “存在授权快照”要求实际绑定工作区/设备：未绑定时 WorkspaceContext
+            # 只带保守默认 approval_mode，不能据此自动启用计划优先。
+            has_grant = bool(
+                workspace_grant.get("workspace_id") or workspace_grant.get("device_id")
+            )
+            routing["execution_mode"] = resolve_execution_mode(
+                preference=execution_preference, approval_mode=grant_mode,
+            )
+            # 计划优先启用判定：显式 step_confirm 恒启用；未显式指定时仅当
+            # 全局开关开启 + 工作区 manual_commit 授权快照存在才启用。
+            plan_first = plan_first_eligible(
+                scene=scene,
+                requires_orchestration=True,
+                execution_preference=execution_preference,
+                approval_mode=grant_mode,
+                plan_first_global=bool(getattr(_settings, "EXECUTION_PLAN_FIRST", False)),
+                has_workspace_grant=has_grant,
+            )
+            routing["execution_state"] = initial_execution_state(
+                routing["execution_mode"],
+                plan_first_enabled=plan_first,
+            )
+            # 计划步骤元数据持久化：供前端 plan/步骤恢复与未来单步执行使用；
+            # plan_revision/current_step_index 由补丁或运行器后续推进。
+            if "steps" not in routing:
+                from app.agents.orchestration.job_run_view import steps_from_nodes
+
+                routing["steps"] = steps_from_nodes(tree.nodes or [])
+            routing.setdefault("plan_revision", 1)
+            routing.setdefault("current_step_index", 0)
+            if prepared.pending_office_docs and not office_docs:
+                names = "、".join(
+                    str(item.get("filename") or "文档")[:120]
+                    for item in prepared.pending_office_docs[:3]
+                )
+                tree = type(tree)(
+                    nodes=[],
+                    clarification=(
+                        f"工作区文档正在解析：{names}。解析完成后我会基于文档内容回答，请稍后重新发送。"
+                    ),
+                    plan_text="等待工作区文档解析完成",
+                )
+                routing["fallback_action"] = "workspace_document_pending"
             routing["input_refs"] = [
                 {
                     "doc_id": str(item.get("doc_id") or ""),
@@ -185,6 +222,35 @@ class JobSubmissionService:
                 if text and text not in authorized_projects:
                     authorized_projects.append(text)
             routing["authorized_project_ids"] = authorized_projects
+
+        # v2 统一任务画像/执行策略：灰度开关开启时写入 routing（随 Job 快照
+        # 暴露给前端；不覆盖既有 fallback_action/旧 M0-M3 遥测字段）。
+        if scene == "office":
+            from app.core.config import settings as _policy_settings
+
+            if getattr(_policy_settings, "EXECUTION_POLICY_V2_ENABLED", False):
+                from app.agents.orchestration.execution_policy import (
+                    TaskEntrySignals,
+                    policy_meta_from_signals,
+                    policy_routing_update,
+                )
+                from app.agents.orchestration.task_shape import assess_task_shape
+
+                signals = TaskEntrySignals(
+                    request=request,
+                    scene=scene,
+                    reasons=tuple(assess_task_shape(request).reasons),
+                    has_attachments=False,
+                    has_office_docs=bool(office_docs),
+                    workspace_available=bool(workspace_id),
+                    web_search_enabled=False,
+                    conversation_has_workspace=bool(workspace_id),
+                )
+                meta = policy_meta_from_signals(signals, enabled=True)
+                for key, value in policy_routing_update(meta).items():
+                    if key == "fallback_action" and routing.get(key) is not None:
+                        continue
+                    routing[key] = value
 
         materialized = await self._materialization.materialize(
             user_id=user_id,
@@ -211,6 +277,7 @@ class JobSubmissionService:
                 "office_docs": office_docs,
                 "prior_summaries": prepared.prior_summaries,
                 "presentation_preferences": prepared.presentation_preferences,
+                "workspace_id": workspace_id,
             }
             self._llm_configs[job.job_id] = llm_config
 
@@ -220,11 +287,29 @@ class JobSubmissionService:
             self._discard_pending(job.job_id)
             return job
 
+        # 计划优先（step_confirm）：首轮只生成计划并置 waiting_run，不派发执行。
+        # 由 /jobs/{id}/resume（action=run_next）逐步骤驱动。
+        if (job.routing or {}).get("execution_state") == "waiting_run":
+            # 计划已就绪但任务停放：不占用准入槽位、不开心跳；plan_text 与完整
+            # 步骤节点保留在快照，供前端恢复计划与 run_next 逐步骤驱动。
+            job.status = JobStatus.PENDING
+            job.routing = {**(job.routing or {}), "plan_text": str(job.plan_text or "")[:12000]}
+            await self._store.create_job(job)
+            await job_admission.release(token=admission_token)
+            self._discard_pending(job.job_id)
+            return job
+
         await job_admission.promote(admission_token, job.job_id, user_id)
-        manifest = job.routing.get("manifest") if isinstance(job.routing, dict) else None
-        if isinstance(manifest, dict):
-            record_manifest_route_decisions(manifest)
         self._start_heartbeat(job.job_id, user_id)
+        # v2 观测：进入 Planner 编排的计数（指标默认关闭时零开销）。
+        if scene == "office":
+            from app.core.observability import inc_planner_invoked
+
+            policy = (job.routing or {}).get("execution_policy")
+            if policy:
+                inc_planner_invoked(
+                    str(policy), str((job.routing or {}).get("complexity") or "")
+                )
         try:
             effects_decision = None
             if (
@@ -346,33 +431,6 @@ class JobSubmissionService:
                         "runtime": "legacy",
                         "temporal_submit_error": str(exc)[:200],
                     }
-            if (
-                job.routing.get("manifest")
-                and self._temporal_mode
-                and self._can_run_manifest_temporal(job)
-                and await self._probe_temporal()
-            ):
-                try:
-                    await self._manifest_backend.submit(job, effective_llm.api_key, llm_config)
-                    logger.info(
-                        "清单任务已提交(Temporal): {} | agent={} request={}",
-                        job.job_id[:8],
-                        [node.agent for node in job.nodes],
-                        request[:40],
-                    )
-                    return job
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Temporal 清单提交失败，回退自建 DAG: {} | {}",
-                        job.job_id[:8],
-                        exc,
-                    )
-                    job.routing = {
-                        **(job.routing or {}),
-                        "runtime": "legacy",
-                        "temporal_submit_error": str(exc)[:200],
-                    }
-
             await self._legacy_backend.submit(job, effective_llm.api_key)
             logger.info(
                 "多智能体任务已提交(legacy): {} | agent={} request={}",

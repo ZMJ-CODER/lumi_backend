@@ -1,35 +1,11 @@
-"""编排资源内核的 Lumi 基础设施适配器。"""
+"""Compatibility exports for the lightweight resource adapter."""
 
-from __future__ import annotations
-
-from typing import Any
-
-from lumi_orch.resources import (
+from app.agents.resource_coordination import (  # noqa: F401
     ResourceClaim,
-    ResourceCoordinator as KernelResourceCoordinator,
-    WriteResourceCoordinationUnavailable,  # noqa: F401 - compatibility export
-    _ACQUIRE_SCRIPT,  # noqa: F401 - compatibility export
-    _RELEASE_SCRIPT,  # noqa: F401 - compatibility export
-    _RENEW_SCRIPT,  # noqa: F401 - compatibility export
+    ResourceCoordinator,
+    WriteResourceCoordinationUnavailable,
+    _ACQUIRE_SCRIPT,
+    _RELEASE_SCRIPT,
+    _RENEW_SCRIPT,
+    resource_coordinator,
 )
-
-from app.core.config import settings
-
-
-class ResourceCoordinator(KernelResourceCoordinator):
-    """Binds the generic coordinator to Lumi's Redis and settings."""
-
-    async def _redis(self) -> Any | None:
-        try:
-            from app.core.redis import get_redis
-
-            return get_redis()
-        except Exception:  # noqa: BLE001
-            return None
-
-    def _requires_fail_closed(self, claim: ResourceClaim) -> bool:
-        return claim.mode == "write" and bool(settings.AGENT_WRITE_RESOURCE_FAIL_CLOSED)
-
-
-# Legacy process-wide entry point. Redis provides cross-process ownership.
-resource_coordinator = ResourceCoordinator()

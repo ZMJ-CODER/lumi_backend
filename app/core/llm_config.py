@@ -77,6 +77,38 @@ async def resolve_effective_llm_config(
     different provider midway through a task.
     """
     cfg = await get_llm_config(scene=scene, user_id=user_id)
+    # A BYOK selection is stored without its secret.  The secret normally
+    # arrives in X-LLM-API-KEY for the individual request.  If an old client
+    # or a restarted desktop process omits that header, do not let a stale
+    # empty-key selection take down an otherwise service-configured task.  It
+    # is safe to fall back only when the selected endpoint is one of Lumi's
+    # built-in provider endpoints; never send a server credential to an
+    # arbitrary custom BYOK gateway.
+    if bool(cfg.get("byok")) and not request_api_key and not str(cfg.get("api_key") or "").strip():
+        from app.core.model_catalog import PROVIDER_BASE_URLS, normalize_provider_base_url
+
+        provider = str(cfg.get("provider") or settings.LLM_PROVIDER or "")
+        selected_base = str(cfg.get("base_url") or "").rstrip("/")
+        builtin_base = str(PROVIDER_BASE_URLS.get(provider) or "").rstrip("/")
+        try:
+            is_builtin = bool(selected_base and builtin_base and normalize_provider_base_url(selected_base) == normalize_provider_base_url(builtin_base))
+        except ValueError:
+            is_builtin = False
+        if is_builtin:
+            env_cfg = _env_fallback(scene, provider)
+            env_key = str(env_cfg.get("api_key") or "").strip()
+            if env_key:
+                logger.warning(
+                    "用户 BYOK 配置未携带本次 API key，已回落服务端 {} 配置",
+                    provider,
+                )
+                cfg = {
+                    **cfg,
+                    "api_key": env_key,
+                    "base_url": selected_base or env_cfg.get("base_url"),
+                    "source": "env_fallback",
+                    "byok": False,
+                }
     return EffectiveLLMConfig(
         provider=str(cfg.get("provider") or settings.LLM_PROVIDER or ""),
         model=str(cfg.get("model") or settings.DEEPSEEK_MODEL),
@@ -164,6 +196,7 @@ async def _resolve_user_cfg(user_cfg: dict, provider: str | None) -> dict | None
     elif prov == "deepseek":
         env_key = settings.DEEPSEEK_API_KEY
     cfg = {
+        "provider": str(prov or ""),
         "base_url": base_url,
         "api_key": "" if user_cfg.get("byok") else env_key,
         "model": normalize_model_id(user_cfg.get("model")),

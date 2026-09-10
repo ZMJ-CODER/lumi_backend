@@ -3,7 +3,7 @@
 import asyncio
 
 from app.core.config import settings
-from app.core.llm_config import _env_fallback, _resolve_user_cfg, get_llm_config
+from app.core.llm_config import _env_fallback, _resolve_user_cfg, get_llm_config, resolve_effective_llm_config
 from app.core.model_catalog import (
     PROVIDER_BASE_URLS,
     find_model,
@@ -82,6 +82,41 @@ def test_resolve_user_cfg_custom_byok_endpoint():
     assert cfg is not None
     assert cfg["base_url"] == "https://gateway.example.com/v1"
     assert cfg["api_key"] == ""
+
+
+def test_effective_config_falls_back_to_server_key_for_builtin_byok(monkeypatch):
+    async def fake_config(**kwargs):
+        return {
+            "provider": "deepseek",
+            "model": settings.DEEPSEEK_MODEL,
+            "base_url": settings.DEEPSEEK_BASE_URL,
+            "api_key": "",
+            "byok": True,
+            "source": "user",
+        }
+
+    monkeypatch.setattr("app.core.llm_config.get_llm_config", fake_config)
+    resolved = asyncio.run(resolve_effective_llm_config(scene="office", user_id="u-1"))
+    assert resolved.api_key == settings.DEEPSEEK_API_KEY
+    assert resolved.byok is False
+    assert resolved.source == "env_fallback"
+
+
+def test_effective_config_does_not_send_server_key_to_custom_byok(monkeypatch):
+    async def fake_config(**kwargs):
+        return {
+            "provider": "custom",
+            "model": "vendor/model",
+            "base_url": "https://gateway.example.com/v1",
+            "api_key": "",
+            "byok": True,
+            "source": "user",
+        }
+
+    monkeypatch.setattr("app.core.llm_config.get_llm_config", fake_config)
+    resolved = asyncio.run(resolve_effective_llm_config(scene="office", user_id="u-1"))
+    assert resolved.api_key == ""
+    assert resolved.byok is True
 
 
 def test_byok_endpoint_validation_rejects_private_or_credentials():

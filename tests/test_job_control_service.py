@@ -37,7 +37,6 @@ def test_cancel_releases_capacity_when_runner_already_marked_job_terminal():
         service = JobControlService(
             repository=store,
             approval=None,
-            temporal_backend=_UnusedBackend(),
             static_backend=_AlreadyTerminalBackend(),
             legacy_backend=_UnusedBackend(),
             finalizer=finalizer,

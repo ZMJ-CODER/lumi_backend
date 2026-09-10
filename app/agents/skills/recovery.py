@@ -17,9 +17,14 @@ class RecoveryDecision:
     safe_to_retry: bool = False
 
 
-_INPUT = {"INVALID_ARGS", "RULE_VIOLATION", "TOOL_NOT_PLANNED", "TOOL_NOT_CALLED", "NON_ATOMIC_TOOL_CALL"}
+_INPUT = {"INVALID_ARGS", "INVALID_PARAMS", "RULE_VIOLATION", "TOOL_NOT_PLANNED", "TOOL_NOT_CALLED", "NON_ATOMIC_TOOL_CALL"}
 _PERMISSION = {"FORBIDDEN", "NEEDS_CONFIRMATION", "REJECTED"}
-_CAPABILITY = {"SANDBOX_REQUIRED", "SKILL_NOT_FOUND", "MCP_UNAVAILABLE", "CLIENT_OFFLINE", "CLIENT_TIMEOUT"}
+_CAPABILITY = {
+    "SANDBOX_REQUIRED", "SKILL_NOT_FOUND", "MCP_UNAVAILABLE", "CLIENT_OFFLINE", "CLIENT_TIMEOUT",
+    "WORKFLOW_DEPENDENCY_MISSING_TOOL", "WORKFLOW_DEPENDENCY_VERSION_MISMATCH",
+    "WORKFLOW_DEPENDENCY_CLIENT_OFFLINE", "WORKFLOW_DEPENDENCY_PROVIDER_UNAVAILABLE",
+    "WORKFLOW_DEPENDENCY_PROVIDER_MISMATCH",
+}
 _TRANSIENT = {"TIMEOUT", "RATE_LIMIT", "NETWORK_ERROR", "MODEL_EMPTY_RESPONSE"}
 _MODEL_ACTION_REQUIRED = {
     "MODEL_INSUFFICIENT_BALANCE",
@@ -116,11 +121,18 @@ def classify_model_error(error: Exception | str) -> tuple[str, str]:
     if (
         "connection refused" in lowered
         or "connection reset" in lowered
+        or "connection error" in lowered
+        or "connecterror" in lowered
         or "provider unavailable" in lowered
         or "bad gateway" in lowered
         or "gateway timeout" in lowered
         or "service unavailable" in lowered
         or "dns" in lowered
+        or "llama-server" in lowered
+        or "llama server" in lowered
+        or "out-of-memory" in lowered
+        or "out of memory" in lowered
+        or "failed to allocate" in lowered
         or any(token in lowered for token in (" 502", " 503", " 504"))
     ):
         return (
@@ -132,7 +144,12 @@ def classify_model_error(error: Exception | str) -> tuple[str, str]:
             "MODEL_CONFIG_ERROR",
             "当前模型配置不被服务商支持，办公任务已停止。请检查模型名称、接口地址和高级参数后重试。",
         )
-    return ("MODEL_UNAVAILABLE", "模型连接异常，办公任务已停止。请检查模型连接、API Key、账户余额或供应商状态后重试。")
+    # Unknown exceptions are not evidence of a provider outage.  Returning
+    # MODEL_UNAVAILABLE here used to turn attachment/parser/import bugs into a
+    # misleading “模型连接异常” bubble and made the planner fail closed before
+    # its safe fallbacks could run.  Keep provider failures explicit above and
+    # preserve an execution-level code for everything else.
+    return ("EXECUTION_ERROR", "办公任务执行时发生内部错误，已安全停止；请稍后重试。")
 
 
 def classify_failure(error_code: str | None, error: str | None = "", retryable: bool = False) -> str:
@@ -167,11 +184,35 @@ def decide_failure(
     retryable: bool = False,
     effectful: bool = False,
     alternatives_remaining: bool = False,
+    profile=None,
+    strategy_snapshot=None,
 ) -> RecoveryDecision:
     """返回是否可重试/换工具；副作用步骤永不盲目重试。"""
     category = classify_failure(error_code, error, retryable)
     if effectful:
         return RecoveryDecision(category, replan_required=category in {"input", "capability_unavailable"})
+    if strategy_snapshot is not None:
+        from app.agents.orchestration.strategy_engine import strategy_engine
+
+        action = strategy_engine.failure_action(
+            category=category,
+            profile=profile,
+            snapshot=strategy_snapshot,
+        )
+        if action == "retry":
+            return RecoveryDecision(category, retry_same=True, safe_to_retry=True)
+        if action == "alternative_or_replan":
+            return RecoveryDecision(
+                category,
+                try_alternative=alternatives_remaining,
+                replan_required=not alternatives_remaining,
+                safe_to_retry=alternatives_remaining,
+            )
+        if action == "replan":
+            return RecoveryDecision(category, replan_required=True)
+        if action == "user_action":
+            return RecoveryDecision(category, user_action_required=True)
+        return RecoveryDecision(category)
     if category == "transient":
         return RecoveryDecision(category, retry_same=True, safe_to_retry=True)
     if category == "capability_unavailable":

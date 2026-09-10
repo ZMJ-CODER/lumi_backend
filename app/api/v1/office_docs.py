@@ -1,6 +1,6 @@
 """办公文档编辑 API：上传 → 读取结构 → LLM 规划编辑 → 缓冲 → 取回落盘/丢弃."""
 
-from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -45,6 +45,7 @@ async def _ensure_session_or_404(user_id: str, doc_id: str) -> dict:
 @router.post("")
 async def upload_office_doc(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     payload: dict = Depends(require_auth),
 ):
@@ -64,14 +65,11 @@ async def upload_office_doc(
     filename = file.filename or "document.txt"
     try:
         meta = office_docs.create_session(payload["sub"], filename, content)
-        # OCR / Docling 解析是 CPU 密集同步操作，放线程池避免阻塞事件循环
-        info = await run_in_compute(office_docs.read_structure, payload["sub"], meta["doc_id"])
     except ValueError as exc:
         raise BadRequestException(str(exc)) from exc
-    # 聊天框链路：临时会话写入 DB（跨实例可恢复）+ 顺带清理过期会话
-    await office_docs.persist_session_record(
-        payload["sub"], meta, content, content_text=info.get("structure")
-    )
+    # 上传接口只负责落盘；解析在后台执行，避免 Docling/OCR 阻塞请求并把解析错误
+    # 错误地映射成模型连接异常。
+    background_tasks.add_task(office_docs.parse_session_background, payload["sub"], meta["doc_id"], content)
     try:
         await run_in_compute(office_docs.cleanup_expired_sessions)
     except Exception:  # noqa: BLE001
@@ -79,13 +77,26 @@ async def upload_office_doc(
     return {
         "code": 0,
         "data": {
-            "doc_id": info["doc_id"],
-            "kind": info["kind"],
-            "filename": info["filename"],
-            "structure": info["structure"],
+            "doc_id": meta["doc_id"],
+            "kind": meta["kind"],
+            "filename": meta["filename"],
+            "status": "queued",
+            "parser": None,
+            "text_available": False,
+            "structure_available": False,
+            "error_code": None,
             "size": len(content),
         },
     }
+
+
+@router.get("/{doc_id}/status")
+async def office_doc_status(doc_id: str, payload: dict = Depends(require_auth)):
+    """查询异步解析状态；解析失败只返回 DOCUMENT_PARSE_FAILED。"""
+    try:
+        return {"code": 0, "data": office_docs.get_parse_status(payload["sub"], doc_id)}
+    except LookupError as exc:
+        raise NotFoundException(str(exc)) from exc
 
 
 # 通用脚本产物（新建文件，无源文档）：按任务/会话 id 隔离
@@ -150,6 +161,7 @@ async def get_office_doc(doc_id: str, payload: dict = Depends(require_auth)):
             **info,
             "has_buffer": buffered.exists(),
             "committed": meta.get("committed", False),
+            "read_only": bool(meta.get("read_only")),
         },
     }
 
@@ -166,6 +178,8 @@ async def edit_office_doc(
     if not instruction:
         raise BadRequestException("缺少编辑指令 instruction")
     await _ensure_session_or_404(payload["sub"], doc_id)
+    if _session_or_404(payload["sub"], doc_id).get("read_only"):
+        raise BadRequestException("工作区挂载文件为只读附件，请在项目沙箱中创建副本后再修改")
     info = await run_in_compute(office_docs.read_structure, payload["sub"], doc_id)
     ops = await office_docs.plan_edits(
         instruction,

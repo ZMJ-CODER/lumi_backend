@@ -176,7 +176,7 @@ class ApplicationTaskNodeExecutor:
             await self._store.save_job(self._job)
 
         try:
-            channel = str((node.metadata or {}).get("route_channel") or "agent")
+            channel = "node_execution"
             # 所有会触发文本模型的节点共享 Provider 级闸门。DAG 并发上限
             # 只限制节点数量，不能代替供应商的 RPM/连接池预算。
             if node.agent in {"direct_llm", "atomic_step", "react_step", "collect_results", "office_text", "office_research"}:
@@ -216,8 +216,9 @@ class ApplicationTaskNodeExecutor:
             confirmed_tools=frozenset(str(v) for v in (node.metadata or {}).get("confirmed_tools", [])),
             confirmed_tool_calls=frozenset(str(v) for v in (node.metadata or {}).get("confirmed_tool_calls", [])),
             approval_context_sha256=str((node.metadata or {}).get("approval_upstream_sha256") or ""),
-            office_doc_ids=tuple(str(v) for v in (node.params.get("doc_ids") or []) if str(v)),
+            office_doc_ids=self._authorized_office_doc_ids(node),
             authorized_project_ids=self._authorized_project_ids(),
+            workspace_id=self._authorized_workspace_id(),
             on_output=on_output,
         )
 
@@ -230,6 +231,39 @@ class ApplicationTaskNodeExecutor:
             if text and text not in values:
                 values.append(text)
         return tuple(values)
+
+    def _authorized_workspace_id(self) -> str:
+        """Return the request-scoped desktop workspace, never a node value."""
+        routing = self._job.routing if isinstance(self._job.routing, dict) else {}
+        return str(routing.get("workspace_id") or "").strip()
+
+    def _authorized_office_doc_ids(self, node: TaskNode) -> tuple[str, ...]:
+        """Use submission-scoped document refs; node params may only narrow.
+
+        A planner/worker never gets to expand document access by putting a
+        fresh ID in ``params``.  This mirrors the project scope rule above and
+        fixes the former empty WorkerContext on normal document read nodes.
+        """
+        routing = self._job.routing if isinstance(self._job.routing, dict) else {}
+        allowed: list[str] = []
+        for item in routing.get("input_refs") or []:
+            value = item.get("doc_id") if isinstance(item, dict) else item
+            text = str(value or "").strip()
+            if text and text not in allowed:
+                allowed.append(text)
+        requested = (node.params or {}).get("doc_ids")
+        if isinstance(requested, str):
+            requested = [requested]
+        if isinstance(requested, (list, tuple, set)) and requested:
+            requested_ids = {str(value).strip() for value in requested if str(value).strip()}
+            return tuple(value for value in allowed if value in requested_ids)
+        # Atomic ``read_document`` encodes its exact target in inputs.  It is
+        # also only a narrowing hint and cannot authorize a foreign document.
+        inputs = (node.params or {}).get("inputs")
+        if isinstance(inputs, dict) and inputs.get("doc_id"):
+            target = str(inputs.get("doc_id") or "").strip()
+            return tuple(value for value in allowed if value == target)
+        return tuple(allowed)
 
     async def _reserve_effect(self, node: TaskNode, effectful: bool) -> NodeExecutionResult | None:
         if not effectful or not node.idempotency_key:

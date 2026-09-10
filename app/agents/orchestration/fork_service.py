@@ -102,9 +102,6 @@ class JobForkService:
             JobStatus.INTERRUPTED,
         }:
             raise RuntimeError("只能从已结束的任务创建分支")
-        if RuntimeGateway.is_manifest_job(source) or isinstance((source.routing or {}).get("manifest"), dict):
-            raise RuntimeError("滚动清单的历史节点仍在压缩归档，暂不支持从单个节点回放")
-
         by_id = {node.id: node for node in source.nodes}
         target = by_id.get(node_id)
         if target is None:

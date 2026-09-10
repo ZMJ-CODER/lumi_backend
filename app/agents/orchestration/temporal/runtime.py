@@ -32,13 +32,11 @@ def build_inprocess_workers(client) -> tuple["Worker", ...]:
     from app.agents.orchestration.temporal.worker import (
         build_logical_effects_worker,
         build_logical_read_worker,
-        build_manifest_worker,
         build_worker,
     )
 
     return (
         build_worker(client),
-        build_manifest_worker(client),
         build_logical_read_worker(client),
         build_logical_effects_worker(client),
     )
@@ -145,7 +143,6 @@ async def start_inprocess_worker() -> None:
         ", ".join(
             (
                 settings.TEMPORAL_TASK_QUEUE,
-                settings.TEMPORAL_MANIFEST_TASK_QUEUE,
                 settings.TEMPORAL_LOGICAL_READ_TASK_QUEUE,
                 settings.TEMPORAL_LOGICAL_EFFECTS_TASK_QUEUE,
             )

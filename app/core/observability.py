@@ -55,21 +55,30 @@ _agent_replans = None
 _agent_route_duration = None
 _agent_node_duration = None
 _agent_channel_wait = None
-_manifest_route_upgrades = None
 _celery_queue_ready = None
 _document_pipeline_state = None
 _document_pipeline_oldest_age = None
 _read_view_cache = None
 _read_view_stage_duration = None
+# v2 统一任务画像/执行策略观测。
+_policy_routes = None
+_policy_route_duration = None
+_policy_first_delta = None
+_policy_stream_duration = None
+_planner_invoked = None
+_agent_invoked = None
+_workspace_read_duration = None
 
 
 def _ensure_metrics():
     """懒加载 prometheus-client 指标（避免未安装/未启用时阻塞启动）."""
     global _prometheus, _http_requests, _http_duration, _agent_jobs, _skill_calls, _skill_routing_modes, _rag_searches
     global _agent_routes, _agent_replans, _agent_route_duration, _agent_node_duration
-    global _agent_channel_wait, _manifest_route_upgrades
+    global _agent_channel_wait
     global _celery_queue_ready, _document_pipeline_state, _document_pipeline_oldest_age
     global _read_view_cache, _read_view_stage_duration
+    global _policy_routes, _policy_route_duration, _policy_first_delta, _policy_stream_duration
+    global _planner_invoked, _agent_invoked, _workspace_read_duration
     if _prometheus is not None:
         return True
     if not settings.METRICS_ENABLED:
@@ -120,11 +129,6 @@ def _ensure_metrics():
             ["channel"],
             buckets=(0.001, 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 30, 60, 300),
         )
-        _manifest_route_upgrades = Counter(
-            "lumi_manifest_route_upgrades_total",
-            "任务清单原子项通道升级次数",
-            ["from_channel", "to_channel", "reason"],
-        )
         _celery_queue_ready = Gauge(
             "lumi_celery_queue_ready_tasks",
             "Celery Redis broker ready-task depth (does not include in-flight tasks)",
@@ -150,6 +154,46 @@ def _ensure_metrics():
             "High-traffic read-view stage duration",
             ["endpoint", "stage"],
             buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+        )
+        # v2 统一任务画像/执行策略观测（性能指标第 4 节）。
+        _policy_routes = Counter(
+            "lumi_execution_policy_route_total",
+            "v2 入口画像路由结果",
+            ["execution_policy", "complexity"],
+        )
+        _policy_route_duration = Histogram(
+            "lumi_policy_route_latency_seconds",
+            "入口画像/策略判定耗时",
+            ["execution_policy", "complexity"],
+            buckets=(0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2),
+        )
+        _policy_first_delta = Histogram(
+            "lumi_answer_first_delta_latency_seconds",
+            "回答阶段开始到首个 delta 的耗时",
+            ["execution_policy", "complexity"],
+            buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 40, 60),
+        )
+        _policy_stream_duration = Histogram(
+            "lumi_answer_stream_duration_seconds",
+            "首个 delta 到 done 的答复流时长",
+            ["execution_policy", "complexity"],
+            buckets=(0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 15, 30, 60, 120, 300, 600),
+        )
+        _planner_invoked = Counter(
+            "lumi_planner_invoked_total",
+            "进入 Planner/复杂编排的次数",
+            ["execution_policy", "complexity"],
+        )
+        _agent_invoked = Counter(
+            "lumi_agent_invoked_total",
+            "进入 Agent/节点执行的次数",
+            ["execution_policy", "complexity"],
+        )
+        _workspace_read_duration = Histogram(
+            "lumi_workspace_read_duration_seconds",
+            "ATOMIC 只读快路径的工作区受控读取耗时",
+            [],
+            buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 40, 60),
         )
         _prometheus = True
         return True
@@ -224,15 +268,6 @@ def observe_agent_channel_wait(channel: str, duration: float) -> None:
         _agent_channel_wait.labels(channel=(channel or "unknown")[:80]).observe(max(0.0, duration))
 
 
-def inc_manifest_route_upgrade(from_channel: str, to_channel: str, reason: str) -> None:
-    if _ensure_metrics():
-        _manifest_route_upgrades.labels(
-            from_channel=(from_channel or "unknown")[:80],
-            to_channel=(to_channel or "unknown")[:80],
-            reason=(reason or "unknown")[:80],
-        ).inc()
-
-
 def inc_read_view_cache(endpoint: str, result: str) -> None:
     """Record cache hits, misses and fail-open Redis errors for read views."""
     if _ensure_metrics():
@@ -245,6 +280,60 @@ def observe_read_view_stage(endpoint: str, stage: str, duration: float) -> None:
         _read_view_stage_duration.labels(
             endpoint=(endpoint or "unknown")[:80], stage=(stage or "unknown")[:40]
         ).observe(max(0.0, duration))
+
+
+def observe_policy_route(execution_policy: str, complexity: str) -> None:
+    if _ensure_metrics():
+        _policy_routes.labels(
+            execution_policy=(execution_policy or "unknown")[:60],
+            complexity=(complexity or "unknown")[:24],
+        ).inc()
+
+
+def observe_policy_route_latency(execution_policy: str, complexity: str, seconds: float) -> None:
+    if _ensure_metrics():
+        _policy_route_duration.labels(
+            execution_policy=(execution_policy or "unknown")[:60],
+            complexity=(complexity or "unknown")[:24],
+        ).observe(max(0.0, seconds))
+
+
+def observe_answer_first_delta(execution_policy: str, complexity: str, seconds: float) -> None:
+    if _ensure_metrics():
+        _policy_first_delta.labels(
+            execution_policy=(execution_policy or "unknown")[:60],
+            complexity=(complexity or "unknown")[:24],
+        ).observe(max(0.0, seconds))
+
+
+def observe_answer_stream_duration(execution_policy: str, complexity: str, seconds: float) -> None:
+    if _ensure_metrics():
+        _policy_stream_duration.labels(
+            execution_policy=(execution_policy or "unknown")[:60],
+            complexity=(complexity or "unknown")[:24],
+        ).observe(max(0.0, seconds))
+
+
+def inc_planner_invoked(execution_policy: str = "", complexity: str = "") -> None:
+    if _ensure_metrics():
+        _planner_invoked.labels(
+            execution_policy=(execution_policy or "unknown")[:60],
+            complexity=(complexity or "unknown")[:24],
+        ).inc()
+
+
+def inc_agent_invoked(execution_policy: str = "", complexity: str = "") -> None:
+    if _ensure_metrics():
+        _agent_invoked.labels(
+            execution_policy=(execution_policy or "unknown")[:60],
+            complexity=(complexity or "unknown")[:24],
+        ).inc()
+
+
+def observe_workspace_read_duration(seconds: float) -> None:
+    """ATOMIC 只读快路径：工作区受控读取耗时（workspace_read_duration_ms）。"""
+    if _ensure_metrics():
+        _workspace_read_duration.observe(max(0.0, seconds))
 
 
 async def refresh_async_dispatch_metrics() -> None:

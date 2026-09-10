@@ -38,6 +38,7 @@ from app.models.conversation import (
     SendMessageRequest,
     UpdateConversationRequest,
 )
+from app.services import workspaces
 from app.models.db_models import Attachment, Conversation, Message
 from app.services.content_codec import normalize_content, serialize_content, split_segments
 from app.services.orchestrator import orchestrator
@@ -590,6 +591,13 @@ async def send_message(
     user_id = payload.get("sub") or req.guest_id or "guest"
     is_guest = not payload
     uid = _uid(payload)
+    if req.workspace_id:
+        if is_guest or req.scene != "office":
+            raise UnauthorizedException("项目工作区需要登录并在办公模式使用")
+        try:
+            workspaces.ensure_workspace(user_id, req.workspace_id)
+        except LookupError as exc:
+            raise UnauthorizedException("工作区不存在或无权访问") from exc
     # BYOK：用户自备 API key 每次请求临时携带，用完即弃（不落库、不打印日志）
     llm_api_key = request.headers.get("x-llm-api-key") or None
 
@@ -622,11 +630,13 @@ async def send_message(
             retrieval_query=req.retrieval_query,
             attachments=req.attachments,
             office_docs=req.office_docs,
+            workspace_id=req.workspace_id,
             web_search_enabled=req.web_search,
             llm_api_key=llm_api_key,
             thinking_mode=req.thinking_mode,
             reply_style=req.reply_style,
             user_role=payload.get("role", "user"),
+            execution_preference=req.execution_preference,
         )
 
         # 服务端持久化（仅登录用户；游客保持 Redis-only）

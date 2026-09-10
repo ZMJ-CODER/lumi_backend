@@ -38,13 +38,20 @@ async def create_client_tool_request(
     params: dict,
     requires_confirmation: bool = False,
     ttl: int | None = None,
+    call_id: str | None = None,
+    workspace_id: str | None = None,
+    device_id: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict | None:
     """创建待用户端执行的请求；返回请求数据（含 request_id）."""
     try:
         uuid.UUID(str(user_id))
     except (ValueError, TypeError):
         return None  # 游客/无效用户：本地文件技能需登录
-    request_id = str(uuid.uuid4())
+    # ``request_id`` remains in the HTTP path for old desktop clients.  New
+    # callers use the same UUID as call_id so a result can be correlated with
+    # an MCP result or a later approval without a second mapping table.
+    request_id = str(call_id or uuid.uuid4())
     r = get_redis()
     payload = {
         "request_id": request_id,
@@ -52,6 +59,10 @@ async def create_client_tool_request(
         "params": json.dumps(dict(params or {}), ensure_ascii=False),
         "requires_confirmation": str(bool(requires_confirmation)).lower(),
         "status": "pending",
+        "call_id": request_id,
+        "workspace_id": str(workspace_id or ""),
+        "device_id": str(device_id or ""),
+        "idempotency_key": str(idempotency_key or ""),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     key = _key(user_id, request_id)
@@ -70,7 +81,7 @@ async def list_pending_requests(user_id: str) -> list[dict]:
     items: list[dict] = []
     for rid in ids:
         data = await r.hgetall(_key(user_id, rid))
-        if not data or data.get("status") != "pending":
+        if not data or data.get("status") not in {"pending", "requested", "dispatched", "running", "waiting_user"}:
             continue
         try:
             data["params"] = json.loads(data.get("params") or "{}")
@@ -98,9 +109,11 @@ async def complete_request(
     r = get_redis()
     key = _key(user_id, request_id)
     request_data = await r.hgetall(key)
-    if not request_data or request_data.get("status") != "pending":
+    if not request_data or request_data.get("status") not in {"pending", "requested", "dispatched", "running", "waiting_user"}:
         return False
     result = {
+        "call_id": request_data.get("call_id") or request_id,
+        "status": "completed" if success else ("cancelled" if (metadata or {}).get("cancelled") else "failed"),
         "success": success,
         "output": output or "",
         "error": error,
@@ -111,7 +124,7 @@ async def complete_request(
         "retryable": retryable,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
-    await r.hset(key, mapping={"status": "completed", "result": json.dumps(result, ensure_ascii=False)})
+    await r.hset(key, mapping={"status": result["status"], "result": json.dumps(result, ensure_ascii=False)})
     await r.lrem(_pending_key(user_id), 1, request_id)
     return True
 
@@ -139,7 +152,7 @@ async def await_result(
             # 请求已过期（TTL）或被清理
             return None
         status = data.get("status")
-        if status == "completed":
+        if status in {"completed", "failed", "cancelled"}:
             try:
                 return json.loads(data.get("result") or "{}")
             except (ValueError, TypeError):

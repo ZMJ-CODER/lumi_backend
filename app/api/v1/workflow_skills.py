@@ -23,6 +23,45 @@ from app.services.user_workflow_skills import (
 )
 
 
+def _validate_capability_contract(
+    goals: list[str],
+    sources: list[str],
+    safety_level: str,
+    allowed_tools: list[str],
+) -> None:
+    """Reject declarations that would let a private Skill over-claim access.
+
+    Empty goal/source lists remain valid for legacy skills and use the
+    conservative dispatcher inference.  Once a user declares a profile it
+    must agree with the Tools that their workflow is allowed to invoke.
+    """
+    if not goals and not sources:
+        return
+    tools = {str(item) for item in allowed_tools}
+    source_tools = {
+        "PUBLIC_WEB": {"web_search", "web_fetch"},
+        "LOCAL_KNOWLEDGE": {"query_knowledge"},
+        "ATTACHED_FILE": {"read_document", "office_doc_read", "office_doc_analyze"},
+        "SYSTEM_STATE": {"Bash", "bash"},
+    }
+    for source, required in source_tools.items():
+        if source in sources and not (tools & required):
+            raise ValueError(f"声明 {source} 来源时，allowed_tools 必须包含相应的受治理 Tool")
+    if safety_level != "READ_ONLY" and not any(
+        str(name).casefold().endswith(("write", "edit", "execute")) for name in tools
+    ):
+        raise ValueError("写操作安全等级需要声明可执行的写入 Tool")
+
+
+def _declared_tools(allowed_tools: list[str], dependencies) -> list[str]:
+    names = [str(item).strip() for item in (allowed_tools or []) if str(item).strip()]
+    rows = dependencies.get("tools", []) if isinstance(dependencies, dict) else []
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("name") or "").strip() not in names:
+            names.append(str(row.get("name")).strip())
+    return names
+
+
 router = APIRouter()
 
 
@@ -38,6 +77,11 @@ def _view(item: UserWorkflowSkill) -> dict:
         "id": str(item.id), "name": item.name, "display_name": item.display_name,
         "description": item.description, "category": item.category, "scenes": item.scenes,
         "allowed_tools": item.allowed_tools, "steps": item.steps, "input_schema": item.input_schema,
+        "dependencies": item.dependencies, "execution_scope": item.execution_scope,
+        "availability_policy": item.availability_policy, "fallback_policy": item.fallback_policy,
+        "approval_policy": item.approval_policy, "prompt_body": item.prompt_body,
+        "provided_goals": item.provided_goals, "provided_sources": item.provided_sources,
+        "safety_level": item.safety_level,
         "status": item.status, "version": item.version, "visibility": "private", "source": "user",
     }
 
@@ -49,6 +93,15 @@ def _developer_view(item) -> dict:
         "description": item.description, "category": item.category, "scenes": item.scenes,
         "allowed_tools": item.allowed_tools, "steps": None,
         "input_schema": input_schema if isinstance(input_schema, dict) else {},
+        "dependencies": item.effective_dependencies(),
+        "execution_scope": str(getattr(item, "execution_scope", "backend") or "backend"),
+        "availability_policy": str(getattr(item, "availability_policy", "fail_if_missing") or "fail_if_missing"),
+        "fallback_policy": str(getattr(item, "fallback_policy", "clarify") or "clarify"),
+        "approval_policy": str(getattr(item, "approval_policy", "none") or "none"),
+        "prompt_body": item.effective_prompt(),
+        "provided_goals": list(getattr(item, "provided_goals", None) or []),
+        "provided_sources": list(getattr(item, "provided_sources", None) or []),
+        "safety_level": str(getattr(item, "safety_level", None) or "READ_ONLY"),
         "status": item.status, "version": item.version, "visibility": "public", "source": "developer",
     }
 
@@ -89,7 +142,15 @@ async def create_workflow_skill(
     try:
         validate_user_skill_name(req.name)
         validate_input_schema(req.input_schema)
-        _validate_definition(req.allowed_tools, steps, input_names=input_names(req.input_schema))
+        dependencies = req.dependencies.model_dump()
+        _validate_definition(
+            req.allowed_tools, steps, input_names=input_names(req.input_schema),
+            dependencies=dependencies, approval_policy=req.approval_policy,
+        )
+        _validate_capability_contract(
+            req.provided_goals, req.provided_sources, req.safety_level,
+            _declared_tools(req.allowed_tools, dependencies),
+        )
     except ValueError as exc:
         raise BadRequestException(str(exc)) from exc
     exists = await db.scalar(
@@ -100,7 +161,11 @@ async def create_workflow_skill(
     item = UserWorkflowSkill(
         user_id=user_id, name=req.name, display_name=req.display_name, description=req.description,
         category=req.category, scenes=req.scenes, allowed_tools=req.allowed_tools, steps=steps,
-        input_schema=req.input_schema,
+        dependencies=dependencies, execution_scope=req.execution_scope,
+        availability_policy=req.availability_policy, fallback_policy=req.fallback_policy,
+        approval_policy=req.approval_policy, prompt_body=req.prompt_body,
+        input_schema=req.input_schema, provided_goals=req.provided_goals,
+        provided_sources=req.provided_sources, safety_level=req.safety_level,
     )
     db.add(item)
     await db.commit()
@@ -121,12 +186,24 @@ async def update_workflow_skill(
     values = req.model_dump(exclude_unset=True)
     if "steps" in values:
         values["steps"] = [step.model_dump() for step in values["steps"]]
+    if "dependencies" in values:
+        values["dependencies"] = req.dependencies.model_dump() if req.dependencies is not None else {}
     allowed_tools = values.get("allowed_tools", item.allowed_tools)
     steps = values.get("steps", item.steps)
     try:
         effective_input_schema = values.get("input_schema", item.input_schema)
         validate_input_schema(effective_input_schema)
-        _validate_definition(allowed_tools, steps, input_names=input_names(effective_input_schema))
+        _validate_definition(
+            allowed_tools, steps, input_names=input_names(effective_input_schema),
+            dependencies=values.get("dependencies", item.dependencies),
+            approval_policy=values.get("approval_policy", item.approval_policy),
+        )
+        _validate_capability_contract(
+            values.get("provided_goals", item.provided_goals),
+            values.get("provided_sources", item.provided_sources),
+            values.get("safety_level", item.safety_level),
+            _declared_tools(allowed_tools, values.get("dependencies", item.dependencies)),
+        )
     except ValueError as exc:
         raise BadRequestException(str(exc)) from exc
     for key, value in values.items():

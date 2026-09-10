@@ -62,6 +62,13 @@ async def lifespan(app: FastAPI):
                 logger.warning("Skill 语义路由未就绪，当前将记录 lexical_fallback；请检查嵌入模型配置")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Skill 语义路由启动预热失败，当前将记录 lexical_fallback: {}", exc)
+    # 策略与 Skill 生命周期独立。错误绝不阻断启动：引擎保留内置安全兜底。
+    try:
+        from app.agents.orchestration.strategy_engine import strategy_engine
+
+        await strategy_engine.reload()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("策略引擎预热失败，将使用内置安全兜底: {}", exc)
     # Schema ownership belongs exclusively to Alembic.  Deployment runs
     # ``alembic upgrade head`` before starting an API replica, so application
     # workers never race over DDL or silently patch production tables.
@@ -89,7 +96,7 @@ async def lifespan(app: FastAPI):
         logger.debug("Skill 遥测缓存预热跳过: {}", exc)
     # 多智能体编排：Temporal Worker 随后端进程启动（未开则需独立进程跑 worker）
     if (
-        settings.AGENT_ORCHESTRATION in {"temporal", "manifest_temporal"}
+        settings.AGENT_ORCHESTRATION == "temporal"
         and settings.TEMPORAL_RUN_WORKER_INPROCESS
     ):
         from app.agents.orchestration.temporal.runtime import start_inprocess_worker
@@ -109,7 +116,7 @@ async def lifespan(app: FastAPI):
 
     # 清理
     if (
-        settings.AGENT_ORCHESTRATION in {"temporal", "manifest_temporal"}
+        settings.AGENT_ORCHESTRATION == "temporal"
         and settings.TEMPORAL_RUN_WORKER_INPROCESS
     ):
         from app.agents.orchestration.temporal.runtime import stop_inprocess_worker

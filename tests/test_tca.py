@@ -15,23 +15,22 @@ def assess(request, *, docs=None, history="", fallback=None):
     )
 
 
-def test_explicit_single_file_conversion_is_m0():
+def test_explicit_single_file_conversion_uses_planner_budget_not_rule_route():
     score = assess(
         "把 scores.csv 转为 txt",
         docs=[{"doc_id": "private-doc-id", "filename": "scores.csv", "type": "text"}],
     )
-    assert score.level == ComplexityLevel.M0
-    assert score.mode.value == "deterministic"
-    assert score.confidence >= 0.95
+    assert score.level == ComplexityLevel.M2
+    assert score.mode.value == "plan_execute"
 
 
-def test_known_document_workflow_is_m1():
+def test_document_workflow_shape_does_not_select_a_named_workflow():
     score = assess(
         "筛选这些发票并生成报销单",
         docs=[{"doc_id": "d1", "filename": "invoice.pdf"}],
     )
-    assert score.level == ComplexityLevel.M1
-    assert score.mode.value == "rule_dag"
+    assert score.level == ComplexityLevel.M2
+    assert score.mode.value == "plan_execute"
 
 
 def test_predictable_multistep_task_is_m2():

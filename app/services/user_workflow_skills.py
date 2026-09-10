@@ -46,21 +46,47 @@ def _validate_definition(
     steps: list[dict[str, Any]],
     *,
     input_names: set[str] | None = None,
+    dependencies: dict[str, Any] | None = None,
+    approval_policy: str = "none",
 ) -> None:
     # 用户 Skill 可以组合经治理的内部办公能力，但这些能力仍不会进入
     # Function Calling 公共候选池。是否可被用户 Skill 引用由
     # ``user_workflow_allowed`` 再做一次显式门控。
-    valid_tools = {
-        tool.name
+    valid_tool_objects = {
+        tool.name: tool
         for tool in ToolRegistry.list(include_internal=True)
-        if tool.status == "stable" and tool.user_workflow_allowed and not tool.write_op
+        if tool.status == "stable" and tool.user_workflow_allowed
     }
+    valid_tools = set(valid_tool_objects)
     requested = {str(name).strip() for name in allowed_tools if str(name).strip()}
+    dependency_rows = list((dependencies or {}).get("tools") or [])
+    dependency_names = {
+        str(row.get("name") or "").strip()
+        for row in dependency_rows if isinstance(row, dict) and str(row.get("name") or "").strip()
+    }
+    requested.update(dependency_names)
     if not requested:
         raise ValueError("必须至少选择一个已注册 Tool")
-    unknown = requested - valid_tools
+    # Plugin-provided desktop MCP capabilities are deployment-discovered and
+    # may be offline while a pure SOP Skill is being authored.  They must use
+    # the stable qualified namespace; execution-time discovery and permission
+    # checks remain mandatory before they can run.
+    unknown = {name for name in requested - valid_tools if not name.startswith("mcp__")}
     if unknown:
         raise ValueError("包含未注册或不可声明的 Tool: " + ", ".join(sorted(unknown)))
+    undeclared_mcp = {name for name in requested if name.startswith("mcp__") and name not in dependency_names}
+    if undeclared_mcp:
+        raise ValueError("MCP Tool 必须在 dependencies.tools 中声明: " + ", ".join(sorted(undeclared_mcp)))
+    write_tools = [valid_tool_objects[name] for name in requested if name in valid_tool_objects and valid_tool_objects[name].write_op]
+    if write_tools and approval_policy == "none":
+        raise ValueError("包含未注册或不可声明的 Tool: " + ", ".join(sorted(item.name for item in write_tools)))
+    for row in dependency_rows:
+        if not isinstance(row, dict):
+            raise ValueError("dependencies.tools 项必须是对象")
+        name = str(row.get("name") or "").strip()
+        provider = str(row.get("provider") or "any")
+        if name.startswith("mcp__") and provider not in {"desktop_mcp", "external_mcp"}:
+            raise ValueError(f"MCP Tool {name} 必须声明 desktop_mcp 或 external_mcp provider")
     for step in steps:
         tool = str(step.get("tool") or "").strip()
         if tool not in requested:
@@ -124,6 +150,16 @@ class DeclarativeUserWorkflowSkill(WorkflowSkill):
         self.allowed_tools = list(record.allowed_tools or [])
         self.input_schema = dict(record.input_schema or {})
         self.steps = list(record.steps or [])
+        self.dependencies = dict(getattr(record, "dependencies", None) or {})
+        self.execution_scope = str(getattr(record, "execution_scope", None) or "backend")
+        self.availability_policy = str(getattr(record, "availability_policy", None) or "fail_if_missing")
+        self.fallback_policy = str(getattr(record, "fallback_policy", None) or "clarify")
+        self.approval_policy = str(getattr(record, "approval_policy", None) or "none")
+        self.prompt_body = str(getattr(record, "prompt_body", None) or "")
+        self.prompt_version = f"user-{record.version}"
+        self.provided_goals = list(getattr(record, "provided_goals", None) or [])
+        self.provided_sources = list(getattr(record, "provided_sources", None) or [])
+        self.safety_level = str(getattr(record, "safety_level", None) or "READ_ONLY")
         self.owner_user_id = str(record.user_id)
         self.visibility = "private"
         self.source = "user"

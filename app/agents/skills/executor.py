@@ -93,12 +93,11 @@ async def _claim_tool_execution(tool_name: str, execution_scope: str):
         yield
         return
 
-    from app.agents.orchestration.resources import (
+    from app.agents.resource_coordination import (
         ResourceClaim,
         WriteResourceCoordinationUnavailable,
         resource_coordinator,
     )
-
     claim = ResourceClaim(
         key=f"global:tool-execution:job:{execution_scope}:tool:{tool_name}",
         mode="write",
@@ -361,6 +360,7 @@ def _skill_capability(skill: Tool) -> ToolCapability:
         bootstrap_until=str(getattr(skill, "bootstrap_until", "") or routing.get("bootstrap_until") or ""),
         parameters=parameters,
         source="tool",
+        environment=str(skill.environment or "server"),
         permission=skill.permission,
         write_op=_skill_is_write(skill),
         requires_confirmation=bool(skill.requires_confirmation),
@@ -435,6 +435,174 @@ async def get_capabilities_for_scene(
         schedule_skill_semantic_index(capabilities)
     except Exception:  # noqa: BLE001
         pass
+    return capabilities
+
+
+async def get_desktop_mcp_capabilities(user_id: str, scene: str, user_role: str) -> list[ToolCapability]:
+    """Discover trusted Electron plugin Tools for Skill dependency checks.
+
+    These capabilities are intentionally absent from the ordinary model Tool
+    pool.  A Workflow Skill must declare them before its runner can invoke the
+    qualified name.
+    """
+    if not user_id:
+        return []
+    from app.agents.mcp.manager import list_tools, server_is_healthy
+    from app.agents.mcp.desktop_connections import desktop_connections
+
+    capabilities: list[ToolCapability] = []
+    for server_name in desktop_connections.desktop_server_names():
+        for remote in await list_tools(server_name):
+            raw_name = str(remote.get("name") or "").strip()
+            if not raw_name:
+                continue
+            permission = str(remote.get("permission") or "user")
+            if not role_allows(permission, user_role):
+                continue
+            capabilities.append(ToolCapability(
+                name=f"mcp__{server_name}__{raw_name}",
+                version=str(remote.get("version") or "1.0.0"), status="stable",
+                description=str(remote.get("description") or ""), category="mcp",
+                domain=str(remote.get("domain") or "desktop"),
+                parameters=remote.get("input_schema") if isinstance(remote.get("input_schema"), dict) else {"type": "object", "properties": {}},
+                source="mcp", environment="client", server=server_name, raw_name=raw_name,
+                permission=permission, write_op=bool(remote.get("write_op")),
+                requires_confirmation=bool(remote.get("requires_confirmation")),
+                confirmation_mode=str(remote.get("confirmation_mode") or "client"),
+                idempotent=bool(remote.get("idempotent")),
+                resource_templates=list(remote.get("resource_templates") or []),
+                annotations={
+                    "provider": "desktop_mcp",
+                    "availability_hint": "available" if server_is_healthy(server_name) else "offline",
+                    "trusted_local_provider": True,
+                },
+            ))
+    return capabilities
+
+
+async def get_workspace_action_capabilities(
+    user_id: str,
+    scene: str,
+    user_role: str,
+    workspace_id: str,
+    allowed_raw: frozenset[str] | set[str],
+) -> list[ToolCapability]:
+    """Build capabilities for an arbitrary workspace capability group.
+
+    Used by stage-based tool windows (read → stage-write → sandbox → commit).
+    Only the Electron connection that registered ``workspace_id`` is queried,
+    and only tools whose raw name is in ``allowed_raw`` are returned.
+    """
+    from app.services.workspace_context import resolve_workspace_desktop
+
+    if not user_id or not str(workspace_id or "").strip() or not allowed_raw:
+        return []
+    route = resolve_workspace_desktop(user_id, str(workspace_id).strip())
+    server_name = str(route.get("server_name") or "")
+    if not server_name:
+        return []
+    from app.agents.mcp.manager import list_tools, server_is_healthy
+
+    healthy = server_is_healthy(server_name)
+    capabilities: list[ToolCapability] = []
+    for remote in await list_tools(server_name):
+        raw_name = str(remote.get("name") or "").strip()
+        if not raw_name or raw_name not in allowed_raw:
+            continue
+        permission = str(remote.get("permission") or "user")
+        if not role_allows(permission, user_role):
+            continue
+        capabilities.append(ToolCapability(
+            name=f"mcp__{server_name}__{raw_name}",
+            version=str(remote.get("version") or "1.0.0"),
+            status="stable",
+            description=str(remote.get("description") or ""),
+            category="workspace",
+            domain="workspace",
+            parameters=remote.get("input_schema") if isinstance(remote.get("input_schema"), dict)
+            else {"type": "object", "properties": {}},
+            source="mcp",
+            environment="client",
+            server=server_name,
+            raw_name=raw_name,
+            permission=permission,
+            write_op=bool(remote.get("write_op")),
+            requires_confirmation=bool(remote.get("requires_confirmation")),
+            confirmation_mode=str(remote.get("confirmation_mode") or "client"),
+            idempotent=bool(remote.get("idempotent")),
+            resource_templates=list(remote.get("resource_templates") or []),
+            annotations={
+                "provider": "desktop_mcp",
+                "workspace_id": str(workspace_id).strip(),
+                "workspace_stage_tool": True,
+                "availability_hint": "available" if healthy else "offline",
+                "trusted_local_provider": True,
+            },
+        ))
+    return capabilities
+
+
+async def get_workspace_reading_capabilities(
+    user_id: str,
+    scene: str,
+    user_role: str,
+    workspace_id: str,
+) -> list[ToolCapability]:
+    """Build the read-only workspace capability window for one bound workspace.
+
+    These are the capabilities of the "通用工作区读取域": workspace_catalog /
+    workspace_list / workspace_read / workspace_search, discovered only from
+    the Electron connection that registered ``workspace_id``.  Unlike raw
+    desktop discovery, this set is workspace-scoped: an office Agent that is
+    authorized for the workspace may see and use them; the write/sandbox
+    tools stay behind the coding/workflow skills that declare them.
+    """
+    from app.services.workspace_context import WORKSPACE_READ_TOOLS, resolve_workspace_desktop
+
+    if not user_id or not str(workspace_id or "").strip():
+        return []
+    route = resolve_workspace_desktop(user_id, str(workspace_id).strip())
+    server_name = str(route.get("server_name") or "")
+    if not server_name:
+        return []
+    from app.agents.mcp.manager import list_tools, server_is_healthy
+
+    healthy = server_is_healthy(server_name)
+    capabilities: list[ToolCapability] = []
+    for remote in await list_tools(server_name):
+        raw_name = str(remote.get("name") or "").strip()
+        if not raw_name or raw_name not in WORKSPACE_READ_TOOLS:
+            continue
+        permission = str(remote.get("permission") or "user")
+        if not role_allows(permission, user_role):
+            continue
+        capabilities.append(ToolCapability(
+            name=f"mcp__{server_name}__{raw_name}",
+            version=str(remote.get("version") or "1.0.0"),
+            status="stable",
+            description=str(remote.get("description") or ""),
+            category="workspace",
+            domain="workspace",
+            parameters=remote.get("input_schema") if isinstance(remote.get("input_schema"), dict)
+            else {"type": "object", "properties": {}},
+            source="mcp",
+            environment="client",
+            server=server_name,
+            raw_name=raw_name,
+            permission=permission,
+            write_op=False,
+            requires_confirmation=False,
+            confirmation_mode="client",
+            idempotent=True,
+            resource_templates=list(remote.get("resource_templates") or []),
+            annotations={
+                "provider": "desktop_mcp",
+                "workspace_id": str(workspace_id).strip(),
+                "workspace_read_domain": True,
+                "availability_hint": "available" if healthy else "offline",
+                "trusted_local_provider": True,
+            },
+        ))
     return capabilities
 
 
@@ -986,11 +1154,43 @@ async def get_tool_capability(
     *,
     include_internal: bool = False,
 ) -> ToolCapability | None:
+    # Execution already has an exact, governed tool name.  Rebuilding the
+    # whole scene catalog here needlessly queries user MCP bindings,
+    # telemetry, and semantic-index warmup before every local call.  Besides
+    # adding latency, an unavailable database could block a completely local
+    # tool.  Apply the same lifecycle/scene/role/write gates directly first;
+    # dynamic discovery remains the fallback for MCP capabilities.
+    registered = ToolRegistry.get(name)
+    registered_is_public = name in getattr(ToolRegistry, "_tools", {})
+    if registered is not None and (registered_is_public or include_internal):
+        write_allowed = bool(settings.AGENT_TOOL_WRITE_ENABLED) or not _skill_is_write(registered)
+        stable = registered.status == "stable"
+        scene_allowed = registered.supports_scene(scene)
+        role_allowed = role_allows(registered.permission, user_role)
+        base_allowed = True
+        if bool(getattr(settings, "AGENT_BASE_TOOLS_ONLY", False)) and not include_internal:
+            from app.agents.skills.discovery import base_tool_names
+
+            allowed_base = base_tool_names()
+            base_allowed = not allowed_base or name in allowed_base
+        if (
+            write_allowed
+            and stable
+            and scene_allowed
+            and role_allowed
+            and base_allowed
+            and skill_runtime_unavailable(registered) is None
+        ):
+            return _skill_capability(registered)
     for capability in await get_capabilities_for_scene(
         scene, user_role, user_id, include_internal=include_internal
     ):
         if capability.name == name:
             return capability
+    if name.startswith("mcp__"):
+        for capability in await get_desktop_mcp_capabilities(user_id, scene, user_role):
+            if capability.name == name:
+                return capability
     return None
 
 
@@ -1107,10 +1307,12 @@ async def execute_tool_call(
     approval_context_sha256: str = "",
     office_doc_ids: tuple[str, ...] | list[str] | None = None,
     authorized_project_ids: tuple[str, ...] | list[str] | None = None,
+    authorized_workspace_id: str = "",
     on_output=None,
     execution_scope: str = "",
     allowed_tools: set[str] | None = None,
     allow_internal: bool = False,
+    mcp_call_id: str | None = None,
 ) -> SkillResult:
     """执行一次技能调用：校验 → 高危拦截 → 执行 → 审计。
 
@@ -1216,6 +1418,25 @@ async def execute_tool_call(
         )
 
         server_name, tool_name = mcp_target
+        if tool_name.startswith(("workspace_", "sandbox_")):
+            trusted_workspace = str(authorized_workspace_id or "").strip()
+            requested_workspace = str(args.get("workspace_id") or "").strip()
+            if not trusted_workspace:
+                return SkillResult(
+                    success=False,
+                    error="当前任务没有已选择的工作区；请先在办公模式中新建或打开项目",
+                    error_code="WORKSPACE_SCOPE_REQUIRED",
+                    retryable=False,
+                    metadata={"server": server_name, "tool": tool_name},
+                )
+            if requested_workspace != trusted_workspace:
+                return SkillResult(
+                    success=False,
+                    error="工具请求的工作区不属于当前任务",
+                    error_code="WORKSPACE_SCOPE_FORBIDDEN",
+                    retryable=False,
+                    metadata={"server": server_name, "tool": tool_name},
+                )
         validation_error = _validate_mcp_arguments(capability.parameters, args)
         if validation_error:
             return SkillResult(
@@ -1225,20 +1446,88 @@ async def execute_tool_call(
                 retryable=False,
                 metadata={"server": server_name, "tool": tool_name},
             )
-        if (
-            capability.requires_confirmation
+        # 统一审批策略（ApprovalPolicyEngine）：工作区/沙箱工具不再只依赖工具
+        # 自身 requires_confirmation，而是按 三档（A 自动 / B 例行 / C 始终确认）
+        # + 执行授权快照（approval_mode）集中判定。Skill/Workflow 无法自行绕过。
+        engine_decision = None
+        policy_meta: dict = {}
+        is_workspace_mcp = mcp_target is not None and tool_name.startswith(("workspace_", "sandbox_"))
+        if is_workspace_mcp:
+            from app.agents.skills.approval_policy import classify_tool_risk, should_confirm
+
+            tier, _risk, _reason = classify_tool_risk(name, args)
+            if tier == "auto":
+                engine_decision = None  # A 档：默认自动，无需加载上下文
+            else:
+                wsid_for_policy = str(authorized_workspace_id or "").strip() or str(args.get("workspace_id") or "")
+                ws_available = bool(authorized_workspace_id)
+                approval_mode = "manual_commit"
+                policy_expires_at = ""
+                if wsid_for_policy:
+                    try:
+                        from app.services.workspace_context import load_workspace_context
+
+                        ctx_policy = await load_workspace_context(
+                            user_id, workspace_id=wsid_for_policy
+                        )
+                        ws_available = ctx_policy.available
+                        approval_mode = ctx_policy.approval_mode
+                        policy_expires_at = str(getattr(ctx_policy, "expires_at", "") or "")
+                    except Exception:  # noqa: BLE001 - 快照缺失按保守默认
+                        ws_available = bool(authorized_workspace_id)
+                engine_decision = should_confirm(
+                    tool=name,
+                    arguments=args,
+                    workspace_context={
+                        "workspace_available": ws_available,
+                        "approval_mode": approval_mode,
+                        "expires_at": policy_expires_at,
+                    },
+                    execution_grant={"approval_mode": approval_mode},
+                )
+                policy_meta = {
+                    "policy_decision": engine_decision.decision,
+                    "policy_risk": engine_decision.risk,
+                    "policy_reason": engine_decision.reason,
+                    "policy_scope": engine_decision.scope,
+                }
+                if engine_decision.decision == "deny":
+                    return SkillResult(
+                        success=False,
+                        error=engine_decision.reason or "工作区策略禁止该操作",
+                        error_code="WORKSPACE_POLICY_DENIED",
+                        retryable=False,
+                        metadata={
+                            "server": server_name, "tool": tool_name,
+                            **policy_meta,
+                        },
+                    )
+        # Desktop MCP is the single approval authority for client-confirmed
+        # workspace actions.  Let the call reach Electron so it can apply the
+        # local workspace policy, show one final confirmation when needed, and
+        # return pending_approval.  Server-confirmed providers still stop here.
+        client_owns_confirmation = bool(
+            is_workspace_mcp and capability.confirmation_mode == "client"
+        )
+        need_user_confirm = (not client_owns_confirmation) and (bool(
+            engine_decision is not None and engine_decision.decision == "require_confirmation"
+        ) or bool(
+            engine_decision is None
+            and capability.requires_confirmation
             and capability.confirmation_mode != "client"
-            and not is_tool_call_confirmed(name, args, confirmed_tool_calls, approval_context_sha256)
-        ):
+        ))
+        if need_user_confirm and not is_tool_call_confirmed(name, args, confirmed_tool_calls, approval_context_sha256):
+            reason = (engine_decision.reason if engine_decision is not None else "该 MCP 操作需要用户确认")
             return SkillResult(
                 success=False,
-                error="该 MCP 操作需要用户确认",
+                error=reason,
                 error_code="NEEDS_CONFIRMATION",
                 retryable=False,
                 metadata={
                     "server": server_name,
                     "tool": tool_name,
                     "approval_fingerprint": tool_call_fingerprint(name, args, approval_context_sha256),
+                    **policy_meta,
                 },
             )
         binding_id = str((capability.annotations or {}).get("binding_id") or "")
@@ -1263,12 +1552,35 @@ async def execute_tool_call(
             register_active_binding_call(binding_id, active_task_id)
         try:
             async with _claim_tool_execution(name, execution_scope):
+                # Route the call to the desktop that registered the workspace
+                # (device-aware MCP routing).  The parsed capability name keeps
+                # its original server, but the authoritative connection is the
+                # one recorded on the workspace manifest; a task started from
+                # another device is forwarded to that Electron.
+                routed_server = server_name
+                call_workspace_id = str(authorized_workspace_id or "").strip()
+                call_device_id = ""
+                if mcp_target and (tool_name.startswith(("workspace_", "sandbox_")) or call_workspace_id):
+                    try:
+                        from app.services.workspace_context import resolve_workspace_desktop
+
+                        route = resolve_workspace_desktop(user_id, call_workspace_id or str(args.get("workspace_id") or ""))
+                        call_device_id = str(route.get("device_id") or "")
+                        if route.get("server_name"):
+                            routed_server = str(route["server_name"])
+                    except Exception:  # noqa: BLE001 - 路由解析失败仍按原 server 调用
+                        call_device_id = ""
                 raw = await call_tool(
-                    server_name,
+                    routed_server,
                     tool_name,
                     args,
+                    call_id=mcp_call_id,
                     task_id=conversation_id or None,
                     on_progress=on_notify,
+                    user_id=user_id,
+                    device_id=call_device_id,
+                    workspace_id=call_workspace_id,
+                    conversation_id=conversation_id or "",
                 )
         except ToolExecutionCoordinationUnavailable:
             return _tool_coordination_failure(name)
@@ -1285,10 +1597,28 @@ async def execute_tool_call(
                 metadata={"server": server_name, "tool": tool_name},
             )
         result = sanitize_server_result(normalize_skill_result(raw))
+        # 服务端可见的工作区写操作成功后，版本缓存应当失效；文件变化也可由
+        # Electron 版本通知或下一轮 workspace_diff 版本探测兜底。
+        if (
+            result.success
+            and tool_name in {"workspace_commit", "sandbox_commit", "workspace_rollback", "workspace_stage_delete"}
+            and call_workspace_id
+        ):
+            try:
+                from app.services.workspace_context import invalidate_workspace_context
+
+                await invalidate_workspace_context(call_workspace_id)
+            except Exception:  # noqa: BLE001
+                pass
         await _record_skill_telemetry(
             capability, scene, result, int((time.perf_counter() - started_at) * 1000)
         )
-        await _record_skill_log(user_id, capability, args, result)
+        audit_scope: dict = dict(policy_meta or {})
+        if call_workspace_id:
+            audit_scope["workspace_id"] = str(call_workspace_id)
+        if call_device_id:
+            audit_scope["device_id"] = str(call_device_id)
+        await _record_skill_log(user_id, capability, args, result, scope_meta=audit_scope or None)
         return result
 
     skill = ToolRegistry.get(name)
@@ -1354,6 +1684,7 @@ async def execute_tool_call(
         execution_policy=execution_policy,
         office_doc_ids=tuple(str(value) for value in (office_doc_ids or ()) if str(value).strip()),
         authorized_project_ids=tuple(str(value) for value in (authorized_project_ids or ()) if str(value).strip()),
+        workspace_id=str(authorized_workspace_id or "").strip(),
     )
     # All registered Skills now pass through the MCP gateway.  The gateway
     # chooses Electron MCP for client capabilities and an in-process adapter
@@ -1415,12 +1746,24 @@ async def _record_skill_log(
     skill: Tool | ToolCapability,
     params: dict,
     result: SkillResult,
+    *,
+    scope_meta: dict | None = None,
 ) -> None:
-    """技能调用审计：control_logs 表（失败不阻塞主流程）."""
+    """技能调用审计：control_logs 表（失败不阻塞主流程）.
+
+    ``scope_meta`` 可携带工作区/设备/审批策略结果等执行上下文，随 detail 落库。
+    """
     try:
         uid = uuid.UUID(str(user_id)) if user_id else None
         if uid is None:
             return
+        detail = {
+            "error_code": result.error_code,
+            "error": result.error,
+            "output": result.output[:500],
+        }
+        if scope_meta:
+            detail["scope_meta"] = scope_meta
         async with async_session_factory() as session:
             session.add(
                 ControlLog(
@@ -1428,14 +1771,7 @@ async def _record_skill_log(
                     action=f"skill:{skill.name}",
                     target=json.dumps(params, ensure_ascii=False)[:500],
                     success=result.success,
-                    detail=json.dumps(
-                        {
-                            "error_code": result.error_code,
-                            "error": result.error,
-                            "output": result.output[:500],
-                        },
-                        ensure_ascii=False,
-                    )[:2000],
+                    detail=json.dumps(detail, ensure_ascii=False)[:2000],
                 )
             )
             await session.commit()
@@ -1583,9 +1919,18 @@ async def _run_skill_loop_legacy(
         if not tool_calls:
             break
 
-        messages.append(
-            {"role": "assistant", "content": content or None, "tool_calls": tool_calls}
-        )
+        assistant_message = {
+            "role": "assistant", "content": content or None, "tool_calls": tool_calls
+        }
+        # DeepSeek thinking-mode tool loops require the opaque reasoning
+        # payload on the assistant message that issued the call.  The unified
+        # response normalizer may carry it on each normalized call; lift it to
+        # the message level before appending the tool result.
+        if tool_calls and isinstance(tool_calls[0], dict):
+            reasoning = tool_calls[0].get("reasoning_content")
+            if reasoning is not None:
+                assistant_message["reasoning_content"] = reasoning
+        messages.append(assistant_message)
         for tc in tool_calls:
             skill_name = str(tc.get("function", {}).get("name") or "")
             if on_progress:

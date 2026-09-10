@@ -286,32 +286,6 @@ def test_direct_text_conversion_honors_explicit_tab_delimiter(tmp_path):
     assert (output_dir / "scores.txt").read_text(encoding="utf-8") == '姓名\t备注\n张伟\t语文,补考\n'
 
 
-def test_direct_text_conversion_honors_named_output_and_encoding(tmp_path):
-    from app.agents.orchestration.intent import resolve_direct_text_conversion
-    from app.agents.roles.office.agents import OfficeScriptAgent
-
-    conversion = resolve_direct_text_conversion(
-        "将 scores.csv 转为 report.txt，使用 UTF-8-SIG 编码并用逗号分隔",
-        [{"doc_id": "scores-doc", "filename": "scores.csv"}],
-    )
-    assert conversion is not None
-    assert conversion["output_filename"] == "report.txt"
-    assert conversion["encoding"] == "utf-8-sig"
-    assert conversion["text_delimiter"] == ","
-
-    source = tmp_path / "scores.csv"
-    source.write_text("姓名,成绩\n张伟,92\n", encoding="utf-8")
-    output_dir = tmp_path / "outputs"
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setenv("LUMI_DOC_PATHS", '{"scores.csv": "' + str(source).replace("\\", "\\\\") + '"}')
-    monkeypatch.setenv("LUMI_DOC_OUTPUT_DIRS", '{"scores.csv": "' + str(output_dir).replace("\\", "\\\\") + '"}')
-    try:
-        exec(OfficeScriptAgent._direct_text_conversion_script(conversion), {"__name__": "__main__"})
-    finally:
-        monkeypatch.undo()
-    assert (output_dir / "report.txt").read_bytes().startswith(b"\xef\xbb\xbf")
-
-
 def test_python_exec_output_contract_validates_real_text_artifact(tmp_path):
     from plugins.tools.shell.python_exec import _validate_output_contract
 

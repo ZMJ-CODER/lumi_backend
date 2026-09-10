@@ -244,6 +244,19 @@ class LLMClient:
                 reply = await breaker.call(lambda: chat_model.ainvoke(self._tool_fallback_messages(messages, tools)))
                 calls = []
             normalized_text, normalized_calls, _warnings = normalize_tool_response(self._message_text(reply), calls)
+            # Preserve provider thinking state across the manual tool loop.
+            # DeepSeek rejects the next request when an assistant tool-call
+            # message omits the reasoning_content returned with that call.
+            reasoning = None
+            try:
+                reasoning = (getattr(reply, "additional_kwargs", {}) or {}).get("reasoning_content")
+                if reasoning is None:
+                    reasoning = (getattr(reply, "response_metadata", {}) or {}).get("reasoning_content")
+            except Exception:  # noqa: BLE001
+                reasoning = None
+            if reasoning is not None:
+                for item in normalized_calls:
+                    item["reasoning_content"] = reasoning
             return reply, normalized_text, normalized_calls, used_model
 
         try:

@@ -18,7 +18,6 @@ import uuid
 from app.agents.orchestration.backends.legacy import LegacyDagBackend
 from app.agents.orchestration.backends.temporal_logical_effects import TemporalLogicalEffectsBackend
 from app.agents.orchestration.backends.temporal_logical_read import TemporalLogicalReadBackend
-from app.agents.orchestration.backends.temporal_manifest import TemporalManifestBackend
 from app.agents.orchestration.backends.temporal_static import TemporalStaticBackend
 from app.agents.orchestration.execution_loop_service import ExecutionLoopService
 from app.agents.orchestration.fork_service import JobForkService
@@ -38,8 +37,6 @@ from app.agents.orchestration.submission_guard import (
 from app.agents.orchestration.job_finalizer import JobFinalizer
 from app.agents.orchestration.job_error_service import JobErrorService
 from app.agents.orchestration.logical_plan_service import LogicalPlanContinuationService
-from app.agents.orchestration.manifest_service import ManifestContinuationService
-from app.agents.orchestration.manifest_submission_service import ManifestSubmissionService
 from app.agents.orchestration.submission_context_service import SubmissionContextService
 from app.agents.orchestration.office_plan_selection_service import OfficePlanSelectionService
 from app.agents.orchestration.job_materialization_service import JobMaterializationService
@@ -79,8 +76,7 @@ class AgentOrchestrator:
     """多智能体协作编排器（单例，全局复用）.
 
     temporal_enabled：None 时按 settings.AGENT_ORCHESTRATION 决定；
-    ``temporal`` 只接收无审批的静态只读 DAG，``manifest_temporal``
-    仅接收显式任务清单，普通办公任务仍走动态 DAG。
+    ``temporal`` 只接收通过运行时准入的静态 DAG；其余办公任务走受控动态 DAG。
     测试/显式场景可传 False 强制走自建 DAG（legacy）。
     """
 
@@ -123,7 +119,6 @@ class AgentOrchestrator:
             plan_compilation=self._plan_compilation,
         )
         self._memory = OfficeMemoryService(repository=memory_repository)
-        self._manifest_submission = ManifestSubmissionService(self._workers)
         self._submission_context = SubmissionContextService(memory=self._memory)
         self._office_plan_selection = OfficePlanSelectionService(
             planner=self._planner,
@@ -159,7 +154,7 @@ class AgentOrchestrator:
             if temporal_enabled is None
             else ("temporal" if temporal_enabled else "legacy")
         )
-        self._temporal_mode = self._orchestration_mode in {"temporal", "manifest_temporal"}
+        self._temporal_mode = self._orchestration_mode == "temporal"
         self._temporal_static_mode = self._orchestration_mode == "temporal"
         self._temporal_logical_read_mode = (
             self._orchestration_mode == "temporal" and settings.TEMPORAL_LOGICAL_READ_ENABLED
@@ -187,11 +182,6 @@ class AgentOrchestrator:
         self._submission_guard = SubmissionGuard(store=self._store)
         # 规划上下文不进入 Job/API，避免把内部文档 ID 或项目绑定暴露给前端。
         self._job_plan_context: dict[str, dict] = {}
-        self._manifest_continuation = ManifestContinuationService(
-            store=self._store,
-            workers=self._workers,
-            context_getter=lambda job_id: self._job_plan_context.get(job_id) or {},
-        )
         self._lease_monitor = AdmissionLeaseMonitor(
             store=self._store,
             tasks=self._tasks,
@@ -204,7 +194,6 @@ class AgentOrchestrator:
             api_keys=self._job_api_keys,
             run_job=self._run_job,
         )
-        self._manifest_backend = TemporalManifestBackend(self._runtime)
         self._static_backend = TemporalStaticBackend(self._runtime)
         self._logical_read_backend = TemporalLogicalReadBackend(self._runtime)
         self._logical_effects_backend = TemporalLogicalEffectsBackend(self._runtime)
@@ -212,18 +201,14 @@ class AgentOrchestrator:
         self._submission = JobSubmissionService(
             store=self._store,
             context_service=self._submission_context,
-            manifest_submission=self._manifest_submission,
             office_plan_selection=self._office_plan_selection,
             plan_compilation=self._plan_compilation,
             materialization=self._job_materialization,
-            temporal_mode=self._temporal_mode,
             temporal_static_mode=self._temporal_static_mode,
             temporal_logical_read_mode=self._temporal_logical_read_mode,
             temporal_logical_effects_mode=self._temporal_logical_effects_mode,
-            can_run_manifest_temporal=self._can_run_manifest_temporal,
             can_run_static_temporal=self._can_run_static_temporal,
             probe_temporal=self._probe_temporal,
-            manifest_backend=self._manifest_backend,
             static_backend=self._static_backend,
             logical_read_backend=self._logical_read_backend,
             logical_effects_backend=self._logical_effects_backend,
@@ -265,7 +250,6 @@ class AgentOrchestrator:
             llm_configs=self._job_llm_configs,
             plan_context=self._job_plan_context,
             context_getter=lambda job_id: self._job_plan_context.get(job_id) or {},
-            continue_manifest=self._continue_manifest_job,
             continue_logical_plan=self._continue_logical_plan,
             maybe_replan=self._maybe_replan_failed_job,
             node_concurrency=settings.AGENT_NODE_CONCURRENCY,
@@ -273,10 +257,26 @@ class AgentOrchestrator:
             ensure_active_capacity=self._ensure_active_capacity,
             task_execution_service=task_execution_service,
         )
+        # step_confirm 计划优先任务的单步执行器（/jobs/{id}/resume action=run_next）。
+        from app.agents.orchestration.step_run_service import StepRunService
+
+        self._step_run = StepRunService(
+            store=self._store,
+            workers=self._workers,
+            review=self._review,
+            finalizer=self._finalizer,
+            llm_configs=self._job_llm_configs,
+            ensure_active_capacity=self._ensure_active_capacity,
+            suspend_capacity=self._finalizer.suspend_capacity,
+            handle_escalation=self._handle_task_escalation,
+            # 最后一步完成后：由执行循环做终态合成与记录（引擎对已全完成的
+            # 任务为零执行）；失败则由 finalizer 做终态清理。
+            finalize_completed=lambda job: self._execution_loop.run(job.job_id),
+            finalize_failed=self._finalizer.finalize,
+        )
         self._control = JobControlService(
             repository=self._store,
             approval=self._approval,
-            temporal_backend=self._manifest_backend,
             static_backend=self._static_backend,
             logical_read_backend=self._logical_read_backend,
             logical_effects_backend=self._logical_effects_backend,
@@ -412,9 +412,19 @@ class AgentOrchestrator:
         llm_api_key: str | None = None,
         clarification_answer: str | None = None,
         office_docs: list[dict] | None = None,
+        workspace_id: str | None = None,
         user_role: str = "user",
+        execution_preference: str = "use_workspace_policy",
     ) -> Job:
         """规划任务树并启动执行（Temporal 优先），立即返回 Job."""
+        if scene == "office" and not workspace_id and conversation_id:
+            try:
+                from app.services.workspaces import workspace_for_conversation
+
+                bound = workspace_for_conversation(user_id, conversation_id)
+                workspace_id = str((bound or {}).get("workspace_id") or "") or None
+            except (LookupError, ValueError, OSError):
+                workspace_id = None
         submission_material = {
             "request": request,
             "scene": scene,
@@ -424,7 +434,9 @@ class AgentOrchestrator:
             "office_docs": sorted(
                 str(d.get("doc_id")) for d in (office_docs or []) if d.get("doc_id")
             ),
+            "workspace_id": str(workspace_id or ""),
             "clarification_answer": clarification_answer,
+            "execution_preference": str(execution_preference or ""),
         }
         submission_key = hashlib.sha256(
             json.dumps(submission_material, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -445,12 +457,19 @@ class AgentOrchestrator:
                     llm_api_key=llm_api_key,
                     clarification_answer=clarification_answer,
                     office_docs=office_docs,
+                    workspace_id=workspace_id,
                     user_role=user_role,
+                    execution_preference=execution_preference,
                     submission_key=submission_key,
                     admission_token=admission_token,
                 ),
             )
         except Exception as exc:
+            # Admission is a public control-flow outcome, not a failed job.
+            # API/SSE callers must receive the existing 429 contract instead
+            # of a synthetic terminal snapshot that silently frees capacity.
+            if isinstance(exc, (ActiveConversationJobError, UserJobLimitError, AgentBackpressureError)):
+                raise
             # 规划/物化发生在 Job 创建前，统一生成可查询的失败快照，避免
             # 对话接口因内部异常直接返回 500。
             from app.core.error_mapping import map_task_error
@@ -468,6 +487,84 @@ class AgentOrchestrator:
             await self._store.create_job(failed)
             return failed
 
+    async def preview_plan(
+        self,
+        user_id: str,
+        request: str,
+        scene: str = "office",
+        conversation_id: str | None = None,
+        project_id: str | None = None,
+        project_ids: list[str] | None = None,
+        llm_api_key: str | None = None,
+        clarification_answer: str | None = None,
+        office_docs: list[dict] | None = None,
+        workspace_id: str | None = None,
+        user_role: str = "user",
+    ) -> tuple[object, dict]:
+        """Build and compile an office plan without creating or scheduling a Job.
+
+        This is intentionally a control-plane operation: it resolves the same
+        authorized context, model snapshot, capability candidates and compiler
+        feedback loop as submission, but never acquires admission, writes job
+        state, creates an effect intent, or hands a node to an executor.
+        """
+        if scene == "office" and not workspace_id and conversation_id:
+            try:
+                from app.services.workspaces import workspace_for_conversation
+
+                bound = workspace_for_conversation(user_id, conversation_id)
+                workspace_id = str((bound or {}).get("workspace_id") or "") or None
+            except (LookupError, ValueError, OSError):
+                workspace_id = None
+        prepared = await self._submission_context.prepare(
+            user_id=user_id,
+            request=request,
+            scene=scene,
+            conversation_id=conversation_id,
+            project_id=project_id,
+            project_ids=project_ids,
+            request_api_key=llm_api_key,
+            clarification_answer=clarification_answer,
+            office_docs=office_docs,
+            workspace_id=workspace_id,
+        )
+        routing_model = prepared.effective_llm.public_dict()
+        if scene == "office":
+            selection = await self._office_plan_selection.select(
+                user_id=user_id,
+                request=request,
+                user_role=user_role,
+                project_id=project_id,
+                project_ids=project_ids,
+                clarification_answer=clarification_answer,
+                office_docs=prepared.office_docs,
+                prior_summaries=prepared.prior_summaries,
+                planning_context=prepared.planning_context,
+                routing_model=routing_model,
+            )
+            tree, routing = selection.tree, selection.routing
+        else:
+            tree = await self._plan_with_context(prepared.planning_context)
+            routing = {"llm": routing_model}
+
+        self._plan_compilation.normalize_for_submission(
+            tree.nodes,
+            request,
+            preserve_dependencies=True,
+            complexity_level=str(routing.get("level") or ""),
+        )
+        if scene == "office" and tree.nodes and not tree.error:
+            tree = await self._plan_compilation.compile_with_feedback(
+                tree,
+                routing=routing,
+                user_role=user_role,
+                context=prepared.planning_context,
+            )
+        routing["preview"] = True
+        routing["workspace_id"] = str(workspace_id or "") or None
+        routing["input_ref_count"] = len(prepared.office_docs)
+        return tree, routing
+
     async def _submit_job_unlocked(
         self,
         *,
@@ -480,9 +577,11 @@ class AgentOrchestrator:
         llm_api_key: str | None,
         clarification_answer: str | None,
         office_docs: list[dict] | None,
+        workspace_id: str | None,
         user_role: str,
         submission_key: str,
         admission_token: str,
+        execution_preference: str = "use_workspace_policy",
     ) -> Job:
         """Delegate one admitted submission to the focused transaction service."""
         return await self._operations.submit(
@@ -495,14 +594,12 @@ class AgentOrchestrator:
             llm_api_key=llm_api_key,
             clarification_answer=clarification_answer,
             office_docs=office_docs,
+            workspace_id=workspace_id,
             user_role=user_role,
+            execution_preference=execution_preference,
             submission_key=submission_key,
             admission_token=admission_token,
         )
-
-    @staticmethod
-    def _can_run_manifest_temporal(job: Job) -> bool:
-        return RuntimeGateway.can_run_manifest(job)
 
     @staticmethod
     def _can_run_static_temporal(job: Job) -> bool:
@@ -510,13 +607,6 @@ class AgentOrchestrator:
 
     async def _submit_temporal(self, job: Job, llm_api_key: str | None, llm_config: dict | None = None) -> None:
         await self._runtime.submit_static(job, llm_api_key, llm_config)
-
-    async def _submit_manifest_temporal(self, job: Job, llm_api_key: str | None, llm_config: dict | None = None) -> None:
-        await self._runtime.submit_manifest(job, llm_api_key, llm_config)
-
-    @staticmethod
-    def _is_manifest_temporal_job(job: Job | None) -> bool:
-        return RuntimeGateway.is_manifest_job(job)
 
     async def fork_job(
         self,
@@ -557,11 +647,6 @@ class AgentOrchestrator:
             "模型连接异常，办公任务已停止。请检查模型连接、API Key、账户余额或供应商状态后重试。",
         )
         return True
-
-    async def _continue_manifest_job(self, job: Job) -> bool:
-        """Commit a manifest batch through the dedicated continuation service."""
-        return await self._manifest_continuation.continue_job(job)
-
 
     async def _continue_logical_plan(self, job: Job) -> bool:
         """Commit a single ordinary-DAG frontier and materialize the next one."""
@@ -680,6 +765,29 @@ class AgentOrchestrator:
 
     async def resume_job(self, job_id: str) -> Job | None:
         return await self._operations.resume(job_id)
+
+    async def stream_run_next(
+        self,
+        *,
+        job_id: str,
+        expected_step_id: str = "",
+        plan_revision: int | None = None,
+        idempotency_key: str = "",
+        workspace_bound: bool = True,
+    ):
+        """step_confirm 计划优先任务：执行“下一步”并产出 SSE 事件流。
+
+        事件类型：step_started / delta / step_completed(+waiting_next 载荷) /
+        waiting_approval / task_completed / task_failed / error / view。
+        """
+        async for event in self._step_run.run_next_stream(
+            job_id=job_id,
+            expected_step_id=expected_step_id,
+            plan_revision=plan_revision,
+            idempotency_key=idempotency_key,
+            workspace_bound=workspace_bound,
+        ):
+            yield event
 
     async def append_plan_patch(self, job_id: str, user_id: str, patch) -> PlanPatchAppendResult:
         """持久化受限补图，并在需要时恢复等待中的 Legacy 执行器。"""

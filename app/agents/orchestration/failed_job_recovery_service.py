@@ -40,8 +40,6 @@ class FailedJobRecoveryService:
 
     async def maybe_recover(self, job: Job, llm_api_key: str | None) -> bool:
         """Apply the stable recovery policy and mount one replacement if allowed."""
-        if isinstance(job.routing, dict) and isinstance(job.routing.get("manifest"), dict):
-            return False
         if isinstance(job.routing, dict) and isinstance(job.routing.get("logical_plan"), dict):
             return await self._replan_logical_plan(job, llm_api_key)
         if self._terminal_model_failure(job):

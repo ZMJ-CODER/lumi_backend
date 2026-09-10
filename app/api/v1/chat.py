@@ -8,6 +8,7 @@
 
 import asyncio
 import json
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, Request
@@ -106,6 +107,13 @@ async def chat_stream(
         started = False
         done_emitted = False
         full_text = ""
+        acceptance_log = bool(getattr(settings, "ACCEPTANCE_SSE_LOG", False))
+        acceptance_seq = 0
+        acceptance_started_at = time.perf_counter()
+        if acceptance_log:
+            from app.services.policy_acceptance import log_sse_start
+
+            log_sse_start(conversation_id=conversation_id, content=req.content, scene=req.scene)
         try:
             lock = await _acquire_conv_lock(conversation_id)
             started = True
@@ -157,6 +165,16 @@ async def chat_stream(
                     full_text += evt["content"]
                 if evt["type"] == "done":
                     result = evt
+                if acceptance_log:
+                    from app.services.policy_acceptance import log_sse_event
+
+                    acceptance_seq += 1
+                    log_sse_event(
+                        conversation_id=conversation_id,
+                        sequence=acceptance_seq,
+                        elapsed_ms=int((time.perf_counter() - acceptance_started_at) * 1000),
+                        event=evt,
+                    )
                 yield _sse(evt)
                 if evt["type"] == "done":
                     # Anything after a terminal SSE event is best-effort

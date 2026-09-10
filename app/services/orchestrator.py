@@ -1,4 +1,4 @@
-﻿"""多智能体编排服务 —— 会话上下文管理、记忆注入、智能体路由.
+"""多智能体编排服务 —— 会话上下文管理、记忆注入、智能体路由.
 
 核心职责:
   1. 维护 Redis 中的短期对话上下文（最近 N 轮）
@@ -1109,6 +1109,55 @@ class Orchestrator:
 
             trace = new_trace(enabled=True)
 
+        # ── 修订版任务画像 / Router v2（灰度 TASK_ROUTER_V2_ENABLED）──
+        router_meta: dict | None = None
+        router_mode = ""
+        router_blocked_reason = ""
+        if getattr(settings, "TASK_ROUTER_V2_ENABLED", False):
+            try:
+                from app.services.task_assessor import AssessmentContext
+                from app.services.task_router_adapter import plan_and_route
+
+                routed = await plan_and_route(
+                    request=content,
+                    context=AssessmentContext(
+                        request=content,
+                        has_attachments=bool(attachments),
+                        has_office_docs=bool(office_docs),
+                        workspace_id=str(workspace_id or ""),
+                        workspace_bound=bool(workspace_id),
+                        has_conversation_memory=bool(conversation_id),
+                        web_search_enabled=bool(web_search_enabled),
+                    ),
+                    user_id=user_id,
+                    llm_api_key=llm_api_key,
+                    use_llm=bool(getattr(settings, "TASK_ASSESSOR_USE_LLM", False)),
+                )
+                router_meta = routed.meta()
+                router_mode = str(router_meta.get("route_mode") or "")
+                if routed.blocked:
+                    router_blocked_reason = routed.blocked_reason
+            except Exception as exc:  # noqa: BLE001 - 路由评估失败回退旧路径
+                logger.warning("Router v2 评估失败，回退旧路径: {}", str(exc)[:200])
+
+        if router_blocked_reason:
+            yield {"type": "delta", "content": router_blocked_reason}
+            blocked_done = {
+                "type": "done",
+                "message_id": message_id,
+                "content": router_blocked_reason,
+                "citations": [],
+                "scene": scene,
+                "title": title or "",
+                "steps": [],
+            }
+            if router_meta is not None:
+                blocked_done["task_router"] = router_meta
+            if policy_public is not None:
+                blocked_done.update(policy_public)
+            yield blocked_done
+            return
+
         # 首条消息：标题生成与回复流并行
         title_task = None
         if prep["is_first"] and not title:
@@ -1134,7 +1183,16 @@ class Orchestrator:
                 user_id=user_id,
                 scene=scene,
             )
-            if not shape.requires_orchestration:
+            # m1_atomic_action（单次副作用）必须走原子动作/编排链路（暂存→Diff→
+            # 审批）。M2/M3 只在“非降级置信度”时强制编排：低置信度启发式画像
+            # 会把只读问答误判为复杂任务，强制编排会导致只出计划、没有正文。
+            router_confident = float(
+                ((router_meta or {}).get("task_profile") or {}).get("confidence") or 0.0
+            ) >= 0.55
+            force_orchestrate = router_mode == "m1_atomic_action" or (
+                router_mode in {"sequential_workflow", "dynamic_agent"} and router_confident
+            )
+            if not shape.requires_orchestration and not force_orchestrate:
                 prep["citations"].extend(office_context.citations)
                 # 只读项目问题：注入工作区目录/状态摘要（或降级边界说明），
                 # 并让可访问工作区走受限读取窗口（少量 read/search 调用）。
@@ -1146,9 +1204,25 @@ class Orchestrator:
                     direct_messages = append_office_context(
                         direct_messages, OfficeContext(text=workspace_summary), content
                     )
-                # v2 灰度：ATOMIC 只读快路径（受控读取 → 真实 chat_stream）。
-                # 默认关闭时保留旧安全路径（chat_with_tools 收敛 + 切段模拟）。
-                if bool(getattr(settings, "EXECUTION_POLICY_V2_ENABLED", False)):
+                # Router v2：direct_chat 不触发任何读取；m1_atomic_read 走
+                # 受控读取 → 真实 chat_stream；其余沿用既有 v2/旧安全路径。
+                if router_mode == "direct_chat":
+                    stream = self._stream_llm_auto(
+                        user_id,
+                        direct_messages,
+                        scene,
+                        image_uris,
+                        content,
+                        prep["citations"],
+                        conversation_id,
+                        llm_api_key,
+                        thinking_mode=thinking_mode,
+                        force_web_search=False,
+                        allow_tools=False,
+                    )
+                elif router_mode == "m1_atomic_read" or bool(
+                    getattr(settings, "EXECUTION_POLICY_V2_ENABLED", False)
+                ):
                     stream = self._stream_v2_atomic_read(
                         user_id=user_id,
                         user_role=user_role,
@@ -1205,7 +1279,7 @@ class Orchestrator:
                 thinking_mode=thinking_mode,
                 force_web_search=web_search_enabled,
             )
-        # v2 灰度：政策元数据作为首个 SSE 事件（前端可不依赖再次推断）。
+        # v2/灰度元数据：作为首批 SSE 事件（前端无需再次推断）。
         answer_stage_at = time.perf_counter()
         first_response_at: float | None = None
         first_delta_at: float | None = None
@@ -1213,15 +1287,21 @@ class Orchestrator:
         # 内部流（如 plan_first 的 plan_ready/done）若已发出终态 done，
         # 外层不再补发第二个 done，保证“每次回复只有一个 done”。
         done_emitted_inner = False
+        prefix_events: list[dict] = []
         if policy_public is not None:
+            prefix_events.append({"type": "task_policy", **policy_public})
+        if router_meta is not None:
+            prefix_events.append({"type": "task_router", **router_meta})
+        if prefix_events:
             base_stream = stream
 
-            async def stream_with_policy_meta():
-                yield {"type": "task_policy", **policy_public}
+            async def stream_with_meta():
+                for event in prefix_events:
+                    yield event
                 async for evt in base_stream:
                     yield evt
 
-            stream = stream_with_policy_meta()
+            stream = stream_with_meta()
         async for evt in stream:
             if evt["type"] != "task_policy" and first_response_at is None:
                 first_response_at = time.perf_counter()
@@ -1326,6 +1406,8 @@ class Orchestrator:
         if policy_public is not None:
             # done 携带最终完整内容与任务元数据（v2 契约）。
             done_event.update(policy_public)
+        if router_meta is not None:
+            done_event["task_router"] = router_meta
         if not done_emitted_inner:
             yield done_event
 
@@ -1828,15 +1910,44 @@ class Orchestrator:
         if workspace_intent:
             yield {"type": "process", "content": "正在读取工作区资料…"}
             started = time.perf_counter()
-            evidence, records = await self.read_workspace_context(
-                user_id=user_id,
-                user_role=user_role,
-                conversation_id=conversation_id,
-                content=content,
-                workspace_id=workspace_id,
-                workspace_summary=workspace_summary,
-                llm_api_key=llm_api_key,
-            )
+            # Router v2：通过 InformationResolver（适配器 + smart_slice）读取，
+            # 超长内容只截断/分段，绝不因 CONTEXT_TOO_LARGE 升级复杂度。
+            from lumi_orch.upgrade_policy import ContextFitStatus
+
+            if bool(getattr(settings, "TASK_ROUTER_V2_ENABLED", False)):
+                from app.services.information_resolver import InformationResolver
+
+                async def _workspace_reader(query: str) -> str:
+                    text, _recs = await self.read_workspace_context(
+                        user_id=user_id,
+                        user_role=user_role,
+                        conversation_id=conversation_id,
+                        content=query,
+                        workspace_id=workspace_id,
+                        workspace_summary=workspace_summary,
+                        llm_api_key=llm_api_key,
+                    )
+                    return text
+
+                resolved = await InformationResolver(
+                    workspace_reader=_workspace_reader,
+                ).resolve(["WORKSPACE"], content)
+                evidence, records = resolved.text, resolved.records
+                if resolved.status == ContextFitStatus.MULTI_STEP_REQUIRED:
+                    yield {
+                        "type": "process",
+                        "content": "资料较长，本轮先给出关键片段结论，可继续分段整理。",
+                    }
+            else:
+                evidence, records = await self.read_workspace_context(
+                    user_id=user_id,
+                    user_role=user_role,
+                    conversation_id=conversation_id,
+                    content=content,
+                    workspace_id=workspace_id,
+                    workspace_summary=workspace_summary,
+                    llm_api_key=llm_api_key,
+                )
             from app.core.observability import observe_workspace_read_duration
 
             observe_workspace_read_duration(time.perf_counter() - started)
@@ -1976,7 +2087,13 @@ class Orchestrator:
 
                     view = run_view(job)
                     yield {"type": "plan_ready", **plan_ready_payload(job_id=job.job_id, view=view)}
-                    yield done_payload(job_id=job.job_id, view=view)
+                    # 计划优先：done.content 回填计划文本，避免前端在没有计划气泡
+                    # 组件时渲染成空答复；真正执行由 run_next 驱动。
+                    yield done_payload(
+                        job_id=job.job_id,
+                        view=view,
+                        content=str(view.get("plan_text") or ""),
+                    )
                     return
                 plan_revision = int(routing.get("plan_revision") or 1)
                 if plan_revision > last_plan_revision:

@@ -35,11 +35,16 @@ from lumi_orch.runner import ChannelLimiter, resolve_node_timeout
 from lumi_orch import (
     execution_mode,
     execution_policy,
+    execution_router,
     protocol,
     run_view,
+    safety_policy,
     step_sequence,
+    task_assessment,
+    upgrade_policy,
 )
 from lumi_orch.task_profile import AbstractTaskNode, TaskProfile
+from lumi_orch.task_assessment import TaskProfile as TaskAssessmentProfile
 
 __all__ = [
     "DagValidationError",
@@ -96,6 +101,11 @@ __all__ = [
     "protocol",
     "run_view",
     "step_sequence",
+    "execution_router",
+    "safety_policy",
+    "task_assessment",
+    "upgrade_policy",
+    "TaskAssessmentProfile",
     "TaskProfile",
     "AbstractTaskNode",
 ]

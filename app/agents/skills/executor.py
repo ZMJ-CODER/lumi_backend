@@ -60,7 +60,7 @@ _OFFICE_REACT_ALLOWED_CATEGORIES = {
 _OFFICE_REACT_ALLOWED_SKILLS = {
     "web_fetch", "web_search", "Calculator", "DateTime", "SystemInfo",
     "OpenFile", "OpenApp", "OpenUrl", "ProcessList", "ProcessSignal",
-    "python_exec", "create_office_document", "query_knowledge", "web_search",
+    "python_exec", "create_office_document", "query_knowledge",
     "inspect_document_set", "read_document",
     "Read", "Edit", "Write", "Glob", "Grep", "FileStat", "Rename", "Delete",
     "Bash", "BashOutput", "KillShell",
@@ -1332,6 +1332,29 @@ async def execute_tool_call(
             retryable=False,
             metadata={"tool": name},
         )
+    # Router v2 灰度：工具级风控（SafetyGuard 两层策略的环境敏感强校验）。
+    if getattr(settings, "TASK_ROUTER_V2_ENABLED", False):
+        try:
+            from app.services.safety_adapter import enforce_tool_safety
+
+            allowed, safety_action, message, code = enforce_tool_safety(tool_call)
+            if not allowed:
+                return SkillResult(
+                    success=False,
+                    error=message,
+                    error_code=code,
+                    retryable=False,
+                    metadata={"tool": name, "safety_action": safety_action.value},
+                )
+        except Exception as exc:  # noqa: BLE001 - 风控适配异常按拒绝执行处理
+            logger.warning("工具级风控校验失败，按拒绝执行处理: {}", str(exc)[:160])
+            return SkillResult(
+                success=False,
+                error="安全策略校验失败，已阻止该工具调用。",
+                error_code="SAFETY_CHECK_FAILED",
+                retryable=False,
+                metadata={"tool": name},
+            )
     capability = await get_tool_capability(
         name, scene, user_role, user_id, include_internal=allow_internal
     )

@@ -5,20 +5,15 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="优化流式显示和执行策略">
+      <change afterPath="$PROJECT_DIR$/scripts/acceptance_sse.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/execution_mode.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/execution_mode.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/execution_policy.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/execution_policy.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/job_run_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/job_run_view.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/orchestration/job_submission_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/job_submission_service.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/step_resume.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/step_resume.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/step_run_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/step_run_service.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/step_sequence.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/step_sequence.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/task_profiles.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/task_profiles.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/agents.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/agents.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/model_output_protocol.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/model_output_protocol.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/office_skill_utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/office_skill_utils.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/executor.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/chat.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/chat.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/packages/execution/src/lumi_execution/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/execution/src/lumi_execution/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/policy_acceptance.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/policy_acceptance.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/packages/orchestration/src/lumi_orch/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/orchestration/src/lumi_orch/__init__.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -53,6 +48,9 @@
   &quot;fromUser&quot;: false
 }</component>
   <component name="ProjectId" id="3HIci9WR16IOMlNTtfH9qeAkEQz" />
+  <component name="ProjectLevelVcsManager">
+    <ConfirmationsSetting value="2" id="Add" />
+  </component>
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
@@ -104,14 +102,6 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1785559147484</updated>
-    </task>
-    <task id="LOCAL-00007" summary="rag新增关键词检索">
-      <option name="closed" value="true" />
-      <created>1786249084699</created>
-      <option name="number" value="00007" />
-      <option name="presentableId" value="LOCAL-00007" />
-      <option name="project" value="LOCAL" />
-      <updated>1786249084699</updated>
     </task>
     <task id="LOCAL-00008" summary="rag新增文档时效性混合检索，新增文档分块策略路由分发">
       <option name="closed" value="true" />
@@ -497,7 +487,15 @@
       <option name="project" value="LOCAL" />
       <updated>1789003142987</updated>
     </task>
-    <option name="localTasksCounter" value="56" />
+    <task id="LOCAL-00056" summary="优化流式显示和执行策略">
+      <option name="closed" value="true" />
+      <created>1789010562575</created>
+      <option name="number" value="00056" />
+      <option name="presentableId" value="LOCAL-00056" />
+      <option name="project" value="LOCAL" />
+      <updated>1789010562575</updated>
+    </task>
+    <option name="localTasksCounter" value="57" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">

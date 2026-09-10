@@ -15,6 +15,8 @@ import hashlib
 import json
 import uuid
 
+from loguru import logger
+
 from app.agents.orchestration.backends.legacy import LegacyDagBackend
 from app.agents.orchestration.backends.temporal_logical_effects import TemporalLogicalEffectsBackend
 from app.agents.orchestration.backends.temporal_logical_read import TemporalLogicalReadBackend
@@ -270,9 +272,9 @@ class AgentOrchestrator:
             suspend_capacity=self._finalizer.suspend_capacity,
             handle_escalation=self._handle_task_escalation,
             # 最后一步完成后：由执行循环做终态合成与记录（引擎对已全完成的
-            # 任务为零执行）；失败则由 finalizer 做终态清理。
+            # 任务为零执行）；失败则先记录升级建议，再由 finalizer 终态清理。
             finalize_completed=lambda job: self._execution_loop.run(job.job_id),
-            finalize_failed=self._finalizer.finalize,
+            finalize_failed=self._finalize_step_failed,
         )
         self._control = JobControlService(
             repository=self._store,
@@ -765,6 +767,26 @@ class AgentOrchestrator:
 
     async def resume_job(self, job_id: str) -> Job | None:
         return await self._operations.resume(job_id)
+
+    async def _finalize_step_failed(self, job: Job) -> None:
+        """单步执行失败：先按升级决策树记录建议，再做终态清理。"""
+        try:
+            from app.services.upgrade_adapter import suggest_upgrade
+
+            result = job.result if isinstance(job.result, dict) else {}
+            error_code = str(
+                result.get("error_code")
+                or next((node.error_code for node in job.nodes if node.error_code), "")
+                or ""
+            )
+            current = str((job.routing or {}).get("complexity") or "M1")
+            suggestion = suggest_upgrade(error_code, current=current)
+            if suggestion:
+                job.routing = {**(job.routing or {}), "upgrade": suggestion}
+                await self._store.save_job(job)
+        except Exception as exc:  # noqa: BLE001 - 建议记录失败不影响终态清理
+            logger.warning("记录升级建议失败 {}: {}", str(job.job_id)[:12], str(exc)[:160])
+        await self._finalizer.finalize(job)
 
     async def stream_run_next(
         self,

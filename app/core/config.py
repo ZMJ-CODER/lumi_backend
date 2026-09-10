@@ -446,6 +446,23 @@ class Settings(BaseSettings):
     # 关闭时保留旧 M0-M3/旧 DAG 语义；新策略异常回退旧安全路径。
     EXECUTION_POLICY_V2_ENABLED: bool = False
 
+    # ── 修订版任务画像 / Router v2（灰度）──
+    # 开启后：入口先经 TaskAssessor 生成严格 TaskProfile（complexity M0-M3 /
+    # side_effects / info_sources / output_target / execution_target / risk…），
+    # 由 ExecutionRouter 8 步决策分发到 direct_chat / m1_atomic_read /
+    # m1_atomic_action / sequential_workflow / dynamic_agent；工具级风控由
+    # SafetyGuard 两层策略执行。默认关闭以保持现行路径。
+    TASK_ROUTER_V2_ENABLED: bool = False
+
+    # 入口画像是否调用 LLM Assessor：默认关闭（用确定性启发式，零额外延迟，
+    # 不会在首个 token 前阻塞）；需要更准的画像时再开启。
+    TASK_ASSESSOR_USE_LLM: bool = False
+
+    # 验收辅助：把每次 /chat/stream 的 SSE 事件序列写入后端日志
+    # （acceptance_sse_start / acceptance_sse 行），前端正常操作即可留证，
+    # 无需 DevTools 抓包或手工提供 token/会话 ID。默认关闭。
+    ACCEPTANCE_SSE_LOG: bool = False
+
     # ── 文档类别与按类别半衰期（不同知识时效性不同）──
     RAG_DEFAULT_CATEGORY: str = "general"   # 默认类别
     RAG_CATEGORY_HALF_LIFE_DAYS: dict[str, int] = {

@@ -119,3 +119,72 @@ def _ms(start: float | None, end: float | None) -> int | None:
     if start is None or end is None:
         return None
     return max(0, int((end - start) * 1000))
+
+
+def sse_detail(event: dict) -> str:
+    """单条 SSE 事件的紧凑摘要（正文只记长度，不落全文）。"""
+    event_type = str(event.get("type") or "")
+    if event_type == "delta":
+        return f"chars={len(str(event.get('content') or ''))}"
+    if event_type == "process":
+        return f"content={str(event.get('content') or '')[:60]!r}"
+    if event_type == "task_router":
+        return (
+            f"route_mode={event.get('route_mode')} safety={event.get('safety_action')} "
+            f"complexity={((event.get('task_profile') or {}).get('complexity'))}"
+        )
+    if event_type == "task_policy":
+        return f"execution_policy={event.get('execution_policy')}"
+    if event_type in {"tool_started", "tool_completed"}:
+        return f"tool={event.get('tool')} status={event.get('status')}"
+    if event_type in {"step_started", "step_completed"}:
+        return f"step_id={event.get('step_id')} status={event.get('status')}"
+    if event_type == "waiting_next":
+        return f"next_step_id={event.get('next_step_id')}"
+    if event_type == "task_failed":
+        return f"error_code={event.get('error_code')}"
+    if event_type == "task_completed":
+        return f"final_chars={len(str(event.get('final_answer') or ''))}"
+    if event_type == "done":
+        return (
+            f"status={event.get('status')} content_chars={len(str(event.get('content') or ''))}"
+        )
+    if event_type == "job":
+        return f"job_id={event.get('job_id')}"
+    if event_type == "plan_ready":
+        return f"status={event.get('status')}"
+    if event_type == "error":
+        return f"code={event.get('code')}"
+    return ""
+
+
+def log_sse_start(*, conversation_id: str, content: str, scene: str) -> None:
+    """验收模式：请求开始标记（含问题前 80 字，便于对应用例）。"""
+    logger.info(
+        "acceptance_sse_start {}",
+        json.dumps(
+            {
+                "conversation_id": str(conversation_id or "")[:64],
+                "scene": str(scene or ""),
+                "request": str(content or "")[:80],
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+
+def log_sse_event(*, conversation_id: str, sequence: int, elapsed_ms: int, event: dict) -> None:
+    """验收模式：把一条 SSE 事件写入后端日志（默认关闭时调用方不会调用）。"""
+    logger.info(
+        "acceptance_sse {}",
+        json.dumps(
+            {
+                "conversation_id": str(conversation_id or "")[:64],
+                "seq": int(sequence),
+                "ms": int(elapsed_ms),
+                "type": str(event.get("type") or ""),
+                "detail": sse_detail(event),
+            },
+            ensure_ascii=False,
+        ),
+    )

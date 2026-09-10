@@ -252,6 +252,30 @@ class JobSubmissionService:
                         continue
                     routing[key] = value
 
+            # Router v2（TASK_ROUTER_V2_ENABLED）：严格 TaskProfile + 8 步路由 +
+            # 任务级风控结果写入 routing（随 Job 快照暴露；覆盖旧 task_profile）。
+            if getattr(_policy_settings, "TASK_ROUTER_V2_ENABLED", False):
+                from app.services.task_assessor import AssessmentContext
+                from app.services.task_router_adapter import plan_and_route
+
+                routed = await plan_and_route(
+                    request=request,
+                    context=AssessmentContext(
+                        request=request,
+                        has_attachments=False,
+                        has_office_docs=bool(office_docs),
+                        workspace_id=str(workspace_id or ""),
+                        workspace_bound=bool(workspace_id),
+                    ),
+                    use_llm=False,  # 提交阶段已有 Planner，避免二次模型调用
+                )
+                router_meta = routed.meta()
+                routing["task_profile"] = router_meta["task_profile"]
+                routing["route_mode"] = router_meta["route_mode"]
+                routing["route_reason_code"] = router_meta["route_reason_code"]
+                routing["safety_action"] = router_meta["safety_action"]
+                routing["policy_version"] = router_meta["policy_version"]
+
         materialized = await self._materialization.materialize(
             user_id=user_id,
             user_role=user_role,

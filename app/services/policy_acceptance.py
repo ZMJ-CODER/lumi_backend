@@ -47,13 +47,24 @@ def new_trace(*, enabled: bool) -> dict[str, Any] | None:
 
 
 def record_trace_event(trace: dict[str, Any] | None, event: dict) -> None:
-    """记录一个 SSE 事件的关键字段（不记录正文全文，只记字符量）。"""
+    """记录一个 SSE 事件的关键字段（不记录正文全文，只记字符量）。
+
+    连续 delta 在事件序列里折叠为一个 `delta×N`（只保留首个），避免长答复把
+    真正的关键事件（tool/done/error）淹没；计数仍逐条累计。
+    """
     if trace is None:
         return
     event_type = str(event.get("type") or "")
     now = time.time()
-    trace.setdefault("event_types", []).append(event_type)
-    if event_type not in {"task_policy", "done"} and trace.get("first_response_at") is None:
+    if event_type == "delta" and trace.get("last_type") == "delta":
+        trace["delta_run"] = int(trace.get("delta_run") or 1) + 1
+    else:
+        if trace.get("last_type") == "delta":
+            _fold_delta_run(trace)
+        trace.setdefault("event_types", []).append(event_type)
+        trace["delta_run"] = 1 if event_type == "delta" else 0
+    trace["last_type"] = event_type
+    if event_type not in {"task_policy", "task_router", "done"} and trace.get("first_response_at") is None:
         trace["first_response_at"] = now
     if event_type == "delta":
         trace["delta_count"] = int(trace.get("delta_count") or 0) + 1
@@ -74,6 +85,15 @@ def record_trace_event(trace: dict[str, Any] | None, event: dict) -> None:
         trace["agent_event_seen"] = True
 
 
+def _fold_delta_run(trace: dict[str, Any]) -> None:
+    """把序列末尾的裸 `delta` 折叠成 `delta×N`。"""
+    run = int(trace.get("delta_run") or 0)
+    types = trace.get("event_types") or []
+    if run > 1 and types and types[-1] == "delta":
+        types[-1] = f"delta×{run}"
+    trace["delta_run"] = 0
+
+
 def finish_trace(
     trace: dict[str, Any] | None,
     *,
@@ -84,14 +104,28 @@ def finish_trace(
     agent_hint: bool = False,
     workspace_read_seconds: float | None = None,
     workspace_tool_count: int = 0,
+    router_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """汇总并输出一条验收 JSON 日志（供联调抓取证据）。"""
     if trace is None:
         return None
+    _fold_delta_run(trace)
     first_delta = trace.get("first_delta_at")
+    router_profile = (router_meta or {}).get("task_profile") or {}
     summary: dict[str, Any] = {
         "user_id": str(user_id or "")[:40],
         "conversation_id": str(conversation_id or "")[:40],
+        # 严格 Router v2 画像（单一事实来源）
+        "route_mode": (router_meta or {}).get("route_mode"),
+        "safety_action": (router_meta or {}).get("safety_action"),
+        "assessor_source": (router_meta or {}).get("assessor_source"),
+        "router_profile": {
+            key: router_profile.get(key)
+            for key in ("complexity", "confidence", "side_effects", "info_sources",
+                        "output_target", "execution_target", "risk_level")
+            if key in router_profile
+        },
+        # 旧 v2 画像（仅当 EXECUTION_POLICY_V2_ENABLED 时存在）
         "task_profile": (policy_public or {}).get("task_profile"),
         "execution_policy": (policy_public or {}).get("execution_policy"),
         "policy_version": (policy_public or {}).get("policy_version"),
@@ -104,7 +138,11 @@ def finish_trace(
             trace.get("planner_event_seen") or planner_hint
         ),
         "agent_invoked": bool(trace.get("agent_event_seen") or agent_hint),
-        "route_latency_ms": _ms(trace.get("started_at"), trace.get("first_response_at")),
+        "route_latency_ms": (
+            int(trace["route_latency_ms_override"])
+            if trace.get("route_latency_ms_override") is not None
+            else _ms(trace.get("started_at"), trace.get("first_response_at"))
+        ),
         "first_delta_latency_ms": _ms(trace.get("started_at"), first_delta),
         "answer_stream_duration_ms": _ms(first_delta, trace.get("last_delta_at")),
         "workspace_read_duration_ms": _ms(0, workspace_read_seconds)

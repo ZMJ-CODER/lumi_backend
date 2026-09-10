@@ -1102,9 +1102,12 @@ class Orchestrator:
                     str((policy_public.get("task_profile") or {}).get("complexity") or "ATOMIC"),
                 )
         # v2 验收追踪：单请求 SSE 证据（开关开启时每用例一条 JSON 日志）。
+        # 与旧执行策略开关解耦：只要开了验收日志或 Router v2 就产出该行。
         trace = None
         job_stream_used = False
-        if getattr(settings, "EXECUTION_POLICY_V2_ENABLED", False):
+        if bool(getattr(settings, "EXECUTION_POLICY_V2_ENABLED", False)) or bool(
+            getattr(settings, "ACCEPTANCE_SSE_LOG", False)
+        ):
             from app.services.policy_acceptance import new_trace
 
             trace = new_trace(enabled=True)
@@ -1118,6 +1121,7 @@ class Orchestrator:
                 from app.services.task_assessor import AssessmentContext
                 from app.services.task_router_adapter import plan_and_route
 
+                _route_started = time.perf_counter()
                 routed = await plan_and_route(
                     request=content,
                     context=AssessmentContext(
@@ -1133,6 +1137,11 @@ class Orchestrator:
                     llm_api_key=llm_api_key,
                     use_llm=bool(getattr(settings, "TASK_ASSESSOR_USE_LLM", False)),
                 )
+                if trace is not None:
+                    # route_latency_ms 只衡量“画像+路由决策”耗时（不含模型 TTFT）。
+                    trace["route_latency_ms_override"] = int(
+                        (time.perf_counter() - _route_started) * 1000
+                    )
                 router_meta = routed.meta()
                 router_mode = str(router_meta.get("route_mode") or "")
                 if routed.blocked:
@@ -1141,7 +1150,12 @@ class Orchestrator:
                 logger.warning("Router v2 评估失败，回退旧路径: {}", str(exc)[:200])
 
         if router_blocked_reason:
-            yield {"type": "delta", "content": router_blocked_reason}
+            blocked_event = {"type": "delta", "content": router_blocked_reason}
+            if trace is not None:
+                from app.services.policy_acceptance import record_trace_event
+
+                record_trace_event(trace, blocked_event)
+            yield blocked_event
             blocked_done = {
                 "type": "done",
                 "message_id": message_id,
@@ -1155,6 +1169,17 @@ class Orchestrator:
                 blocked_done["task_router"] = router_meta
             if policy_public is not None:
                 blocked_done.update(policy_public)
+            if trace is not None:
+                from app.services.policy_acceptance import finish_trace, record_trace_event
+
+                record_trace_event(trace, blocked_done)
+                finish_trace(
+                    trace,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    policy_public=policy_public,
+                    router_meta=router_meta,
+                )
             yield blocked_done
             return
 
@@ -1349,18 +1374,6 @@ class Orchestrator:
                 observe_answer_stream_duration(
                     policy_label, complexity_label, last_delta_at - first_delta_at
                 )
-        # v2 验收追踪输出（每用例一条 JSON；关闭开关时 trace 为 None 直接跳过）。
-        if trace is not None:
-            from app.services.policy_acceptance import finish_trace
-
-            finish_trace(
-                trace,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                policy_public=policy_public,
-                planner_hint=job_stream_used,
-            )
-
         if title_task is not None:
             try:
                 # A title is cosmetic.  It starts concurrently with the main
@@ -1409,7 +1422,23 @@ class Orchestrator:
         if router_meta is not None:
             done_event["task_router"] = router_meta
         if not done_emitted_inner:
+            if trace is not None:
+                from app.services.policy_acceptance import record_trace_event
+
+                record_trace_event(trace, done_event)
             yield done_event
+        # v2 验收追踪输出：放在 done 之后结算，done_count 才是真实值。
+        if trace is not None:
+            from app.services.policy_acceptance import finish_trace
+
+            finish_trace(
+                trace,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                policy_public=policy_public,
+                planner_hint=job_stream_used,
+                router_meta=router_meta,
+            )
 
     @staticmethod
     def _job_step(node) -> dict:
@@ -1561,159 +1590,44 @@ class Orchestrator:
         workspace_summary: str,
         llm_api_key: str | None,
     ) -> tuple[str | None, list[dict]]:
-        """只读项目问题：注入摘要后，允许少量工作区读取工具调用再收敛回答。
+        """旧安全路径（非流式）：统一读取一次资料后由模型收敛回答。
 
-        仅在“工作区可访问 + 问题指向本地内容 + 读取域工具可用”时启用；
-        其它情况返回 ``(None, [])``，由调用方走原直接回答路径。绝不让写工具
-        进入此窗口，也不在窗口内提交/回滚/运行。
+        读取本身不再让模型选择 catalog/list/search/read 组合，
+        统一走 read_workspace_context → WorkspaceReader（内部定位与解析）。
         """
-        if not str(workspace_id or "").strip() or not str(content or "").strip():
-            return None, []
-        if "已注册且可访问" not in str(workspace_summary or ""):
-            return None, []
-        if not _workspace_content_question(content):
-            return None, []
-        from app.agents.skills.executor import (
-            execute_tool_call,
-            get_workspace_reading_capabilities,
+        evidence, records = await self.read_workspace_context(
+            user_id=user_id,
+            user_role=user_role,
+            conversation_id=conversation_id,
+            content=content,
+            workspace_id=workspace_id,
+            workspace_summary=workspace_summary,
+            llm_api_key=llm_api_key,
         )
-
-        caps = await get_workspace_reading_capabilities(user_id, "office", user_role, workspace_id)
-        if not caps:
-            return None, []
-        await self._ensure_llm_started()
-        definitions: list[dict] = []
-        names: set[str] = set()
-        for capability in caps:
-            name = str(capability.name or "")
-            names.add(name)
-            definitions.append({
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": str(capability.description or ""),
-                    "parameters": capability.parameters
-                    if isinstance(capability.parameters, dict)
-                    else {"type": "object", "properties": {}},
-                },
-            })
-        system = (
-            "你是只读工作区问答助手。允许调用给出的工作区读取工具"
-            "（workspace_catalog / workspace_list / workspace_read / workspace_search）查证目录或文件内容，"
-            "除此之外不要调用任何其它工具，也不要写入、运行或提交。"
-            "目录摘要是定位线索，不等于文件正文：只有真正读到的内容才能引用；"
-            "读不到、设备离线或根目录缺失时，明确说明无法访问，绝不编造文件内容。"
-            "回答应当基于实际读取结果并保持简明。"
-        )
+        if not evidence:
+            return None, records
         messages: list[dict] = [
-            {"role": "system", "content": system + "\n\n[当前授权工作区]\n" + str(workspace_summary or "")},
+            {
+                "role": "system",
+                "content": (
+                    "你是只读工作区问答助手。下面是系统受控读取到的工作区资料正文，"
+                    "请仅依据这些内容回答用户问题；资料不足时明确说明，不要编造，"
+                    "不要输出任何工具协议或标签。"
+                ),
+            },
             {"role": "user", "content": str(content or "")},
+            {"role": "user", "content": "[工作区资料正文]\n" + evidence},
         ]
-        from app.services.workspace_context import (
-            WORKSPACE_DEVICE_OFFLINE,
-            WORKSPACE_NOT_REGISTERED,
-            WORKSPACE_READ_FAILED,
-            WORKSPACE_ROOT_MISSING,
-        )
-
-        degrade_codes = {
-            WORKSPACE_DEVICE_OFFLINE, WORKSPACE_NOT_REGISTERED,
-            WORKSPACE_ROOT_MISSING, WORKSPACE_READ_FAILED,
-            "MCP_UNAVAILABLE", "MCP_TIMEOUT", "WORKSPACE_DIFF_FAILED",
-        }
-        max_calls = max(1, int(getattr(settings, "WORKSPACE_READ_MAX_CALLS", 4)))
-        records: list[dict] = []
-        used = 0
-        last_tool_text = ""
-        while True:
-            tool_text, calls = await self._llm.chat_with_tools(
-                messages, definitions, scene="office", api_key=llm_api_key,
-                usage_user_id=user_id, usage_category=CATEGORY_SKILL,
-            )
-            if not calls:
-                final = str(tool_text or "") or last_tool_text
-                return final.strip() or None, records
-            call = calls[0]
-            function = call.get("function") or {}
-            requested_name = str(function.get("name") or "")
-            name = _resolve_workspace_tool_name(requested_name, names)
-            if not name:
-                final = str(tool_text or "") or last_tool_text
-                return final.strip() or None, records
-            # Keep the assistant history internally consistent with the
-            # qualified capability schema.  Some providers emit the bare
-            # DSML name; feeding that bare name back in the next turn can make
-            # the provider repeat the same call instead of consuming the tool
-            # result.
-            if requested_name != name:
-                call = dict(call)
-                call_function = dict(function)
-                call_function["name"] = name
-                call["function"] = call_function
-            raw_args = function.get("arguments") or {}
-            if isinstance(raw_args, str):
-                try:
-                    raw_args = json.loads(raw_args or "{}")
-                except (TypeError, ValueError):
-                    raw_args = {}
-            if not isinstance(raw_args, dict):
-                raw_args = {}
-            used += 1
-            records.append({"tool": name})
-            result = await execute_tool_call(
-                {
-                    "id": f"ws-read-{used}",
-                    "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(raw_args, ensure_ascii=False)},
-                },
-                user_id, "office", conversation_id,
-                user_role=user_role,
-                user_message=str(content or ""),
-                llm_api_key=llm_api_key,
-                office_doc_ids=(),
-                authorized_workspace_id=str(workspace_id),
-                allowed_tools=set(names),
-            )
-            last_tool_text = str(
-                (getattr(result, "output", "") or getattr(result, "error", "") or "") or ""
-            )
-            assistant_message = {
-                "role": "assistant",
-                "content": (str(tool_text or "") or None),
-                "tool_calls": [call],
-            }
-            if call.get("reasoning_content") is not None:
-                assistant_message["reasoning_content"] = call.get("reasoning_content")
-            messages.append(assistant_message)
-            messages.append({
-                "role": "tool",
-                "tool_call_id": str(call.get("id") or f"ws-read-{used}"),
-                "content": json.dumps({
-                    "status": "ok" if getattr(result, "success", False) else "error",
-                    "error_code": getattr(result, "error_code", "") or "",
-                    "output": last_tool_text[:8000],
-                }, ensure_ascii=False),
-            })
-            if not getattr(result, "success", False) and str(getattr(result, "error_code", "") or "") in degrade_codes:
-                break
-            if used >= max_calls:
-                break
         try:
-            if not messages or messages[-1].get("role") != "user":
-                messages.append({
-                    "role": "user",
-                    "content": "请仅基于上述读取结果给出最终回答，不要再调用工具；若内容不足请明确说明。",
-                })
             final = await self._llm.chat(
                 messages, scene="office", api_key=llm_api_key,
                 usage_user_id=user_id, usage_category=CATEGORY_SKILL,
             )
-        except Exception:  # noqa: BLE001 - 总结失败时用最后一次读取输出兜底
-            final = last_tool_text
-        text = str(final or "") or last_tool_text
-        return text.strip() or None, records
-
-    # ── v2 ATOMIC 只读快路径（受控读取 → 真实 chat_stream）──────────
+        except Exception as exc:  # noqa: BLE001 - 收敛失败时直接交付读取正文
+            logger.warning("工作区读取后收敛回答失败，直接返回读取正文: {}", str(exc)[:160])
+            return evidence, records
+        text = str(final or "").strip() or evidence
+        return text, records
 
     async def read_workspace_context(
         self,
@@ -1726,136 +1640,51 @@ class Orchestrator:
         workspace_summary: str,
         llm_api_key: str | None,
     ) -> tuple[str, list[dict]]:
-        """受控读取资料（v2 ATOMIC 只读前半段）。
+        """统一读取：一个 workspace_read 内部完成定位 / 解析 / 分页。
 
-        只负责“读资料并返回”，不做任何最终回答：模型只被允许在少量确定性
-        读取轮次内选择 read/search/catalog 类工具；读取失败返回降级空资料。
+        模型不参与工具选择（不再暴露 list/search/catalog 组合），只需把结构化
+        正文注入上下文；读取失败返回可理解状态，绝不伪造内容。
         """
         if not str(workspace_id or "").strip() or not str(content or "").strip():
             return "", []
-        if "已注册且可访问" not in str(workspace_summary or ""):
-            return "", []
         if not _workspace_content_question(content):
             return "", []
-        from app.agents.skills.executor import (
-            execute_tool_call,
-            get_workspace_reading_capabilities,
-        )
+        from app.services.workspace_reader import WorkspaceReader, unified_payload_to_text
 
-        caps = await get_workspace_reading_capabilities(user_id, "office", user_role, workspace_id)
-        if not caps:
-            return "", []
-        await self._ensure_llm_started()
-        definitions: list[dict] = []
-        names: set[str] = set()
-        for capability in caps:
-            name = str(capability.name or "")
-            names.add(name)
-            definitions.append({
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": str(capability.description or ""),
-                    "parameters": capability.parameters
-                    if isinstance(capability.parameters, dict)
-                    else {"type": "object", "properties": {}},
-                },
-            })
-        system = (
-            "你是只读工作区资料读取器。允许调用给出的工作区读取工具"
-            "（workspace_catalog / workspace_list / workspace_read / workspace_search）定位并读取"
-            "与问题直接相关的文件正文；除此之外不要调用任何工具，也不要写入、运行或提交。"
-            "目录摘要是定位线索，不等于文件正文：只有真正读到的内容才算资料。"
-            "读不到、设备离线或根目录缺失时停止读取。"
+        reader = WorkspaceReader(
+            user_id=user_id,
+            user_role=user_role,
+            workspace_id=str(workspace_id),
+            conversation_id=conversation_id,
         )
-        messages: list[dict] = [
-            {"role": "system", "content": system + "\n\n[当前授权工作区]\n" + str(workspace_summary or "")},
-            {"role": "user", "content": str(content or "")},
-        ]
-        from app.services.workspace_context import (
-            WORKSPACE_DEVICE_OFFLINE,
-            WORKSPACE_NOT_REGISTERED,
-            WORKSPACE_READ_FAILED,
-            WORKSPACE_ROOT_MISSING,
+        payload = await reader.read(
+            content,
+            max_chars=max(2000, int(getattr(settings, "WORKSPACE_READ_MAX_CHARS", 12000))),
         )
-
-        degrade_codes = {
-            WORKSPACE_DEVICE_OFFLINE, WORKSPACE_NOT_REGISTERED,
-            WORKSPACE_ROOT_MISSING, WORKSPACE_READ_FAILED,
-            "MCP_UNAVAILABLE", "MCP_TIMEOUT", "WORKSPACE_DIFF_FAILED",
-        }
-        max_calls = max(1, int(getattr(settings, "WORKSPACE_READ_MAX_CALLS", 4)))
-        records: list[dict] = []
-        pieces: list[str] = []
-        used = 0
-        while used < max_calls:
-            _tool_text, calls = await self._llm.chat_with_tools(
-                messages, definitions, scene="office", api_key=llm_api_key,
-                usage_user_id=user_id, usage_category=CATEGORY_SKILL,
-            )
-            if not calls:
-                break
-            call = calls[0]
-            function = call.get("function") or {}
-            requested_name = str(function.get("name") or "")
-            name = _resolve_workspace_tool_name(requested_name, names)
-            if not name:
-                break
-            if requested_name != name:
-                call = dict(call)
-                call_function = dict(function)
-                call_function["name"] = name
-                call["function"] = call_function
-            raw_args = function.get("arguments") or {}
-            if isinstance(raw_args, str):
-                try:
-                    raw_args = json.loads(raw_args or "{}")
-                except (TypeError, ValueError):
-                    raw_args = {}
-            if not isinstance(raw_args, dict):
-                raw_args = {}
-            used += 1
-            records.append({"tool": name, "sequence": used})
-            result = await execute_tool_call(
-                {
-                    "id": f"ws-read-{used}",
-                    "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(raw_args, ensure_ascii=False)},
-                },
-                user_id, "office", conversation_id,
-                user_role=user_role,
-                user_message=str(content or ""),
-                llm_api_key=llm_api_key,
-                office_doc_ids=(),
-                authorized_workspace_id=str(workspace_id),
-                allowed_tools=set(names),
-            )
-            output = str(
-                (getattr(result, "output", "") or getattr(result, "error", "") or "") or ""
-            ).strip()
-            if getattr(result, "success", False) and output:
-                pieces.append(output)
-            assistant_message = {
-                "role": "assistant",
-                "content": (str(_tool_text or "") or None),
-                "tool_calls": [call],
+        text = unified_payload_to_text(payload)
+        records: list[dict] = [
+            {
+                "tool": "workspace_read",
+                "source": str(item.get("source") or ""),
+                "location": str(item.get("location") or ""),
+                "status": str(payload.get("status") or ""),
             }
-            if call.get("reasoning_content") is not None:
-                assistant_message["reasoning_content"] = call.get("reasoning_content")
-            messages.append(assistant_message)
-            messages.append({
-                "role": "tool",
-                "tool_call_id": str(call.get("id") or f"ws-read-{used}"),
-                "content": json.dumps({
-                    "status": "ok" if getattr(result, "success", False) else "error",
-                    "error_code": getattr(result, "error_code", "") or "",
-                    "output": output[:8000],
-                }, ensure_ascii=False),
+            for item in (payload.get("content") or [])
+            if isinstance(item, dict)
+        ]
+        if not records:
+            records.append({
+                "tool": "workspace_read",
+                "status": str(payload.get("status") or "failed"),
+                "summary": str(payload.get("summary") or ""),
+                "error_code": str((payload.get("meta") or {}).get("error_code") or ""),
+                **(
+                    {"cursor": str(payload.get("cursor") or "")}
+                    if payload.get("has_more")
+                    else {}
+                ),
             })
-            if not getattr(result, "success", False) and str(getattr(result, "error_code", "") or "") in degrade_codes:
-                break
-        evidence = "\n\n".join(pieces)[:20000]
-        return evidence, records
+        return text, records
 
     async def stream_answer_from_context(
         self,

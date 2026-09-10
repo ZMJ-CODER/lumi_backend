@@ -548,14 +548,11 @@ async def get_workspace_reading_capabilities(
     user_role: str,
     workspace_id: str,
 ) -> list[ToolCapability]:
-    """Build the read-only workspace capability window for one bound workspace.
+    """模型可见的唯一读取能力：``workspace_read``（统一读取域）。
 
-    These are the capabilities of the "通用工作区读取域": workspace_catalog /
-    workspace_list / workspace_read / workspace_search, discovered only from
-    the Electron connection that registered ``workspace_id``.  Unlike raw
-    desktop discovery, this set is workspace-scoped: an office Agent that is
-    authorized for the workspace may see and use them; the write/sandbox
-    tools stay behind the coding/workflow skills that declare them.
+    目录枚举、文件类型识别、解析器选择（PPTX/DOCX/PDF/XLSX/图片 OCR…）、
+    搜索与分页都在该工具内部完成，模型只填写 request/path/cursor/max_chars，
+    不需要知道文件格式、解析器或“先 list 再 search 再 read”。
     """
     from app.services.workspace_context import WORKSPACE_READ_TOOLS, resolve_workspace_desktop
 
@@ -567,43 +564,59 @@ async def get_workspace_reading_capabilities(
         return []
     from app.agents.mcp.manager import list_tools, server_is_healthy
 
+    try:
+        advertised = [item for item in await list_tools(server_name) if isinstance(item, dict)]
+    except Exception:  # noqa: BLE001 - 工具发现失败时视为离线
+        advertised = []
+    if not any(str(item.get("name") or "") in WORKSPACE_READ_TOOLS for item in advertised):
+        return []
     healthy = server_is_healthy(server_name)
-    capabilities: list[ToolCapability] = []
-    for remote in await list_tools(server_name):
-        raw_name = str(remote.get("name") or "").strip()
-        if not raw_name or raw_name not in WORKSPACE_READ_TOOLS:
-            continue
-        permission = str(remote.get("permission") or "user")
-        if not role_allows(permission, user_role):
-            continue
-        capabilities.append(ToolCapability(
-            name=f"mcp__{server_name}__{raw_name}",
-            version=str(remote.get("version") or "1.0.0"),
-            status="stable",
-            description=str(remote.get("description") or ""),
-            category="workspace",
-            domain="workspace",
-            parameters=remote.get("input_schema") if isinstance(remote.get("input_schema"), dict)
-            else {"type": "object", "properties": {}},
-            source="mcp",
-            environment="client",
-            server=server_name,
-            raw_name=raw_name,
-            permission=permission,
-            write_op=False,
-            requires_confirmation=False,
-            confirmation_mode="client",
-            idempotent=True,
-            resource_templates=list(remote.get("resource_templates") or []),
-            annotations={
-                "provider": "desktop_mcp",
-                "workspace_id": str(workspace_id).strip(),
-                "workspace_read_domain": True,
-                "availability_hint": "available" if healthy else "offline",
-                "trusted_local_provider": True,
+    permission = "user"
+    for item in advertised:
+        if str(item.get("name") or "") == "workspace_read":
+            permission = str(item.get("permission") or "user")
+            break
+    if not role_allows(permission, user_role):
+        return []
+    return [ToolCapability(
+        name=f"mcp__{server_name}__workspace_read",
+        version="1.0.0",
+        status="stable",
+        description=(
+            "读取当前工作区资料并返回结构化正文。可传自然语言 request（自动定位相关文件）"
+            "或 path（指定文件）；内容过长时用 cursor 继续读取。"
+        ),
+        category="workspace",
+        domain="workspace",
+        parameters={
+            "type": "object",
+            "properties": {
+                "request": {"type": "string", "description": "读取意图，例如：读取这份 PPT 并回答问题"},
+                "path": {"type": "string", "description": "可选，目标文件路径"},
+                "cursor": {"type": "string", "description": "可选，继续读取时使用"},
+                "max_chars": {"type": "integer", "description": "可选，单次返回的最大字符数"},
             },
-        ))
-    return capabilities
+            "required": ["request"],
+        },
+        source="mcp",
+        environment="client",
+        server=server_name,
+        raw_name="workspace_read",
+        permission=permission,
+        write_op=False,
+        requires_confirmation=False,
+        confirmation_mode="client",
+        idempotent=True,
+        resource_templates=[],
+        annotations={
+            "provider": "desktop_mcp",
+            "workspace_id": str(workspace_id).strip(),
+            "workspace_read_domain": True,
+            "unified_read": True,
+            "availability_hint": "available" if healthy else "offline",
+            "trusted_local_provider": True,
+        },
+    )]
 
 
 def _routing_terms(text: str) -> set[str]:
@@ -1444,6 +1457,9 @@ async def execute_tool_call(
         if tool_name.startswith(("workspace_", "sandbox_")):
             trusted_workspace = str(authorized_workspace_id or "").strip()
             requested_workspace = str(args.get("workspace_id") or "").strip()
+            if tool_name == "workspace_read":
+                # 统一读取工具的工作区由服务端注入；模型不传（也不应传）workspace_id。
+                requested_workspace = trusted_workspace
             if not trusted_workspace:
                 return SkillResult(
                     success=False,
@@ -1460,6 +1476,34 @@ async def execute_tool_call(
                     retryable=False,
                     metadata={"server": server_name, "tool": tool_name},
                 )
+        if tool_name == "workspace_read":
+            # 唯一读取能力：目录/定位/解析/分页全部在统一读取服务内部完成。
+            from app.services.workspace_reader import WorkspaceReader, json_dumps
+
+            reader = WorkspaceReader(
+                user_id=user_id,
+                user_role=user_role,
+                workspace_id=str(authorized_workspace_id or "").strip(),
+                conversation_id=conversation_id,
+            )
+            payload = await reader.read(
+                str(args.get("request") or user_message or ""),
+                path=str(args.get("path") or ""),
+                cursor=str(args.get("cursor") or ""),
+                max_chars=int(args.get("max_chars") or 12000),
+            )
+            read_status = str(payload.get("status") or "failed")
+            readable = read_status in {"success", "partial", "empty"}
+            return SkillResult(
+                status=read_status,
+                output=json_dumps(payload),
+                data=payload,
+                content_type="structured",
+                error=None if readable else str(payload.get("summary") or "读取失败"),
+                error_code=str((payload.get("meta") or {}).get("error_code") or "") or None,
+                retryable=False,
+                metadata={"tool": "workspace_read", "unified_read": True},
+            )
         validation_error = _validate_mcp_arguments(capability.parameters, args)
         if validation_error:
             return SkillResult(

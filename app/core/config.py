@@ -423,6 +423,8 @@ class Settings(BaseSettings):
     WORKSPACE_VERSION_PROBE_TTL_SECONDS: int = 10
     # 单次只读工作区问答允许的读取类工具调用上限（写入/运行走 Planner/Agent）。
     WORKSPACE_READ_MAX_CALLS: int = 4
+    # 统一 workspace_read 单次返回给模型的最大字符数（超出用 cursor 继续读取）。
+    WORKSPACE_READ_MAX_CHARS: int = 12000
 
     # ── 计划优先执行（step_confirm）──
     # 计划优先启用判定（execution_mode.plan_first_eligible）：

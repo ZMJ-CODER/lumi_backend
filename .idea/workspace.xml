@@ -4,17 +4,12 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="优化流式显示和执行策略">
-      <change afterPath="$PROJECT_DIR$/scripts/acceptance_sse.py" afterDir="false" />
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="复杂度路由设计一阶段">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/job_submission_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/job_submission_service.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/skills/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/executor.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/chat.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/chat.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/services/policy_acceptance.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/policy_acceptance.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/packages/orchestration/src/lumi_orch/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/orchestration/src/lumi_orch/__init__.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -102,14 +97,6 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1785559147484</updated>
-    </task>
-    <task id="LOCAL-00008" summary="rag新增文档时效性混合检索，新增文档分块策略路由分发">
-      <option name="closed" value="true" />
-      <created>1786253975764</created>
-      <option name="number" value="00008" />
-      <option name="presentableId" value="LOCAL-00008" />
-      <option name="project" value="LOCAL" />
-      <updated>1786253975764</updated>
     </task>
     <task id="LOCAL-00009" summary="几乎优化rag检索">
       <option name="closed" value="true" />
@@ -495,7 +482,15 @@
       <option name="project" value="LOCAL" />
       <updated>1789010562575</updated>
     </task>
-    <option name="localTasksCounter" value="57" />
+    <task id="LOCAL-00057" summary="复杂度路由设计一阶段">
+      <option name="closed" value="true" />
+      <created>1789024806466</created>
+      <option name="number" value="00057" />
+      <option name="presentableId" value="LOCAL-00057" />
+      <option name="project" value="LOCAL" />
+      <updated>1789024806466</updated>
+    </task>
+    <option name="localTasksCounter" value="58" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -522,7 +517,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="重构项目，屏蔽codeagent，新增officeagent系列，引入mcp实现skill调用管理" />
     <MESSAGE value="新增多方位监控和异常处理，解决一些问题" />
     <MESSAGE value="修复一些问题" />
     <MESSAGE value="优化一些性能和并发问题" />
@@ -547,6 +541,7 @@
     <MESSAGE value="缩减工具数量，新增skill，优化系统执行策略，优化一些已知问题" />
     <MESSAGE value="优化工具调用逻辑，优化路由设计和规划器逻辑" />
     <MESSAGE value="优化流式显示和执行策略" />
-    <option name="LAST_COMMIT_MESSAGE" value="优化流式显示和执行策略" />
+    <MESSAGE value="复杂度路由设计一阶段" />
+    <option name="LAST_COMMIT_MESSAGE" value="复杂度路由设计一阶段" />
   </component>
 </project>

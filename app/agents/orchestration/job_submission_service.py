@@ -153,7 +153,7 @@ class JobSubmissionService:
                 routing["workspace_grant"] = workspace_grant
             # 由工作区 approval_mode 推导 execution_mode（use_workspace_policy 语义），
             # 并记录本轮规范执行状态（计划优先时 step_confirm → waiting_run）。
-            from app.agents.orchestration.execution_mode import (
+            from lumi_orch.execution_mode import (
                 initial_execution_state,
                 plan_first_eligible,
                 resolve_execution_mode,
@@ -187,7 +187,7 @@ class JobSubmissionService:
             # 计划步骤元数据持久化：供前端 plan/步骤恢复与未来单步执行使用；
             # plan_revision/current_step_index 由补丁或运行器后续推进。
             if "steps" not in routing:
-                from app.agents.orchestration.job_run_view import steps_from_nodes
+                from lumi_orch.run_view import steps_from_nodes
 
                 routing["steps"] = steps_from_nodes(tree.nodes or [])
             routing.setdefault("plan_revision", 1)
@@ -229,7 +229,7 @@ class JobSubmissionService:
             from app.core.config import settings as _policy_settings
 
             if getattr(_policy_settings, "EXECUTION_POLICY_V2_ENABLED", False):
-                from app.agents.orchestration.execution_policy import (
+                from lumi_orch.execution_policy import (
                     TaskEntrySignals,
                     policy_meta_from_signals,
                     policy_routing_update,

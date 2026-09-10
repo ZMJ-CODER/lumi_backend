@@ -6,6 +6,16 @@ concerns are supplied through ports and adapters by the host application.
 """
 
 from lumi_execution.engine import ExecutionEngine, ExecutionOutcome
+from lumi_execution.step_contract import (
+    EXECUTION_JOB_STATES,
+    SSE_EVENTS,
+    StepCandidate,
+    StepOutcome,
+    StepRunState,
+    locate_next_step,
+)
+from lumi_execution.step_engine import StepRunEngine, StepRunPorts
+from lumi_execution.step_resume import ResumeCheckInput, ResumeCheckResult, validate_resume_request
 from lumi_execution.task_engine import TaskExecutionEngine
 from lumi_execution.task_results import JobExecutionResult, NodeExecutionResult
 from lumi_execution.artifacts import ArtifactRef, ArtifactStore
@@ -55,4 +65,16 @@ __all__ = [
     "NodeExecutionMetrics",
     "NullTelemetry",
     "TelemetryPort",
+    # ── 计划式单步执行（契约 + 驱动）──
+    "EXECUTION_JOB_STATES",
+    "SSE_EVENTS",
+    "StepCandidate",
+    "StepOutcome",
+    "StepRunState",
+    "locate_next_step",
+    "StepRunEngine",
+    "StepRunPorts",
+    "ResumeCheckInput",
+    "ResumeCheckResult",
+    "validate_resume_request",
 ]

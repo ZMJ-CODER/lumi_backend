@@ -7,47 +7,19 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Literal
-
-from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.agents.orchestration.models import TaskNode
 from lumi_orch.job_spec import NodeExecutionSpec
-
-
-Goal = Literal["ANSWER", "GENERATE", "RETRIEVE", "ANALYZE", "EXECUTE", "INTERACT"]
-Source = Literal[
-    "USER_INPUT", "ATTACHED_FILE", "WORKSPACE_READ", "LOCAL_KNOWLEDGE", "PUBLIC_WEB",
-    "EXTERNAL_API", "SYSTEM_STATE",
-]
-Complexity = Literal["ATOMIC", "SEQUENTIAL", "DYNAMIC"]
-Safety = Literal["READ_ONLY", "SAFE_WRITE", "RISKY_WRITE", "CRITICAL"]
-
-
-class TaskProfile(BaseModel):
-    """与业务词解耦的任务能力需求契约。"""
-
-    goal: Goal
-    required_sources: list[Source] = Field(default_factory=lambda: ["USER_INPUT"])
-    complexity: Complexity = "ATOMIC"
-    safety_level: Safety = "READ_ONLY"
-    has_side_effect: bool = False
-    needs_runtime_decision: bool = False
-    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
-    entities: dict = Field(default_factory=dict)
-
-
-class AbstractTaskNode(BaseModel):
-    id: str
-    name: str
-    profile: TaskProfile
-    depends_on: list[str] = Field(default_factory=list)
-    is_critical: bool = True
-    instruction: str = ""
-
-
-_SAFETY_ORDER = {"READ_ONLY": 1, "SAFE_WRITE": 2, "RISKY_WRITE": 3, "CRITICAL": 4}
+from lumi_orch.task_profile import (  # noqa: F401 - re-exported for existing importers
+    AbstractTaskNode,
+    Complexity,
+    Goal,
+    SAFETY_ORDER as _SAFETY_ORDER,
+    Safety,
+    Source,
+    TaskProfile,
+)
 
 
 def _is_general_text_profile(profile: TaskProfile) -> bool:

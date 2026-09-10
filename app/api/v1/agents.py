@@ -1,4 +1,4 @@
-"""多智能体协作 API —— 提交任务 / 查询状态 / 终止 / 暂停 / 恢复 / 单步执行."""
+﻿"""多智能体协作 API —— 提交任务 / 查询状态 / 终止 / 暂停 / 恢复 / 单步执行."""
 
 import json
 
@@ -161,7 +161,7 @@ async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     # 前端页面刷新后需恢复 计划/步骤/当前状态/按钮数据：在原有 Job 快照上
     # 附带 run_view（execution_mode/plan_revision/current_step_index/steps/
     # canonical status/dsml_pending/task_completed/task_failed）。
-    from app.agents.orchestration.job_run_view import run_view
+    from lumi_orch.run_view import run_view
 
     data = job.model_dump()
     data["run_view"] = run_view(job)
@@ -252,7 +252,7 @@ async def cancel_agent_job(
     job = await orchestrator.cancel_job(job_id, effective_keep)
     if not job:
         raise NotFoundException("任务不存在")
-    from app.agents.orchestration.job_run_view import run_view
+    from lumi_orch.run_view import run_view
 
     data = job.model_dump()
     data["run_view"] = run_view(job, status_override="cancelled")

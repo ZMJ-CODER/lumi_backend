@@ -70,7 +70,7 @@ async def office_llm(
     # full-width DSML and a ``tool_calls`` wrapper as plain text.  Passing those
     # chunks straight to office_stream makes the protocol visible in the user
     # bubble and appears as a blocked/non-streaming response.
-    from app.services.model_output_protocol import (
+    from lumi_orch.protocol import (
         ModelStreamProtocolParser,
         TextToolStripper,
         chunk_to_events,

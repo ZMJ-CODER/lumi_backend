@@ -32,6 +32,14 @@ from lumi_orch.resources import (
 from lumi_orch.replanning import ReplanDecision, decide_failed_job_replan, decide_logical_plan_replan
 from lumi_orch.validation import FailureCategory, ValidationOutcome
 from lumi_orch.runner import ChannelLimiter, resolve_node_timeout
+from lumi_orch import (
+    execution_mode,
+    execution_policy,
+    protocol,
+    run_view,
+    step_sequence,
+)
+from lumi_orch.task_profile import AbstractTaskNode, TaskProfile
 
 __all__ = [
     "DagValidationError",
@@ -82,4 +90,12 @@ __all__ = [
     "ChannelLimiter",
     "resolve_node_timeout",
     "validate_dag",
+    # ── 计划式执行状态机 / 步骤协议 / 画像策略 / 模型输出协议 ──
+    "execution_mode",
+    "execution_policy",
+    "protocol",
+    "run_view",
+    "step_sequence",
+    "TaskProfile",
+    "AbstractTaskNode",
 ]

@@ -1,4 +1,4 @@
-"""多智能体编排服务 —— 会话上下文管理、记忆注入、智能体路由.
+﻿"""多智能体编排服务 —— 会话上下文管理、记忆注入、智能体路由.
 
 核心职责:
   1. 维护 Redis 中的短期对话上下文（最近 N 轮）
@@ -1076,7 +1076,7 @@ class Orchestrator:
         policy_meta = None
         policy_public = None
         if getattr(settings, "EXECUTION_POLICY_V2_ENABLED", False):
-            from app.agents.orchestration.execution_policy import (
+            from lumi_orch.execution_policy import (
                 TaskEntrySignals,
                 policy_meta_from_signals,
                 policy_meta_public,
@@ -1968,7 +1968,7 @@ class Orchestrator:
                 # 不自动派发执行；SSE 在展示计划后收敛，后续由
                 # /agents/jobs/{id}/resume（action=run_next）逐步骤驱动。
                 if isinstance(routing, dict) and routing.get("execution_state") == "waiting_run":
-                    from app.agents.orchestration.job_run_view import (
+                    from lumi_orch.run_view import (
                         done_payload,
                         plan_ready_payload,
                         run_view,
@@ -2533,7 +2533,7 @@ class Orchestrator:
             tool/warning/process 不外发、不执行，也不触发第二次模型调用；
           - 结尾冲刷残留文本。
         """
-        from app.services.model_output_protocol import (
+        from lumi_orch.protocol import (
             ModelStreamProtocolParser,
             TextToolStripper,
             chunk_to_events,

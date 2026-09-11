@@ -9,10 +9,10 @@ from app.core.llm import LLMClient
 from app.services.usage import CATEGORY_SKILL
 
 
+# 读取阶段只给聚合入口 workspace_navigator（action=list/search/read）；内部原子
+# 读取名保留在 MCP 注册表与后端内部依赖中，不再进入模型 function calling schema。
 _TOOLS = (
-    "mcp__lumi_client__workspace_list",
-    "mcp__lumi_client__workspace_read",
-    "mcp__lumi_client__workspace_search",
+    "mcp__lumi_client__workspace_navigator",
     "mcp__lumi_client__workspace_stage_write",
     "mcp__lumi_client__workspace_stage_delete",
     "mcp__lumi_client__workspace_diff",

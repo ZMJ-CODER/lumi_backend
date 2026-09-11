@@ -123,6 +123,7 @@ async def _execute_node_activity_inner(payload: dict) -> dict:
         authorized_project_ids=tuple(
             str(value) for value in (payload.get("authorized_project_ids") or []) if str(value).strip()
         ),
+        workspace_id=str(payload.get("workspace_id") or "").strip(),
         on_output=on_output,
     )
 

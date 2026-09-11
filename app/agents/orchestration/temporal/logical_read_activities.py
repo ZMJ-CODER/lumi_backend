@@ -90,6 +90,8 @@ async def _try_replan_pure_read_tail(job, plan: dict, pointer: dict) -> tuple[bo
         llm_config=llm_config,
         office_docs=tuple(replan_context.get("office_docs") or ()),
         prior_summaries=evolution_context,
+        workspace_id=str(replan_context.get("workspace_id") or "") or None,
+        workspace_summary=str(replan_context.get("workspace_summary") or ""),
     )
     tree = await planner.plan_for_level(
         ComplexityLevel.M3,

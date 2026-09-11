@@ -871,6 +871,11 @@ class AgentDagWorkflow:
             "scene": self._job.get("scene", "office"),
             "user_request": self._job.get("request", ""),
             "authorized_project_ids": list((self._job.get("routing") or {}).get("authorized_project_ids") or []),
+            # 工作区绑定属于 Job 路由授权的一部分，必须随每个 Temporal
+            # Activity payload 传入。否则 Activity 创建的 WorkerContext
+            # workspace_id 为空，workspace_navigator 会在执行阶段被拒绝，
+            # 且后续 direct_llm 看不到读取证据。
+            "workspace_id": str((self._job.get("routing") or {}).get("workspace_id") or ""),
             "office_doc_ids": [
                 str(item.get("doc_id") or "")
                 for item in ((self._job.get("routing") or {}).get("input_refs") or [])

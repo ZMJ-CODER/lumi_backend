@@ -47,6 +47,9 @@ Tier = Literal["auto", "routine", "critical"]
 _TIER_AUTO_RAW = frozenset({
     "workspace_catalog", "workspace_list", "workspace_stat", "workspace_read",
     "workspace_search", "workspace_content_extract", "workspace_diff",
+    # 聚合读取入口：list/search/read 三动作都只读，不触碰真实文件。
+    # 敏感内容由 navigator 内部做检测 + 自动脱敏，读取本身不需要确认。
+    "workspace_navigator",
     "workspace_stage_write", "workspace_stage_delete",
     "sandbox_prepare", "sandbox_reset",
     "read", "glob", "grep", "filestat", "openfile", "read_document",

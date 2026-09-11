@@ -15,6 +15,7 @@ from loguru import logger
 
 from app.agents.roles.knowledge.retrieval import RetrievalAgent
 from app.agents.roles.knowledge.document_targeting import DocumentTargetingAgent
+from app.agents.roles.knowledge.workspace_coverage import WorkspaceCoverageAgent
 from app.agents.roles.atomic import AtomicStepAgent
 from app.agents.roles.direct_llm import DirectLlmAgent
 from app.agents.roles.collect_results import CollectResultsAgent
@@ -49,6 +50,7 @@ def register_all_agents() -> list[WorkerAgent]:
         WorkflowSkillAgent(),
         RetrievalAgent(),
         DocumentTargetingAgent(),
+        WorkspaceCoverageAgent(),
         OfficeTextAgent(),
         OfficeResearchAgent(),
         OfficeTodoAgent(),
@@ -81,6 +83,7 @@ __all__ = [
     "WorkflowSkillAgent",
     "RetrievalAgent",
     "DocumentTargetingAgent",
+    "WorkspaceCoverageAgent",
     "OfficeTextAgent",
     "OfficeResearchAgent",
     "OfficeTodoAgent",

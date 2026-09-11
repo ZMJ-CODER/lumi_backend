@@ -45,6 +45,60 @@ def _version(value: str) -> tuple[int, int, int]:
     return tuple(int(part) for part in match.groups()) if match else (0, 0, 0)
 
 
+# ── 聚合入口的依赖别名 ──────────────────────────────────────
+# 模型只声明聚合读取入口 workspace_navigator，但它由后端合成，Electron 的工具
+# 清单里并不存在同名工具。依赖解析必须把它当作“只要该桌面提供了任一内部原子读取
+# 能力即可用”，否则工作流会误报 MISSING_TOOL。
+# 原子名取自 workspace_context（唯一事实来源），不在这里维护第二份字面量。
+def _aggregated_sources() -> dict[str, tuple[str, ...]]:
+    from app.services.workspace_context import (
+        WORKSPACE_INTERNAL_READ_CAPABILITIES,
+        WORKSPACE_NAVIGATOR,
+    )
+
+    return {WORKSPACE_NAVIGATOR: tuple(sorted(WORKSPACE_INTERNAL_READ_CAPABILITIES))}
+
+
+AGGREGATED_DEPENDENCY_SOURCES: dict[str, tuple[str, ...]] = _aggregated_sources()
+
+
+def _qualified(server_name: str, raw_name: str) -> str:
+    return f"mcp__{server_name}__{raw_name}"
+
+
+def synthesize_aggregated_capabilities(
+    capabilities: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """由内部原子能力推导聚合入口能力（不修改输入）。"""
+    if not capabilities:
+        return {}
+    servers: set[str] = set()
+    for name in capabilities:
+        parts = str(name).split("__", 2)
+        if len(parts) == 3 and parts[0] == "mcp":
+            servers.add(parts[1])
+    derived: dict[str, dict[str, Any]] = {}
+    for server_name in servers:
+        for aggregated, sources in AGGREGATED_DEPENDENCY_SOURCES.items():
+            target = _qualified(server_name, aggregated)
+            if target in capabilities:
+                continue
+            for raw in sources:
+                source = capabilities.get(_qualified(server_name, raw))
+                if source is None:
+                    continue
+                minimum = _version(str(source.get("version") or "1.0.0"))
+                # 聚合入口的可用版本不低于它所复用的原子能力版本。
+                derived[target] = {
+                    "version": f"{minimum[0]}.{minimum[1]}.{minimum[2]}",
+                    "provider": source.get("provider") or "desktop_mcp",
+                    "environment": source.get("environment") or "client",
+                    "annotations": {**dict(source.get("annotations") or {}), "aggregated": True},
+                }
+                break
+    return derived
+
+
 def resolve_dependencies(
     manifest: dict[str, Any] | None,
     capabilities: dict[str, dict[str, Any]],

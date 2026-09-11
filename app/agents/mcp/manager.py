@@ -92,6 +92,20 @@ def _desktop_workspace_alias(skill_name: str, args: dict, *, task_id: str | None
     if not project_id:
         return None
     path = str(args.get("path") or args.get("file_path") or "").strip()
+    from app.services.workspace_context import WORKSPACE_NAVIGATOR
+
+    if skill_name == WORKSPACE_NAVIGATOR:
+        # 聚合读取入口的传输兼容别名：老客户端只实现了原子 workspace_read 时，
+        # read 动作仍可投递（list/search 需要客户端升级）。模型可见的正式工具名
+        # 始终是聚合入口，别名只在传输层使用。
+        action = str(args.get("action") or "").strip().casefold()
+        if action != "read" or not path:
+            return None
+        return "workspace_read", {
+            "workspace_id": project_id,
+            "path": path,
+            "max_chars": args.get("max_chars") or 200000,
+        }
     if skill_name == "Read" and path:
         return "workspace_read", {"workspace_id": project_id, "path": path, "max_chars": args.get("limit", 200000)}
     if skill_name == "Write" and path:

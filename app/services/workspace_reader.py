@@ -96,6 +96,16 @@ def _tokenize(text: str) -> set[str]:
     return {token.casefold() for token in tokens}
 
 
+def _payload_remote_cursor(payload: Any) -> str:
+    """取远端解析器自带的 cursor（信封或 meta 里）。"""
+    if not isinstance(payload, dict):
+        return ""
+    for source in (payload, payload.get("meta")):
+        if isinstance(source, dict) and source.get("cursor"):
+            return str(source["cursor"])
+    return ""
+
+
 def _is_garbage(text: str) -> bool:
     raw = str(text or "")
     if not raw.strip():
@@ -199,6 +209,8 @@ class WorkspaceReader:
         parser_used = ""
         workspace_version: Any = None
         failed_reason = ""
+        remote_cursor = ""
+        remote_has_more = False
         for target in targets:
             extracted = await self._extract(target, route)
             if extracted is None:
@@ -207,11 +219,65 @@ class WorkspaceReader:
             payload, parser_name = extracted
             parser_used = parser_used or parser_name
             workspace_version = workspace_version or self._workspace_version(payload)
+            # 远端解析器自己的分页状态：必须原样保留并随游标回传，否则续读会
+            # 重新请求首批（重复）或永远拿不到后续（丢尾部）。
+            if not remote_cursor:
+                remote_cursor = _payload_remote_cursor(payload)
+                remote_has_more = bool(
+                    payload.get("has_more") or (payload.get("meta") or {}).get("has_more")
+                )
             sections.extend(self._normalize(target, payload))
-        if not sections:
+        if not sections and not remote_has_more:
             return ReadOutcome(
                 status="failed",
                 summary=failed_reason or "未能从目标文件中提取到可读正文。",
+                meta={"format": None, "parser": parser_used or None, "encoding": None,
+                      "workspace_version": workspace_version},
+            ).to_dict()
+        # 远端解析器返回了 cursor（即使 JSON 里没有 sections）→ 分页事实由它决定：
+        # 本地已经发完的段照发，剩余部分用远端 cursor 继续拉取。
+        if remote_cursor:
+            page = self._paginate(
+                sections,
+                request=request,
+                targets=targets,
+                parser_used=parser_used,
+                workspace_version=workspace_version,
+                max_chars=max_chars,
+                remote_cursor=remote_cursor,
+            )
+            if not page.get("has_more") or not page.get("cursor"):
+                return page
+            # 还没读完：在这个后端游标里记住远端 cursor，续读时回传。
+            state = _CURSOR_STORE.get(page["cursor"])
+            if state is not None:
+                state["sections"] = [item.to_dict() for item in sections]
+                state["emitted_sections"] = len(sections)
+                state["emitted_offset"] = 0
+                state["remote_cursor"] = remote_cursor
+                state["targets"] = targets
+            return page
+
+        if not sections and remote_has_more:
+            # 远端说还有内容但没有正文：给一个可继续的游标，不要谎报"读完"。
+            cursor_id = uuid.uuid4().hex
+            _CURSOR_STORE[cursor_id] = {
+                "created_at": time.time(),
+                "sections": [],
+                "emitted_sections": 0,
+                "emitted_offset": 0,
+                "remote_cursor": remote_cursor,
+                "request": request,
+                "targets": targets,
+                "parser": parser_used,
+                "workspace_version": workspace_version,
+            }
+            return ReadOutcome(
+                status="partial",
+                summary="远端解析器还有后续内容，可继续读取。",
+                content=[],
+                has_more=True,
+                cursor=cursor_id,
                 meta={"format": None, "parser": parser_used or None, "encoding": None,
                       "workspace_version": workspace_version},
             ).to_dict()
@@ -223,6 +289,7 @@ class WorkspaceReader:
             parser_used=parser_used,
             workspace_version=workspace_version,
             max_chars=max_chars,
+            remote_cursor=remote_cursor,
         )
 
     # ── 内部：路由 / 工具发现 / 目标选择 ───────────────────────
@@ -345,19 +412,25 @@ class WorkspaceReader:
                 return candidate
         return ""
 
-    async def _extract(self, target: dict, route: dict) -> tuple[Any, str] | None:
+    async def _extract(
+        self, target: dict, route: dict, *, remote_cursor: str = ""
+    ) -> tuple[Any, str] | None:
         tool = self._pick_tool(_EXTRACT_TOOLS)
         if not tool:
             return None
         path = str(target.get("path") or "")
-        payload = await self._call(tool, {"workspace_id": self.workspace_id, "path": path})
+        call_args: dict = {"workspace_id": self.workspace_id, "path": path}
+        if remote_cursor:
+            # 远端解析器自带的分页 cursor：原样回传，让远端从上次位置继续。
+            call_args["cursor"] = remote_cursor
+        payload = await self._call(tool, call_args)
         if payload is None or str(payload.get("status") or "").lower() in {"failed", "cancelled"}:
             # 统一内容提取不可用时，降级为文本读取（仅对文本类文件有效）。
             if tool != "workspace_read" and "workspace_read" in {
                 str(item.get("name") or "") for item in getattr(self, "_advertised", [])
             }:
                 payload = await self._call(
-                    "workspace_read", {"workspace_id": self.workspace_id, "path": path}
+                    "workspace_read", dict(call_args)
                 )
                 tool = "workspace_read"
         if payload is None:
@@ -472,31 +545,61 @@ class WorkspaceReader:
         parser_used: str,
         workspace_version: Any,
         max_chars: int,
+        remote_cursor: str = "",
+        start_section: int = 0,
+        start_offset: int = 0,
     ) -> dict:
+        # 续读起点：只对起点那一段应用段内偏移。
+        default_start = max(0, int(start_section or 0))
         budget = max(500, int(max_chars or DEFAULT_MAX_CHARS))
         kept: list[UnifiedSection] = []
         used = 0
-        for section in sections:
+        # 起点：第 start_section 段的第 start_offset 个字符（续读时指向上次截断处）。
+        start_section = max(0, int(start_section or 0))
+        start_offset = max(0, int(start_offset or 0))
+        emitted_sections = start_section
+        emitted_offset = 0
+        for index in range(start_section, len(sections)):
             if used >= budget:
                 break
+            section = sections[index]
             text = section.text
+            if index == default_start and start_offset > 0:
+                text = text[start_offset:]
+                # 起点段必须先切片：否则截断时会用原始全量文本，
+                # 续读页会把上次已经发过的部分再发一遍（页面重叠）。
+                section = UnifiedSection(section.source, section.location, section.title, text)
             remaining = budget - used
             if len(text) > remaining:
-                section = UnifiedSection(
+                kept.append(UnifiedSection(
                     section.source, section.location, section.title,
                     text[:remaining] + "\n…（本段已截断，可用 cursor 继续）",
-                )
-            kept.append(section)
+                ))
+                # 这一页在这里结束：该段只发出了 remaining 个字符。
+                emitted_sections = index
+                emitted_offset = (start_offset if index == default_start else 0) + remaining
+                break
+            kept.append(UnifiedSection(section.source, section.location, section.title, text))
             used += len(section.text)
+            emitted_sections = index + 1
+            emitted_offset = 0
 
-        has_more = len(kept) < len(sections)
+        # 还有后续 section、某段只发了一部分、或远端解析器自己还有 cursor
+        # → 都需要给调用方一个可继续的后端游标。
+        has_more = emitted_sections < len(sections) or emitted_offset > 0 or bool(remote_cursor)
         cursor: str | None = None
         if has_more:
             cursor = uuid.uuid4().hex
             _CURSOR_STORE[cursor] = {
                 "created_at": time.time(),
+                # 存**原文**副本：续读时按 (段号, 段内偏移) 切片，
+                # 用打过"已截断"标记的文本切片会算错偏移、重复内容。
                 "sections": [item.to_dict() for item in sections],
-                "offset": len(kept),
+                "emitted_sections": emitted_sections,
+                "emitted_offset": emitted_offset,
+                # 远端解析器自己的 cursor 必须原样保留，续读时回传，
+                # 否则远端分页状态在后端重包装后丢失（重复读或读不到）。
+                "remote_cursor": remote_cursor,
                 "request": request,
                 "targets": targets,
                 "parser": parser_used,
@@ -532,31 +635,54 @@ class WorkspaceReader:
                 meta={"error_code": "CURSOR_EXPIRED"},
             ).to_dict()
         sections = [UnifiedSection(**item) for item in state.get("sections") or []]
-        offset = int(state.get("offset") or 0)
-        remaining = sections[offset:]
-        if not remaining:
+        emitted = int(state.get("emitted_sections") or 0)
+        emitted_offset = int(state.get("emitted_offset") or 0)
+        remote_cursor = str(state.get("remote_cursor") or "")
+        targets = list(state.get("targets") or [])
+        parser_used = str(state.get("parser") or "")
+        workspace_version = state.get("workspace_version")
+
+        if emitted >= len(sections) and emitted_offset <= 0 and not remote_cursor:
             return ReadOutcome(
                 status="success",
                 summary="已读取完全部内容。",
                 content=[],
                 has_more=False,
-                meta={"parser": state.get("parser"), "workspace_version": state.get("workspace_version")},
+                meta={"parser": parser_used, "workspace_version": workspace_version},
             ).to_dict()
+
+        # 远端还有后续：用远端 cursor 再拉一批，追加到已有段后面。
+        if remote_cursor and emitted >= len(sections):
+            try:
+                self._advertised = await self._list_tools(self._route()["server_name"])
+            except Exception:  # noqa: BLE001
+                self._advertised = []
+            target = targets[0] if targets else {"path": str(state.get("path") or "")}
+            extracted = await self._extract(target, self._route(), remote_cursor=remote_cursor)
+            if extracted is not None:
+                payload, parser_name = extracted
+                parser_used = parser_used or parser_name
+                workspace_version = workspace_version or self._workspace_version(payload)
+                extra = self._normalize(target, payload)
+                if extra:
+                    sections = [*sections, *extra]
+                new_remote = _payload_remote_cursor(payload) or remote_cursor
+                remote_cursor = new_remote if payload.get("has_more") else ""
+
         result = self._paginate(
-            remaining,
+            sections,
             request=str(state.get("request") or "继续读取"),
-            targets=list(state.get("targets") or []),
-            parser_used=str(state.get("parser") or ""),
-            workspace_version=state.get("workspace_version"),
+            targets=targets,
+            parser_used=parser_used,
+            workspace_version=workspace_version,
             max_chars=max_chars,
+            remote_cursor=remote_cursor,
+            start_section=emitted,
+            start_offset=emitted_offset,
         )
-        if result.get("has_more") and result.get("cursor"):
-            # 续读：把新游标指向剩余的剩余部分，保持同一会话可连续翻页。
-            inner = _CURSOR_STORE.pop(result["cursor"], None)
-            if inner is not None:
-                inner["offset"] = offset + int(inner.get("offset") or 0)
-                inner["sections"] = state.get("sections") or []
-                _CURSOR_STORE[result["cursor"]] = inner
+        # 续读不再重写游标：内层 _paginate 生成的新游标已经指向"这次剩下部分"的
+        # 正确位置（offset/partial_offset/远端 cursor 都在内层算好了）。之前这里
+        # 用旧 state 覆盖 inner 的 sections，会把远端 cursor 与段内偏移一起丢掉。
         _prune_cursors()
         return result
 

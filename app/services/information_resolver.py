@@ -50,6 +50,19 @@ def requires_cross_segment(query: str) -> bool:
     return bool(_CROSS_SEGMENT_HINT.search(str(query or "")))
 
 
+# 明确要求"整份/全文/通读"的意图：这类请求应该按页读到文件结束，而不是只给一页。
+_COMPLETE_READ_HINT = re.compile(
+    r"(整份|完整|全文|全部(页|内容|章节)?|通读|从头到尾|读到结尾|读到底|整个文档|整个文件"
+    r"|每一页|逐页|所有页|不要截断|别截断|read\s+(it\s+)?all|entire\s+(document|file)|full\s+text)",
+    re.IGNORECASE,
+)
+
+
+def requires_complete_read(query: str) -> bool:
+    """用户是否明确要求把文件读完（用于给 read 打 read_to_end 标记）。"""
+    return bool(_COMPLETE_READ_HINT.search(str(query or "")))
+
+
 def smart_slice(text: str, query: str, *, keep_chars: int) -> str:
     """关键词/标题定位优先，其次保留头尾，避免整段丢弃关键信息。"""
     raw = str(text or "")
@@ -170,5 +183,6 @@ __all__ = [
     "InformationResolver",
     "ResolvedContext",
     "requires_cross_segment",
+    "requires_complete_read",
     "smart_slice",
 ]

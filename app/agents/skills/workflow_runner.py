@@ -180,7 +180,7 @@ async def run_workflow_skill(
                         result = result.model_copy(update={"output": "\n\n".join(lines)[:12000]})
         return result
 
-    from app.agents.skills.dependencies import resolve_dependencies
+    from app.agents.skills.dependencies import resolve_dependencies, synthesize_aggregated_capabilities
     from app.agents.skills.executor import get_capabilities_for_scene, get_desktop_mcp_capabilities
 
     capability_rows = await get_capabilities_for_scene(
@@ -198,6 +198,10 @@ async def run_workflow_skill(
         }
         for item in capability_rows
     }
+    # 聚合读取入口由后端合成（Electron 只发布内部原子工具），否则依赖解析会把
+    # workspace_navigator 误判为 MISSING_TOOL。
+    for name, row in synthesize_aggregated_capabilities(capability_map).items():
+        capability_map.setdefault(name, row)
     dependency_report = resolve_dependencies(
         skill.effective_dependencies(), capability_map,
         execution_scope=str(getattr(skill, "execution_scope", "backend") or "backend"),

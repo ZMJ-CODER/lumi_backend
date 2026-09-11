@@ -1649,6 +1649,7 @@ class Orchestrator:
             return "", []
         if not _workspace_content_question(content):
             return "", []
+        from app.services.information_resolver import requires_complete_read
         from app.services.workspace_reader import WorkspaceReader, unified_payload_to_text
 
         reader = WorkspaceReader(
@@ -1657,24 +1658,48 @@ class Orchestrator:
             workspace_id=str(workspace_id),
             conversation_id=conversation_id,
         )
-        payload = await reader.read(
-            content,
-            max_chars=max(2000, int(getattr(settings, "WORKSPACE_READ_MAX_CHARS", 12000))),
-        )
-        text = unified_payload_to_text(payload)
+        page_chars = max(2000, int(getattr(settings, "WORKSPACE_READ_MAX_CHARS", 12000)))
+        complete_read = requires_complete_read(content)
+        max_pages = int(getattr(settings, "WORKSPACE_READ_MAX_PAGES_PER_REQUEST", 32)) if complete_read else 1
+
+        sections: list[dict] = []
+        cursor = ""
+        pages_read = 0
+        payload: dict = {}
+        while pages_read < max_pages:
+            payload = await reader.read(
+                content if pages_read == 0 else "继续读取",
+                cursor=cursor,
+                max_chars=page_chars,
+            )
+            pages_read += 1
+            for item in payload.get("content") or []:
+                if isinstance(item, dict):
+                    sections.append(item)
+            if not payload.get("has_more"):
+                break
+            cursor = str(payload.get("cursor") or "")
+            if not cursor:
+                break
+
+        read_complete = not bool(payload.get("has_more"))
+        merged = {**payload, "content": sections}
+        text = unified_payload_to_text(merged)
         records: list[dict] = [
             {
-                "tool": "workspace_read",
+                "tool": "workspace_navigator",
+                "action": "read",
                 "source": str(item.get("source") or ""),
                 "location": str(item.get("location") or ""),
                 "status": str(payload.get("status") or ""),
             }
-            for item in (payload.get("content") or [])
-            if isinstance(item, dict)
+            for item in sections
         ]
         if not records:
             records.append({
-                "tool": "workspace_read",
+                # 审计/SSE 记录模型实际看见的入口名，内部实现仍是 WorkspaceReader。
+                "tool": "workspace_navigator",
+                "action": "read",
                 "status": str(payload.get("status") or "failed"),
                 "summary": str(payload.get("summary") or ""),
                 "error_code": str((payload.get("meta") or {}).get("error_code") or ""),
@@ -1684,6 +1709,12 @@ class Orchestrator:
                     else {}
                 ),
             })
+        # 覆盖度事实：整份请求读完了吗？下游与审计据此判断能不能声称"全文"。
+        records[0]["read_complete"] = read_complete
+        records[0]["pages_read"] = pages_read
+        records[0]["complete_read_requested"] = complete_read
+        if payload.get("has_more"):
+            records[0]["cursor"] = str(payload.get("cursor") or "")
         return text, records
 
     async def stream_answer_from_context(

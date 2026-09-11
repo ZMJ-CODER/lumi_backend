@@ -16,12 +16,9 @@ from app.services.usage import CATEGORY_SKILL
 
 # 与 workspace_code_change 保持一致的前缀约定：正式桌面 MCP 能力名
 # mcp__{server}__{tool}；多设备部署时按工作区注册的 server 路由。
+# 读取阶段只声明聚合入口；目录/搜索/单文件读取都由它的 action 完成。
 _TOOLS = (
-    "mcp__lumi_client__workspace_catalog",
-    "mcp__lumi_client__workspace_list",
-    "mcp__lumi_client__workspace_stat",
-    "mcp__lumi_client__workspace_read",
-    "mcp__lumi_client__workspace_search",
+    "mcp__lumi_client__workspace_navigator",
     "mcp__lumi_client__workspace_stage_write",
     "mcp__lumi_client__workspace_stage_delete",
     "mcp__lumi_client__workspace_diff",

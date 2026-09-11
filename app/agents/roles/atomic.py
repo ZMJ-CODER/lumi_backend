@@ -183,9 +183,51 @@ class AtomicStepAgent(WorkerAgent):
                 "approval_fingerprint": str(result.meta.quality_hints.get("approval_fingerprint") or ""),
                 "execution": result.to_execution_envelope(),
             }
+        # 工作区读取是交给下游节点的**证据**，不是一句 UI 状态。旧的通用 2200 字符
+        # 展示预算会把长 PPT/DOCX 的尾部在 direct_llm 回答前就丢掉。普通工具保持紧凑
+        # 预算；工作区读取域（聚合入口 + 覆盖 Agent）使用配置的上下文窗口。
+        display_limit = 2200
+        from app.services.workspace_context import WORKSPACE_READ_TOOL_NAMES
+        from app.services.workspace_navigator import handoff_text
+
+        # 覆盖读取（workspace_coverage）同样产出工作区正文证据，必须一起豁免：
+        # 只放行 navigator+read 会让覆盖链路被 2200 字符截断，模型只拿到半段正文，
+        # 于是回答"尚未读取到文件正文"。
+        is_workspace_read = selected_tool in WORKSPACE_READ_TOOL_NAMES or selected_tool == "workspace_coverage"
+        if is_workspace_read:
+            from app.core.config import settings
+
+            display_limit = max(
+                display_limit,
+                int(getattr(settings, "WORKSPACE_READ_CONTEXT_MAX_CHARS", 120000)),
+            )
+        # 交接优先级：
+        #   1) 覆盖 Agent 这类**自己已渲染好正文**的执行体：直接透传 output
+        #      （它自己已按 MAX_EVIDENCE_CHARS / MAX_TOTAL_CHARS 控过预算）；
+        #   2) navigator 的统一信封：用 handoff_text 渲染成可读正文证据
+        #      （而不是把整包 JSON 塞给下游，让正文埋在 limits/parser 等噪音里）。
+        direct_evidence = ""
+        payload = result.data if isinstance(result.data, dict) else {}
+        if selected_tool == "workspace_coverage":
+            direct_evidence = str(getattr(result, "output", "") or "").strip()
+        if not direct_evidence and selected_tool in WORKSPACE_READ_TOOL_NAMES:
+            direct_evidence = handoff_text(payload, limit=display_limit)
+        if not direct_evidence and selected_tool == "workspace_coverage":
+            direct_evidence = handoff_text(payload, limit=display_limit)
+        if direct_evidence:
+            return attach_display_result(node, {
+                "success": True,
+                "content": direct_evidence[:display_limit],
+                "tool": selected_tool,
+                "attempt": node.retries + 1,
+                "method_chain": planned_tools,
+                "execution": result.to_execution_envelope(),
+                "step_title": node.name or str(node.params.get("instruction") or "")[:40],
+                "read_evidence": True,
+            })
         return attach_display_result(node, {
             "success": True,
-            "content": render_for_model(result, max_chars=2200).strip(),
+            "content": render_for_model(result, max_chars=display_limit).strip(),
             "tool": selected_tool,
             "attempt": node.retries + 1,
             "method_chain": planned_tools,

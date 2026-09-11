@@ -98,6 +98,8 @@ class RuntimeGateway:
                     "project_id": (job.routing or {}).get("project_id"),
                     "project_ids": (job.routing or {}).get("project_ids") or [],
                     "office_docs": (job.routing or {}).get("input_refs") or [],
+                    "workspace_id": (job.routing or {}).get("workspace_id") or "",
+                    "workspace_summary": (job.routing or {}).get("workspace_summary") or "",
                     "prior_summaries": "",
                     "routing": {
                         "level": (job.routing or {}).get("level", "m2"),
@@ -157,6 +159,8 @@ class RuntimeGateway:
                     "project_id": (job.routing or {}).get("project_id"),
                     "project_ids": (job.routing or {}).get("project_ids") or [],
                     "office_docs": (job.routing or {}).get("input_refs") or [],
+                    "workspace_id": (job.routing or {}).get("workspace_id") or "",
+                    "workspace_summary": (job.routing or {}).get("workspace_summary") or "",
                     "prior_summaries": "",
                 },
             )

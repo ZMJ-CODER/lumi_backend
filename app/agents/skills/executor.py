@@ -542,19 +542,29 @@ async def get_workspace_action_capabilities(
     return capabilities
 
 
-async def get_workspace_reading_capabilities(
+async def get_workspace_navigator_capability(
     user_id: str,
     scene: str,
     user_role: str,
     workspace_id: str,
 ) -> list[ToolCapability]:
-    """模型可见的唯一读取能力：``workspace_read``（统一读取域）。
+    """模型可见的**唯一**工作区读取能力：``workspace_navigator``（统一聚合入口）。
 
-    目录枚举、文件类型识别、解析器选择（PPTX/DOCX/PDF/XLSX/图片 OCR…）、
-    搜索与分页都在该工具内部完成，模型只填写 request/path/cursor/max_chars，
-    不需要知道文件格式、解析器或“先 list 再 search 再 read”。
+    目录枚举（list）、文件名/内容检索（search）、单文件原子读取（read）都由该入口
+    按 action 分发到后端处理器，再复用 Electron 现有原子工具与格式解析器。模型不需要
+    （也看不到）workspace_catalog / workspace_list / workspace_stat / workspace_read /
+    workspace_search / workspace_content_extract 这些内部名字，否则工具槽位会被同一
+    读取域的多个别名占满。
+
+    ``workspace_id`` 不由模型填写：执行时由 ``execute_tool_call`` 用服务端注入的
+    ``authorized_workspace_id`` 覆盖。
     """
-    from app.services.workspace_context import WORKSPACE_READ_TOOLS, resolve_workspace_desktop
+    from app.services.workspace_context import (
+        WORKSPACE_INTERNAL_READ_CAPABILITIES,
+        WORKSPACE_NAVIGATOR,
+        WORKSPACE_READ_TOOL_NAMES,
+        resolve_workspace_desktop,
+    )
 
     if not user_id or not str(workspace_id or "").strip():
         return []
@@ -568,40 +578,90 @@ async def get_workspace_reading_capabilities(
         advertised = [item for item in await list_tools(server_name) if isinstance(item, dict)]
     except Exception:  # noqa: BLE001 - 工具发现失败时视为离线
         advertised = []
-    if not any(str(item.get("name") or "") in WORKSPACE_READ_TOOLS for item in advertised):
+    if not any(str(item.get("name") or "") in WORKSPACE_READ_TOOL_NAMES for item in advertised):
         return []
     healthy = server_is_healthy(server_name)
     permission = "user"
     for item in advertised:
-        if str(item.get("name") or "") == "workspace_read":
+        if str(item.get("name") or "") in WORKSPACE_INTERNAL_READ_CAPABILITIES:
             permission = str(item.get("permission") or "user")
             break
     if not role_allows(permission, user_role):
         return []
     return [ToolCapability(
-        name=f"mcp__{server_name}__workspace_read",
+        name=f"mcp__{server_name}__{WORKSPACE_NAVIGATOR}",
         version="1.0.0",
         status="stable",
         description=(
-            "读取当前工作区资料并返回结构化正文。可传自然语言 request（自动定位相关文件）"
-            "或 path（指定文件）；内容过长时用 cursor 继续读取。"
+            "浏览、搜索并读取当前工作区的本地资料（唯一的读取入口）。"
+            "action=list 列出目录条目（不读正文，默认不返回隐藏项与 node_modules/构建/缓存）；"
+            "action=search 按关键词检索文件名或内容，匹配是 OR（任一关键词命中即返回，按相关度排序），"
+            "只返回命中位置与少量上下文；action=read 一次只读取一个文件并返回结构化正文，"
+            "内容过长时用 cursor 继续。读取目录请用 list，不要用 read。"
         ),
         category="workspace",
         domain="workspace",
         parameters={
             "type": "object",
             "properties": {
-                "request": {"type": "string", "description": "读取意图，例如：读取这份 PPT 并回答问题"},
-                "path": {"type": "string", "description": "可选，目标文件路径"},
-                "cursor": {"type": "string", "description": "可选，继续读取时使用"},
-                "max_chars": {"type": "integer", "description": "可选，单次返回的最大字符数"},
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "search", "read"],
+                    "description": "要执行的动作",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "工作区内的相对路径；list 省略=根目录，read 必填且必须是单个文件",
+                },
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "search 的检索词：关键词或短句。空格与 | * [ ( ^ $ . 等都按分隔符处理，"
+                        "任一关键词命中即返回（OR，按相关度排序），不是正则、不是严格 AND。"
+                    ),
+                },
+                "search_path": {"type": "string", "description": "search 的限定目录（可选）"},
+                "search_mode": {
+                    "type": "string",
+                    "enum": ["auto", "filename", "content"],
+                    "description": "search 模式，默认 auto（先文件名/路径再内容）",
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "list 的递归深度：1（默认，只列当前目录）到 4，超出被钳制到 4",
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "同一次 list/search/read 的后续分页游标，原样回传即可",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "read 每页返回的字符数（分页粒度，不是文件可读总量）",
+                },
+                "read_to_end": {
+                    "type": "boolean",
+                    "description": (
+                        "read 是否按页连续读取直到文件结束（默认 false=每次一页）。"
+                        "为 true 时会消费 cursor 直到读完或达到页数上限；达到上限仍返回 "
+                        "has_more=true 与 cursor，继续读取直到 has_more 为 false 才算读完整份。"
+                    ),
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "list/search 本页最大条目数（上限 200）",
+                },
+                "include_ignored": {
+                    "type": "boolean",
+                    "description": "list 是否返回被忽略条目（隐藏项与 node_modules/构建/缓存目录），默认 false",
+                },
             },
-            "required": ["request"],
+            "required": ["action"],
+            "additionalProperties": False,
         },
         source="mcp",
         environment="client",
         server=server_name,
-        raw_name="workspace_read",
+        raw_name=WORKSPACE_NAVIGATOR,
         permission=permission,
         write_op=False,
         requires_confirmation=False,
@@ -613,10 +673,16 @@ async def get_workspace_reading_capabilities(
             "workspace_id": str(workspace_id).strip(),
             "workspace_read_domain": True,
             "unified_read": True,
+            "navigator_actions": ["list", "search", "read"],
+            "internal_atomic_tools": sorted(WORKSPACE_INTERNAL_READ_CAPABILITIES),
             "availability_hint": "available" if healthy else "offline",
             "trusted_local_provider": True,
         },
     )]
+
+
+# 历史名保留：旧调用方仍可 import，但返回的同样是聚合入口。
+get_workspace_reading_capabilities = get_workspace_navigator_capability
 
 
 def _routing_terms(text: str) -> set[str]:
@@ -1262,6 +1328,19 @@ def _has_json_ref(value) -> bool:
     return False
 
 
+def _navigator_result_count(payload: dict) -> int:
+    """workspace_navigator 信封中的结果条数（用于审计与决策信号，不含正文）。"""
+    if not isinstance(payload, dict):
+        return 0
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    total = 0
+    for key in ("entries", "matches", "sections"):
+        value = data.get(key)
+        if isinstance(value, list):
+            total += len(value)
+    return total
+
+
 def _validate_mcp_arguments(schema: dict, args: dict) -> str | None:
     """校验不可信 MCP schema/参数，拒绝超大或带外部引用的调用。"""
     try:
@@ -1457,8 +1536,8 @@ async def execute_tool_call(
         if tool_name.startswith(("workspace_", "sandbox_")):
             trusted_workspace = str(authorized_workspace_id or "").strip()
             requested_workspace = str(args.get("workspace_id") or "").strip()
-            if tool_name == "workspace_read":
-                # 统一读取工具的工作区由服务端注入；模型不传（也不应传）workspace_id。
+            if tool_name in {"workspace_read", "workspace_navigator"}:
+                # 统一读取入口的工作区由服务端注入；模型不传（也不应传）workspace_id。
                 requested_workspace = trusted_workspace
             if not trusted_workspace:
                 return SkillResult(
@@ -1476,6 +1555,51 @@ async def execute_tool_call(
                     retryable=False,
                     metadata={"server": server_name, "tool": tool_name},
                 )
+        if tool_name == "workspace_navigator":
+            # 唯一模型可见的读取入口：action=list/search/read 由后端聚合服务分发到
+            # 内部处理器，再复用 Electron 原子工具与格式解析器。
+            # workspace_id 一律取服务端注入值，模型传值被忽略。
+            from app.services.workspace_navigator import (
+                ACTIONS as NAVIGATOR_ACTIONS,
+                WorkspaceNavigatorService,
+                model_text as navigator_model_text,
+            )
+
+            action = str(args.get("action") or "").strip().casefold()
+            if action not in NAVIGATOR_ACTIONS:
+                return SkillResult(
+                    success=False,
+                    error=f"workspace_navigator.action 只能是 list/search/read，收到：{action or '（空）'}",
+                    error_code="INVALID_ACTION",
+                    retryable=False,
+                    metadata={"tool": tool_name, "action": action, "allowed": list(NAVIGATOR_ACTIONS)},
+                )
+            navigator = WorkspaceNavigatorService(
+                user_id=user_id,
+                user_role=user_role,
+                workspace_id=str(authorized_workspace_id or "").strip(),
+                conversation_id=conversation_id,
+                request=str(user_message or ""),
+            )
+            payload = await navigator.execute(action, args)
+            payload_status = str(payload.get("status") or "error")
+            ok = payload_status in {"ok", "partial", "empty"}
+            return SkillResult(
+                status="success" if ok else "failed",
+                output=navigator_model_text(payload),
+                data=payload,
+                content_type="structured",
+                error=None if ok else str((payload.get("error") or {}).get("message") or "读取失败"),
+                error_code=None if ok else str((payload.get("error") or {}).get("code") or "") or None,
+                retryable=False,
+                metadata={
+                    "tool": "workspace_navigator",
+                    "unified_read": True,
+                    "navigator_action": action,
+                    "result_count": _navigator_result_count(payload),
+                    "workspace_version": (payload.get("meta") or {}).get("workspace_version"),
+                },
+            )
         if tool_name == "workspace_read":
             # 唯一读取能力：目录/定位/解析/分页全部在统一读取服务内部完成。
             from app.services.workspace_reader import WorkspaceReader, json_dumps

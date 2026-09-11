@@ -39,6 +39,10 @@ WORKSPACE_READY = "WORKSPACE_READY"
 # 窗口，模型可见不等于可直接调用（调用仍受 workspace scope 与策略门约束）。
 WORKSPACE_CONTENT_EXTRACT = "workspace_content_extract"
 
+# 读取阶段模型只看到 workspace_navigator 一个聚合工具（action=list/search/read）；
+# 内部原子名保留在 MCP 注册表与后端内部依赖里，但不再进入模型 schema。
+WORKSPACE_NAVIGATOR = "workspace_navigator"
+
 WORKSPACE_READ_CAPABILITIES = frozenset({
     "workspace_catalog",
     "workspace_list",
@@ -76,7 +80,65 @@ WORKSPACE_ALL_CAPABILITIES = frozenset({
 
 # 历史兼容名：受限只读窗口仍引用 WORKSPACE_READ_TOOLS（含 workspace_stat）。
 WORKSPACE_READ_TOOLS = WORKSPACE_READ_CAPABILITIES
+# 内部原子读取能力：只有后端聚合服务与旧客户端兼容路径使用，对模型不可见。
+WORKSPACE_INTERNAL_READ_CAPABILITIES = WORKSPACE_READ_CAPABILITIES
 WORKSPACE_CATALOG_TOOL = "workspace_catalog"
+
+# ── 模型可见读取入口（唯一）──────────────────────────────
+# 读取阶段模型只看到 workspace_navigator 一个聚合工具（action=list/search/read）；
+# 内部原子名保留在 MCP 注册表与后端内部依赖里（Electron 原子能力 + 旧客户端兼容），
+# 但不再进入模型的 function calling schema。
+WORKSPACE_NAVIGATOR = "workspace_navigator"
+
+# 工作区读取域**全部**工具名的唯一事实来源。
+#
+# 为什么要集中：这批名字此前散落在 executor 分发、executor schema 合成、
+# react_runner 阶段窗、plan_compiler 计划校验、skill 依赖别名、MCP 传输别名、
+# 原子步骤交接判定等七处，加一个工作区能力要改七个文件。所有"这个工具是不是
+# 工作区读取能力"的判断都应引用这里，而不是各自维护一份字面量。
+WORKSPACE_READ_TOOL_NAMES = frozenset({
+    WORKSPACE_NAVIGATOR,
+    *WORKSPACE_INTERNAL_READ_CAPABILITIES,
+})
+# 写入/沙箱/提交阶段才会按需注入的能力（不属于读取域）。
+WORKSPACE_STAGE_AND_EXEC_TOOL_NAMES = frozenset({
+    *WORKSPACE_STAGE_WRITE_CAPABILITIES,
+    *WORKSPACE_SANDBOX_CAPABILITIES,
+    *WORKSPACE_COMMIT_CAPABILITIES,
+})
+# 全部工作区/沙箱能力名（显式集合，替代"靠字符串前缀猜"的判断）。
+WORKSPACE_TOOL_NAMES = frozenset({
+    *WORKSPACE_READ_TOOL_NAMES,
+    *WORKSPACE_STAGE_AND_EXEC_TOOL_NAMES,
+})
+
+
+def readonly_capabilities_visible_to_model() -> frozenset[str]:
+    """读取阶段真正能进入模型 function calling schema 的能力集合。"""
+    return frozenset({WORKSPACE_NAVIGATOR})
+
+
+def validate_model_readonly_capabilities(names: object) -> tuple[bool, list[str]]:
+    """校验一份"读取阶段"能力清单是否只暴露聚合入口。
+
+    返回 ``(ok, 违规名列表)``；任何内部原子读取能力泄漏给模型都会被列出。
+    """
+    values = {str(item or "").strip() for item in (names or ()) if str(item or "").strip()}
+    leaked = sorted(values & WORKSPACE_INTERNAL_READ_CAPABILITIES)
+    return (not leaked), leaked
+
+
+def is_workspace_read_tool(name: str) -> bool:
+    """某个工具名是否属于工作区读取域（含内部原子名）。"""
+    return str(name or "").strip() in WORKSPACE_READ_TOOL_NAMES
+
+
+def is_workspace_tool(name: str) -> bool:
+    """某个工具名是否属于工作区/沙箱能力（显式集合优先）。"""
+    raw = str(name or "").strip()
+    if raw in WORKSPACE_TOOL_NAMES:
+        return True
+    return raw.startswith(("workspace_", "sandbox_"))
 
 # 审批模式（对应前端“帮我确认”开关）：
 #   manual_commit：关闭“帮我确认”——任务中不打断，仅在最终真实写入前确认一次；

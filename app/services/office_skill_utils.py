@@ -11,6 +11,46 @@ from app.core.llm import LLMClient
 from app.services.response_format import OFFICE_RESPONSE_FORMAT_COMPACT
 from app.services.usage import CATEGORY_SKILL
 
+# 内部路由哨兵：属于执行控制数据，绝不允许作为答案文本进入用户可见输出。
+# 定义只保留这一处，缓冲（本模块）与判定（DirectLlmAgent）必须引用同一个常量，
+# 否则会出现"缓冲拦不住、判定认不出"的半截标记泄漏。
+ROUTE_SENTINEL_PREFIX = "ROUTE_UPGRADE_"
+# 模型实际输出的形态是 markdown 包裹的 ``[[ROUTE_UPGRADE_RAG]]``。缓冲判定要以这个
+# 完整形态为基准，否则开头的 ``[[`` 会被当成普通正文先流出去。
+ROUTE_MARKER_PATTERN = "[[ROUTE_UPGRADE_"
+
+
+def possible_route_sentinel_start(text: str, sentinel: str) -> int:
+    """返回缓冲区里"可能是一个路由标记开头"的最早位置（没有则 -1）。
+
+    从尾巴往前扫：任何比 ``len(sentinel)`` 更早的位置都已经确定不可能是标记的开头。
+    这样形如 ``[``、``[[``、``[[ROUTE_UP`` 的碎片会被拦住，而正常长文本依然立即流出。
+    """
+    value = str(text or "")
+    marker = str(sentinel or "")
+    if not value or not marker:
+        return -1
+    for start in range(max(0, len(value) - len(marker) + 1), len(value)):
+        tail = value[start:]
+        if len(tail) < len(marker) and marker.startswith(tail):
+            return start
+    return -1
+
+
+def sentinel_prefix_tail_len(text: str, sentinel: str) -> int:
+    """正文末尾有多少个字符是"某个更长标记前缀的尾巴"（最多 ``len(sentinel)-1``）。
+
+    把这种"看起来像标记开头"的后缀一起扣住，用户才不会先看到 ``[[``。
+    """
+    value = str(text or "")
+    marker = str(sentinel or "")
+    if not value or not marker:
+        return 0
+    for length in range(min(len(value), len(marker) - 1), 0, -1):
+        if marker.startswith(value[-length:]):
+            return length
+    return 0
+
 
 async def _emit_output(context: SkillContext | None, text: str) -> None:
     callback = context.on_output if context else None
@@ -81,11 +121,13 @@ async def office_llm(
     # Keep a small tail buffered so internal route sentinels cannot leak one
     # token at a time through SSE before DirectLlmAgent classifies the result.
     pending = ""
-    sentinel = "ROUTE_UPGRADE_"
+    sentinel = ROUTE_SENTINEL_PREFIX
+    marker = ROUTE_MARKER_PATTERN
     started = time.perf_counter()
     first_delta_at: float | None = None
     parser = ModelStreamProtocolParser()
     stripper = TextToolStripper()
+    sentinel_seen = False
     # Do not accidentally remove the caller's output budget while switching to
     # astream.  Previously chat_stream ignored max_tokens, which let a simple
     # writing request consume the provider default and appear to run forever.
@@ -115,13 +157,20 @@ async def office_llm(
                         if clean:
                             parts.append(clean)
                             pending += clean
-        # Keep a small tail buffered so internal route sentinels cannot leak one
-        # token at a time through SSE before DirectLlmAgent classifies the result.
         if sentinel in pending:
-            # The caller will convert this into a controlled reroute result;
-            # never stream the control marker to the client.
-            continue
-        safe_len = max(0, len(pending) - len(sentinel) + 1)
+            # 一旦出现路由哨兵：丢弃已缓冲文本（哨兵前那一小段对用户没有意义），
+            # 且不再发出任何 delta，也不再继续消费 provider。调用方会把它转换成
+            # 受控的重新路由结果。
+            pending = ""
+            sentinel_seen = True
+            break
+        # 只放出"确定不可能是路由标记开头"的部分：从缓冲区尾部往前找可能成为标记
+        # 前缀的位置，之前的内容立即流出。否则形如 "[["、"[[ROUTE_UP" 的碎片会先于
+        # 完整标记被流式发出（用户会在回答里看到半个标记）。
+        marker_start = possible_route_sentinel_start(pending, marker)
+        safe_len = len(pending) if marker_start < 0 else marker_start
+        # 尾巴上"像标记开头"的短后缀（"[[" 这类）一并扣住。
+        safe_len = max(0, safe_len - sentinel_prefix_tail_len(pending[:safe_len], marker))
         if safe_len:
             await _emit_output(context, pending[:safe_len])
             pending = pending[safe_len:]
@@ -150,7 +199,7 @@ async def office_llm(
             elif event.get("type") == "process":
                 await _emit_process(context, str(event.get("content") or ""))
     output = "".join(parts)
-    if sentinel not in output and pending:
+    if not sentinel_seen and sentinel not in output and pending:
         await _emit_output(context, pending)
     from loguru import logger
 

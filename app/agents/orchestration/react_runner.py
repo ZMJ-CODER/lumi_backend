@@ -121,7 +121,8 @@ class OfficeReactRunner:
         return str(name or "").casefold() in {
             "read", "glob", "grep", "filestat", "openfile", "read_document", "office_doc_read",
             "get_project_context", "inspect_document_set",
-            # workspace 通用读取域
+            # workspace 通用读取域（内部原子能力 + 模型可见的聚合入口）
+            "workspace_navigator",
             "workspace_read", "workspace_search", "workspace_list", "workspace_catalog",
         }
 
@@ -170,7 +171,8 @@ class OfficeReactRunner:
     async def _maybe_inject_workspace_stage_window(self, capabilities: list[Any], route_text: str) -> list[Any]:
         """按阶段把工作区能力并入候选窗，不因 write_op 永久隐藏写工具。
 
-        读取域：任何面向工作区内容的步骤都可见；
+        读取阶段：只并入聚合入口 workspace_navigator（list/search/read），内部原子
+        读取名不再进窗；
         暂存写：出现修改/创建/删除/移动等意图时注入（仍只写暂存层）；
         沙箱：出现测试/运行/构建/验证意图时注入；
         提交域：出现提交/回滚意图时注入（实际提交仍由 ApprovalPolicyEngine
@@ -180,7 +182,7 @@ class OfficeReactRunner:
             return capabilities
         from app.services.workspace_context import (
             WORKSPACE_COMMIT_CAPABILITIES,
-            WORKSPACE_READ_CAPABILITIES,
+            WORKSPACE_NAVIGATOR,
             WORKSPACE_SANDBOX_CAPABILITIES,
             WORKSPACE_STAGE_WRITE_CAPABILITIES,
         )
@@ -193,7 +195,8 @@ class OfficeReactRunner:
         commit_tokens = ("提交", "回滚", "commit", "rollback")
 
         groups: list[tuple[frozenset[str], bool]] = [
-            (WORKSPACE_READ_CAPABILITIES, True),
+            # 读取域只暴露聚合入口，模型不会同时看到 6 个读取别名。
+            (frozenset({WORKSPACE_NAVIGATOR}), True),
             (WORKSPACE_STAGE_WRITE_CAPABILITIES, any(token in value for token in modify_tokens)),
             (WORKSPACE_SANDBOX_CAPABILITIES, any(token in value for token in verify_tokens)),
             (WORKSPACE_COMMIT_CAPABILITIES, any(token in value for token in commit_tokens)),

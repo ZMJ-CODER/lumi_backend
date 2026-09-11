@@ -29,7 +29,8 @@ from app.core.database import async_session_factory
 from app.models.db_models import ControlLog
 from app.services import client_tools
 from app.services.tool_output_projection import project_tool_output
-from app.services.tool_output_pipeline import clean_assistant_text, normalize_skill_result
+from app.services.tool_output_pipeline import clean_assistant_text, normalize_execution_envelope
+from lumi_contracts import ToolRequest
 from app.services.usage import CATEGORY_CHAT, CATEGORY_SKILL
 
 
@@ -1414,8 +1415,19 @@ async def execute_tool_call(
     original_fn = tool_call.get("function") or {}
     name = str(original_fn.get("name") or "").strip()
     args = _parse_arguments(original_fn.get("arguments"))
+    if not isinstance(args, dict):
+        # 参数必须是对象：模型偶尔会传数组/标量，这里给可自纠的错误而不是 500。
+        return SkillResult(
+            success=False,
+            error="工具参数必须是 JSON 对象",
+            error_code="INVALID_ARGS",
+            retryable=False,
+            metadata={"tool": name},
+        )
     # Reserved policy fields can never originate from a model tool call.
     args.pop("_lumi_execution_policy", None)
+    # 注意：MCP 工具**不套 ToolRequest 外壳**——调用直接走 MCP client（参数的
+    # 权威定义是 MCP 自己的 inputSchema），这里只做"参数必须是对象"的通用校验。
     if allowed_tools is not None and name not in allowed_tools:
         return SkillResult(
             success=False,
@@ -1787,7 +1799,7 @@ async def execute_tool_call(
                 retryable=True,
                 metadata={"server": server_name, "tool": tool_name},
             )
-        result = sanitize_server_result(normalize_skill_result(raw))
+        result = sanitize_server_result(normalize_execution_envelope(raw, tool_name=tool_name))
         # 服务端可见的工作区写操作成功后，版本缓存应当失效；文件变化也可由
         # Electron 版本通知或下一轮 workspace_diff 版本探测兜底。
         if (
@@ -1877,6 +1889,17 @@ async def execute_tool_call(
         authorized_project_ids=tuple(str(value) for value in (authorized_project_ids or ()) if str(value).strip()),
         workspace_id=str(authorized_workspace_id or "").strip(),
     )
+    # 进程内（backend/sandbox）工具才走契约 ToolRequest：它承载本地命令的
+    # 参数对象校验、关联标识与幂等/审批绑定。MCP 工具在上面的分支里已经直接
+    # 调用了 MCP client，不重复包一层。
+    tool_request = ToolRequest(
+        tool_name=name,
+        arguments=args,
+        call_id=str(mcp_call_id or tool_call.get("id") or ""),
+        idempotency_key=str(tool_call.get("id") or ""),
+        approval_fingerprint=str(approval_context_sha256 or ""),
+    )
+    args = tool_request.arguments
     # All registered Skills now pass through the MCP gateway.  The gateway
     # chooses Electron MCP for client capabilities and an in-process adapter
     # for backend/sandbox capabilities, preserving one timeout/result path.
@@ -1892,6 +1915,7 @@ async def execute_tool_call(
                 task_id=conversation_id or None,
                 on_progress=on_notify,
                 execution_policy=execution_policy,
+                call_id=tool_request.call_id or None,
             )
     except ToolExecutionCoordinationUnavailable:
         return _tool_coordination_failure(name)
@@ -1899,7 +1923,8 @@ async def execute_tool_call(
     # ExecutionOutput envelope.  Normalize once here so callers receive the
     # same object regardless of transport; do not reconstruct legacy
     # success/content/metadata fields.
-    result = normalize_skill_result(raw)
+    # 信封 → 契约 → ToolOutput 的转换只在契约适配器内部接触裸字典。
+    result = normalize_execution_envelope(raw, tool_name=name)
     # server/sandbox results may contain stack traces, environment variables or
     # absolute paths; client paths are user-device data and remain untouched.
     if skill.environment in {"server", "sandbox"}:
@@ -1953,6 +1978,13 @@ async def _record_skill_log(
             "error": result.error,
             "output": result.output[:500],
         }
+        # 契约审计投影：把"调了什么/结果如何/耗时/错误码"结构化落库，
+        # 排障不必再从自由文本里猜（不含业务正文）。
+        from app.contracts.projections import result_audit
+
+        audit = result_audit(result, tool_name=str(getattr(skill, "name", "") or ""))
+        if audit:
+            detail["audit"] = audit
         if scope_meta:
             detail["scope_meta"] = scope_meta
         async with async_session_factory() as session:

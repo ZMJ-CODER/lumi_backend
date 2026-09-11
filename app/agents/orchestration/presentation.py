@@ -116,9 +116,19 @@ def attach_display_plan(node: Any) -> None:
 
 
 def attach_display_result(node: Any, result: dict) -> dict:
-    """给节点执行结果附加公开完成摘要，供前端直接显示。"""
+    """给节点执行结果附加公开完成摘要，供前端直接显示。
+
+    除人类可读的 ``display.completed`` 外，还附上**契约 UI 投影**
+    （``display.ui``：状态、摘要、条目/匹配/分段、分页游标、错误），
+    前端据此恢复"继续读取/查看来源"，不必解析内部 payload。
+    """
     value = dict(result or {})
     display = dict(value.get("display") or {})
     display["completed"] = completed_text(node, value)
+    from app.contracts.projections import result_ui
+
+    ui = result_ui(value, tool_name=str(_value(node, "agent") or ""))
+    if ui:
+        display["ui"] = ui
     value["display"] = display
     return value

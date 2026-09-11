@@ -1,6 +1,4 @@
-﻿"""多智能体协作 API —— 提交任务 / 查询状态 / 终止 / 暂停 / 恢复 / 单步执行."""
-
-import json
+"""多智能体协作 API —— 提交任务 / 查询状态 / 终止 / 暂停 / 恢复 / 单步执行."""
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -165,6 +163,17 @@ async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
 
     data = job.model_dump()
     data["run_view"] = run_view(job)
+    # 契约校验：形状漂移（未知状态/丢步骤/缺按钮状态）在这里暴露，但**不改动**
+    # 返回给前端的形状。
+    from app.contracts.run_view import run_view_problems
+
+    problems = run_view_problems(data["run_view"], expected_job_id=job.job_id)
+    if problems:
+        logger.warning(
+            "run_view 契约校验未通过: job={} problems={}",
+            str(job_id)[:12],
+            "；".join(problems[:6]),
+        )
     return {"code": 0, "data": data}
 
 
@@ -317,8 +326,11 @@ async def resume_agent_job(
 
 def _run_next_sse_response(job_id: str, *, expected_step_id: str, plan_revision: int | None, idempotency_key: str):
     """构造 run_next 的 SSE 响应（事件流见 orchestrator.stream_run_next）。"""
+    from app.contracts.events import SseEventEncoder
 
     async def event_gen():
+        # 每条流一个编码器：seq 单调递增，前端据此发现丢帧；未知事件不抛错。
+        encoder = SseEventEncoder(job_id=job_id)
         try:
             async for evt in orchestrator.stream_run_next(
                 job_id=job_id,
@@ -326,10 +338,10 @@ def _run_next_sse_response(job_id: str, *, expected_step_id: str, plan_revision:
                 plan_revision=plan_revision,
                 idempotency_key=idempotency_key,
             ):
-                yield _sse_line(evt)
+                yield encoder.encode(evt)
         except Exception as exc:  # noqa: BLE001
             logger.warning("run_next SSE 中断 job={} err={}", str(job_id)[:12], str(exc)[:200])
-            yield _sse_line({
+            yield encoder.encode({
                 "type": "error",
                 "message": "单步执行流中断，请刷新任务状态后重试",
                 "status": 500,
@@ -341,11 +353,6 @@ def _run_next_sse_response(job_id: str, *, expected_step_id: str, plan_revision:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-def _sse_line(obj: dict) -> str:
-    """构造 SSE 事件行（与 /chat/stream 相同的编码兜底）。"""
-    return f"data: {json.dumps(obj, ensure_ascii=False, default=str)}\n\n"
 
 
 @router.post("/jobs/{job_id}/plan-patches")

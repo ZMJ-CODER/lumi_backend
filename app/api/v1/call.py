@@ -6,7 +6,6 @@
 """
 
 import base64
-import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
@@ -89,10 +88,6 @@ def _take_call_segment(buffer: str) -> str | None:
     if len(buffer) >= _CALL_SEGMENT_MAX_CHARS:
         return buffer[:_CALL_SEGMENT_MAX_CHARS]
     return None
-
-
-def _sse(obj: dict) -> str:
-    return f"data: {json.dumps(obj, ensure_ascii=False, default=str)}\n\n"
 
 
 @router.post("/turn")
@@ -180,6 +175,9 @@ async def call_stream(req: CallTurnRequest, payload: dict = Depends(require_auth
     llm = LLMClient()
 
     async def event_gen():
+        from app.contracts.events import SseEventEncoder
+
+        encoder = SseEventEncoder(conversation_id=conversation_id)
         buffer = ""
         full_text = ""
         segment_idx = 0
@@ -208,7 +206,7 @@ async def call_stream(req: CallTurnRequest, payload: dict = Depends(require_auth
                         audio = await synthesize_speech(seg)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("流式 TTS 单段失败: {}", exc)
-                    yield _sse(
+                    yield encoder.encode(
                         {
                             "type": "segment",
                             "index": segment_idx,
@@ -225,7 +223,7 @@ async def call_stream(req: CallTurnRequest, payload: dict = Depends(require_auth
                     audio = await synthesize_speech(buffer.strip())
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("流式 TTS 收尾失败: {}", exc)
-                yield _sse(
+                yield encoder.encode(
                     {
                         "type": "segment",
                         "index": segment_idx,
@@ -248,10 +246,10 @@ async def call_stream(req: CallTurnRequest, payload: dict = Depends(require_auth
                 },
             )
             await orchestrator._maybe_summarize_context(conversation_id, user_id, "chat")
-            yield _sse({"type": "done", "content": full_text, "conversation_id": conversation_id})
+            yield encoder.encode({"type": "done", "content": full_text, "conversation_id": conversation_id})
         except Exception as exc:  # noqa: BLE001
             logger.warning("流式语音通话失败: {}", exc)
-            yield _sse({"type": "error", "message": f"语音通话失败: {exc}"})
+            yield encoder.encode({"type": "error", "message": f"语音通话失败: {exc}"})
 
     return StreamingResponse(
         event_gen(),

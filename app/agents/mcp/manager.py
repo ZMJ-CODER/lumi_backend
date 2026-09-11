@@ -29,7 +29,7 @@ from app.core.config import settings
 from app.core.resilience import CircuitOpenError, get_breaker
 from app.agents.skills.base import SkillContext, SkillProgress, Tool
 from app.agents.skills.output_contract import OutputMeta, ToolOutput
-from app.services.tool_output_pipeline import to_execution_envelope
+from app.services.tool_output_pipeline import normalize_execution_envelope, to_execution_envelope
 
 # 连接失败冷却：Electron 未启动/后端先于前端启动时，避免每次调用都重试并刷日志
 _RETRY_COOLDOWN_S = 30.0
@@ -597,9 +597,11 @@ async def call_skill(
                             call_id=call_id, status="failed", data="无法读取工作区版本",
                             error="无法读取工作区版本", error_code="WORKSPACE_DIFF_FAILED",
                         ))
-                    diff_data = diff.get("data") if isinstance(diff.get("data"), dict) else {}
+                    diff_output = normalize_execution_envelope(diff, tool_name="workspace_diff")
+                    diff_data = diff_output.data if isinstance(diff_output.data, dict) else {}
+                    diff_meta = diff_output.metadata.get("meta") if isinstance(diff_output.metadata, dict) else {}
                     target_args["base_version"] = diff_data.get(
-                        "base_version", (diff.get("meta") or {}).get("workspace_version")
+                        "base_version", (diff_meta or {}).get("workspace_version")
                     )
                 raw = await call_tool(
                     server_name,
@@ -618,7 +620,8 @@ async def call_skill(
                     # Keep the transport visible to the scheduler/audit layer.
                     # An MCP tool error is still an MCP execution result and
                     # must not be silently retried through the legacy queue.
-                    normalized = ToolOutput.model_validate(to_execution_envelope(raw))
+                    # 信封解析只在契约适配器内部进行，这里不再手工读裸字典。
+                    normalized = normalize_execution_envelope(raw, tool_name=target_name)
                     if normalized.status == "failed" and not normalized.error_code:
                         normalized = normalized.model_copy(update={"error_code": "MCP_EXEC_ERROR"})
                     return to_execution_envelope(

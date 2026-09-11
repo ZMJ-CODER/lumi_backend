@@ -199,6 +199,25 @@ def _register_plugin(instance: Tool | WorkflowSkill) -> None:
         public_names = base_tool_names()
         ToolRegistry.register(instance, source="plugin", public=(not public_names or name in public_names))
         _loaded_tool_names.append(name)
+        # 插件白名单/版本校验（F 项）：不受信的命名空间或非法版本号只记录不阻断，
+        # 与 ToolSpec 影子注册共用同一份报告（tool_spec_report()）。
+        try:
+            from app.contracts.tools import (
+                plugin_namespace_for,
+                record_plugin_report,
+                validate_plugin_declaration,
+            )
+
+            namespace = plugin_namespace_for(
+                str(getattr(instance, "__module__", "") or ""),
+                declared=str(getattr(instance, "namespace", "") or ""),
+            )
+            record_plugin_report(
+                name,
+                validate_plugin_declaration(instance, namespace=namespace),
+            )
+        except Exception as exc:  # noqa: BLE001 - 准入校验不得影响插件加载
+            logger.debug("插件契约准入校验异常: {} ({})", name, str(exc)[:120])
 
 
 def _load_workflow_prompt(instance: WorkflowSkill) -> None:

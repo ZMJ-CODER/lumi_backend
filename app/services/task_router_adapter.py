@@ -14,6 +14,17 @@ from lumi_orch.execution_router import ExecutionMode, RouteDecision, route
 from lumi_orch.safety_policy import SafetyAction, task_level_action
 from lumi_orch.task_assessment import TaskProfile
 
+# 阶段三：编排边界的所有对外形状都来自契约（旧枚举串只经映射表还原）。
+from app.contracts.routing import (
+    RouteDecision as ContractRouteDecision,
+    ServerContext,
+    TaskProfile as ContractTaskProfile,
+    execution_request,
+    legacy_route_mode,
+    route_decision_contract,
+    task_profile_contract,
+)
+from app.contracts import ExecutionRequest
 from app.services.task_assessor import AssessmentContext, assess_task_profile
 
 BLOCKING_SAFETY = frozenset({SafetyAction.REQUIRE_ADMIN_APPROVAL, SafetyAction.BLOCK})
@@ -44,10 +55,37 @@ class RoutedTask:
             return "该任务风险等级过高，已被安全策略拦截；请联系管理员或在沙箱/回收站等可逆方式下重试。"
         return ""
 
+    # ── 阶段三：编排边界对外只暴露契约对象 ────────────────────────
+    def contract_profile(self) -> ContractTaskProfile:
+        """评估画像 → 契约画像（``lumi_contracts.routing.TaskProfile``）。"""
+        return task_profile_contract(self.profile)
+
+    def contract_decision(self) -> ContractRouteDecision:
+        """路由决策 → 契约决策（含契约画像与旧模式串，可审计）。"""
+        return route_decision_contract(self.decision, profile=self.profile)
+
+    def execution_request(
+        self,
+        instruction: str,
+        *,
+        context: ServerContext,
+        **overrides,
+    ) -> ExecutionRequest:
+        """本次执行请求（身份来自服务端上下文，路由来自契约决策）。"""
+        return execution_request(
+            instruction,
+            context=context,
+            route=self.contract_decision(),
+            **overrides,
+        )
+
     def meta(self) -> dict:
+        # 旧快照字段全部保留：``route_mode`` 由契约决策经唯一映射表还原，
+        # 不再各自硬编码字符串。
+        route_mode = legacy_route_mode(self.contract_decision().mode) if self.decision.mode is not None else ""
         return {
             "task_profile": self.profile.model_dump(),
-            "route_mode": self.decision.mode.value if self.decision.mode else "",
+            "route_mode": route_mode,
             "route_reason_code": self.decision.reason_code,
             "safety_action": self.safety_action.value,
             "assessor_source": self.assessor_source,

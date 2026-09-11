@@ -13,6 +13,7 @@ supported-markers = [
 [manifest]
 members = [
     "lumi-backend",
+    "lumi-contracts",
     "lumi-execution",
     "lumi-orchestration",
 ]
@@ -1585,6 +1586,7 @@ dependencies = [
     { name = "langchain-openai" },
     { name = "langgraph" },
     { name = "loguru" },
+    { name = "lumi-contracts" },
     { name = "lumi-execution" },
     { name = "lumi-orchestration" },
     { name = "mcp" },
@@ -1657,6 +1659,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.0.0" },
     { name = "locust", marker = "extra == 'dev'", specifier = ">=2.46.4" },
     { name = "loguru", specifier = ">=0.7.0" },
+    { name = "lumi-contracts", editable = "packages/contracts" },
     { name = "lumi-execution", editable = "packages/execution" },
     { name = "lumi-orchestration", editable = "packages/orchestration" },
     { name = "mcp", specifier = ">=1.29.0,<2.0.0" },
@@ -1694,6 +1697,17 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
 ]
 provides-extras = ["dev", "rag-eval"]
+
+[[package]]
+name = "lumi-contracts"
+version = "0.1.0"
+source = { editable = "packages/contracts" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.0" }]
 
 [[package]]
 name = "lumi-execution"

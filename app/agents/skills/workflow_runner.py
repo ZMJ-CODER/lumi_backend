@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from app.agents.skills.base import SkillContext, ToolOutput, WorkflowSkill
 from app.agents.skills.executor import execute_tool_call
 from app.core.config import settings
+from lumi_contracts import SkillStep, skill_step_from_tool_output
 
 
 ToolInvoker = Callable[[str, dict], Awaitable[ToolOutput]]
@@ -39,7 +40,44 @@ async def run_workflow_skill(
     authorized_project_ids: tuple[str, ...] = (),
     workspace_id: str = "",
 ) -> ToolOutput:
-    """执行一个已由编排层选定的组合 Skill。"""
+    """执行一个已由编排层选定的组合 Skill（并对步骤做契约级记账）。"""
+    from app.contracts.skill_result import skill_result_to_tool_output, to_skill_result
+
+    steps: list[SkillStep] = []
+    result = await _run_workflow_skill(
+        skill,
+        params,
+        context,
+        steps=steps,
+        user_role=user_role,
+        user_message=user_message,
+        confirmed_tools=confirmed_tools,
+        confirmed_tool_calls=confirmed_tool_calls,
+        approval_context_sha256=approval_context_sha256,
+        authorized_project_ids=authorized_project_ids,
+        workspace_id=workspace_id,
+    )
+    # SkillResult：Skill 级控制信息 + 步骤账；回程仍是旧 ToolOutput（步骤账进
+    # quality_hints），下游既有消费者无需改动。
+    skill_result = to_skill_result(result, skill_name=skill.name, steps=steps)
+    return skill_result_to_tool_output(skill_result, base=result)
+
+
+async def _run_workflow_skill(
+    skill: WorkflowSkill,
+    params: dict,
+    context: SkillContext,
+    *,
+    steps: list[SkillStep],
+    user_role: str = "user",
+    user_message: str = "",
+    confirmed_tools: frozenset[str] | set[str] | None = None,
+    confirmed_tool_calls: frozenset[str] | set[str] | None = None,
+    approval_context_sha256: str = "",
+    authorized_project_ids: tuple[str, ...] = (),
+    workspace_id: str = "",
+) -> ToolOutput:
+    """组合 Skill 的实际执行体（每次工具调用都会记一条 ``SkillStep``）。"""
 
     allowed = set(skill.allowed_tools)
     allowed.update(
@@ -51,6 +89,17 @@ async def run_workflow_skill(
     client_approval_wait_s = max(5.0, float(settings.MCP_CLIENT_APPROVAL_WAIT_S))
 
     async def invoke_tool(name: str, arguments: dict) -> ToolOutput:
+        """记录步骤账的薄包装：每个内部工具调用恰好产生一条 ``SkillStep``。"""
+        started = _monotonic()
+        result = await _invoke_tool(name, arguments)
+        steps.append(
+            skill_step_from_tool_output(
+                result, name=name, index=len(steps), tool=name
+            ).model_copy(update={"duration_ms": int((_monotonic() - started) * 1000)})
+        )
+        return result
+
+    async def _invoke_tool(name: str, arguments: dict) -> ToolOutput:
         # Workspace IDs are a server-side authority, not a model-selectable
         # parameter.  A workflow may omit it; it may never switch it.
         target_args = dict(arguments or {})
@@ -140,9 +189,17 @@ async def run_workflow_skill(
                     await maybe
             deadline = _monotonic() + client_approval_wait_s
             poll_seconds = 1.0
-            while result.status == "pending_approval" and _monotonic() < deadline:
+            # 轮询次数上限：时钟被测试桩/系统单调时钟异常卡住时也不能死循环。
+            max_polls = max(1, int(client_approval_wait_s))
+            polls = 0
+            while (
+                result.status == "pending_approval"
+                and _monotonic() < deadline
+                and polls < max_polls
+            ):
                 await asyncio.sleep(poll_seconds)
                 result = await execute_once()
+                polls += 1
                 poll_seconds = min(3.0, poll_seconds + 0.5)
             if result.status == "pending_approval":
                 return ToolOutput(
@@ -221,3 +278,6 @@ async def run_workflow_skill(
         )
 
     return await skill.run(params, context, invoke_tool)
+
+
+__all__ = ["ToolInvoker", "run_workflow_skill"]

@@ -57,7 +57,12 @@ async def persist_result_ref(user_id: str, result: dict | None) -> dict[str, str
     raw = _json(body)
     result_id = uuid.uuid4().hex
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    record = {"sha256": digest, "body": body, "created_at": time.time()}
+    # 持久化投影：附加一份"可恢复的最小快照"（白名单字段 + 分页指针 + 产物引用，
+    # 不含正文）。恢复/fork/滚动窗口只用它就能决定下一步，避免先拉正文。
+    from app.contracts.projections import result_storage
+
+    storage = result_storage(body)
+    record = {"sha256": digest, "body": body, "storage": storage, "created_at": time.time()}
     try:
         from app.core.redis import get_redis
 
@@ -68,8 +73,21 @@ async def persist_result_ref(user_id: str, result: dict | None) -> dict[str, str
     return {"id": result_id, "sha256": digest}
 
 
-async def resolve_result_ref(user_id: str, result_ref: dict | None) -> dict | None:
-    """Resolve a reference only for the owning user's dependent node."""
+async def resolve_result_storage(user_id: str, result_ref: dict | None) -> dict | None:
+    """只取持久化投影（最小快照），不加载正文；用于恢复/fork 的前置判断。"""
+    record = await _load_record(user_id, result_ref, verify=False)
+    if not isinstance(record, dict):
+        return None
+    storage = record.get("storage")
+    return dict(storage) if isinstance(storage, dict) else None
+
+
+def _sha256_of(body: dict) -> str:
+    return hashlib.sha256(_json(body).encode("utf-8")).hexdigest()
+
+
+async def _load_record(user_id: str, result_ref: dict | None, *, verify: bool = True) -> dict | None:
+    """读取结果记录；``verify`` 为真时校验 sha256（正文完整性）。"""
     if not isinstance(result_ref, dict):
         return None
     result_id = str(result_ref.get("id") or "")
@@ -85,13 +103,23 @@ async def resolve_result_ref(user_id: str, result_ref: dict | None) -> dict | No
     except Exception:
         async with _memory_lock:
             record = _memory_results.get(f"{_owner_key(user_id)}:{result_id}")
-    if not isinstance(record, dict) or str(record.get("sha256") or "") != expected:
+    if not isinstance(record, dict):
         return None
+    if not verify:
+        return record if str(record.get("sha256") or "") == expected else None
     body = record.get("body")
     if not isinstance(body, dict):
         return None
-    actual = hashlib.sha256(_json(body).encode("utf-8")).hexdigest()
-    return body if actual == expected else None
+    return record if _sha256_of(body) == expected else None
+
+
+async def resolve_result_ref(user_id: str, result_ref: dict | None) -> dict | None:
+    """Resolve a reference only for the owning user's dependent node."""
+    record = await _load_record(user_id, result_ref, verify=True)
+    if not isinstance(record, dict):
+        return None
+    body = record.get("body")
+    return body if isinstance(body, dict) else None
 
 
 async def ensure_node_result_ref(user_id: str, node) -> dict[str, str] | None:
@@ -103,9 +131,12 @@ async def ensure_node_result_ref(user_id: str, node) -> dict[str, str] | None:
     created = await persist_result_ref(user_id, getattr(node, "result", None))
     if created:
         metadata["result_ref"] = created
+        # 持久化投影随之挂在节点上：断线恢复/前端展示不必再解析正文。
+        storage = await resolve_result_storage(user_id, created)
+        if storage:
+            metadata["result_storage"] = storage
         node.metadata = metadata
     return created
-
 
 async def record_node_span(
     *,

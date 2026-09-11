@@ -39,12 +39,29 @@ class ToolRegistry:
             cls._skill_implementations[tool.name] = tool
             cls._sources[tool.name] = source
             logger.debug("记录 Skill 执行实现（不进入工具注册表）: {}", tool.name)
+            cls._shadow_register_tool_spec(tool, internal=True)
             return
         target = cls._tools
         if tool.name in target:
             logger.warning("工具 '{}' 已存在，将被覆盖（来源: {}）", tool.name, source)
         target[tool.name] = tool
         cls._sources[tool.name] = source
+        cls._shadow_register_tool_spec(tool, internal=False)
+
+    @staticmethod
+    def _shadow_register_tool_spec(tool: Tool, *, internal: bool) -> None:
+        """契约 ToolSpec 影子注册（B 项）：校验治理声明，但不阻断真实注册。
+
+        影子注册让"新工具自定义输入/输出字段"只依赖工具自己的声明
+        （``parameters_schema`` / ``result_contract``），核心代码无需改动；
+        声明问题进 ``app.contracts.tools.tool_spec_report()``。
+        """
+        try:
+            from app.contracts.tools import register_tool_spec
+
+            register_tool_spec(tool, internal=internal)
+        except Exception as exc:  # noqa: BLE001 - 契约层异常不得影响工具注册
+            logger.debug("ToolSpec 影子注册异常: {} ({})", tool.name, str(exc)[:120])
 
     @classmethod
     def get(cls, name: str) -> Tool | None:

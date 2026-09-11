@@ -1,13 +1,15 @@
 """聊天流式接口（SSE）—— 前端 /api/v1/chat/stream 契约.
 
 事件格式（text/event-stream，每行 data: {json}）：
-  {"type":"delta","content":"部分文本"}
+  {"type":"delta","content":"部分文本","version":1,"seq":2}
   {"type":"done","message_id":"uuid","content":"完整文本","citations":[...],"title":"...","scene":"..."}
   {"type":"error","message":"...","status":500,"code":"STABLE_ERROR_CODE"}
+
+所有帧都带契约版本 ``version`` 与流内单调 ``seq``（由
+``app.contracts.events.SseEventEncoder`` 统一附加）。
 """
 
 import asyncio
-import json
 import time
 import uuid
 
@@ -44,13 +46,6 @@ from app.services import workspaces
 from app.agents.skills.recovery import classify_model_error
 
 router = APIRouter()
-
-
-def _sse(obj: dict) -> str:
-    """构造 SSE 事件行."""
-    # default=str 兜底：citations 等元数据里若混入 datetime 等类型，
-    # 序列化失败会让整条流式以 error 结束，绝不能发生
-    return f"data: {json.dumps(obj, ensure_ascii=False, default=str)}\n\n"
 
 
 @router.post("/stream")
@@ -102,6 +97,10 @@ async def chat_stream(
         )
 
     async def event_gen():
+        from app.contracts.events import SseEventEncoder
+
+        # 每条流一个编码器：所有帧都带契约版本与单调递增 seq（前端可发现丢帧）。
+        encoder = SseEventEncoder(conversation_id=conversation_id)
         result = None
         lock = None
         started = False
@@ -131,7 +130,7 @@ async def chat_stream(
             if not is_guest and req.message_id:
                 replay = await _find_duplicate(db, conversation_id, req.message_id)
                 if replay is not None:
-                    yield _sse(
+                    yield encoder.encode(
                         {
                             "type": "done",
                             "message_id": replay.get("message_id"),
@@ -175,7 +174,7 @@ async def chat_stream(
                         elapsed_ms=int((time.perf_counter() - acceptance_started_at) * 1000),
                         event=evt,
                     )
-                yield _sse(evt)
+                yield encoder.encode(evt)
                 if evt["type"] == "done":
                     # Anything after a terminal SSE event is best-effort
                     # persistence/notification work.  It must never append an
@@ -217,12 +216,12 @@ async def chat_stream(
             code = "OFFICE_JOB_CONFLICT" if status == 409 else (
                 "OFFICE_JOB_BACKPRESSURE" if isinstance(exc, AgentBackpressureError) else "OFFICE_JOB_LIMIT"
             )
-            yield _sse({"type": "error", "message": str(exc), "status": status, "code": code})
+            yield encoder.encode({"type": "error", "message": str(exc), "status": status, "code": code})
         except StatePersistenceError:
             # 禁止先发 job_id 再让客户端轮询一个不存在的快照。这里明确告诉用户
             # 状态库不可用，避免前端把它误显示为“回复中断”。
             logger.error("办公任务状态库写后读校验失败")
-            yield _sse({
+            yield encoder.encode({
                 "type": "error",
                 "message": "办公任务未能提交：任务状态库暂不可用，请检查 Redis 后重试。",
                 "status": 503,
@@ -265,7 +264,7 @@ async def chat_stream(
                 "MODEL_CONNECTION_ERROR": 503,
                 "MODEL_UNAVAILABLE": 503,
             }.get(model_code)
-            yield _sse({
+            yield encoder.encode({
                 "type": "error",
                 "message": model_message if model_status else "服务器内部错误",
                 "status": model_status or 500,

@@ -7,6 +7,8 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from loguru import logger
+
 from app.agents.skills.output_contract import ArtifactRef, OutputMeta, ToolOutput
 
 
@@ -102,6 +104,18 @@ def normalize_skill_result(result: Any, *, content_type: str | None = None) -> T
                 meta = meta.model_copy(update={"summary": "[待审批] 操作已提交，等待用户确认，尚未执行"})
             return result.model_copy(update={"status": "pending_approval", "meta": meta})
         return result
+    if isinstance(result, Mapping) and "payload" in result and "status" in result:
+        # 新契约形态（ExecutionResult dict）：先经适配器解析（payload → data），
+        # 否则下面按 ``data`` 读取会把有 payload 的结果误判成 empty。
+        try:
+            from app.contracts import execution_result_from_envelope, to_tool_output
+
+            return to_tool_output(execution_result_from_envelope(result))
+        except Exception as exc:  # noqa: BLE001 - 回退到宽松归一，但留下审计标记
+            _note_contract_violation(exc)
+            relaxed = dict(result)
+            relaxed.setdefault("data", relaxed.get("payload"))
+            result = relaxed
     if isinstance(result, Mapping) and "status" in result:
         raw_meta = result.get("meta")
         try:
@@ -110,13 +124,18 @@ def normalize_skill_result(result: Any, *, content_type: str | None = None) -> T
             meta = OutputMeta()
         raw_data = result.get("data")
         raw_output = str(result.get("output") or result.get("content") or "")
-        if not raw_output and str(result.get("content_type") or content_type or "text") == "structured":
+        declared = str(result.get("content_type") or content_type or "text")
+        if declared not in {"text", "structured", "artifact", "streaming"}:
+            # 未知 content_type 不能直接构造 ToolOutput（Literal 校验会抛），
+            # 也不能让结果消失：退化为 text，与通用分支保持一致。
+            declared = "text"
+        if not raw_output and declared == "structured":
             raw_output = _structured_output_text(raw_data)
         return ToolOutput(
             status=str(result.get("status") or "failed"),
             call_id=str(result.get("call_id") or "") or None,
             data=raw_data,
-            content_type=str(result.get("content_type") or content_type or "text"),
+            content_type=declared,
             meta=meta,
             output=raw_output,
             error=result.get("error"),
@@ -194,6 +213,67 @@ def normalize_skill_result(result: Any, *, content_type: str | None = None) -> T
     )
 
 
+_CONTRACT_VIOLATIONS: dict[str, int] = {}
+
+
+def contract_violation_report() -> dict[str, int]:
+    """契约适配失败的计数（按错误码），用于告警/验收观察。"""
+    return dict(_CONTRACT_VIOLATIONS)
+
+
+def _note_contract_violation(exc: BaseException) -> dict[str, Any]:
+    """记录一次契约适配失败：可观测（warn + 计数）且可审计（随结果带标记）。
+
+    不能静默降级：方案第六条要求"无法无损转换时返回
+    UNSUPPORTED_CONTRACT_VERSION"，因此这里既告警又把标记挂到结果元数据上，
+    下游/审计能看到"这个结果走了兼容归一"。
+    """
+    code = str(getattr(exc, "code", "") or type(exc).__name__)
+    _CONTRACT_VIOLATIONS[code] = _CONTRACT_VIOLATIONS.get(code, 0) + 1
+    marker = {
+        "code": code,
+        "message": str(exc)[:200],
+        "fallback": "legacy_normalizer",
+        "count": _CONTRACT_VIOLATIONS[code],
+    }
+    if _CONTRACT_VIOLATIONS[code] == 1:
+        logger.warning("执行信封契约适配失败，已回退旧归一（并标记审计）: {}", marker["message"])
+    else:
+        logger.debug("执行信封契约适配失败（第 {} 次）: {}", _CONTRACT_VIOLATIONS[code], marker["message"])
+    return marker
+
+
+def normalize_execution_envelope(value: Any, *, tool_name: str = "") -> ToolOutput:
+    """跨进程执行信封 → ``ToolOutput``（第二阶段：边界只走契约适配器）。
+
+    ``call_skill`` 之后拿到的已经是信封字典；这里用
+    ``LegacyEnvelopeAdapter.adapt_envelope`` 解析一次，裸字典不再向下游扩散，
+    也无法再靠 ``isinstance(x, Mapping) and "status" in x`` 之类的猜测处理。
+
+    契约适配失败（信封形状不合法、未知 ``content_type`` 等）时回退到旧的宽松
+    归一：信封出问题不能让结果消失；同时**告警 + 在结果上打审计标记**，
+    不做静默降级。
+    """
+    if isinstance(value, ToolOutput):
+        return normalize_skill_result(value)
+    try:
+        from app.contracts import ExecutionResult, execution_result_from_envelope, to_tool_output
+
+        result = value if isinstance(value, ExecutionResult) else execution_result_from_envelope(value, tool_name=tool_name)
+        output = to_tool_output(result)
+    except Exception as exc:  # noqa: BLE001 - 契约层异常不得丢结果
+        marker = _note_contract_violation(exc)
+        fallback = normalize_skill_result(value)
+        meta = fallback.meta.model_copy(
+            update={"quality_hints": {**fallback.meta.quality_hints, "contract_violation": marker}}
+        )
+        return fallback.model_copy(update={"meta": meta})
+    if output.content_type == "structured" and not output.output:
+        # 与旧的 dict 归一保持一致：结构化正文补一份可读文本，方便下游直接引用。
+        output = output.model_copy(update={"output": _structured_output_text(output.data)})
+    return output
+
+
 def to_execution_envelope(
     result: Any,
     *,
@@ -243,7 +323,64 @@ def apply_output_budget(tool_output: ToolOutput, *, max_chars: int = DEFAULT_MAX
     return tool_output.model_copy(update={"data": data})
 
 
+def _has_structured_sections(tool_output: ToolOutput) -> bool:
+    """结果是否是"分段正文"形态（工作区读取类）。
+
+    只有这种形态才用契约投影渲染：它能给出可读的 ``[文件 · 位置]`` 分段；
+    其他结构化 payload 保持既有 JSON 渲染行为不变。
+    """
+    data = tool_output.data
+    if not isinstance(data, dict):
+        return False
+    for source in (data, data.get("data")):
+        if isinstance(source, dict) and isinstance(source.get("sections"), list) and source["sections"]:
+            return True
+    return False
+
+
+def _contract_model_text(tool_output: ToolOutput, *, max_chars: int) -> str:
+    """经契约层渲染模型文本（第二阶段：投影统一走 ``lumi_contracts``）。
+
+    注意**必须传原始 ToolOutput**：``apply_output_budget`` 会把 ``data`` 序列化成
+    JSON 字符串，之后投影就再也看不到 ``sections`` 结构了。
+
+    * 传输边界只在适配器内部接触裸字典：``to_execution_result()`` 之后下游只见
+      ``ExecutionResult``；
+    * 任何契约层失败都回退到旧的通用渲染，**不能因为投影问题丢结果**。
+    """
+    try:
+        from app.contracts import (
+            is_workspace_envelope,
+            projection_registry,
+            to_execution_result,
+            to_workspace_result,
+        )
+
+        metadata = tool_output.metadata if isinstance(tool_output.metadata, dict) else {}
+        tool_name = str(metadata.get("tool") or "")
+        # 工作区读取结果走**类型化**适配（裸字典留在适配器内部），
+        # 这样投影层能按 payload 类型名挑到专用投影。
+        result = (
+            to_workspace_result(tool_output)
+            if is_workspace_envelope(tool_output)
+            else to_execution_result(tool_output, tool_name=tool_name)
+        )
+        registry = projection_registry(model_budget=max(200, int(max_chars)))
+        view = registry.project("model", result)
+        return str(view.get("text") or "")
+    except Exception as exc:  # noqa: BLE001 - 契约层异常不得影响结果交付
+        logger.debug("契约投影失败，回退通用渲染: {}", str(exc)[:160])
+        return ""
+
+
 def render_for_model(tool_output: ToolOutput, *, max_chars: int = DEFAULT_MAX_CHARS) -> str:
+    # 分段正文（工作区读取）在预算裁剪前就用契约投影渲染成可读文本，
+    # 避免正文被序列化成 JSON 后埋进 meta/limits 噪音。
+    structured_text = (
+        _contract_model_text(tool_output, max_chars=max_chars)
+        if _has_structured_sections(tool_output)
+        else ""
+    )
     bounded = apply_output_budget(tool_output, max_chars=max_chars)
     if bounded.status in {"pending", "pending_approval", "uncertain"}:
         summary = bounded.meta.summary or bounded.data or "操作尚未完成"
@@ -274,7 +411,7 @@ def render_for_model(tool_output: ToolOutput, *, max_chars: int = DEFAULT_MAX_CH
                 lines.append(f"   摘要：{summary}")
         text = "\n".join(lines)
     else:
-        text = f"{prefix}{bounded.data or bounded.meta.summary or '步骤已完成'}"
+        text = structured_text or f"{prefix}{bounded.data or bounded.meta.summary or '步骤已完成'}"
     if bounded.status == "partial":
         text += "\n结果不完整：可缩小范围后继续查询。"
     if bounded.meta.citations:

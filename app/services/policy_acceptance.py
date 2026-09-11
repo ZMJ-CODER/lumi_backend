@@ -112,6 +112,15 @@ def finish_trace(
     _fold_delta_run(trace)
     first_delta = trace.get("first_delta_at")
     router_profile = (router_meta or {}).get("task_profile") or {}
+    raw_decision = (policy_public or {}).get("route_decision")
+    route_decision = (
+        {
+            key: raw_decision.get(key)
+            for key in ("schema_name", "schema_version", "policy_version", "route_mode")
+        }
+        if isinstance(raw_decision, dict)
+        else None
+    )
     summary: dict[str, Any] = {
         "user_id": str(user_id or "")[:40],
         "conversation_id": str(conversation_id or "")[:40],
@@ -125,10 +134,13 @@ def finish_trace(
                         "output_target", "execution_target", "risk_level")
             if key in router_profile
         },
-        # 旧 v2 画像（仅当 EXECUTION_POLICY_V2_ENABLED 时存在）
+        # 权威画像/路由（Router v2 时为严格 M0-M3 画像；旧画像在 compat 里）
         "task_profile": (policy_public or {}).get("task_profile"),
         "execution_policy": (policy_public or {}).get("execution_policy"),
+        # 契约版本唯一读取点：routing.route_decision.policy_version
         "policy_version": (policy_public or {}).get("policy_version"),
+        "route_decision": route_decision,
+        "compat": (policy_public or {}).get("compat"),
         "event_sequence": list(trace.get("event_types") or []),
         "done_count": int(trace.get("done_count") or 0),
         "delta_count": int(trace.get("delta_count") or 0),

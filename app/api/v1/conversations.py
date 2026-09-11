@@ -744,6 +744,10 @@ async def conversation_stream(
         raise UnauthorizedException("请先登录")
 
     async def event_gen():
+        from app.contracts.events import SseEventEncoder
+
+        # 每条流一个编码器：多端推送的帧同样带契约版本与单调 seq（前端可发现丢帧）。
+        encoder = SseEventEncoder()
         r = get_redis()
         pubsub = r.pubsub()
         await pubsub.subscribe(CONV_EVENTS_CHANNEL)
@@ -760,7 +764,8 @@ async def conversation_stream(
                     continue
                 if event.get("user_id") != str(uid):
                     continue
-                yield f"event: {event.get('type', 'message')}\ndata: {msg['data']}\n\n"
+                event_type = str(event.get("type") or "message")
+                yield f"event: {event_type}\n{encoder.encode(event)}"
         finally:
             await pubsub.unsubscribe(CONV_EVENTS_CHANNEL)
             await pubsub.aclose()

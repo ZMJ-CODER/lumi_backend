@@ -1072,17 +1072,20 @@ class Orchestrator:
         message_id = str(uuid.uuid4())
         title = await self.get_conversation_title(conversation_id)
 
-        # ── v2 统一任务画像/执行策略（灰度开关；默认关闭保持旧语义）──
+        # ── 路由快照（Router v2 权威；旧执行策略只提供 compat；互不覆盖）──
         policy_meta = None
         policy_public = None
-        if getattr(settings, "EXECUTION_POLICY_V2_ENABLED", False):
+        router_meta = None
+        # 阶段三：分发只看契约决策（旧字符串仍写进快照/事件）。
+        router_decision = None
+        router_v2_enabled = bool(getattr(settings, "TASK_ROUTER_V2_ENABLED", False))
+        policy_v2_enabled = bool(getattr(settings, "EXECUTION_POLICY_V2_ENABLED", False))
+        if policy_v2_enabled:
             from lumi_orch.execution_policy import (
                 TaskEntrySignals,
                 policy_meta_from_signals,
-                policy_meta_public,
             )
             from app.agents.orchestration.task_shape import assess_task_shape
-            from app.core.observability import observe_policy_route
 
             signals = TaskEntrySignals(
                 request=content,
@@ -1095,12 +1098,19 @@ class Orchestrator:
                 conversation_has_workspace=bool(workspace_id),
             )
             policy_meta = policy_meta_from_signals(signals, enabled=True)
-            policy_public = policy_meta_public(policy_meta)
-            if policy_public:
-                observe_policy_route(
-                    str(policy_public.get("execution_policy") or "direct_stream"),
-                    str((policy_public.get("task_profile") or {}).get("complexity") or "ATOMIC"),
-                )
+        from app.agents.orchestration.route_snapshot import (
+            build_route_snapshot,
+            public_policy_fields,
+        )
+
+        route_snapshot = build_route_snapshot(
+            router_v2_enabled=router_v2_enabled,
+            execution_policy_v2_enabled=policy_v2_enabled,
+            router_meta=router_meta,
+            policy_meta=policy_meta,
+        )
+        if route_snapshot:
+            policy_public = public_policy_fields(route_snapshot)
         # v2 验收追踪：单请求 SSE 证据（开关开启时每用例一条 JSON 日志）。
         # 与旧执行策略开关解耦：只要开了验收日志或 Router v2 就产出该行。
         trace = None
@@ -1113,10 +1123,8 @@ class Orchestrator:
             trace = new_trace(enabled=True)
 
         # ── 修订版任务画像 / Router v2（灰度 TASK_ROUTER_V2_ENABLED）──
-        router_meta: dict | None = None
-        router_mode = ""
         router_blocked_reason = ""
-        if getattr(settings, "TASK_ROUTER_V2_ENABLED", False):
+        if router_v2_enabled:
             try:
                 from app.services.task_assessor import AssessmentContext
                 from app.services.task_router_adapter import plan_and_route
@@ -1143,11 +1151,27 @@ class Orchestrator:
                         (time.perf_counter() - _route_started) * 1000
                     )
                 router_meta = routed.meta()
-                router_mode = str(router_meta.get("route_mode") or "")
+                router_decision = routed.contract_decision()
                 if routed.blocked:
                     router_blocked_reason = routed.blocked_reason
             except Exception as exc:  # noqa: BLE001 - 路由评估失败回退旧路径
                 logger.warning("Router v2 评估失败，回退旧路径: {}", str(exc)[:200])
+        if router_meta is not None:
+            # Router v2 权威：重算一次投影（SSE 与 Job 快照同一生成器、同一优先级）。
+            route_snapshot = build_route_snapshot(
+                router_v2_enabled=router_v2_enabled,
+                execution_policy_v2_enabled=policy_v2_enabled,
+                router_meta=router_meta,
+                policy_meta=policy_meta,
+            )
+            policy_public = public_policy_fields(route_snapshot) or policy_public
+        if policy_public:
+            from app.core.observability import observe_policy_route
+
+            observe_policy_route(
+                str(policy_public.get("execution_policy") or "direct_stream"),
+                str((policy_public.get("task_profile") or {}).get("complexity") or "ATOMIC"),
+            )
 
         if router_blocked_reason:
             blocked_event = {"type": "delta", "content": router_blocked_reason}
@@ -1193,6 +1217,7 @@ class Orchestrator:
         stream = None
         if scene == "office":
             from app.agents.orchestration.task_shape import assess_task_shape_with_skills
+            from app.contracts import RouteMode
             from app.services.office_context import (
                 OfficeContext,
                 append_office_context,
@@ -1211,11 +1236,15 @@ class Orchestrator:
             # m1_atomic_action（单次副作用）必须走原子动作/编排链路（暂存→Diff→
             # 审批）。M2/M3 只在“非降级置信度”时强制编排：低置信度启发式画像
             # 会把只读问答误判为复杂任务，强制编排会导致只出计划、没有正文。
+            # 置信度与模式都取自契约决策（与旧 task_profile 是同一个事实来源）。
             router_confident = float(
-                ((router_meta or {}).get("task_profile") or {}).get("confidence") or 0.0
+                getattr(getattr(router_decision, "profile", None), "confidence", 0.0)
+                or ((router_meta or {}).get("task_profile") or {}).get("confidence")
+                or 0.0
             ) >= 0.55
-            force_orchestrate = router_mode == "m1_atomic_action" or (
-                router_mode in {"sequential_workflow", "dynamic_agent"} and router_confident
+            _route_mode = getattr(router_decision, "mode", None)
+            force_orchestrate = _route_mode is RouteMode.SINGLE_ACTION or (
+                _route_mode in {RouteMode.PLANNER_DAG, RouteMode.REACT} and router_confident
             )
             if not shape.requires_orchestration and not force_orchestrate:
                 prep["citations"].extend(office_context.citations)
@@ -1231,7 +1260,7 @@ class Orchestrator:
                     )
                 # Router v2：direct_chat 不触发任何读取；m1_atomic_read 走
                 # 受控读取 → 真实 chat_stream；其余沿用既有 v2/旧安全路径。
-                if router_mode == "direct_chat":
+                if _route_mode is RouteMode.DIRECT_CHAT:
                     stream = self._stream_llm_auto(
                         user_id,
                         direct_messages,
@@ -1245,7 +1274,7 @@ class Orchestrator:
                         force_web_search=False,
                         allow_tools=False,
                     )
-                elif router_mode == "m1_atomic_read" or bool(
+                elif _route_mode is RouteMode.ATOMIC_READ or bool(
                     getattr(settings, "EXECUTION_POLICY_V2_ENABLED", False)
                 ):
                     stream = self._stream_v2_atomic_read(

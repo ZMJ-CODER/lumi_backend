@@ -223,16 +223,24 @@ class JobSubmissionService:
                     authorized_projects.append(text)
             routing["authorized_project_ids"] = authorized_projects
 
-        # v2 统一任务画像/执行策略：灰度开关开启时写入 routing（随 Job 快照
-        # 暴露给前端；不覆盖既有 fallback_action/旧 M0-M3 遥测字段）。
+        # 路由快照：**唯一**由 route_snapshot 投影器写入（Router v2 权威；
+        # 旧执行策略只提供 compat 字段；两个开关都关时策略字段清空）。
         if scene == "office":
             from app.core.config import settings as _policy_settings
 
-            if getattr(_policy_settings, "EXECUTION_POLICY_V2_ENABLED", False):
+            from app.agents.orchestration.route_snapshot import (
+                apply_route_snapshot,
+                build_route_snapshot,
+            )
+
+            router_v2_enabled = bool(getattr(_policy_settings, "TASK_ROUTER_V2_ENABLED", False))
+            policy_v2_enabled = bool(getattr(_policy_settings, "EXECUTION_POLICY_V2_ENABLED", False))
+            # 两个决策各自按其开关生成，互不依赖、互不覆盖。
+            policy_meta = None
+            if policy_v2_enabled:
                 from lumi_orch.execution_policy import (
                     TaskEntrySignals,
                     policy_meta_from_signals,
-                    policy_routing_update,
                 )
                 from app.agents.orchestration.task_shape import assess_task_shape
 
@@ -246,15 +254,10 @@ class JobSubmissionService:
                     web_search_enabled=False,
                     conversation_has_workspace=bool(workspace_id),
                 )
-                meta = policy_meta_from_signals(signals, enabled=True)
-                for key, value in policy_routing_update(meta).items():
-                    if key == "fallback_action" and routing.get(key) is not None:
-                        continue
-                    routing[key] = value
+                policy_meta = policy_meta_from_signals(signals, enabled=True)
 
-            # Router v2（TASK_ROUTER_V2_ENABLED）：严格 TaskProfile + 8 步路由 +
-            # 任务级风控结果写入 routing（随 Job 快照暴露；覆盖旧 task_profile）。
-            if getattr(_policy_settings, "TASK_ROUTER_V2_ENABLED", False):
+            router_meta = None
+            if router_v2_enabled:
                 from app.services.task_assessor import AssessmentContext
                 from app.services.task_router_adapter import plan_and_route
 
@@ -270,11 +273,33 @@ class JobSubmissionService:
                     use_llm=False,  # 提交阶段已有 Planner，避免二次模型调用
                 )
                 router_meta = routed.meta()
-                routing["task_profile"] = router_meta["task_profile"]
-                routing["route_mode"] = router_meta["route_mode"]
-                routing["route_reason_code"] = router_meta["route_reason_code"]
-                routing["safety_action"] = router_meta["safety_action"]
-                routing["policy_version"] = router_meta["policy_version"]
+
+            apply_route_snapshot(
+                routing,
+                build_route_snapshot(
+                    router_v2_enabled=router_v2_enabled,
+                    execution_policy_v2_enabled=policy_v2_enabled,
+                    router_meta=router_meta,
+                    policy_meta=policy_meta,
+                    existing=routing,
+                ),
+            )
+            if router_meta is not None:
+                # ExecutionRequest：链路 TaskProfile → RouteDecision → ExecutionRequest。
+                # 身份只来自服务端上下文；快照里不重复存用户原文（只留长度+哈希）。
+                from app.contracts import ServerContext
+                from app.contracts.routing import execution_request_snapshot
+
+                execution_request = routed.execution_request(
+                    request,
+                    context=ServerContext(
+                        user_id=user_id,
+                        user_role=user_role,
+                        conversation_id=str(conversation_id or ""),
+                        workspace_id=str(workspace_id or ""),
+                    ),
+                )
+                routing["execution_request"] = execution_request_snapshot(execution_request)
 
         materialized = await self._materialization.materialize(
             user_id=user_id,

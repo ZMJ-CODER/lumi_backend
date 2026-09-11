@@ -112,6 +112,17 @@ async def lifespan(app: FastAPI):
         logger.warning("启动清理生成文件失败（忽略）: {}", exc)
     logger.info("基础设施初始化完成")
 
+    # 能力撤销广播订阅：跨 worker 撤销要立刻失效本地租约缓存，否则撤销会有窗口期
+    # （客户端已隔离但别的 worker 仍按旧缓存派发）。Redis 不可用时静默跳过。
+    try:
+        from app.services.capability_revoke import start_revoke_listener
+
+        subscribed = await start_revoke_listener()
+        if subscribed:
+            logger.info("能力撤销广播已订阅（跨 worker 缓存失效就绪）")
+    except Exception as exc:  # noqa: BLE001 - 订阅失败不阻断启动
+        logger.warning("能力撤销订阅失败（忽略）: {}", str(exc)[:160])
+
     yield
 
     # 清理
@@ -127,6 +138,13 @@ async def lifespan(app: FastAPI):
         from app.agents.mcp.manager import close_all
 
         await close_all()
+    except Exception:  # noqa: BLE001
+        pass
+    # 停止能力撤销订阅（避免退出时留下挂起的后台任务）
+    try:
+        from app.services.capability_revoke import stop_revoke_listener
+
+        await stop_revoke_listener()
     except Exception:  # noqa: BLE001
         pass
     await close_redis()

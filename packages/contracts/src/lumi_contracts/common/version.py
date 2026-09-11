@@ -69,6 +69,14 @@ STREAM_EVENT = contract_version("stream_event", 1)
 JOB_RUN_VIEW = contract_version("job_run_view", 1)
 TASK_PROFILE = contract_version("task_profile", 1)
 ROUTE_DECISION = contract_version("route_decision", 1)
+# ── 插件化/能力化（Capability Provider / Plugin）──
+PLUGIN_MANIFEST = contract_version("plugin_manifest", 1)
+CAPABILITY_DESCRIPTOR = contract_version("capability_descriptor", 1)
+CAPABILITY_INVOCATION = contract_version("capability_invocation", 1)
+CAPABILITY_RESULT = contract_version("capability_result", 1)
+PROVIDER_LEASE = contract_version("provider_lease", 1)
+PLUGIN_SNAPSHOT = contract_version("plugin_snapshot", 1)
+VIEW_CONTRIBUTION = contract_version("view_contribution", 1)
 
 KNOWN_CONTRACTS: frozenset[str] = frozenset(
     str(item)
@@ -82,15 +90,28 @@ KNOWN_CONTRACTS: frozenset[str] = frozenset(
         JOB_RUN_VIEW,
         TASK_PROFILE,
         ROUTE_DECISION,
+        PLUGIN_MANIFEST,
+        CAPABILITY_DESCRIPTOR,
+        CAPABILITY_INVOCATION,
+        CAPABILITY_RESULT,
+        PROVIDER_LEASE,
+        PLUGIN_SNAPSHOT,
+        VIEW_CONTRIBUTION,
     )
 )
 
 
 __all__ = [
+    "CAPABILITY_DESCRIPTOR",
+    "CAPABILITY_INVOCATION",
+    "CAPABILITY_RESULT",
     "ContractVersion",
     "EXECUTION_RESULT",
     "JOB_RUN_VIEW",
     "KNOWN_CONTRACTS",
+    "PLUGIN_MANIFEST",
+    "PLUGIN_SNAPSHOT",
+    "PROVIDER_LEASE",
     "ROUTE_DECISION",
     "SKILL_RESULT",
     "STREAM_EVENT",
@@ -98,5 +119,6 @@ __all__ = [
     "TOOL_REQUEST",
     "TOOL_RESPONSE",
     "TOOL_SPEC",
+    "VIEW_CONTRIBUTION",
     "contract_version",
 ]

@@ -1,0 +1,74 @@
+"""服务端插件子系统（阶段 4 / 5 / 8 的后端部分）。
+
+模块地图::
+
+    state        安装状态存储（JSON，原子写；离线也能安装与回滚）
+    signatures   签名校验（hmac-sha256 / ed25519；未配置密钥 = 未验签，不假装有 PKI）
+    dependencies 依赖解析（能力 / 插件 / 策略 / 版本；报告形状与既有 dependencies 对齐）
+    registry     安装/启用/停用/升级/回滚/健康检查 + 插件快照
+    extensions   Extension Handler 登记（未知 kind 默认拒绝）
+
+边界：本包只做**控制面**（登记、门禁、状态机、审计），不做执行加载——第三方插件
+必须在 Worker/容器里跑，不在 API 进程内 importlib（见 registry 的隔离门禁）。
+"""
+
+from __future__ import annotations
+
+from app.services.plugins.dependencies import (
+    DependencyIssue,
+    DependencyReport,
+    DependencyResolver,
+    InstalledPluginView,
+)
+from app.services.plugins.extensions import (
+    ExtensionHandler,
+    ExtensionHandlerRegistry,
+    extension_handlers,
+)
+from app.services.plugins.registry import (
+    PLUGIN_DEPENDENCIES_UNSATISFIED,
+    PLUGIN_DEPLOYMENT_NOT_ALLOWED,
+    PLUGIN_ISOLATION_TOO_WEAK,
+    PLUGIN_KIND_NEEDS_DEV,
+    PLUGIN_KIND_UNKNOWN,
+    PLUGIN_NOT_INSTALLED,
+    PLUGIN_SIGNATURE_INVALID,
+    PLUGIN_VERSION_UNAVAILABLE,
+    PluginInstallation,
+    PluginRegistry,
+    PluginRejected,
+)
+from app.services.plugins.signatures import (
+    SignatureOutcome,
+    SignaturePolicy,
+    policy_from_settings,
+    verify_signature,
+)
+from app.services.plugins.state import PluginStateStore, installation_record
+
+__all__ = [
+    "DependencyIssue",
+    "DependencyReport",
+    "DependencyResolver",
+    "ExtensionHandler",
+    "ExtensionHandlerRegistry",
+    "InstalledPluginView",
+    "PLUGIN_DEPENDENCIES_UNSATISFIED",
+    "PLUGIN_DEPLOYMENT_NOT_ALLOWED",
+    "PLUGIN_ISOLATION_TOO_WEAK",
+    "PLUGIN_KIND_NEEDS_DEV",
+    "PLUGIN_KIND_UNKNOWN",
+    "PLUGIN_NOT_INSTALLED",
+    "PLUGIN_SIGNATURE_INVALID",
+    "PLUGIN_VERSION_UNAVAILABLE",
+    "PluginInstallation",
+    "PluginRegistry",
+    "PluginRejected",
+    "PluginStateStore",
+    "SignatureOutcome",
+    "SignaturePolicy",
+    "extension_handlers",
+    "installation_record",
+    "policy_from_settings",
+    "verify_signature",
+]

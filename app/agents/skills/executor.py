@@ -16,6 +16,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
+from typing import Any
 
 from loguru import logger
 
@@ -1406,11 +1407,15 @@ async def execute_tool_call(
     allowed_tools: set[str] | None = None,
     allow_internal: bool = False,
     mcp_call_id: str | None = None,
+    capability_lease_service: Any = None,
 ) -> SkillResult:
     """执行一次技能调用：校验 → 高危拦截 → 执行 → 审计。
 
     ``execution_scope`` 仅由 DAG 节点执行器注入。它将同一 Job 中的同名工具
     调用串行化，而不会影响普通聊天会话或不同工具的节点级并发。
+
+    ``capability_lease_service`` 供测试/定制注入租约服务；缺省时能力路由自建一个。
+    它只在 ``AGENT_CAPABILITY_ROUTING_MODE != off`` 时被使用。
     """
     original_fn = tool_call.get("function") or {}
     name = str(original_fn.get("name") or "").strip()
@@ -1533,6 +1538,28 @@ async def execute_tool_call(
             validate_command(str(args.get("command") or ""), cwd=str(args.get("cwd") or ""))
         except ResourcePolicyError as exc:
             return SkillResult(success=False, error=str(exc), error_code="RESOURCE_FORBIDDEN", retryable=False, metadata={"tool": name})
+
+    # ── 能力路由门禁（灰度旁路；默认 off = 零开销，行为与旧版逐字相同）──
+    # 位置：参数校验与资源策略之后、MCP 分支之前——即"授权已确认，但还没决定谁执行"。
+    from app.agents.skills.capability_route import try_capability_route
+
+    routed = await try_capability_route(
+        tool_name=name,
+        args=args,
+        user_id=user_id,
+        user_role=user_role,
+        conversation_id=conversation_id,
+        workspace_id=str(authorized_workspace_id or ""),
+        authorized_project_ids=authorized_project_ids,
+        lease_service=capability_lease_service,
+        task_id=execution_scope or None,
+        call_id=mcp_call_id,
+        # 既有工具级审批的**确切指纹**：命中即视为该能力调用已获批准（参数变了就不命中）。
+        approved_tool_calls=confirmed_tool_calls,
+        upstream_sha256=approval_context_sha256,
+    )
+    if routed is not None:
+        return routed
 
     mcp_target = _parse_mcp_name(name)
     if mcp_target:

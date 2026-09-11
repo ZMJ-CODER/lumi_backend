@@ -49,6 +49,12 @@ class ApplicationTaskNodeExecutor:
         worker = self._workers.get(node.agent)
         if worker is None:
             return self._failure(node, "未注册的执行 agent: " + node.agent, "AGENT_NOT_FOUND")
+        # 能力门禁（阶段 4/3）：节点显式声明了能力时，在**执行前**拦下静态不可能的情况
+        # （未声明能力/位置违反数据本地性）；运行时不可用只记录，交给 Broker 在调用点
+        # 给出准确错误。默认关闭，开启后行为对未声明能力的节点完全不变。
+        gate_failure = self._capability_gate_failure(node)
+        if gate_failure is not None:
+            return gate_failure
         prepare_node_safety(node, self._job.user_id, self._job.job_id)
         # Forked prefixes intentionally keep no result body in the branch Job.
         # Resolve their owner-scoped references at execution time so the core
@@ -231,6 +237,34 @@ class ApplicationTaskNodeExecutor:
             if text and text not in values:
                 values.append(text)
         return tuple(values)
+
+    def _capability_gate_failure(self, node: TaskNode) -> "NodeExecutionResult | None":
+        """执行前能力门禁（返回失败结果表示不要执行该节点）。
+
+        开关默认关闭（``AGENT_CAPABILITY_GATE_ENABLED``），且只对**显式声明了能力**的
+        节点生效：没有声明能力的节点在此完全不受影响，因此开启开关也不会改变既有
+        计划的行为。只拦"静态不可能"的问题（未声明能力、位置违反本地性）。
+        """
+        try:
+            from app.core.config import settings
+
+            if not bool(getattr(settings, "AGENT_CAPABILITY_GATE_ENABLED", False)):
+                return None
+        except Exception:  # noqa: BLE001 - 配置不可用时按关闭处理（保守）
+            return None
+        from app.agents.capabilities.gate import declared_capabilities, node_capability_failure
+
+        if not declared_capabilities(node):
+            return None
+        failure = node_capability_failure(node)
+        if failure is None:
+            return None
+        error = failure.error
+        return self._failure(
+            node,
+            str(getattr(error, "message", "") or "能力门禁未通过"),
+            str(failure.error_code or "CAPABILITY_MISSING"),
+        )
 
     def _authorized_workspace_id(self) -> str:
         """Return the request-scoped desktop workspace, never a node value."""

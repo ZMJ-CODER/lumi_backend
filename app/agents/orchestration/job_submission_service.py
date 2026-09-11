@@ -312,6 +312,54 @@ class JobSubmissionService:
             node_count=len(getattr(tree, "nodes", None) or []),
             override=timeout_seconds,
         )
+        # 插件/能力/策略快照：记录"这次任务当时用了哪个 Provider/设备/契约版本/策略包"，
+        # 刷新与回滚后仍可解释（routing 只放审计摘要，不放过程日志与正文）。
+        from app.agents.capabilities.policy_packs import select_policy_id
+        from app.agents.capabilities.snapshots import attach_job_snapshots
+
+        approval_mode = str((routing.get("workspace_grant") or {}).get("approval_mode") or "")
+        policy_id = select_policy_id(
+            approval_mode=approval_mode,
+            risk_level=str((routing.get("task_profile") or {}).get("risk_level") or ""),
+            side_effects=(routing.get("task_profile") or {}).get("side_effects") or [],
+        )
+        routing["policy_id"] = policy_id
+        attach_job_snapshots(
+            routing,
+            approval_mode=approval_mode,
+            execution_mode=str(routing.get("execution_mode") or ""),
+            policy_id=policy_id,
+        )
+        # required_capabilities 解析：把 TaskProfile 的**抽象能力**翻成具体能力，并
+        # 记录当前绑定下有没有 Provider（缺 Provider 的结论与"安装/启用"提示一并落
+        # routing，供计划阶段提示与后续步骤级前置门禁使用）。
+        # 注意：本阶段**不因缺能力拒收任务**——计划本身仍有价值，且客户端可能随后
+        # 连接；硬性前置失败落在"即将产生副作用的那一步"（由 Broker 返回
+        # CAPABILITY_MISSING，前端据此提示连接设备/安装 Provider）。
+        try:
+            from app.agents.capabilities.broker import capability_broker
+            from app.agents.capabilities.resolver import (
+                CapabilityResolver,
+                concrete_capabilities,
+            )
+            from lumi_contracts.plugins import SessionBinding
+
+            required = concrete_capabilities(
+                list((routing.get("task_profile") or {}).get("required_capabilities") or [])
+                or list((routing.get("route_decision") or {}).get("required_capabilities") or [])
+            )
+            if required:
+                resolution = CapabilityResolver(broker=capability_broker).resolve(
+                    required,
+                    binding=SessionBinding(
+                        user_id=user_id,
+                        conversation_id=str(conversation_id or ""),
+                        workspace_id=str(workspace_id or ""),
+                    ),
+                )
+                routing["capability_resolution"] = resolution.as_dict()
+        except Exception as exc:  # noqa: BLE001 - 解析失败不能阻断提交
+            logger.warning("能力解析降级（忽略）: {}", str(exc)[:160])
         materialized = await self._materialization.materialize(
             user_id=user_id,
             user_role=user_role,

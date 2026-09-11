@@ -329,6 +329,9 @@ class StepRunService:
             job = await self._store.get_job(job_id)
         except Exception as exc:  # noqa: BLE001 - 文案注入失败不能中断执行
             logger.warning("过程文案注入读取任务失败 {}: {}", str(job_id)[:12], str(exc)[:160])
+        # 能力状态帧：run_next 流里也要能看到"等待 Provider / 能力完成/失败"，
+        # 否则客户端离线时用户只看到步骤一直转圈。事件流不可用时静默跳过。
+        capability_cursor = 0
         async for event in self._engine.run_next_stream(
             job_id=job_id,
             expected_step_id=expected_step_id,
@@ -336,11 +339,37 @@ class StepRunService:
             workspace_bound=workspace_bound,
             plan_revision=plan_revision,
         ):
+            step_id = str(event.get("step_id") or "") if isinstance(event, dict) else ""
+            # 能力状态事件先于当帧输出（时间顺序：能力在跑 → 步骤状态跟上）。
+            capability_cursor, pending = await self._collect_capability_events(
+                job_id, capability_cursor, step_id=step_id
+            )
+            for capability_event in pending:
+                yield capability_event
             fields = _live_presentation_fields(job, event) if isinstance(event, dict) else {}
             if fields:
                 yield {**event, **fields}
             else:
                 yield event
+
+    @staticmethod
+    async def _collect_capability_events(
+        job_id: str, cursor: int, *, step_id: str = ""
+    ) -> tuple[int, list[dict]]:
+        """按游标取出能力状态事件（返回新游标 + 事件列表）。"""
+        try:
+            from app.services.capability_events import read_capability_events
+
+            events, cursor = await read_capability_events(job_id, cursor)
+        except Exception:  # noqa: BLE001 - 状态流不可用不能中断执行
+            return cursor, []
+        rows: list[dict] = []
+        for item in events:
+            if step_id and not item.get("step_id"):
+                # 补 step_id 便于前端把能力状态归到当前步骤行。
+                item = {**item, "step_id": step_id}
+            rows.append(item)
+        return cursor, rows
 
     # ── StepRunPorts 实现 ─────────────────────────────────────
 

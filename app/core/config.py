@@ -341,6 +341,28 @@ class Settings(BaseSettings):
     # 桌面能力发现（MCP list_tools）与工作区健康探测必须快速失败并降级，
     # 不能用一个完整步骤档位去等一个离线客户端。
     AGENT_MCP_DISCOVERY_TIMEOUT_SECONDS: float = 5.0
+    # ── 插件（Skill Plugin / Provider / Policy Pack / View / Extension）──
+    # 插件安装状态目录（JSON；不依赖数据库，离线也能安装与回滚）。
+    PLUGIN_STATE_DIR: str = ""
+    # 开发者模式：允许注册 Extension Handler 与本地路径插件；**生产必须保持 False**。
+    PLUGIN_DEVELOPER_MODE: bool = False
+    # 插件验签策略。未配置算法/密钥时一律视为"未验签"（自称 official 会被降级）。
+    PLUGIN_SIGNATURE_ALGORITHM: str = ""      # "" / hmac-sha256 / ed25519
+    PLUGIN_SIGNATURE_SECRET: str = ""         # hmac-sha256 用
+    PLUGIN_SIGNATURE_PUBLIC_KEY: str = ""     # ed25519 用（base64 公钥）
+    PLUGIN_SIGNATURE_KEY_ID: str = ""
+    # 节点级能力门禁：节点**显式声明** required_capabilities 时，在执行前拦下静态不可能
+    # 的情况（能力未声明 / 位置违反数据本地性）。默认关闭，因此不改变既有计划行为；
+    # 运行时不可用（客户端离线）不在此拦截，由 Broker 在调用点给出准确错误。
+    AGENT_CAPABILITY_GATE_ENABLED: bool = False
+    # 能力派发模式（executor 前插门禁的开关）：
+    #   off      —— 完全走旧路径
+    #   shadow   —— 只查能力/租约/健康并打点，**不改执行路径**
+    #   read_only—— 只读能力（workspace.read）走 Broker 派发；写/执行仍走旧路径
+    #   active   —— 全部已声明能力都走 Broker 派发（写/执行失败不静默回退）
+    # 默认 active：**没有租约时自动落回旧路径**，因此对未接入客户端 Provider 的部署
+    # 行为不变；一旦客户端注册了租约就按租约派发。
+    AGENT_CAPABILITY_ROUTING_MODE: str = "active"
     # ── Temporal 编排（多智能体任务执行引擎）──
     # legacy remains the default. ``temporal`` moves only static read-only
     # DAGs to the external worker; dynamic/ReAct/write paths remain legacy.

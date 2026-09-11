@@ -429,6 +429,7 @@ async def call_tool(
     device_id: str = "",
     workspace_id: str = "",
     conversation_id: str = "",
+    route: dict | None = None,
 ) -> dict | None:
     """调用 MCP 工具。
 
@@ -438,9 +439,22 @@ async def call_tool(
     ``user_id / device_id / workspace_id / conversation_id`` 只用于把请求
     身份透传给 Electron（路由到托管该工作区的设备、供其审计/归属校验），
     服务端的授权判定始终发生在调用本函数之前。
+
+    ``route``（可选）表达"这次调用**由哪个 Provider/租约**承接"：能力派发适配层会带上
+    ``{"provider_id": ..., "plugin_id": ..., "lease_id": ...}``。它随 ``_meta.lumi``
+    透传给 Electron（供其核对是否与自己的租约一致），**不改变**路由选择本身；
+    缺省为空 = 旧行为（按工具名调用默认本地实现）。
     """
 
     call_id = str(call_id or uuid.uuid4())
+    route_meta = {
+        key: str(value)
+        for key, value in dict(route or {}).items()
+        if key in {"provider_id", "plugin_id", "lease_id", "capability"} and value not in (None, "")
+    }
+    if route_meta:
+        # 派发关联必须一路带到客户端：它用 provider_id/lease_id 核对"服务端确实按租约派的"。
+        args = {**(args or {}), "_lumi_route": route_meta}
 
     async def _call(session) -> dict:
         call_kwargs: dict[str, Any] = {}
@@ -479,6 +493,9 @@ async def call_tool(
             ):
                 if value not in (None, ""):
                     lumi_meta[key] = str(value)
+            if route_meta:
+                # 路由/租约信息与身份并列，客户端据此核对归属。
+                lumi_meta["route"] = route_meta
             call_kwargs["meta"] = {
                 "progressToken": task_id,
                 "io.modelcontextprotocol/related-task": {"taskId": task_id},

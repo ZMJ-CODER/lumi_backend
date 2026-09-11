@@ -9,6 +9,7 @@ from app.api.v1 import (
     agents,
     auth,
     call,
+    capabilities,
     chat,
     control_logs,
     conversations,
@@ -21,6 +22,7 @@ from app.api.v1 import (
     memory_manage,
     memories,
     office_docs,
+    plugins,
     preferences,
     prompts,
     projects,
@@ -44,6 +46,12 @@ api_router.include_router(usage.router, prefix="/usage", tags=["usage"])
 # 多智能体协作（办公模式：任务编排 / 状态管理）
 api_router.include_router(agents.router, prefix="/agents", tags=["agents"])
 api_router.include_router(workflow_skills.router, prefix="/workflow-skills", tags=["workflow-skills"])
+
+# 能力 Provider 注册与租约（阶段 2：客户端声明能力 → 服务端签发租约 → Broker 选路）
+api_router.include_router(capabilities.router, prefix="/capabilities", tags=["capabilities"])
+
+# 插件生命周期（阶段 4/8：安装/启用/停用/升级/回滚/健康 + 扩展类型登记）
+api_router.include_router(plugins.router, prefix="/plugins", tags=["plugins"])
 
 # 健康检查
 api_router.include_router(health.router, prefix="/health", tags=["health"])

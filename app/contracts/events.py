@@ -37,13 +37,89 @@ _PROCESS_EVENT_TYPES = frozenset({
     "tool_completed",
     "approval_required",
     "approval_resolved",
+    # 能力状态帧（阶段 2）：与过程帧共用统一字段，前端在同一气泡里渲染
+    # "等待 Provider / 能力完成 / 本地拒止"。delta/done 帧完全不受影响。
+    "capability_requested",
+    "waiting_provider",
+    "provider_connected",
+    "provider_disconnected",
+    "capability_started",
+    "capability_completed",
+    "capability_failed",
+    "plugin_health_changed",
 })
+
+
+#: 能力状态帧的类型集合（它们的 ``status`` 用能力词表，不是过程状态词表）。
+_CAPABILITY_STATUS_EVENT_TYPES = frozenset(
+    {
+        "capability_requested",
+        "waiting_provider",
+        "provider_connected",
+        "provider_disconnected",
+        "capability_started",
+        "capability_completed",
+        "capability_failed",
+        "plugin_health_changed",
+    }
+)
 
 
 def _now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
+#: 能力状态帧的展示文案模板（kind 由后端判定；前端只渲染，不按能力名猜）。
+_CAPABILITY_EVENT_TITLE = {
+    "capability_requested": "请求能力",
+    "waiting_provider": "等待客户端 Provider",
+    "provider_connected": "Provider 已连接",
+    "provider_disconnected": "Provider 已断开",
+    "capability_started": "正在执行能力",
+    "capability_completed": "能力已完成",
+    "capability_failed": "能力未完成",
+    "plugin_health_changed": "插件健康状态变化",
+    "approval_required": "等待确认",
+}
+
+_CAPABILITY_EVENT_SUMMARY = {
+    "capability_requested": "正在准备调用 {capability}",
+    "waiting_provider": "{capability} 暂无可用 Provider，等待客户端连接",
+    "provider_connected": "{provider} 已提供 {capability}",
+    "provider_disconnected": "{provider} 已断开，{capability} 暂时不可用",
+    "capability_started": "正在由 {provider} 执行 {capability}",
+    "capability_completed": "{capability} 已完成",
+    "capability_failed": "{capability} 未完成：{error_code}",
+    "plugin_health_changed": "插件健康状态：{health_status}",
+    "approval_required": "{capability} 需要你确认后继续",
+}
+
+
+def _capability_display_fields(payload: Mapping[str, Any]) -> dict[str, str]:
+    """能力状态帧的 title/summary（缺省时按事件类型现算，避免空行）。
+
+    与过程帧同样的道理：出口只能复制它拿到的字段，所以这里给兜底文案；
+    文案里只放能力名/Provider/错误码/健康状态，不涉及参数与正文。
+    """
+    event_type = str(payload.get("type") or "")
+    if event_type not in _CAPABILITY_EVENT_TITLE:
+        return {}
+    capability = str(payload.get("capability") or "该能力")
+    provider = str(payload.get("provider_id") or "客户端")
+    fields: dict[str, str] = {
+        "title": _CAPABILITY_EVENT_TITLE[event_type],
+        "summary": _CAPABILITY_EVENT_SUMMARY[event_type].format(
+            capability=capability,
+            provider=provider,
+            error_code=str(payload.get("error_code") or "未说明原因"),
+            health_status=str(payload.get("health_status") or "unknown"),
+        ),
+    }
+    if capability and capability != "该能力":
+        fields["tool_name"] = capability[:80]
+    return fields
 
 
 def encode_sse(frame: Mapping[str, Any]) -> str:
@@ -87,6 +163,9 @@ class SseEventEncoder:
         self._last_seq = seq
         event_type = str(payload.get("type") or "error")
         if event_type in _PROCESS_EVENT_TYPES:
+            # 能力状态帧先补兜底展示文案（能力名/Provider/错误码），再交给统一条目，
+            # 避免发射方漏给 title/summary 时前端出现空行。
+            payload.update(_capability_display_fields(payload))
             entry = ProcessLogEntry.from_event(
                 payload,
                 job_id=str(payload.get("job_id") or self._job_id or ""),
@@ -97,6 +176,13 @@ class SseEventEncoder:
                 entry = entry.model_copy(update={"sequence": seq})
             # 原字段保留（旧前端兼容），统一字段覆盖同名键。
             payload.update(entry.to_sse_fields())
+            if event_type in _CAPABILITY_STATUS_EVENT_TYPES and payload.get("status"):
+                # 能力帧的 ``status`` 是**能力状态词表**（waiting_provider/unavailable/
+                # denied/…），契约过程状态只有 pending/running/completed/failed。
+                # 两者不能互相覆盖：这里保留能力状态给前端分派，同时把过程状态放在
+                # ``process_status`` 里，让按过程契约消费的旧读法仍然拿得到合法值。
+                payload["process_status"] = str(entry.status)
+                payload["status"] = str(event.get("status") or entry.status)
         return StreamEvent(
             type=event_type,
             version=self._version,

@@ -89,12 +89,18 @@ from lumi_contracts.events import (
     ApprovalScope,
     ApprovalState,
     EventSequencer,
+    ProcessKind,
+    ProcessLogEntry,
+    ProcessStatus,
     RunState,
     StreamEvent,
     StreamEventType,
     approval_fingerprint,
     assert_transition,
     can_transition,
+    derive_kind,
+    merge_process_log,
+    sanitize_process_text,
 )
 
 # ── persistence ──────────────────────────────────────────
@@ -177,6 +183,9 @@ __all__ = [
     "ApprovalState",
     "EventSequencer",
     "KNOWN_EVENT_TYPES",
+    "ProcessKind",
+    "ProcessLogEntry",
+    "ProcessStatus",
     "RunState",
     "StreamEvent",
     "StreamEventType",
@@ -184,6 +193,9 @@ __all__ = [
     "approval_fingerprint",
     "assert_transition",
     "can_transition",
+    "derive_kind",
+    "merge_process_log",
+    "sanitize_process_text",
     # persistence
     "JobRunView",
     "StepView",

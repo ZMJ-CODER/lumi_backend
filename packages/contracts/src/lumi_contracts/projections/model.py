@@ -150,24 +150,12 @@ def _render(value: Any, *, budget: int) -> tuple[str, bool]:
         for source in (value, value.get("data")):
             if not isinstance(source, dict):
                 continue
-            sections = source.get("sections")
-            if not isinstance(sections, list) or not sections:
+            rendered = _render_list_payload(source, summary=summary, budget=budget)
+            if rendered is None:
                 continue
-            lines: list[str] = []
-            if summary:
-                lines.append(summary)
-            for item in sections:
-                if not isinstance(item, dict):
-                    continue
-                header = f"[{item.get('source') or ''} · {item.get('location') or ''}]".strip()
-                lines.append(header)
-                text = str(item.get("text") or "")
-                remaining = budget - sum(len(line) for line in lines)
-                if remaining <= 0:
-                    return "\n".join(lines)[:budget], True
-                lines.append(text[:remaining])
+            lines, dropped = rendered
             joined = "\n".join(lines)
-            return joined[:budget], len(joined) > budget
+            return joined[:budget], bool(dropped or len(joined) > budget)
         import json
 
         try:
@@ -177,6 +165,89 @@ def _render(value: Any, *, budget: int) -> tuple[str, bool]:
         return encoded[:budget], len(encoded) > budget
     text = str(value)
     return text[:budget], len(text) > budget
+
+
+def _render_list_payload(
+    source: dict[str, Any],
+    *,
+    summary: str,
+    budget: int,
+) -> tuple[list[str], bool] | None:
+    """把"列表型"payload 渲染成行式清单（``sections`` / ``matches`` / ``entries``）。
+
+    返回 ``(lines, dropped)``；``None`` 表示不是列表型，交给通用 JSON 渲染。
+
+    为什么要在这里渲染而不是让业务类自己拼：读取/检索/列举三类结果都必须经过
+    同一套投影，否则同一份数据在模型侧会出现"正文走投影、命中走 JSON"的绕过。
+    """
+    sections = source.get("sections")
+    if isinstance(sections, list) and sections:
+        return _render_sections(sections, summary=summary, budget=budget)
+    matches = source.get("matches")
+    if isinstance(matches, list) and matches:
+        return _render_matches(matches, summary=summary, budget=budget)
+    entries = source.get("entries")
+    if isinstance(entries, list) and entries:
+        return _render_entries(entries, summary=summary, budget=budget)
+    return None
+
+
+def _render_sections(sections: list, *, summary: str, budget: int) -> tuple[list[str], bool]:
+    lines: list[str] = [summary] if summary else []
+    for item in sections:
+        if not isinstance(item, dict):
+            continue
+        header = f"[{item.get('source') or ''} · {item.get('location') or ''}]".strip()
+        remaining = budget - sum(len(line) for line in lines) - len(header)
+        if remaining <= 0:
+            return lines, True
+        lines.append(header)
+        text = str(item.get("text") or "")
+        lines.append(text[:remaining])
+    return lines, False
+
+
+def _render_matches(matches: list, *, summary: str, budget: int) -> tuple[list[str], bool]:
+    """检索命中：``[路径 · 位置]`` + 命中上下文（上下文长度由上游固定/脱敏）。"""
+    lines: list[str] = [summary] if summary else []
+    for item in matches:
+        if isinstance(item, str):
+            item = {"path": item}
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or item.get("file") or item.get("name") or "")
+        location = str(item.get("location") or "")
+        if not path:
+            continue
+        header = f"[{path} · {location}]" if location else f"[{path}]"
+        remaining = budget - sum(len(line) for line in lines) - len(header)
+        if remaining <= 0:
+            return lines, True
+        lines.append(header)
+        context = " ".join(str(item.get("context") or "").split())
+        if context:
+            lines.append("  " + context[: max(0, remaining - 2)])
+    return lines, False
+
+
+def _render_entries(entries: list, *, summary: str, budget: int) -> tuple[list[str], bool]:
+    """目录列举：一行一个路径；目录补 ``/``，便于模型直接拼 read 的 path。"""
+    lines: list[str] = [summary] if summary else []
+    for item in entries:
+        if isinstance(item, str):
+            item = {"path": item}
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or item.get("name") or "")
+        if not path:
+            continue
+        if str(item.get("kind") or "") in {"directory", "dir", "folder"} and not path.endswith("/"):
+            path += "/"
+        remaining = budget - sum(len(line) for line in lines) - len(path) - 2
+        if remaining <= 0:
+            return lines, True
+        lines.append(f"[{path}]")
+    return lines, False
 
 
 __all__ = [

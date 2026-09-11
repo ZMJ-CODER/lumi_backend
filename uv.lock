@@ -1714,12 +1714,14 @@ name = "lumi-execution"
 version = "0.1.0"
 source = { editable = "packages/execution" }
 dependencies = [
+    { name = "lumi-contracts" },
     { name = "lumi-orchestration" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "lumi-contracts", editable = "packages/contracts" },
     { name = "lumi-orchestration", editable = "packages/orchestration" },
     { name = "pydantic", specifier = ">=2.0" },
 ]
@@ -1729,6 +1731,7 @@ name = "lumi-orchestration"
 version = "0.1.0"
 source = { editable = "packages/orchestration" }
 dependencies = [
+    { name = "lumi-contracts" },
     { name = "pydantic" },
 ]
 
@@ -1743,6 +1746,7 @@ redis = [
 [package.metadata]
 requires-dist = [
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.0.0" },
+    { name = "lumi-contracts", editable = "packages/contracts" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0.0" },
 ]

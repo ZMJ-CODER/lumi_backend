@@ -324,17 +324,26 @@ def apply_output_budget(tool_output: ToolOutput, *, max_chars: int = DEFAULT_MAX
 
 
 def _has_structured_sections(tool_output: ToolOutput) -> bool:
-    """结果是否是"分段正文"形态（工作区读取类）。
+    """结果是否是"列表型"形态（工作区读取/检索/列举）。
 
-    只有这种形态才用契约投影渲染：它能给出可读的 ``[文件 · 位置]`` 分段；
+    三种形态都必须走契约投影，否则会出现"正文走投影、命中/目录走 JSON"的绕过：
+
+    * ``sections``：读取正文分段；
+    * ``matches``：检索命中（路径 + 位置 + 固定长度上下文）；
+    * ``entries``：目录列举。
+
     其他结构化 payload 保持既有 JSON 渲染行为不变。
     """
     data = tool_output.data
     if not isinstance(data, dict):
         return False
     for source in (data, data.get("data")):
-        if isinstance(source, dict) and isinstance(source.get("sections"), list) and source["sections"]:
-            return True
+        if not isinstance(source, dict):
+            continue
+        for key in ("sections", "matches", "entries"):
+            value = source.get(key)
+            if isinstance(value, list) and value:
+                return True
     return False
 
 

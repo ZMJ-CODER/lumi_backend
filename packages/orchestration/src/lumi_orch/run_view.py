@@ -20,6 +20,11 @@ from lumi_orch.execution_mode import (
     EXECUTION_JOB_STATES,
     resolve_execution_mode,
 )
+from lumi_contracts.events.process import (
+    DETAIL_MAX_CHARS,
+    SUMMARY_MAX_CHARS,
+    sanitize_process_text,
+)
 
 # 现有 JobStatus 值 → 前端规范状态（无 execution_state 时的回退）。
 _EXISTING_TO_CANONICAL = {
@@ -71,6 +76,28 @@ def next_action_for_state(state: str) -> str:
     return _NEXT_ACTION_BY_STATE.get(str(state or "").strip(), "none")
 
 
+def _safe_step_fields(step: dict) -> dict:
+    """步骤计划/结果文本过安全摘要（绝对路径/凭据/协议原始载荷不进前端）。
+
+    ``description`` 与 ``result_summary`` 是**既有计划通道**上的自由文本，来源是
+    规划器的 instruction 与步骤结果摘要——都可能夹带绝对本地路径、令牌或工具原始
+    载荷。``run_view`` 是所有出口（``GET /agents/jobs/{id}``、``plan_ready``、
+    ``waiting_next``、``done``）共用的投影，在这里统一净化一次，各处形状自然一致。
+
+    只动这两个文本字段：id/status/tool/依赖/资源声明/时间戳等结构化字段原样保留，
+    否则会破坏前端按钮状态机与单步执行定位。长度上限与过程日志同级（描述 600 /
+    摘要 300），避免把正文从这条通道带到前端。
+    """
+    for key, limit in (
+        ("description", DETAIL_MAX_CHARS),
+        ("result_summary", SUMMARY_MAX_CHARS),
+    ):
+        value = step.get(key)
+        if isinstance(value, str) and value.strip():
+            step[key] = sanitize_process_text(value, limit=limit)
+    return step
+
+
 def run_view(
     job: Any,
     *,
@@ -104,7 +131,7 @@ def run_view(
             continue
         step = dict(raw)
         step["index"] = int(index)
-        view_steps.append(step)
+        view_steps.append(_safe_step_fields(step))
     return {
         "job_id": str(_attr(job, "job_id", "") or ""),
         "execution_mode": execution_mode,

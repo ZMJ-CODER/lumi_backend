@@ -28,6 +28,16 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from lumi_contracts.events.process import (
+    SUMMARY_MAX_CHARS,
+    TITLE_MAX_CHARS,
+    derive_kind,
+    sanitize_process_text,
+)
+
+# 过程事件的展示标题（协议层没有步骤对象，只能用通用阶段标签）。
+PROCESS_ENTRY_TITLE = "执行过程"
+
 
 def _normalize_protocol_text(text: str) -> str:
     """Normalize provider-specific full-width DSML punctuation.
@@ -716,32 +726,54 @@ def chunk_to_events(
       {"type": "tool", "tool_call": {...}}       —— 归一化工具调用（on_tool 可改写/分发）；
       {"type": "warning", "content": ...}        —— 协议解析告警（供调用方做一次格式纠正重试）。
 
+    过程/工具事件同时携带**语义过程字段**（``entry_id`` / ``kind`` / ``title`` /
+    ``summary`` / ``status``，全部过 ``sanitize_process_text``）：``kind`` 由后端按
+    工具名判定，前端只渲染；``tool`` 事件用稳定 ``call_id`` 作 ``entry_id``，与
+    后续同一调用的完成事件合并成一行。原始 ``tool_call.arguments`` 只保留在既有
+    的 ``tool_call`` 字段里（内部消费者用），绝不复制进过程展示字段。
+
     Chat / ReAct / Planner 的流式出口都应经过这里，共用同一个解析器。
     """
     events: list[dict] = []
     if chunk.answer_delta:
         events.append({"type": "delta", "content": chunk.answer_delta})
     if chunk.process_delta:
-        events.append({"type": "process", "content": chunk.process_delta})
+        events.append({
+            "type": "process",
+            "content": chunk.process_delta,
+            # 语义过程字段：kind 由后端判定；标题是通用阶段标签，摘要复用解析出的
+            # 工具前置说明（本来就是发给用户的自然语言，非模型推理链）。
+            "kind": str(derive_kind(event_type="process")),
+            "title": sanitize_process_text(PROCESS_ENTRY_TITLE, limit=TITLE_MAX_CHARS),
+            "summary": sanitize_process_text(chunk.process_delta, limit=SUMMARY_MAX_CHARS),
+            "status": "running",
+        })
     for call in chunk.tool_calls:
         if on_tool is not None:
             produced = on_tool(call)
             if produced is not None:
                 events.append(dict(produced))
-            else:
-                events.append({"type": "tool", "tool_call": {
-                    "name": call.name,
-                    "arguments": call.arguments,
-                    "call_id": call.call_id,
-                    "protocol": call.protocol,
-                }})
-        else:
-            events.append({"type": "tool", "tool_call": {
+                continue
+        events.append({
+            "type": "tool",
+            "tool_call": {
                 "name": call.name,
                 "arguments": call.arguments,
                 "call_id": call.call_id,
                 "protocol": call.protocol,
-            }})
+            },
+            # 语义过程字段：entry_id 用稳定 call_id（同一调用的完成事件复用同一
+            # call_id，因此合并成一行）；工具名只以净化后的短文本出现。
+            "tool_name": sanitize_process_text(call.name, limit=TITLE_MAX_CHARS),
+            "call_id": str(call.call_id or ""),
+            "entry_id": f"call:{call.call_id}" if call.call_id else "",
+            "kind": str(derive_kind(tool_name=str(call.name or ""))),
+            "title": sanitize_process_text(call.name or "工具调用", limit=TITLE_MAX_CHARS),
+            "summary": sanitize_process_text(
+                f"正在调用 {call.name}", limit=SUMMARY_MAX_CHARS
+            ),
+            "status": "running",
+        })
     for warning in chunk.warnings:
         events.append({"type": "warning", "content": warning})
     return events

@@ -89,6 +89,11 @@ class Job(BaseModel):
     # 办公任务路由与恢复审计信息。使用开放 dict 保持 API 向后兼容，旧任务
     # 快照缺少该字段时会自动使用空对象。
     routing: dict = Field(default_factory=dict)
+    # 执行过程日志（任务气泡刷新恢复的唯一落库点）。**只存过程**，不存路由/策略
+    # （那是 routing 的职责），也不存原始工具参数/原始响应/模型推理；条目形状见
+    # ``lumi_contracts.events.process.ProcessLogEntry``，由
+    # ``app.contracts.process_log`` 从既有 Job 状态派生并去重、限长（≤200）。
+    process_log: list[dict] = Field(default_factory=list)
     error: str | None = None
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)

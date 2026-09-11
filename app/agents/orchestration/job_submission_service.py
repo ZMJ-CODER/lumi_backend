@@ -89,6 +89,7 @@ class JobSubmissionService:
         submission_key: str,
         admission_token: str,
         execution_preference: str = "use_workspace_policy",
+        timeout_seconds: float | None = None,
     ) -> Job:
         """Create and dispatch one job while an admission reservation is held."""
         prepared = await self._context_service.prepare(
@@ -301,6 +302,16 @@ class JobSubmissionService:
                 )
                 routing["execution_request"] = execution_request_snapshot(execution_request)
 
+        # 内部执行超时预算：按复杂度档位取阶梯值（M0=5/M1=10/M2=30/M3=60），
+        # 模型计划规模可升级档位，请求里的 timeout_seconds 可覆盖。写进 routing
+        # 作为可审计字段，供后续内部等待（MCP/工作区/节点）有界化时取用。
+        from app.agents.orchestration.timeout_ladder import describe_budget
+
+        routing["timeout"] = describe_budget(
+            tier=routing.get("level"),
+            node_count=len(getattr(tree, "nodes", None) or []),
+            override=timeout_seconds,
+        )
         materialized = await self._materialization.materialize(
             user_id=user_id,
             user_role=user_role,

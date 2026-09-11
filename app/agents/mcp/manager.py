@@ -27,6 +27,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.resilience import CircuitOpenError, get_breaker
+from app.agents.orchestration.timeout_ladder import DeadlineExceeded
 from app.agents.skills.base import SkillContext, SkillProgress, Tool
 from app.agents.skills.output_contract import OutputMeta, ToolOutput
 from app.services.tool_output_pipeline import normalize_execution_envelope, to_execution_envelope
@@ -60,6 +61,26 @@ def _loopback_health_url(cfg: dict) -> str:
     }:
         return ""
     return urlunsplit((parsed.scheme, parsed.netloc, "/health", "", ""))
+
+
+def _call_timeout_seconds() -> float:
+    """MCP 单次会话调用的上界（桌面能力发现/健康探测必须快速失败并降级）。
+
+    取 ``AGENT_MCP_DISCOVERY_TIMEOUT_SECONDS``（默认 5s，可调），并夹在超时阶梯的
+    合法区间内；任何情况下都不返回 0/None，避免退化成无界等待。
+    """
+    from app.agents.orchestration.timeout_ladder import (
+        MAX_OVERRIDE_SECONDS,
+        MIN_OVERRIDE_SECONDS,
+    )
+
+    try:
+        configured = float(getattr(settings, "AGENT_MCP_DISCOVERY_TIMEOUT_SECONDS", 5.0))
+    except (TypeError, ValueError):
+        configured = 5.0
+    if configured <= 0:
+        configured = 5.0
+    return min(max(configured, MIN_OVERRIDE_SECONDS), MAX_OVERRIDE_SECONDS)
 
 
 async def _loopback_server_has_recovered(cfg: dict) -> bool:
@@ -167,7 +188,17 @@ class _McpSessionWorker:
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         await self.queue.put((fn, future))
-        return await future
+        # 有界等待：worker 任务若卡在握手/会话初始化（桌面端未启动、socket 半开、
+        # 版本不兼容），这个 future 永远不会被 set，调用方此前会**无界**挂住——
+        # 计划编译期发现桌面能力正是这样把一次 submit_job 卡死的。超时后取消
+        # future 并让调用方走既有降级（工具集为空/熔断冷却）。
+        from app.agents.orchestration.timeout_ladder import enforce
+
+        return await enforce(
+            future,
+            seconds=_call_timeout_seconds(),
+            label="MCP 会话调用",
+        )
 
     async def close(self) -> None:
         if not self.task.done():
@@ -206,7 +237,18 @@ async def ensure_server_healthy(name: str) -> bool:
     until = _failed_until.get(name)
     if until is None or time.monotonic() >= until:
         return True
-    if not await _loopback_server_has_recovered(cfg):
+    # 探测本身也必须有界：健康探测卡住同样会把提交路径钉死在这里。
+    from app.agents.orchestration.timeout_ladder import DeadlineExceeded, enforce
+
+    try:
+        recovered = await enforce(
+            _loopback_server_has_recovered(cfg),
+            seconds=_call_timeout_seconds(),
+            label="MCP 健康探测",
+        )
+    except DeadlineExceeded:
+        return False
+    if not recovered:
         return False
     stale_worker = _session_workers.pop(name, None)
     if stale_worker is not None:
@@ -265,7 +307,14 @@ async def _call_with_session(
         logger.info("[MCP] 服务器 {} 暂时熔断，跳过调用: {}", name, exc)
         return None
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[MCP] 调用服务器 {} 失败（将回退轮询）: {}", name, exc)
+        # 超时（``DeadlineExceeded``）与普通失败走同一降级路径：失效工具缓存并进入
+        # 冷却，下一次调用由健康探测决定是否重建会话（会话 worker 已在上面关闭）。
+        if isinstance(exc, DeadlineExceeded):
+            logger.warning(
+                "[MCP] 服务器 {} 会话调用超时（{}s），已降级", name, getattr(exc, "timeout", "")
+            )
+        else:
+            logger.warning("[MCP] 调用服务器 {} 失败（将回退轮询）: {}", name, exc)
         invalidate_tool_cache(name)
         _failed_until[name] = time.monotonic() + _RETRY_COOLDOWN_S
         return None

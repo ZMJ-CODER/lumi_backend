@@ -153,6 +153,10 @@ extend-immutable-calls = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# 仓库根与 tests/ 都进 sys.path：``tests/deadline.py`` 这类**测试内部**辅助模块
+# 用裸名导入（如 ``from deadline import with_deadline``），既能在单独跑某个用例文件
+# 时解析，也能在混合目录（tests/ + packages/*/tests/）批量运行时解析。
+pythonpath = [".", "tests"]
 # 禁用 pytest 缓存：Windows 上 .pytest_cache 目录权限异常会导致每次运行报
 # PytestCacheWarning（WinError 5 拒绝访问），本项目不需要 --lf/--ff 等缓存功能。
 addopts = "-p no:cacheprovider"

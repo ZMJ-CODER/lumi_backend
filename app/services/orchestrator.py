@@ -40,6 +40,13 @@ from app.services.conversation_memory import ConversationRecall, retrieve_conver
 from app.services.prompts import OFFICE_DECISION_PROMPT, get_base_system_prompt, get_prompt_content
 from app.services.usage import CATEGORY_CHAT, CATEGORY_SKILL, CATEGORY_TITLE
 from app.services.tool_output_projection import project_citations
+from lumi_contracts.events.process import (
+    SUMMARY_MAX_CHARS,
+    TITLE_MAX_CHARS,
+    ProcessStatus,
+    derive_kind,
+    sanitize_process_text,
+)
 
 # Redis Key 模板
 CONTEXT_KEY = "conv:ctx:{conversation_id}"  # 会话上下文 (list of json)
@@ -311,6 +318,77 @@ def _resolve_workspace_tool_name(name: str, names: set[str]) -> str | None:
     suffix = requested.split("__")[-1]
     matches = [candidate for candidate in names if candidate.split("__")[-1] == suffix]
     return matches[0] if len(matches) == 1 else None
+
+
+# ── 过程条目语义字段（kind 由后端判定；前端只渲染）────────────────────
+# SSE 出口（app/contracts/events.py::SseEventEncoder）只能复制它拿到的字段：如果
+# 发射点不给 title/summary，实时帧就是空行，用户只能靠刷新等
+# app/contracts/process_log.py 从 Job 快照补出来。因此这里在**发射点**补齐，
+# 并且 entry_id 与持久化去重键一致（step:<step_id> / plan:r<rev> / call:<call_id>），
+# 让实时帧与刷新快照合并成同一行。所有人类可读文本一律过 sanitize_process_text：
+# 不落原始工具参数/原始响应/DSML/绝对路径/凭据，摘要只写公开进度短语。
+PROCESS_ENTRY_TITLE = "执行过程"
+
+
+def _process_fields(
+    *,
+    kind: str,
+    title: str,
+    summary: str,
+    status: str,
+    entry_id: str = "",
+) -> dict[str, str]:
+    """安全摘要后的统一过程字段（``entry_id`` 为空时不落该键，交给 SSE 出口兜底）。"""
+    text_title = sanitize_process_text(title, limit=TITLE_MAX_CHARS)
+    # kind/status 只允许契约词汇：非法值收敛（kind → thinking，status → running），
+    # 不向前端发明新枚举。
+    mapped_status = str(status or "").strip().casefold()
+    fields = {
+        "kind": str(derive_kind(explicit=kind)),
+        "title": text_title or PROCESS_ENTRY_TITLE,
+        "summary": (
+            sanitize_process_text(summary, limit=SUMMARY_MAX_CHARS)
+            or text_title
+            or "正在处理当前步骤"
+        ),
+        "status": (
+            mapped_status
+            if mapped_status in {item.value for item in ProcessStatus}
+            else str(ProcessStatus.RUNNING)
+        ),
+    }
+    if entry_id:
+        fields["entry_id"] = str(entry_id)
+    return fields
+
+
+def _step_frame_fields(step: object, *, entry_prefix: str = "step") -> dict[str, str]:
+    """``{"type": "step", "step": {...}}`` 帧的语义过程字段。
+
+    ``step`` 是 ``_job_step`` / 技能进度事件共用的展示形状（id/title/status/tool/
+    output/error）。摘要只取**已经在外发字段里**的安全文本（output/error），
+    并再次过安全摘要；status 沿用步骤自身状态（pending/running/completed/failed）。
+    """
+    data = step if isinstance(step, dict) else {}
+    step_id = str(data.get("id") or data.get("step_id") or "")
+    tool_name = str(data.get("tool") or data.get("tool_name") or "")
+    status = str(data.get("status") or "pending")
+    title = str(data.get("title") or tool_name or "")
+    if status == "completed":
+        summary = str(data.get("output") or "") or f"已完成{title or '该步骤'}"
+    elif status == "failed":
+        summary = str(data.get("error") or "") or f"{title or '该步骤'}未完成"
+    elif status == "running":
+        summary = f"正在执行：{title or '当前步骤'}"
+    else:
+        summary = f"待执行：{title or '当前步骤'}"
+    return _process_fields(
+        entry_id=f"{entry_prefix}:{step_id}" if step_id else "",
+        kind=str(derive_kind(tool_name=tool_name)) if tool_name else str(derive_kind()),
+        title=title or "执行步骤",
+        summary=summary,
+        status=status,
+    )
 
 
 class Orchestrator:
@@ -1797,7 +1875,19 @@ class Orchestrator:
         )
         answer_messages = list(direct_messages)
         if workspace_intent:
-            yield {"type": "process", "content": "正在读取工作区资料…"}
+            yield {
+                "type": "process",
+                "content": "正在读取工作区资料…",
+                # 语义过程字段：原子只读路径没有 job/step，entry_id 用阶段序号
+                # （同一请求内稳定），kind 由后端判定为 read。
+                **_process_fields(
+                    entry_id="process:atomic_read:1",
+                    kind=str(derive_kind(tool_name="workspace_read")),
+                    title="读取工作区资料",
+                    summary="正在读取工作区资料…",
+                    status="running",
+                ),
+            }
             started = time.perf_counter()
             # Router v2：通过 InformationResolver（适配器 + smart_slice）读取，
             # 超长内容只截断/分段，绝不因 CONTEXT_TOO_LARGE 升级复杂度。
@@ -1826,6 +1916,13 @@ class Orchestrator:
                     yield {
                         "type": "process",
                         "content": "资料较长，本轮先给出关键片段结论，可继续分段整理。",
+                        **_process_fields(
+                            entry_id="process:atomic_read:2",
+                            kind=str(derive_kind(tool_name="workspace_read")),
+                            title="整理工作区资料",
+                            summary="资料较长，本轮先给出关键片段结论，可继续分段整理。",
+                            status="running",
+                        ),
                     }
             else:
                 evidence, records = await self.read_workspace_context(
@@ -1848,9 +1945,29 @@ class Orchestrator:
                     OfficeContext(text="[受限读取到的工作区资料正文]\n" + evidence),
                     content,
                 )
-                yield {"type": "process", "content": "已完成资料整理，正在生成回答…"}
+                yield {
+                    "type": "process",
+                    "content": "已完成资料整理，正在生成回答…",
+                    **_process_fields(
+                        entry_id="process:atomic_read:3",
+                        kind=str(derive_kind(tool_name="workspace_read")),
+                        title="整理工作区资料",
+                        summary="已完成资料整理，正在生成回答…",
+                        status="completed",
+                    ),
+                }
             elif records:
-                yield {"type": "process", "content": "未能读取到文件正文，将基于工作区目录摘要回答。"}
+                yield {
+                    "type": "process",
+                    "content": "未能读取到文件正文，将基于工作区目录摘要回答。",
+                    **_process_fields(
+                        entry_id="process:atomic_read:4",
+                        kind=str(derive_kind(tool_name="workspace_read")),
+                        title="读取工作区资料",
+                        summary="未能读取到文件正文，将基于工作区目录摘要回答。",
+                        status="failed",
+                    ),
+                }
         # The read window above is the only place where workspace tools may be
         # executed for an atomic question.  Make that fact explicit in the
         # final model turn: some providers otherwise emit a second textual
@@ -1975,7 +2092,27 @@ class Orchestrator:
                     )
 
                     view = run_view(job)
-                    yield {"type": "plan_ready", **plan_ready_payload(job_id=job.job_id, view=view)}
+                    from app.contracts.process_log import PLAN_ENTRY_TITLE
+
+                    yield {
+                        "type": "plan_ready",
+                        # 语义过程字段：entry_id 与持久化 plan:r<rev> 对齐（刷新后同一行）。
+                        # 载荷展开在后：status 仍由 plan_ready_payload 给出（waiting_run），
+                        # 过程状态（running/completed）由 SSE 出口按同一事件判定。
+                        **_process_fields(
+                            entry_id=f"plan:r{max(1, int(view.get('plan_revision') or 1))}",
+                            kind=str(derive_kind(event_type="process")),
+                            title=PLAN_ENTRY_TITLE,
+                            summary=str(view.get("plan_text") or "")
+                            or "已生成执行计划，等待你确认后逐步运行。",
+                            status=(
+                                "running"
+                                if str(view.get("status") or "") in {"", "planning"}
+                                else "completed"
+                            ),
+                        ),
+                        **plan_ready_payload(job_id=job.job_id, view=view),
+                    }
                     # 计划优先：done.content 回填计划文本，避免前端在没有计划气泡
                     # 组件时渲染成空答复；真正执行由 run_next 驱动。
                     yield done_payload(
@@ -2009,6 +2146,14 @@ class Orchestrator:
                                 "completed_at": None,
                                 "duration_ms": None,
                             },
+                            # 语义过程字段：计划调整是一次性的瞬时通知，没有持久化
+                            # 对应行，entry_id 用稳定的合成步骤 id。
+                            **_step_frame_fields({
+                                "id": f"plan-revision-{plan_revision}",
+                                "title": "调整执行计划",
+                                "status": "completed",
+                                "output": reason[:500],
+                            }),
                         }
                     last_plan_revision = plan_revision
                 logical_steps = await self._logical_plan_steps(user_id, routing)
@@ -2022,7 +2167,14 @@ class Orchestrator:
                     signature = (step["status"], step["error"], step["output"], step["effect_status"])
                     if last.get(step["id"]) != signature:
                         last[step["id"]] = signature
-                        yield {"type": "step", "job_id": job.job_id, "step": step}
+                        yield {
+                            "type": "step",
+                            "job_id": job.job_id,
+                            "step": step,
+                            # 语义过程字段：entry_id 与持久化 step:<step_id> 对齐，
+                            # title/summary 非空（原来只有 step.output，实时帧是空行）。
+                            **_step_frame_fields(step),
+                        }
                 # Text-producing office skills publish deltas independently of
                 # status snapshots. Drain them while the node is still running.
                 from app.services.office_stream import read_deltas
@@ -2104,6 +2256,9 @@ class Orchestrator:
                             "type": "step",
                             "job_id": job.job_id,
                             "step": state_step,
+                            # 语义过程字段：状态库丢失是本地合成步骤（无持久化行），
+                            # 用稳定的 step:state 去重键，状态为 failed。
+                            **_step_frame_fields(state_step),
                         }
                         break
                     continue
@@ -2480,7 +2635,13 @@ class Orchestrator:
                     if next_progress in done:
                         progress = next_progress.result()
                         if isinstance(progress, dict) and progress.get("type") == "step":
-                            yield {"type": "step", "step": progress}
+                            yield {
+                                "type": "step",
+                                "step": progress,
+                                # 语义过程字段：技能进度事件的 id 是工具调用 id，
+                                # 运行/完成两次发射共用它 → 同一行；kind 按工具名判定。
+                                **_step_frame_fields(progress),
+                            }
                     else:
                         next_progress.cancel()
                         await asyncio.gather(next_progress, return_exceptions=True)
@@ -2489,7 +2650,11 @@ class Orchestrator:
                 while not progress_queue.empty():
                     progress = progress_queue.get_nowait()
                     if isinstance(progress, dict) and progress.get("type") == "step":
-                        yield {"type": "step", "step": progress}
+                        yield {
+                            "type": "step",
+                            "step": progress,
+                            **_step_frame_fields(progress),
+                        }
 
                 reply, _tool_records, tool_citations = tool_task.result()
                 citations.extend(tool_citations)
@@ -2548,12 +2713,31 @@ class Orchestrator:
 
         parser = ModelStreamProtocolParser()
         stripper = TextToolStripper()
+        # 语义过程字段：协议层没有步骤/工具标识，entry_id 用流内递增序号
+        # （同一条流内稳定、唯一），kind 由后端判定为 thinking。
+        process_seq = 0
+
+        def _process_frame(text: str) -> dict:
+            nonlocal process_seq
+            process_seq += 1
+            return {
+                "type": "process",
+                "content": text,
+                **_process_fields(
+                    entry_id=f"process:chat:{process_seq}",
+                    kind=str(derive_kind(event_type="process")),
+                    title=PROCESS_ENTRY_TITLE,
+                    summary=text,
+                    status="running",
+                ),
+            }
+
         try:
             async for raw_delta in self._llm.chat_stream(messages, **stream_kwargs):
                 for piece in stripper.feed(str(raw_delta or "")):
                     process_prefix = stripper.drain_process()
                     if process_prefix:
-                        yield {"type": "process", "content": process_prefix}
+                        yield _process_frame(process_prefix)
                     for chunk in parser.feed(piece):
                         for event in chunk_to_events(chunk):
                             if event["type"] == "delta":
@@ -2561,12 +2745,12 @@ class Orchestrator:
                                 if clean:
                                     yield {"type": "delta", "content": clean}
                             elif event["type"] == "process":
-                                yield {"type": "process", "content": str(event.get("content") or "")}
+                                yield _process_frame(str(event.get("content") or ""))
             # 结尾：冲刷剥离器与解析器残留的干净文本。
             for piece in stripper.flush():
                 process_prefix = stripper.drain_process()
                 if process_prefix:
-                    yield {"type": "process", "content": process_prefix}
+                    yield _process_frame(process_prefix)
                 for chunk in parser.feed(piece):
                     for event in chunk_to_events(chunk):
                         if event["type"] == "delta":
@@ -2574,7 +2758,7 @@ class Orchestrator:
                             if clean:
                                 yield {"type": "delta", "content": clean}
                         elif event["type"] == "process":
-                            yield {"type": "process", "content": str(event.get("content") or "")}
+                            yield _process_frame(str(event.get("content") or ""))
             for chunk in parser.finalize():
                 for event in chunk_to_events(chunk):
                     if event["type"] == "delta":
@@ -2582,7 +2766,7 @@ class Orchestrator:
                         if clean:
                             yield {"type": "delta", "content": clean}
                     elif event["type"] == "process":
-                        yield {"type": "process", "content": str(event.get("content") or "")}
+                        yield _process_frame(str(event.get("content") or ""))
         except asyncio.CancelledError:
             raise
 
@@ -2591,17 +2775,44 @@ class Orchestrator:
         """把协议解析事件归一化为现有 SSE 载荷。
 
         delta/process/warning/tool 保持协议名直出（前端按需消费）；其中
-        tool 仅做记录，普通闲聊路径不自动执行未请求的工具。
+        tool 仅做记录，普通闲聊路径不自动执行未请求的工具。过程/工具事件补齐
+        **语义过程字段**（协议层已给出则沿用，缺失则按事件内容现算并净化）。
         """
         event_type = str(event.get("type") or "")
         if event_type == "delta":
             return {"type": "delta", "content": str(event.get("content") or "")}
         if event_type == "process":
-            return {"type": "process", "content": str(event.get("content") or "")}
+            content = str(event.get("content") or "")
+            return {
+                "type": "process",
+                "content": content,
+                **_process_fields(
+                    entry_id=str(event.get("entry_id") or ""),
+                    kind=str(event.get("kind") or derive_kind(event_type="process")),
+                    title=str(event.get("title") or PROCESS_ENTRY_TITLE),
+                    summary=str(event.get("summary") or content),
+                    status=str(event.get("status") or "running"),
+                ),
+            }
         if event_type == "warning":
             return {"type": "warning", "content": str(event.get("content") or "")}
         if event_type == "tool":
-            return {"type": "tool", "tool_call": event.get("tool_call") or {}}
+            tool_call = event.get("tool_call") or {}
+            tool_name = str(event.get("tool_name") or tool_call.get("name") or "")
+            return {
+                "type": "tool",
+                # 原始 tool_call 字段保持原样（内部消费者用）；语义字段只放净化文本。
+                "tool_call": tool_call,
+                "tool_name": sanitize_process_text(tool_name, limit=TITLE_MAX_CHARS),
+                "call_id": str(event.get("call_id") or tool_call.get("call_id") or ""),
+                **_process_fields(
+                    entry_id=str(event.get("entry_id") or ""),
+                    kind=str(event.get("kind") or derive_kind(tool_name=tool_name)),
+                    title=str(event.get("title") or tool_name or "工具调用"),
+                    summary=str(event.get("summary") or f"正在调用 {tool_name}"),
+                    status=str(event.get("status") or "running"),
+                ),
+            }
         return event
 
     # ── 内部方法 ────────────────────────────────────────

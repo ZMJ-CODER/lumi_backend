@@ -36,6 +36,16 @@ class CreateAgentJobRequest(BaseModel):
         default="use_workspace_policy",
         description="办公任务执行方式：use_workspace_policy / step_confirm / auto_routine",
     )
+    timeout_seconds: float | None = Field(
+        default=None,
+        ge=1,
+        le=600,
+        description=(
+            "可选：本次任务的内部执行超时（秒）。缺省时按复杂度档位取超时阶梯"
+            "（M0=5/M1=10/M2=30/M3=60，随模型计划升级，可在配置里调整）。"
+            "只影响内部等待的有界化，不改变任务语义。"
+        ),
+    )
 
 
 RESUME_ACTION_RESUME = "resume"

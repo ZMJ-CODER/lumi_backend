@@ -18,10 +18,32 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from lumi_contracts import EventSequencer, StreamEvent
+from lumi_contracts import EventSequencer, ProcessLogEntry, StreamEvent
 
 # 事件契约版本：新增字段不升版本，破坏性改名才升（前端按版本解析）。
 STREAM_EVENT_VERSION = 1
+
+# 需要补"过程条目字段"的事件：过程气泡只消费这些，普通聊天 delta/done 不受影响。
+# "step" / "plan_ready" 是自动（auto/step_confirm）路径的实时帧，之前漏登记，
+# 导致那条路径实时没有统一字段（只能靠刷新恢复）。
+_PROCESS_EVENT_TYPES = frozenset({
+    "process",
+    "step",
+    "step_started",
+    "step_completed",
+    "plan_ready",
+    "tool",
+    "tool_started",
+    "tool_completed",
+    "approval_required",
+    "approval_resolved",
+})
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 def encode_sse(frame: Mapping[str, Any]) -> str:
@@ -53,12 +75,30 @@ class SseEventEncoder:
         return self._last_seq
 
     def frame(self, event: Mapping[str, Any]) -> dict[str, Any]:
-        """事件字典 → 扁平 SSE 帧（``type`` / ``version`` / ``seq`` + 原字段）。"""
+        """事件字典 → 扁平 SSE 帧（``type`` / ``version`` / ``seq`` + 原字段）。
+
+        过程/工具事件额外补齐**统一展示字段**（``entry_id`` / ``kind`` / ``title`` /
+        ``summary`` / ``detail`` / ``status`` / ``step_id`` / ``call_id`` /
+        ``sequence`` / ``occurred_at``）：前端只渲染，不再按工具名猜"读取/编辑/Pwsh"，
+        也不需要第二套过程解析入口。原始参数/响应/推理文本一律不取。
+        """
         payload = dict(event or {})
         seq = self._sequencer.next_seq()
         self._last_seq = seq
+        event_type = str(payload.get("type") or "error")
+        if event_type in _PROCESS_EVENT_TYPES:
+            entry = ProcessLogEntry.from_event(
+                payload,
+                job_id=str(payload.get("job_id") or self._job_id or ""),
+                sequence=seq,
+                occurred_at=str(payload.get("occurred_at") or _now_iso()),
+            )
+            if not entry.sequence:
+                entry = entry.model_copy(update={"sequence": seq})
+            # 原字段保留（旧前端兼容），统一字段覆盖同名键。
+            payload.update(entry.to_sse_fields())
         return StreamEvent(
-            type=str(payload.get("type") or "error"),
+            type=event_type,
             version=self._version,
             seq=seq,
             job_id=str(payload.get("job_id") or self._job_id or ""),

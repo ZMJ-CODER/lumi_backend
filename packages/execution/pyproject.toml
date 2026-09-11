@@ -10,6 +10,9 @@ requires-python = "==3.13.*"
 dependencies = [
     "pydantic>=2.0",
     "lumi-orchestration>=0.1.0",
+    # 过程条目契约（kind/title/summary/sanitize）是共享契约层：执行内核直接产出
+    # 语义过程字段，不自己再写一套 kind 映射与安全摘要。
+    "lumi-contracts>=0.1.0",
 ]
 
 [tool.setuptools.packages.find]

@@ -326,6 +326,21 @@ class Settings(BaseSettings):
     AGENT_USER_ACTIVE_JOB_LIMIT: int = 2
     AGENT_SUBMISSION_MAX_INFLIGHT: int = 8
     AGENT_ADMISSION_LEASE_SECONDS: int = 7200
+    # ── 内部执行超时阶梯（可调）──
+    # 任何"等外部依赖（Electron/MCP/工作区设备）"的内部等待都必须有界：无界等待会
+    # 让一次提交永远不返回（计划编译期发现桌面能力时尤其明显）。超时按任务复杂度
+    # 档位取阶梯值，可按模型计划升级（M0→…→M3）或用请求里的 timeout_seconds 覆盖。
+    # 解析规则见 app/agents/orchestration/timeout_ladder.py。
+    AGENT_TIMEOUT_LADDER_ENABLED: bool = True
+    AGENT_TIMEOUT_M0_SECONDS: int = 5
+    AGENT_TIMEOUT_M1_SECONDS: int = 10
+    AGENT_TIMEOUT_M2_SECONDS: int = 30
+    AGENT_TIMEOUT_M3_SECONDS: int = 60
+    # 计划节点数兜底映射（没有 TCA 档位时）：≤3→M0，≤6→M1，≤12→M2，其余 M3。
+    AGENT_TIMEOUT_NODE_TIERS: str = "3,6,12"
+    # 桌面能力发现（MCP list_tools）与工作区健康探测必须快速失败并降级，
+    # 不能用一个完整步骤档位去等一个离线客户端。
+    AGENT_MCP_DISCOVERY_TIMEOUT_SECONDS: float = 5.0
     # ── Temporal 编排（多智能体任务执行引擎）──
     # legacy remains the default. ``temporal`` moves only static read-only
     # DAGs to the external worker; dynamic/ReAct/write paths remain legacy.

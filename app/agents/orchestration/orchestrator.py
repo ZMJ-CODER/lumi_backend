@@ -417,6 +417,7 @@ class AgentOrchestrator:
         workspace_id: str | None = None,
         user_role: str = "user",
         execution_preference: str = "use_workspace_policy",
+        timeout_seconds: float | None = None,
     ) -> Job:
         """规划任务树并启动执行（Temporal 优先），立即返回 Job."""
         if scene == "office" and not workspace_id and conversation_id:
@@ -462,6 +463,7 @@ class AgentOrchestrator:
                     workspace_id=workspace_id,
                     user_role=user_role,
                     execution_preference=execution_preference,
+                    timeout_seconds=timeout_seconds,
                     submission_key=submission_key,
                     admission_token=admission_token,
                 ),
@@ -584,6 +586,7 @@ class AgentOrchestrator:
         submission_key: str,
         admission_token: str,
         execution_preference: str = "use_workspace_policy",
+        timeout_seconds: float | None = None,
     ) -> Job:
         """Delegate one admitted submission to the focused transaction service."""
         return await self._operations.submit(
@@ -599,6 +602,7 @@ class AgentOrchestrator:
             workspace_id=workspace_id,
             user_role=user_role,
             execution_preference=execution_preference,
+            timeout_seconds=timeout_seconds,
             submission_key=submission_key,
             admission_token=admission_token,
         )

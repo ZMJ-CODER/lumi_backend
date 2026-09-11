@@ -4,26 +4,30 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="优化读取工具和输出">
-      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/lumi_backend.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/lumi_backend.iml" afterDir="false" />
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="新增contractssdk">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.tmp_openapi.json" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/mcp/manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/mcp/manager.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/execution/lineage.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/execution/lineage.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/agents/orchestration/job_submission_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/job_submission_service.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/presentation.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/presentation.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/executor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/executor.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/loader.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/loader.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/registry.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/registry.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/skills/workflow_runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/workflow_runner.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/models.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/models.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/step_run_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/step_run_service.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/api/v1/agents.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/agents.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/call.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/call.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/chat.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/chat.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/conversations.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/conversations.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/contracts/events.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/contracts/events.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/contracts/workspace_result.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/contracts/workspace_result.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/models/agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/agent.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/policy_acceptance.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/policy_acceptance.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/task_router_adapter.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/task_router_adapter.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/services/tool_output_pipeline.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/tool_output_pipeline.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/events/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/events/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/persistence/run_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/persistence/run_view.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/projections/model.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/projections/model.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/execution/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/packages/execution/pyproject.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/execution/src/lumi_execution/step_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/execution/src/lumi_execution/step_engine.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/orchestration/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/packages/orchestration/pyproject.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/orchestration/src/lumi_orch/protocol.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/orchestration/src/lumi_orch/protocol.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/orchestration/src/lumi_orch/run_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/orchestration/src/lumi_orch/run_view.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
@@ -113,14 +117,6 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1785559147484</updated>
-    </task>
-    <task id="LOCAL-00010" summary="添加沙箱实例，预留skill编写基底">
-      <option name="closed" value="true" />
-      <created>1786266289839</created>
-      <option name="number" value="00010" />
-      <option name="presentableId" value="LOCAL-00010" />
-      <option name="project" value="LOCAL" />
-      <updated>1786266289839</updated>
     </task>
     <task id="LOCAL-00011" summary="优化文档上传异常处理">
       <option name="closed" value="true" />
@@ -506,7 +502,15 @@
       <option name="project" value="LOCAL" />
       <updated>1789094570319</updated>
     </task>
-    <option name="localTasksCounter" value="59" />
+    <task id="LOCAL-00059" summary="新增contractssdk">
+      <option name="closed" value="true" />
+      <created>1789110091300</created>
+      <option name="number" value="00059" />
+      <option name="presentableId" value="LOCAL-00059" />
+      <option name="project" value="LOCAL" />
+      <updated>1789110091300</updated>
+    </task>
+    <option name="localTasksCounter" value="60" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -533,7 +537,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="修复一些问题" />
     <MESSAGE value="优化一些性能和并发问题" />
     <MESSAGE value="修正提交问题" />
     <MESSAGE value="修复一些问题，完善dag与普通和办公模式执行链路" />
@@ -558,6 +561,7 @@
     <MESSAGE value="优化流式显示和执行策略" />
     <MESSAGE value="复杂度路由设计一阶段" />
     <MESSAGE value="优化读取工具和输出" />
-    <option name="LAST_COMMIT_MESSAGE" value="优化读取工具和输出" />
+    <MESSAGE value="新增contractssdk" />
+    <option name="LAST_COMMIT_MESSAGE" value="新增contractssdk" />
   </component>
 </project>

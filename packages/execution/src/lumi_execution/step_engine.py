@@ -39,6 +39,42 @@ from lumi_execution.step_contract import (
     settle_success,
 )
 from lumi_execution.step_resume import ResumeCheckInput, validate_resume_request
+from lumi_contracts.events.process import (
+    SUMMARY_MAX_CHARS,
+    TITLE_MAX_CHARS,
+    derive_kind,
+    sanitize_process_text,
+)
+
+# ── 过程条目语义字段（kind 由后端判定，前端只渲染）────────────────────
+# 去重键与持久化投影（app.contracts.process_log）保持一致：
+#   step:<step_id> / call:<call_id> / process:<step_id>:<sequence>
+# 因此实时帧与刷新后的 run_view.process_log 合并成同一行。
+#
+# 执行内核不依赖 ``app``（packages/orchestration/tests/test_kernel_boundaries.py
+# 强制），拿不到 presentation.py 的润色文案：这里只用**步骤自己声明的**标题/说明
+# 生成安全摘要，绝不读模型推理、工具参数或工具原始响应。
+PROCESS_ENTRY_TITLE = "执行过程"
+STEP_ENTRY_TITLE = "执行步骤"
+
+
+def _step_title(candidate: StepCandidate) -> str:
+    """步骤标题 → 安全标题（空则返回空串，由调用方给兜底文案）。"""
+    return sanitize_process_text(candidate.step.get("title") or "", limit=TITLE_MAX_CHARS)
+
+
+def _step_intent(candidate: StepCandidate) -> str:
+    """步骤声明的公开意图（说明优先、其次标题），一律过安全摘要。"""
+    declared = candidate.step.get("description") or candidate.step.get("title") or ""
+    return sanitize_process_text(declared, limit=SUMMARY_MAX_CHARS)
+
+
+def _step_kind(candidate: StepCandidate) -> str:
+    """按步骤声明的工具判定 kind；未声明工具时是 thinking（与持久化一致）。"""
+    tool_name = str(candidate.step.get("tool") or "").strip()
+    if tool_name:
+        return str(derive_kind(tool_name=tool_name))
+    return str(derive_kind(event_type="step_started"))
 
 
 class StepRunPorts(Protocol):
@@ -184,6 +220,7 @@ class StepRunEngine:
             return
 
         yielded_revision = int(state.plan_revision or 1)
+        intent = _step_intent(candidate)
         yield {
             "type": SSE_EVENT_STEP_STARTED,
             "job_id": job_id,
@@ -191,6 +228,11 @@ class StepRunEngine:
             "step_index": candidate.index,
             "title": str(candidate.step.get("title") or "")[:200],
             "plan_revision": yielded_revision,
+            # 语义过程字段：entry_id 与持久化 step:<id> 对齐（刷新后同一行）；
+            # title/status 由统一字段覆盖为净化后的安全值。
+            **self._step_semantics(
+                candidate, status="running", summary=intent or "正在执行该步骤",
+            ),
         }
 
         queue: asyncio.Queue[str] = asyncio.Queue()
@@ -202,6 +244,7 @@ class StepRunEngine:
 
         task = asyncio.create_task(self._ports.execute_step(state, candidate.step_id, on_process))
         sequence = 0
+        process_summary = f"正在处理：{intent}" if intent else "正在处理当前步骤"
         if tool_name:
             yield self._tool_started(job_id, candidate, tool_name, call_id)
         while not task.done() or not queue.empty():
@@ -214,6 +257,13 @@ class StepRunEngine:
                 yield {
                     "type": "process", "job_id": job_id, "step_id": candidate.step_id,
                     "content": text, "sequence": sequence,
+                    # 语义过程字段：summary 只用步骤声明的公开意图做进度短语，
+                    # **绝不**复制模型正文到摘要（过程不是推理链）；content 原样保留。
+                    "entry_id": f"process:{candidate.step_id}:{sequence}",
+                    "kind": str(derive_kind(event_type="process")),
+                    "title": _step_title(candidate) or PROCESS_ENTRY_TITLE,
+                    "summary": process_summary,
+                    "status": "running",
                 }
         outcome: StepOutcome = task.result()
         state = await self._ports.load_state(job_id) or state
@@ -224,18 +274,31 @@ class StepRunEngine:
                 yield self._tool_started(job_id, candidate, tool_name, call_id)
         if tool_name:
             completed = outcome.status == "completed"
+            pending_approval = outcome.status == "waiting_approval"
+            # status 是**过程状态**（completed/running/failed，与统一过程契约一致）；
+            # 旧的工具级状态（success/pending_approval/failed）保留在 tool_status。
+            tool_summary = sanitize_process_text(outcome.result_summary or "", limit=SUMMARY_MAX_CHARS)
+            if not tool_summary:
+                tool_summary = (
+                    f"已完成 {tool_name}" if completed
+                    else (f"等待确认后继续 {tool_name}" if pending_approval else f"{tool_name} 未完成")
+                )
             yield {
                 "type": SSE_EVENT_TOOL_COMPLETED,
                 "job_id": job_id,
                 "step_id": candidate.step_id,
                 "call_id": call_id,
                 "tool": tool_name,
-                "status": (
-                    "success" if completed
-                    else ("pending_approval" if outcome.status == "waiting_approval" else "failed")
+                "status": "completed" if completed else ("running" if pending_approval else "failed"),
+                "tool_status": (
+                    "success" if completed else ("pending_approval" if pending_approval else "failed")
                 ),
-                "summary": outcome.result_summary[:200],
+                "summary": tool_summary,
                 "error_code": None if completed else (outcome.error_code or None),
+                # 语义过程字段：entry_id 用稳定 call_id，与 tool_started 同一行。
+                "entry_id": f"call:{call_id}",
+                "kind": str(derive_kind(tool_name=tool_name)),
+                "title": _step_title(candidate) or STEP_ENTRY_TITLE,
             }
 
         async for event in self._settle(state, candidate, outcome, yielded_revision):
@@ -256,15 +319,25 @@ class StepRunEngine:
             await self._ports.save_state(state)
             await self._ports.release_capacity(state)
             view = self._view(state)
+            approval_call_id = f"call-{candidate.step_id}"
+            approval_summary = sanitize_process_text(
+                outcome.result_summary or "", limit=SUMMARY_MAX_CHARS
+            )
             yield {
                 "type": SSE_EVENT_WAITING_APPROVAL,
                 "job_id": state.job_id,
                 "step_id": candidate.step_id,
-                "call_id": f"call-{candidate.step_id}",
+                "call_id": approval_call_id,
+                # 该事件不在 SseEventEncoder 的统一过程字段集合里，字段原样上线：
+                # status 保持既有审批语义（前端按它显示审批态），过程状态由 type 表达。
                 "status": "waiting_approval",
-                "summary": outcome.result_summary[:200],
+                "summary": approval_summary or "等待你确认后继续",
                 "risk": str(candidate.step.get("risk") or "高危操作需要你的确认")[:200],
                 "run_view": view,
+                # 语义过程字段：与 tool_* 共用稳定 call_id，等待/完成合并成同一行。
+                "entry_id": f"call:{approval_call_id}",
+                "kind": _step_kind(candidate),
+                "title": _step_title(candidate) or STEP_ENTRY_TITLE,
             }
             yield self._done_event(state.job_id, view)
             return
@@ -289,8 +362,17 @@ class StepRunEngine:
                 "step_id": candidate.step_id,
                 "step_index": candidate.index,
                 "status": "failed",
-                "result_summary": str(outcome.error or "")[:400],
+                # result_summary 是**步骤级**字段（不是最终答复），保持字段名不变；
+                # 值一律过安全摘要（绝对路径/凭据/协议痕迹不落）。
+                "result_summary": sanitize_process_text(
+                    outcome.error or "", limit=SUMMARY_MAX_CHARS
+                ),
                 "plan_revision": plan_revision,
+                **self._step_semantics(
+                    candidate,
+                    status="failed",
+                    summary=outcome.error or "该步骤未完成",
+                ),
             }
             yield {
                 "type": SSE_EVENT_TASK_FAILED,
@@ -318,8 +400,17 @@ class StepRunEngine:
             "step_id": candidate.step_id,
             "step_index": candidate.index,
             "status": "completed",
-            "result_summary": str(outcome.result_summary or "")[:400],
+            # 步骤级结果摘要（明确不是最终答复：final_answer 只来自 run_view），
+            # 值过安全摘要后再进过程字段。
+            "result_summary": sanitize_process_text(
+                outcome.result_summary or "", limit=SUMMARY_MAX_CHARS
+            ),
             "plan_revision": plan_revision,
+            **self._step_semantics(
+                candidate,
+                status="completed",
+                summary=outcome.result_summary or "该步骤已完成",
+            ),
         }
         if waiting:
             await self._ports.release_capacity(state)
@@ -379,6 +470,18 @@ class StepRunEngine:
         return {"ok": False, "code": result.error_code or "JOB_NOT_RESUMABLE", "reason": result.reason}
 
     @staticmethod
+    def _step_semantics(candidate: StepCandidate, *, status: str, summary: str) -> dict:
+        """步骤事件的统一语义过程字段（entry_id 与持久化 step:<id> 对齐）。"""
+        return {
+            "entry_id": f"step:{candidate.step_id}",
+            "kind": _step_kind(candidate),
+            "title": _step_title(candidate) or STEP_ENTRY_TITLE,
+            "summary": sanitize_process_text(summary, limit=SUMMARY_MAX_CHARS)
+            or "正在执行该步骤",
+            "status": status,
+        }
+
+    @staticmethod
     def _tool_started(job_id: str, candidate: StepCandidate, tool_name: str, call_id: str) -> dict:
         return {
             "type": SSE_EVENT_TOOL_STARTED,
@@ -387,6 +490,15 @@ class StepRunEngine:
             "call_id": call_id,
             "tool": tool_name,
             "display": str(candidate.step.get("title") or "")[:200],
+            # 语义过程字段：entry_id 用稳定 call_id，与 tool_completed 同一行；
+            # kind 由工具名判定（后端唯一判定处）。
+            "entry_id": f"call:{call_id}",
+            "kind": str(derive_kind(tool_name=tool_name)),
+            "title": _step_title(candidate) or STEP_ENTRY_TITLE,
+            "summary": sanitize_process_text(
+                f"正在调用 {tool_name}", limit=SUMMARY_MAX_CHARS
+            ),
+            "status": "running",
         }
 
     @staticmethod

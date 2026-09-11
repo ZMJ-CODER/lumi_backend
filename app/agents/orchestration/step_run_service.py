@@ -117,6 +117,110 @@ def _result_summary(result: dict | None, fallback: str = "") -> str:
     return str(fallback or "")[:200]
 
 
+def _presentation_node(job: Job | None, step_id: str, step: dict | None) -> Any:
+    """还原 ``presentation`` 文案所需的节点形状（与刷新投影同一解析规则）。
+
+    ``app/contracts/process_log.py`` 用 ``job.nodes`` 里的节点（没有时退化成只用
+    ``routing["steps"]`` 的轻量节点）调用 ``presentation.step_action`` 等函数；这里
+    必须**逐字复用同一规则**，否则实时帧与刷新快照又会是两套措辞。内核只有声明
+    文案（instruction/title），拿不到面向用户的表达，所以文案注入放在 app 层。
+    """
+    node = next((item for item in (job.nodes if job is not None else []) or [] if item.id == step_id), None)
+    if node is not None:
+        return node
+    data = step if isinstance(step, dict) else {}
+    from app.contracts.process_log import _StepNode
+
+    return _StepNode(
+        step_id=step_id,
+        title=str(data.get("title") or ""),
+        tool=str(data.get("tool") or ""),
+    )
+
+
+def _display_text(result: Any, key: str) -> str:
+    """节点结果里的 ``display`` 文案（``attach_display_result`` 的落库副本）。"""
+    if not isinstance(result, dict):
+        return ""
+    display = result.get("display")
+    if not isinstance(display, dict):
+        return ""
+    return str(display.get(key) or "").strip()
+
+
+def _text_or(step: Any, key: str) -> str:
+    if not isinstance(step, dict):
+        return ""
+    return str(step.get(key) or "").strip()
+
+
+def _live_presentation_fields(job: Job | None, event: dict) -> dict[str, str]:
+    """按过程状态给出与刷新投影同源的 ``title``/``summary``（不改 ``entry_id``）。
+
+    ``process_log_from_job()`` 的步骤条目 = ``title: step_action(node)`` +
+    ``summary: intent/working/completed/failed_text(node, ...)``；实时帧若用内核
+    的声明文案，同一行（``entry_id`` 相同、不会重复）在刷新前后会换措辞。这里在
+    app 层注入同一套函数，使**同一步骤的实时帧与刷新快照逐字一致**。
+    """
+    from app.agents.orchestration.presentation import (
+        completed_text,
+        failed_text,
+        intent_text,
+        step_action,
+        working_text,
+    )
+
+    step_id = str(event.get("step_id") or "")
+    if not step_id:
+        return {}
+    steps = (job.routing or {}).get("steps") if isinstance(job.routing, dict) else []
+    step = next(
+        (
+            item
+            for item in steps or []
+            if isinstance(item, dict)
+            and step_id in {str(item.get("id") or ""), str(item.get("step_id") or "")}
+        ),
+        None,
+    )
+    node = _presentation_node(job, step_id, step)
+    result = step.get("result") if isinstance(step, dict) else None
+    if not isinstance(result, dict):
+        node_result = getattr(node, "result", None)
+        result = node_result if isinstance(node_result, dict) else None
+    status = str(event.get("status") or "running").casefold()
+    if status == "completed":
+        # 与刷新投影同源：刷新取节点 ``display.completed``（没有时才退到
+        # ``routing.steps[].result_summary``）。实时帧发射时节点结果可能还没写回
+        # 状态库，而 ``step_completed.result_summary`` **就是**引擎用同一个
+        # ``_result_summary`` 算出的同一句话，因此这里优先用它，避免实时与刷新
+        # 因为"快照早/晚一步"而换措辞。
+        summary = _display_text(result, "completed")
+        if not summary:
+            summary = str(event.get("result_summary") or "").strip()
+        if not summary:
+            summary = str((step or {}).get("result_summary") or "").strip()
+        if not summary:
+            summary = completed_text(node, result)
+    elif status == "failed":
+        # 与刷新投影（``_step_entry`` → ``failed_text(node, step.error)``）同源。
+        # 失败时状态库里的 ``step["error"]`` 与事件里的 ``result_summary`` 是**同一句**
+        # 净化后的错误（内核 ``settle_failure`` 同时写两处）；节点/步骤已落地的错误
+        # 优先，事件自带文本兜底，避免刷新前后措辞不同。
+        error = (
+            _display_text(result, "error")
+            or _text_or(step, "error")
+            or str(event.get("result_summary") or "").strip()
+            or str(event.get("error") or "")
+        )
+        summary = failed_text(node, error or None)
+    elif status == "pending":
+        summary = intent_text(node)
+    else:
+        summary = working_text(node)
+    return {"title": step_action(node), "summary": summary}
+
+
 async def _persist_node_result_ref(user_id: str, result: dict | None) -> dict[str, str] | None:
     try:
         from app.agents.orchestration.execution.lineage import persist_result_ref
@@ -195,13 +299,48 @@ class StepRunService:
         workspace_bound: bool = True,
         plan_revision: int | None = None,
     ):
-        return self._engine.run_next_stream(
+        """转发内核事件流，并在 app 层把步骤文案换成"刷新后同一句"。
+
+        内核（``lumi_execution.step_engine``）只按步骤声明的 instruction/title 发
+        文案，且不得 import ``app.*``；刷新投影（``app/contracts/process_log.py``）
+        用的是 ``presentation.intent_text/working_text/completed_text/failed_text``。
+        这里按 ``status`` 覆盖实时帧的 ``title``/``summary``，让同一 ``entry_id``
+        （``step:<id>``）的行在实时与刷新后逐字一致；其余字段一律不动。
+        """
+        return self._run_next_with_presentation(
             job_id=job_id,
             expected_step_id=expected_step_id,
             idempotency_key=idempotency_key,
             workspace_bound=workspace_bound,
             plan_revision=plan_revision,
         )
+
+    async def _run_next_with_presentation(
+        self,
+        *,
+        job_id: str,
+        expected_step_id: str,
+        idempotency_key: str,
+        workspace_bound: bool,
+        plan_revision: int | None,
+    ):
+        job: Job | None = None
+        try:
+            job = await self._store.get_job(job_id)
+        except Exception as exc:  # noqa: BLE001 - 文案注入失败不能中断执行
+            logger.warning("过程文案注入读取任务失败 {}: {}", str(job_id)[:12], str(exc)[:160])
+        async for event in self._engine.run_next_stream(
+            job_id=job_id,
+            expected_step_id=expected_step_id,
+            idempotency_key=idempotency_key,
+            workspace_bound=workspace_bound,
+            plan_revision=plan_revision,
+        ):
+            fields = _live_presentation_fields(job, event) if isinstance(event, dict) else {}
+            if fields:
+                yield {**event, **fields}
+            else:
+                yield event
 
     # ── StepRunPorts 实现 ─────────────────────────────────────
 
@@ -231,6 +370,12 @@ class StepRunService:
         job.updated_at = state.updated_at or time.time()
         if state.final_answer:
             job.result = {**(job.result or {}), "final_answer": state.final_answer}
+        # 执行过程日志：由本次保存的最新步骤状态派生并**合并**（重复保存/重跑同一步
+        # 不重复，列表有界 ≤200）。落 Job 快照本身，不放进 routing（routing 只存
+        # 路由/策略），供刷新后 GET /agents/jobs/{id} 恢复过程气泡。
+        from app.contracts.process_log import persist_process_log
+
+        persist_process_log(job)
         await self._store.save_job(job)
 
     async def acquire_capacity(self, state: StepRunState) -> bool:

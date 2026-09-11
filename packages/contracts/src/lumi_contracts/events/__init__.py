@@ -8,6 +8,14 @@ from lumi_contracts.events.approval import (
     ApprovalState,
     approval_fingerprint,
 )
+from lumi_contracts.events.process import (
+    ProcessKind,
+    ProcessLogEntry,
+    ProcessStatus,
+    derive_kind,
+    merge_process_log,
+    sanitize_process_text,
+)
 from lumi_contracts.events.lifecycle import (
     TERMINAL_STATES,
     RunState,
@@ -27,6 +35,9 @@ __all__ = [
     "ApprovalState",
     "EventSequencer",
     "KNOWN_EVENT_TYPES",
+    "ProcessKind",
+    "ProcessLogEntry",
+    "ProcessStatus",
     "RunState",
     "StreamEvent",
     "StreamEventType",
@@ -34,4 +45,7 @@ __all__ = [
     "approval_fingerprint",
     "assert_transition",
     "can_transition",
+    "derive_kind",
+    "merge_process_log",
+    "sanitize_process_text",
 ]

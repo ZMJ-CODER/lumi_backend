@@ -124,6 +124,7 @@ async def create_agent_job(
             workspace_id=req.workspace_id,
             user_role=payload.get("role", "user"),
             execution_preference=req.execution_preference,
+            timeout_seconds=req.timeout_seconds,
         )
     except ActiveConversationJobError as exc:
         raise ConflictException(str(exc), error_code="OFFICE_JOB_CONFLICT") from exc
@@ -141,7 +142,12 @@ async def list_agent_jobs(
 ):
     """列出我的多智能体任务（按提交时间倒序）."""
     jobs = await orchestrator.list_jobs(payload["sub"], limit)
-    return {"code": 0, "data": {"items": [j.model_dump() for j in jobs]}}
+    # 过程日志（每任务最多 200 条）只走详情接口的 run_view.process_log：列表是
+    # 唯一的多任务响应，带上它会按任务数放大轮询载荷，任务卡片也不需要它。
+    return {
+        "code": 0,
+        "data": {"items": [j.model_dump(exclude={"process_log"}) for j in jobs]},
+    }
 
 
 @router.get("/jobs/{job_id}")
@@ -162,7 +168,13 @@ async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     from lumi_orch.run_view import run_view
 
     data = job.model_dump()
-    data["run_view"] = run_view(job)
+    view = run_view(job)
+    # 过程气泡恢复：持久化的过程条目 + 由当前 Job 状态现推导的条目合并（去重且
+    # ≤200）。内核 run_view 形状不动，只在 app 层补 process_log 字段。
+    from app.contracts.process_log import merge_job_process_log, process_log_payload
+
+    view["process_log"] = process_log_payload(merge_job_process_log(job))
+    data["run_view"] = view
     # 契约校验：形状漂移（未知状态/丢步骤/缺按钮状态）在这里暴露，但**不改动**
     # 返回给前端的形状。
     from app.contracts.run_view import run_view_problems
@@ -264,7 +276,12 @@ async def cancel_agent_job(
     from lumi_orch.run_view import run_view
 
     data = job.model_dump()
-    data["run_view"] = run_view(job, status_override="cancelled")
+    view = run_view(job, status_override="cancelled")
+    # 取消也是一次可恢复快照：同样带上合并后的过程日志（形状与 GET 一致）。
+    from app.contracts.process_log import merge_job_process_log, process_log_payload
+
+    view["process_log"] = process_log_payload(merge_job_process_log(job))
+    data["run_view"] = view
     data["cancel_reason"] = req.reason
     data["keep_completed_steps"] = bool(effective_keep)
     return {"code": 0, "data": data, "message": "任务已终止"}

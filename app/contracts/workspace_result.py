@@ -47,6 +47,12 @@ class WorkspaceMatch(BaseModel):
     sheet: Any = None
     format: str = ""
     sensitive: bool = False
+    # 命中上下文（上游已固定长度 + 脱敏）与命中类型必须一起进类型化 payload，
+    # 否则模型/前端投影会拿到"有路径没有上下文"的命中。
+    context: str = ""
+    match_type: str = ""
+    redacted: bool = False
+    redaction_count: int = 0
 
 
 class WorkspaceNavigatorResult(BaseModel):

@@ -78,6 +78,7 @@ docker build -f Dockerfile.sandbox -t lumi-python-sandbox:latest .
 - [docs/RAG_DESIGN.md](docs/RAG_DESIGN.md) — RAG、知识库、办公附件与记忆的分域检索
 - [docs/MEMORY_DESIGN.md](docs/MEMORY_DESIGN.md) — 长期记忆与隐私
 - [docs/CURRENT_DAG_ARCHITECTURE.md](docs/CURRENT_DAG_ARCHITECTURE.md) — 当前办公 DAG、运行时、审批、恢复与验收基线
+- [docs/RESULT_CHECKPOINT_RECOVERY.md](docs/RESULT_CHECKPOINT_RECOVERY.md) — 结果存储（ResultStore 引用体系）、步骤检查点、快照边界与副作用恢复
 - [docs/TOOL_SKILL_EXECUTION_GUIDE.md](docs/TOOL_SKILL_EXECUTION_GUIDE.md) — 工具选择、执行门禁与结果回流
 - [docs/MCP_SKILL_GOVERNANCE.md](docs/MCP_SKILL_GOVERNANCE.md) — Skill 生命周期、候选池评测与外部 MCP 准入
 - [docs/DAG_MCP_PITFALLS.md](docs/DAG_MCP_PITFALLS.md) — 办公 DAG/MCP 的故障复盘与排障路线

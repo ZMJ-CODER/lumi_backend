@@ -13,8 +13,10 @@ from app.agents.orchestration.orchestrator import (
 from app.core.deps import require_auth
 from app.core.throttling import consume_route_limit
 from app.core.exceptions import (
+    AppException,
     BadRequestException,
     ConflictException,
+    ForbiddenException,
     NotFoundException,
     RateLimitException,
 )
@@ -37,6 +39,21 @@ async def _get_owned_job(job_id: str, user_id: str):
     if not job or job.user_id != user_id:
         raise NotFoundException("任务不存在")
     return job
+
+
+async def _checkpoint_view_fields(job_id: str) -> dict:
+    """步骤检查点摘要（只放计数与最大版本；读不到返回空字典，绝不抛错）。
+
+    方案 §3.2：JobRunView 继续作为前端恢复模型，但**不放完整检查点**——完整记录走
+    ``GET /api/v1/agents/jobs/{id}/steps`` 分页读取。
+    """
+    try:
+        from app.services.step_checkpoint import checkpoint_view_fields, load_checkpoints
+
+        return checkpoint_view_fields(await load_checkpoints(str(job_id or "")))
+    except Exception as exc:  # noqa: BLE001 - 摘要失败不能影响任务详情
+        logger.debug("检查点摘要读取失败（降级）: {}", str(exc)[:120])
+        return {}
 
 
 @router.post("/plan-preview")
@@ -179,6 +196,9 @@ async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     from app.services.process_log_archive import archive_view_fields
 
     view.update(archive_view_fields(job))
+    # 步骤检查点摘要（方案 §3.2：JobRunView 只放**计数**，正文/完整检查点走
+    # GET /api/v1/agents/jobs/{id}/steps 分页）；读不到时留空，不影响详情返回。
+    view.update(await _checkpoint_view_fields(job.job_id))
     # 产物与声明式视图（刷新恢复 Artifact 卡片 / View 容器）：只放引用与元数据，
     # 下载仍走受权限保护的 /api/v1/artifacts/{artifact_id}/download。
     try:
@@ -247,6 +267,173 @@ async def get_agent_job_spans(
             "spans": await list_node_spans(job.execution_id or job.job_id, limit),
         },
     }
+
+
+@router.get("/jobs/{job_id}/steps")
+async def list_agent_job_steps(
+    job_id: str,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    payload: dict = Depends(require_auth),
+):
+    """分页步骤记录（方案 §7.2）：只返回检查点的**摘要与引用**，绝不含正文。
+
+    * 分页：``offset`` / ``limit``，总数在 ``total``；
+    * 每条只给 ``status`` / ``effect_status`` / ``error_code`` / ``result_ref``
+      （``{"id","sha256"}`` 最小引用）与时间戳；正文按引用另行获取；
+    * 过程日志归档（超过 200 条的部分）入口由 ``GET /jobs/{id}`` 的
+      ``log_archive_ref`` 给出，本接口不重复下发。
+    """
+    job = await _get_owned_job(job_id, payload["sub"])
+    from app.services.step_checkpoint import load_checkpoints, recovery_view
+
+    checkpoints = await load_checkpoints(job.job_id)
+    rows = sorted(
+        checkpoints,
+        key=lambda item: (int(getattr(item, "checkpoint_version", 0) or 0), str(item.step_id)),
+    )
+    window = rows[offset : offset + limit]
+    report = recovery_view(rows)
+    return {
+        "code": 0,
+        "data": {
+            "job_id": job.job_id,
+            "total": len(rows),
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + limit < len(rows),
+            "steps": [_step_row(item) for item in window],
+            **report.as_dict(),
+        },
+    }
+
+
+@router.get("/jobs/{job_id}/results/{result_id}")
+async def get_agent_job_result(
+    job_id: str,
+    result_id: str,
+    mode: str = Query(default="full", pattern="^(full|summary)$"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=0, ge=0, le=500),
+    max_chars: int = Query(default=0, ge=0, le=200000),
+    fields: str = Query(default=""),
+    payload: dict = Depends(require_auth),
+):
+    """按权限解析 ``result_ref``（方案 §7.2）：**正文按需加载**，不是快照的一部分。
+
+    参数与前端 ``resultRefs.js`` / 主进程 ``result:fetch`` **逐字对齐**：
+
+    * ``mode``：``full``（默认，完整正文）| ``summary``（只读摘要，不返回正文）；
+    * ``offset`` / ``limit``：列表字段分页（前端只传，后端执行）；
+    * ``max_chars``：字符预算（超出的文本字段截断并标 ``truncated``）；
+    * ``fields``：逗号分隔的字段白名单（只读指定字段）。
+
+    错误语义（前端据此分派，且**绝不返回空成功**）：
+
+    * 归属由**任务所有者**推导，跨用户一律 403 / 任务不可见 404；
+    * 过期 → **410** + ``data.error_code=RESULT_REF_EXPIRED``（终局，不可重试）；
+    * 不存在 → **404** + 统一错误体（与"接口未上线"的 ``{"detail": ...}`` 区分）；
+    * 完整性失败 → 404 + ``RESULT_REF_INTEGRITY_FAILED``；
+    * ``sha256`` / ``schema_version`` / ``degraded`` 一并回传，前端据此做完整性校验、
+      版本化解析与降级展示。
+    """
+    job = await _get_owned_job(job_id, payload["sub"])
+    from app.services.result_store import (
+        RESULT_REF_EXPIRED,
+        RESULT_REF_FORBIDDEN,
+        owner_key,
+        resolve_result_for_owner,
+    )
+
+    field_list = tuple(item.strip() for item in str(fields or "").split(",") if item.strip())
+    body, error_code = await resolve_result_for_owner(
+        owner_key_value=owner_key(job.user_id),
+        result_id=result_id,
+        max_chars=max_chars,
+        # 前端用 offset/limit 表达分页；预算与分页都由服务端执行。
+        page_size=limit,
+        page_offset=offset,
+        fields=field_list,
+        summary_only=str(mode or "").strip().lower() == "summary",
+    )
+    if error_code == RESULT_REF_FORBIDDEN:
+        raise ForbiddenException("无权读取该结果引用")
+    if error_code:
+        # 过期是**终局**错误（不可重试）：410 让前端与"结果不存在(404)"区分开。
+        status = 410 if error_code == RESULT_REF_EXPIRED else 404
+        message = _result_error_message(error_code)
+        raise AppException(
+            status_code=status,
+            message=message,
+            data={"error_code": error_code, "result_id": str(result_id), "message": message},
+            error_code=error_code,
+        )
+    return {
+        "code": 0,
+        "data": {
+            "job_id": job.job_id,
+            "result_id": str(result_id),
+            **(body or {}),
+        },
+    }
+
+
+def _result_error_message(error_code: str) -> str:
+    """结果引用不可用时的用户文案（与 ``UnifiedError`` 口径一致，不暴露内部细节）。"""
+    from lumi_contracts import spec_for
+
+    return str(spec_for(str(error_code)).safe_message or "结果引用不可用")
+
+
+def _step_row(checkpoint) -> dict:
+    """检查点 → 接口行（白名单字段；正文一律按引用获取）。"""
+    from lumi_contracts.persistence.checkpoint import runtime_status_for
+
+    state = getattr(checkpoint, "status", "")
+    step_id = str(getattr(checkpoint, "step_id", "") or "")
+    return {
+        "step_id": step_id,
+        # 服务端权威去重键：与快照/实时过程日志的步骤条目**同一个** id（``step:<id>``），
+        # 前端把本接口拉到的步骤与过程日志合并时不会出现重复行。
+        "entry_id": f"step:{step_id}" if step_id else "",
+        "attempt": int(getattr(checkpoint, "attempt", 1) or 1),
+        "tool_name": str(getattr(checkpoint, "tool_name", "") or ""),
+        "step_type": str(getattr(checkpoint, "step_type", "") or ""),
+        "status": str(getattr(state, "value", state) or ""),
+        "runtime_status": runtime_status_for(state),
+        "effect_type": str(getattr(checkpoint, "effect_type", "") or ""),
+        "effect_status": str(getattr(checkpoint, "effect_status", "") or ""),
+        "error_code": str(getattr(checkpoint, "error_code", "") or ""),
+        # 展示摘要：与过程日志的 summary 同源文案（前端时间线/步骤卡片直接用），
+        # 完整正文按 ``result_ref`` 走 GET /jobs/{id}/results/{result_id}。
+        "display_summary": str(getattr(checkpoint, "output_summary", "") or "")[:2000],
+        "output_summary": str(getattr(checkpoint, "output_summary", "") or "")[:2000],
+        "result_ref": (
+            dict(checkpoint.result_ref) if isinstance(getattr(checkpoint, "result_ref", None), dict) else None
+        ),
+        "artifact_refs": [dict(item) for item in (getattr(checkpoint, "artifact_refs", None) or []) if isinstance(item, dict)],
+        "checkpoint_version": int(getattr(checkpoint, "checkpoint_version", 0) or 0),
+        "started_at": float(getattr(checkpoint, "started_at", 0.0) or 0.0),
+        "finished_at": float(getattr(checkpoint, "finished_at", 0.0) or 0.0),
+    }
+
+
+@router.get("/jobs/{job_id}/recovery")
+async def get_agent_job_recovery(
+    job_id: str,
+    load_dependencies: bool = Query(default=False),
+    payload: dict = Depends(require_auth),
+):
+    """恢复核对报告（方案 §5）：**只读**，不触发任何重排或重跑。
+
+    前端/运维据此判断"这个任务能不能自动恢复、哪些步骤要等人工"。副作用在途（``pending``）
+    且可核对的步骤会出现在 ``reconcile_step_ids``，必须先核对实际状态。
+    """
+    job = await _get_owned_job(job_id, payload["sub"])
+    from app.agents.orchestration.job_recovery_service import JobRecoveryService
+
+    report = await JobRecoveryService().plan_for_job(job, load_dependencies=load_dependencies)
+    return {"code": 0, "data": report.as_dict()}
 
 
 @router.post("/jobs/{job_id}/fork")

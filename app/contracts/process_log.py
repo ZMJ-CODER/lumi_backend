@@ -55,10 +55,13 @@ from app.agents.orchestration.presentation import (
 # 规划阶段条目的展示标题（气泡里的阶段标签，不是对已完成工作的断言）。
 PLAN_ENTRY_TITLE = "执行计划"
 
-# 步骤/节点状态 → 契约过程状态。契约只有 pending/running/completed/failed 四态：
+# 步骤/节点状态 → 契约过程状态。
 # - waiting_approval 与 SSE 出口一致记为 running（正在推进，等待人工放行）；
-# - cancelled/interrupted/skipped 没有对应态，按"未完成"记为 failed，避免前端
-#   把被跳过/被终止的步骤显示成成功。
+# - **uncertain 必须原样保留**（方案《结果存储、检查点与恢复》§4.3）：它表示"副作用
+#   可能在途、等人工确认"。既不能算 completed（会抹掉恢复最需要看见的事实），也不能
+#   算 failed（会被当成明确失败而重跑）；前端对它给独立文案；
+# - cancelled/skipped 记为 cancelled（用户主动终止，不是失败）；
+# - interrupted 记为 failed（执行被系统中断，确实没完成）。
 _STEP_STATUS_TO_PROCESS: dict[str, ProcessStatus] = {
     "pending": ProcessStatus.PENDING,
     "ready": ProcessStatus.PENDING,
@@ -73,10 +76,16 @@ _STEP_STATUS_TO_PROCESS: dict[str, ProcessStatus] = {
     "succeeded": ProcessStatus.COMPLETED,
     "failed": ProcessStatus.FAILED,
     "error": ProcessStatus.FAILED,
-    "cancelled": ProcessStatus.FAILED,
     "interrupted": ProcessStatus.FAILED,
-    "skipped": ProcessStatus.FAILED,
+    "uncertain": ProcessStatus.UNCERTAIN,
+    "cancelled": ProcessStatus.CANCELLED,
+    "canceled": ProcessStatus.CANCELLED,
+    "skipped": ProcessStatus.CANCELLED,
+    "expired": ProcessStatus.EXPIRED,
 }
+
+#: 过程状态词表（未登记的状态原样透传，不硬塞进旧枚举）。
+_PROCESS_STATUS_VALUES: frozenset[str] = frozenset(str(item) for item in ProcessStatus)
 
 
 class _StepNode:
@@ -109,8 +118,13 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _process_status(*values: Any) -> ProcessStatus:
-    """按「步骤状态优先、节点状态兜底」判定过程状态（未知值记为 pending）。"""
+def _process_status(*values: Any) -> ProcessStatus | str:
+    """按「步骤状态优先、节点状态兜底」判定过程状态。
+
+    已登记的状态映射成契约枚举；**未登记但有值**的状态原样透传（例如 ``uncertain``
+    的旧别名、将来新增的检查点状态）——绝不兜底成 pending/completed，否则刷新后的
+    过程日志会与实时帧说两套口径。
+    """
     for value in values:
         key = _text(getattr(value, "value", value)).casefold()
         if not key:
@@ -118,6 +132,9 @@ def _process_status(*values: Any) -> ProcessStatus:
         mapped = _STEP_STATUS_TO_PROCESS.get(key)
         if mapped is not None:
             return mapped
+        if key in _PROCESS_STATUS_VALUES:
+            return ProcessStatus(key)
+        return key
     return ProcessStatus.PENDING
 
 
@@ -175,12 +192,25 @@ def _completed_summary(node: Any, step: dict, result: Any) -> str:
     return completed_text(node, result if isinstance(result, dict) else None)
 
 
-def _step_summary(node: Any, step: dict, result: Any, status: ProcessStatus) -> str:
+def _uncertain_summary(node: Any, step: dict, result: Any) -> str:
+    """``uncertain`` 步骤的文案：说明"副作用可能在途、需要确认"，绝不说"已完成"。
+
+    优先复用节点/步骤上已经落地的失败文案（``presentation.failed_text`` 会把真实原因
+    说出来），再补一句"状态不确定、不会自动重跑"，让前端不必自己拼这句话。
+    """
+    error = _text(step.get("error")) or _text(_attr(node, "error", ""))
+    head = failed_text(node, error) if error else str(_attr(node, "name", "") or "该步骤")
+    return f"{head}；副作用状态不确定，不会自动重跑，请确认后再继续。"
+
+
+def _step_summary(node: Any, step: dict, result: Any, status: ProcessStatus | str) -> str:
     if status is ProcessStatus.COMPLETED:
         return _completed_summary(node, step, result)
     if status is ProcessStatus.FAILED:
         error = _text(step.get("error")) or _text(_attr(node, "error", ""))
         return failed_text(node, error)
+    if status is ProcessStatus.UNCERTAIN or str(status) == ProcessStatus.UNCERTAIN.value:
+        return _uncertain_summary(node, step, result)
     if status is ProcessStatus.RUNNING:
         return working_text(node)
     return intent_text(node)

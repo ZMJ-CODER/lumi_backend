@@ -14,7 +14,7 @@ import re
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, field_validator
 
 # ── 长度上限（过程日志是"过程"，不是正文）──
 TITLE_MAX_CHARS = 120
@@ -34,13 +34,53 @@ class ProcessKind(StrEnum):
 
 
 class ProcessStatus(StrEnum):
+    """过程条目状态（前端按值渲染，**不得把未知状态压成 completed**）。
+
+    ``uncertain`` / ``cancelled`` / ``expired`` 是步骤检查点的真实结论（方案《结果存储、
+    检查点与恢复》§2.2 / §4.3）：``uncertain`` 表示"副作用可能在途、等人工确认"，
+    在 UI 上是**独立**状态——若被兜底成 ``completed``，验收场景"写文件在途时取消 →
+    步骤变 uncertain"在界面上就完全看不出来。
+    """
+
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
     PENDING = "pending"
+    #: 副作用可能已发生但无法确认：等人工/策略决策，绝不显示成成功。
+    UNCERTAIN = "uncertain"
+    #: 被取消/被跳过（不是失败：用户主动终止，前端据此给不同文案）。
+    CANCELLED = "cancelled"
+    #: 引用/结果已过期（终局，不可重试）。
+    EXPIRED = "expired"
 
 
-# 工具名 → kind（后端唯一判定处；前端不得再按名字猜）。
+#: 这些事件家族的 ``status`` 字段用的是**另一套词表**（能力状态 / 操作状态 / 审批状态），
+#: 不是过程状态。对它们，词表外的值必须**按事件语义推导过程状态**，而不是原样透传——
+#: 否则能力帧的 ``unavailable`` 会被当成过程状态，前端时间线拿到非法值。
+#: 注意这与"未知的**步骤**状态原样保留"并不矛盾：步骤事件（step_*/tool_*/process）
+#: 的 status 一定属于过程语义，新状态必须让前端看见。
+_SEPARATE_STATUS_VOCAB_EVENT_TYPES = frozenset(
+    {
+        "capability_requested",
+        "waiting_provider",
+        "provider_connected",
+        "provider_disconnected",
+        "capability_started",
+        "capability_completed",
+        "capability_failed",
+        "plugin_health_changed",
+        "operation_started",
+        "operation_preview",
+        "operation_completed",
+        "operation_failed",
+        "operation_rolled_back",
+        "approval_required",
+        "approval_resolved",
+    }
+)
+
+
+#: 工具名 → kind（后端唯一判定处；前端不得再按名字猜）。
 _READ_TOOLS = frozenset({
     "workspace_navigator", "workspace_read", "workspace_list", "workspace_search",
     "workspace_stat", "workspace_content_extract", "read_document", "inspect_document_set",
@@ -126,19 +166,38 @@ def derive_kind(*, event_type: str = "", tool_name: str = "", explicit: str = ""
 class ProcessLogEntry(BaseModel):
     """一条执行过程记录（安全摘要 + 去重键 + 状态）。"""
 
+    model_config = ConfigDict(validate_assignment=False)
+
     id: str = ""
     entry_id: str = ""
     kind: ProcessKind = ProcessKind.THINKING
     title: str = ""
     summary: str = ""
     detail: str = ""
-    status: ProcessStatus = ProcessStatus.RUNNING
+    #: 过程状态：词表内的值是 ``ProcessStatus`` 成员（前端按值渲染、后端可身份比较），
+    #: 词表外的**新状态**原样保留字符串——前向兼容优先：把未知状态硬塞进旧枚举
+    #: （或兜底成 completed）会让"副作用不确定"这类状态在 UI 上彻底消失。
+    status: ProcessStatus | str = ProcessStatus.RUNNING
     step_id: str = ""
     call_id: str = ""
     tool_name: str = ""
     sequence: int = 0
     occurred_at: str = ""
     job_id: str = ""
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _normalize_status(cls, value: Any) -> Any:
+        """已登记状态 → 枚举成员；未登记但有值 → 原样保留（不猜、不兜底）。"""
+        if isinstance(value, ProcessStatus):
+            return value
+        text = str(getattr(value, "value", value) or "").strip().casefold()
+        if not text:
+            return ProcessStatus.RUNNING
+        try:
+            return ProcessStatus(text)
+        except ValueError:
+            return text
 
     @property
     def dedup_key(self) -> str:
@@ -188,13 +247,20 @@ class ProcessLogEntry(BaseModel):
         status = str(
             data.get("status") or step.get("runtime_status") or step.get("status") or ""
         ).casefold()
-        entry_status = ProcessStatus.RUNNING
-        if status in {item.value for item in ProcessStatus}:
+        known_statuses = {item.value for item in ProcessStatus}
+        if status in known_statuses:
             entry_status = ProcessStatus(status)
+        elif status and event_type not in _SEPARATE_STATUS_VOCAB_EVENT_TYPES:
+            # 步骤/工具/过程事件的 status 属于过程语义：**原样保留**未登记的新状态。
+            # 绝不按事件类型兜底成 completed——那会把"副作用不确定"显示成"已完成"，
+            # 正好抹掉恢复流程最需要被看见的那条事实。前端对未知状态按中性态渲染。
+            entry_status = status
         elif event_type.endswith("_completed") or event_type == "done":
             entry_status = ProcessStatus.COMPLETED
         elif event_type in {"task_failed", "error"}:
             entry_status = ProcessStatus.FAILED
+        else:
+            entry_status = ProcessStatus.RUNNING
         call_id = str(data.get("call_id") or "")
         # 稳定 entry_id：优先显式给；否则用 call_id（工具事件）或 job+sequence（过程事件），
         # 保证 SSE 重连/轮询/刷新同一条日志只出现一次。

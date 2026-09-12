@@ -4,6 +4,15 @@ The Job snapshot is intentionally not used as a replay payload.  A forked
 execution retains only a result reference (opaque id + content hash) for its
 successful prefix.  The sanitized body stays in the result store and is read
 only by a later dependent node at execution time.
+
+结果读写统一收口到 :mod:`app.services.result_store`（方案 §1）：
+
+* ``RESULT_STORE_V2`` 关闭时仍走原来的"Redis 键 + 进程内存兜底"；
+* 打开后按**序列化字节数**分层（Redis / 本地 / Blob），引用携带
+  ``schema_version`` 与 ``expires_at``，读取先校验归属、过期与 sha256。
+
+对外形状保持不变：``persist_result_ref`` 只返回 ``{"id", "sha256"}``（旧读取方
+不需要改），完整引用只在内部使用。
 """
 
 from __future__ import annotations
@@ -47,10 +56,68 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
 
 
-async def persist_result_ref(user_id: str, result: dict | None) -> dict[str, str] | None:
+def unified_result_store_enabled() -> bool:
+    """结果是否走统一 ResultStore（``RESULT_STORE_V2``，默认关闭）。"""
+    try:
+        from app.core.feature_flags import feature_enabled
+
+        return feature_enabled("RESULT_STORE_V2")
+    except Exception:  # noqa: BLE001 - 开关不可用时保持旧路径（保守）
+        return False
+
+
+async def _save_via_result_store(
+    user_id: str,
+    result: dict | None,
+    *,
+    job_id: str = "",
+    step_id: str = "",
+    tool_name: str = "",
+    schema_name: str = "execution_result",
+    schema_version: int = 1,
+) -> dict[str, str] | None:
+    from app.services.result_store import SaveResultRequest, get_result_store
+
+    receipt = await get_result_store().save(
+        SaveResultRequest(
+            result=result,
+            user_id=user_id,
+            job_id=job_id,
+            step_id=step_id,
+            tool_name=tool_name,
+            schema_name=schema_name,
+            schema_version=schema_version,
+            ttl_seconds=_ttl(),
+        )
+    )
+    return receipt.minimal_ref if receipt is not None else None
+
+
+async def persist_result_ref(
+    user_id: str,
+    result: dict | None,
+    *,
+    job_id: str = "",
+    step_id: str = "",
+    tool_name: str = "",
+    schema_name: str = "execution_result",
+    schema_version: int = 1,
+) -> dict[str, str] | None:
     """Store a sanitized node result and return a body-free reference."""
     if not result:
         return None
+    if unified_result_store_enabled():
+        saved = await _save_via_result_store(
+            user_id,
+            result,
+            job_id=job_id,
+            step_id=step_id,
+            tool_name=tool_name,
+            schema_name=schema_name,
+            schema_version=schema_version,
+        )
+        if saved:
+            return saved
     from app.agents.orchestration.context import sanitize_dependency_result
 
     body = sanitize_dependency_result(result)
@@ -62,7 +129,15 @@ async def persist_result_ref(user_id: str, result: dict | None) -> dict[str, str
     from app.contracts.projections import result_storage
 
     storage = result_storage(body)
-    record = {"sha256": digest, "body": body, "storage": storage, "created_at": time.time()}
+    record = {
+        "sha256": digest,
+        "body": body,
+        "storage": storage,
+        "created_at": time.time(),
+        # 方案 §1.3：引用必须携带**存储时**的 payload 结构版本，读取时按它解析。
+        "schema_name": str(schema_name or "execution_result"),
+        "schema_version": int(schema_version or 1),
+    }
     try:
         from app.core.redis import get_redis
 
@@ -75,6 +150,12 @@ async def persist_result_ref(user_id: str, result: dict | None) -> dict[str, str
 
 async def resolve_result_storage(user_id: str, result_ref: dict | None) -> dict | None:
     """只取持久化投影（最小快照），不加载正文；用于恢复/fork 的前置判断。"""
+    if unified_result_store_enabled():
+        from app.services.result_store import resolve_result_storage as _resolve_storage
+
+        stored = await _resolve_storage(user_id, result_ref)
+        if isinstance(stored, dict):
+            return stored
     record = await _load_record(user_id, result_ref, verify=False)
     if not isinstance(record, dict):
         return None
@@ -115,6 +196,17 @@ async def _load_record(user_id: str, result_ref: dict | None, *, verify: bool = 
 
 async def resolve_result_ref(user_id: str, result_ref: dict | None) -> dict | None:
     """Resolve a reference only for the owning user's dependent node."""
+    if unified_result_store_enabled():
+        from app.services.result_store import resolve_result as _resolve
+
+        body = await _resolve(user_id, result_ref)
+        if body is None:
+            return None
+        # 与旧路径一致：校验请求方给的 sha256（防篡改引用）。
+        expected = str((result_ref or {}).get("sha256") or "")
+        if expected and _sha256_of(body) != expected:
+            return None
+        return body
     record = await _load_record(user_id, result_ref, verify=True)
     if not isinstance(record, dict):
         return None
@@ -128,7 +220,13 @@ async def ensure_node_result_ref(user_id: str, node) -> dict[str, str] | None:
     existing = metadata.get("result_ref")
     if await resolve_result_ref(user_id, existing):
         return existing
-    created = await persist_result_ref(user_id, getattr(node, "result", None))
+    created = await persist_result_ref(
+        user_id,
+        getattr(node, "result", None),
+        job_id=str((metadata.get("job_id") if isinstance(metadata, dict) else "") or ""),
+        step_id=str(getattr(node, "id", "") or ""),
+        tool_name=str((getattr(node, "params", {}) or {}).get("preferred_tool") or ""),
+    )
     if created:
         metadata["result_ref"] = created
         # 持久化投影随之挂在节点上：断线恢复/前端展示不必再解析正文。
@@ -137,6 +235,7 @@ async def ensure_node_result_ref(user_id: str, node) -> dict[str, str] | None:
             metadata["result_storage"] = storage
         node.metadata = metadata
     return created
+
 
 async def record_node_span(
     *,
@@ -201,3 +300,14 @@ async def list_node_spans(execution_id: str, limit: int = 200) -> list[dict[str,
     except Exception:
         async with _memory_lock:
             return list(_memory_spans.get(execution_id, [])[-limit:])
+
+
+__all__ = [
+    "ensure_node_result_ref",
+    "list_node_spans",
+    "persist_result_ref",
+    "record_node_span",
+    "resolve_result_ref",
+    "resolve_result_storage",
+    "unified_result_store_enabled",
+]

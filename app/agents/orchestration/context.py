@@ -23,7 +23,14 @@ _ALLOWED_KEYS = {
 }
 
 
-def _sanitize(value, *, depth: int = 0, text_limit: int = 6000, max_depth: int = 4):
+def _sanitize(
+    value,
+    *,
+    depth: int = 0,
+    text_limit: int = 6000,
+    max_depth: int = 4,
+    list_limit: int = 30,
+):
     if depth > max_depth:
         return "[已裁剪]"
     if value is None or isinstance(value, (bool, int, float)):
@@ -32,7 +39,11 @@ def _sanitize(value, *, depth: int = 0, text_limit: int = 6000, max_depth: int =
         limit = max(500, int(text_limit or 6000))
         return value[:limit] + ("…[已截断]" if len(value) > limit else "")
     if isinstance(value, list):
-        return [_sanitize(v, depth=depth + 1, text_limit=text_limit, max_depth=max_depth) for v in value[:30]]
+        cap = max(1, int(list_limit or 30))
+        return [
+            _sanitize(v, depth=depth + 1, text_limit=text_limit, max_depth=max_depth, list_limit=cap)
+            for v in value[:cap]
+        ]
     if isinstance(value, dict):
         out = {}
         for key, item in value.items():
@@ -41,7 +52,9 @@ def _sanitize(value, *, depth: int = 0, text_limit: int = 6000, max_depth: int =
                 continue
             if depth == 0 and name not in _ALLOWED_KEYS:
                 continue
-            out[name] = _sanitize(item, depth=depth + 1, text_limit=text_limit, max_depth=max_depth)
+            out[name] = _sanitize(
+                item, depth=depth + 1, text_limit=text_limit, max_depth=max_depth, list_limit=list_limit
+            )
         return out
     return str(value)[:1000]
 
@@ -99,6 +112,33 @@ def sanitize_dependency_result(result: dict | None, max_chars: int = 12000) -> d
     if len(encoded) <= effective_max_chars:
         return cleaned
     return {"summary": encoded[:effective_max_chars] + "…[依赖结果已裁剪]"}
+
+
+#: 存储侧脱敏的文本上限（比"注入下游上下文"宽松得多：ResultStore 是完整结果的归属地，
+#: 下游按预算读取时才截断；这里只做**脱敏**与结构安全，不做上下文裁剪）。
+STORAGE_TEXT_LIMIT = 200_000
+#: 存储侧脱敏的列表上限（几十页 PPT / 大批条目不能被上下文裁剪规则砍掉）。
+STORAGE_LIST_LIMIT = 2_000
+
+
+def sanitize_stored_result(result: dict | None) -> dict:
+    """ResultStore 专用脱敏：**保留完整结构**，只剥离敏感键并保证 JSON 安全。
+
+    与 :func:`sanitize_dependency_result` 的区别：
+
+    * 后者是"注入下游 Prompt 的上下文"，必须按字符预算裁剪（几十页正文会被压成摘要）；
+    * 本函数是"落库的完整结果"，只能脱敏，不能裁剪——否则按引用取回的正文不完整，
+      恢复/fork 的下游拿到的就是残件。裁剪由读取侧的 ``LoadBudget`` 负责。
+    """
+    cleaned = _sanitize(
+        result or {},
+        text_limit=STORAGE_TEXT_LIMIT,
+        max_depth=10,
+        list_limit=STORAGE_LIST_LIMIT,
+    )
+    if not isinstance(cleaned, dict):
+        cleaned = {"content": cleaned}
+    return cleaned
 
 
 def build_dependency_context(node, node_by_id: dict, max_total_chars: int = 24000) -> dict:

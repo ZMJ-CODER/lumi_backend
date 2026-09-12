@@ -37,6 +37,9 @@ def to_job_run_view(view: Any, *, conversation_id: str = "", routing: dict | Non
     for raw in raw_steps if isinstance(raw_steps, list) else []:
         if not isinstance(raw, dict):
             continue
+        # 展示摘要：优先显式 ``display_summary``，其次步骤级 ``result_summary``
+        # （两者同源：都是"已完成/进行中"的安全短文案，正文永远走 result_ref）。
+        summary = str(raw.get("display_summary") or raw.get("result_summary") or "")
         steps.append(
             StepView(
                 id=str(raw.get("id") or ""),
@@ -45,11 +48,13 @@ def to_job_run_view(view: Any, *, conversation_id: str = "", routing: dict | Non
                 runtime_status=str(raw.get("runtime_status") or ""),
                 tool=str(raw.get("tool") or ""),
                 output=str(raw.get("output") or ""),
+                display_summary=summary,
                 error=str(raw["error"]) if raw.get("error") else None,
                 error_code=str(raw["error_code"]) if raw.get("error_code") else None,
                 depends_on=tuple(str(item) for item in (raw.get("depends_on") or ())),
                 resource_claims=tuple(str(item) for item in (raw.get("resource_claims") or ())),
                 effect_status=str(raw["effect_status"]) if raw.get("effect_status") else None,
+                attempt=max(1, int(raw.get("attempt") or 1)),
                 started_at=raw.get("started_at"),
                 completed_at=raw.get("completed_at"),
                 duration_ms=raw.get("duration_ms"),

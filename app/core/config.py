@@ -604,6 +604,10 @@ class Settings(BaseSettings):
     TASK_PROFILE_CANONICAL: bool = False      # 统一 TaskProfile（contracts 为权威）
     PLUGIN_QUOTA_ENFORCEMENT: bool = False    # Worker 真执行插件配额
     ARCHIVE_CONTENT_V2: bool = False          # 归档读取走 /artifacts/{ref}/content
+    # ── 《结果存储、检查点与恢复》接入开关（同样默认全关：关掉即回到旧路径）──
+    RESULT_STORE_V2: bool = False             # Tool/Skill/MCP 结果统一进 ResultStore（分层 + 过期 + 版本）
+    STEP_CHECKPOINT_V2: bool = False          # 每步写检查点，且完成事件在检查点落盘之后
+    EFFECT_JOURNAL_TYPED_V2: bool = False     # 副作用日志记 effect_type / effect_key（pending 在途核对）
     #: 影子运行：只记录"新逻辑会做什么"的差异，不改变实际返回。
     INTEGRATION_SHADOW_MODE: bool = False
 
@@ -664,6 +668,32 @@ class Settings(BaseSettings):
     LOG_ARCHIVE_RETENTION_ACTIVE_TASK_SECONDS: int = 86400       # 24h
     LOG_ARCHIVE_RETENTION_COMPLETED_JOB_SECONDS: int = 604800   # 7d（与产物 TTL 对齐）
     LOG_ARCHIVE_RETENTION_USER_ARTIFACT_SECONDS: int = 2592000  # 30d
+
+    # ── 统一结果存储（方案 §1：ResultStore 分层存储）──
+    # 分层判据是**序列化字节数**，不是字符数：<= REDIS 进 Redis（短摘要/错误码），
+    # <= LOCAL 进本地受控目录（中等结果），再大的一律进 Blob（长正文/大日志/PPT）。
+    # 阈值在这里配置，代码里不写死；业务层只使用 result_ref，不感知后端。
+    RESULT_STORE_REDIS_MAX_BYTES: int = 65536          # 64KB
+    RESULT_STORE_LOCAL_MAX_BYTES: int = 4194304        # 4MB
+    # Blob 后端：local（默认，本地受控目录，不开新依赖）/ s3（MinIO / OSS / S3 兼容）。
+    RESULT_STORE_BLOB_BACKEND: str = "local"
+    RESULT_STORE_BLOB_BUCKET: str = "lumi-results"
+    RESULT_STORE_BLOB_PREFIX: str = "agent-results"
+    RESULT_STORE_BLOB_ENDPOINT: str = ""               # MinIO/OSS 自定义端点；空 = AWS 默认
+    RESULT_STORE_BLOB_REGION: str = ""
+    RESULT_STORE_BLOB_ACCESS_KEY: str = ""
+    RESULT_STORE_BLOB_SECRET_KEY: str = ""
+    RESULT_STORE_BLOB_USE_SSL: bool = True
+    # Blob 不可用时是否回退本地目录（本地开发环境 true；生产可设 false 以 fail-closed）。
+    RESULT_STORE_BLOB_FALLBACK_LOCAL: bool = True
+    # 结果引用默认保留期：``0`` 表示跟随 AGENT_RESULT_REF_TTL_SECONDS。
+    RESULT_STORE_TTL_SECONDS: int = 0
+    # 单次按需加载的默认字符预算（方案 §1.4：注入下游上下文前按预算截断）。
+    RESULT_STORE_LOAD_MAX_CHARS: int = 24000
+    # ── job_runs / job_steps 异步数据库投影（方案 §3.3，默认关闭）──
+    # 事实源是 Redis Job State + ResultStore + Effect Journal；DB 只是查询/审计投影。
+    # 打开后按批次幂等 upsert，DB 写失败不阻塞任务执行（恢复后可补写）。
+    JOB_PROJECTION_ENABLED: bool = False
 
     # ── 语音（ASR + TTS）──
     WHISPER_MODEL: str = "base"        # openai-whisper：tiny/base/small/medium/large

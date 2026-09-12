@@ -69,6 +69,9 @@ STREAM_EVENT = contract_version("stream_event", 1)
 JOB_RUN_VIEW = contract_version("job_run_view", 1)
 TASK_PROFILE = contract_version("task_profile", 1)
 ROUTE_DECISION = contract_version("route_decision", 1)
+# ── 持久化（结果引用 / 步骤检查点）──
+RESULT_REF = contract_version("result_ref", 1)
+STEP_CHECKPOINT = contract_version("step_checkpoint", 1)
 # ── 插件化/能力化（Capability Provider / Plugin）──
 PLUGIN_MANIFEST = contract_version("plugin_manifest", 1)
 CAPABILITY_DESCRIPTOR = contract_version("capability_descriptor", 1)
@@ -90,6 +93,8 @@ KNOWN_CONTRACTS: frozenset[str] = frozenset(
         JOB_RUN_VIEW,
         TASK_PROFILE,
         ROUTE_DECISION,
+        RESULT_REF,
+        STEP_CHECKPOINT,
         PLUGIN_MANIFEST,
         CAPABILITY_DESCRIPTOR,
         CAPABILITY_INVOCATION,
@@ -112,8 +117,10 @@ __all__ = [
     "PLUGIN_MANIFEST",
     "PLUGIN_SNAPSHOT",
     "PROVIDER_LEASE",
+    "RESULT_REF",
     "ROUTE_DECISION",
     "SKILL_RESULT",
+    "STEP_CHECKPOINT",
     "STREAM_EVENT",
     "TASK_PROFILE",
     "TOOL_REQUEST",

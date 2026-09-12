@@ -221,14 +221,129 @@ def _live_presentation_fields(job: Job | None, event: dict) -> dict[str, str]:
     return {"title": step_action(node), "summary": summary}
 
 
-async def _persist_node_result_ref(user_id: str, result: dict | None) -> dict[str, str] | None:
+async def _persist_node_result_ref(
+    user_id: str,
+    result: dict | None,
+    *,
+    job_id: str = "",
+    step_id: str = "",
+    tool_name: str = "",
+    schema_name: str = "execution_result",
+    schema_version: int = 1,
+) -> dict[str, str] | None:
     try:
         from app.agents.orchestration.execution.lineage import persist_result_ref
 
-        return await persist_result_ref(user_id, result)
+        return await persist_result_ref(
+            user_id,
+            result,
+            job_id=job_id,
+            step_id=step_id,
+            tool_name=tool_name,
+            schema_name=schema_name,
+            schema_version=schema_version,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("步骤结果引用持久化失败（降级继续）: {}", str(exc)[:160])
         return None
+
+
+async def _record_step_checkpoints(job: Job, state: StepRunState) -> None:
+    """方案 §2.3 第 6/7 步：**结果引用已落盘、状态已写 Job 之后**写步骤检查点。
+
+    这里只写检查点，不发事件：完成事件由内核对**已保存的状态**发射，而
+    ``save_state`` 一定在发射之前被调用（见 ``lumi_execution.step_engine._settle``），
+    因此"完成事件必须在检查点落盘之后"这条铁律由调用顺序保证；发射侧的闸门是
+    :func:`app.services.step_checkpoint.StepCheckpointCoordinator.confirm_persisted_for_emit`。
+
+    检查点写失败**不阻塞任务执行**（只记日志）：任务状态仍以 Job 快照为准，
+    恢复时按"没有检查点"保守处理。
+    """
+    from app.services.step_checkpoint import coordinator_for, state_for_step
+
+    coordinator = coordinator_for(job.job_id)
+    if not coordinator.enabled:
+        return
+    job_status = job.status.value if hasattr(job.status, "value") else str(job.status)
+    nodes_by_id = {node.id: node for node in job.nodes}
+    written: list[Any] = []
+    for raw in state.steps:
+        if not isinstance(raw, dict):
+            continue
+        step_id = str(raw.get("id") or raw.get("step_id") or "")
+        if not step_id:
+            continue
+        node = nodes_by_id.get(step_id)
+        metadata = node.metadata if node is not None and isinstance(node.metadata, dict) else {}
+        effect_type = str(
+            raw.get("effect_type")
+            or metadata.get("effect_type")
+            or _effect_type_for_node(node)
+        )
+        outcome = await coordinator.record(
+            step_id,
+            state_for_step(status=str(raw.get("status") or ""), job_status=job_status),
+            attempt=int(raw.get("attempt") or 1),
+            tool_name=str(raw.get("tool") or raw.get("tool_name") or "")[:160],
+            step_type=str(raw.get("step_type") or "")[:80],
+            effect_type=effect_type[:32],
+            idempotency_key=str(getattr(node, "idempotency_key", "") or "")[:160],
+            input_digest=str(metadata.get("input_sha256") or raw.get("input_digest") or "")[:128],
+            output_summary=str(raw.get("result_summary") or "")[:2000],
+            result_ref=raw.get("result_ref") if isinstance(raw.get("result_ref"), dict) else None,
+            error_code=str(raw.get("error_code") or (getattr(node, "error_code", "") or ""))[:120],
+            effect_status=str(
+                raw.get("effect_status") or (getattr(node, "effect_status", "") or "")
+            ),
+        )
+        if outcome.checkpoint is not None:
+            written.append(outcome.checkpoint)
+    if not written:
+        return
+    # 方案 §3.3：检查点同时异步投影进 DB（查询/审计用）。DB 写失败不阻塞执行。
+    from app.services.job_projection import project_job_run, project_step_checkpoints
+
+    await project_step_checkpoints(job.job_id, written)
+    await project_job_run(
+        job_id=job.job_id,
+        user_id=str(job.user_id or ""),
+        conversation_id=str(getattr(job, "conversation_id", "") or ""),
+        status=job_status,
+        current_step_id=_current_step_id(state),
+        plan_revision=int(state.plan_revision or 1),
+        last_checkpoint_version=max(int(item.checkpoint_version or 0) for item in written),
+        error_code=str(state.error or ""),
+    )
+
+
+def _current_step_id(state: StepRunState) -> str:
+    """当前步骤 id（越界/形状异常一律返回空串，不猜）。"""
+    index = int(state.current_step_index or 0)
+    steps = state.steps or []
+    if 0 <= index < len(steps) and isinstance(steps[index], dict):
+        return str(steps[index].get("id") or steps[index].get("step_id") or "")
+    return ""
+
+
+def _effect_type_for_node(node: Any) -> str:
+    """按节点声明判定副作用类型（判不出返回 ``unknown``，不猜）。"""
+    if node is None:
+        return ""
+    try:
+        from lumi_orch.effects import effect_type_for
+
+        params = getattr(node, "params", {}) or {}
+        return str(
+            effect_type_for(
+                params.get("preferred_tool"),
+                params.get("tool"),
+                params.get("action"),
+                params.get("operation"),
+                getattr(node, "agent", ""),
+            ).value
+        )
+    except Exception:  # noqa: BLE001 - 判不出类型不能影响检查点写入
+        return ""
 
 
 class StepRunService:
@@ -348,9 +463,49 @@ class StepRunService:
                 yield capability_event
             fields = _live_presentation_fields(job, event) if isinstance(event, dict) else {}
             if fields:
-                yield {**event, **fields}
-            else:
-                yield event
+                event = {**event, **fields}
+            await self._confirm_checkpoint_before_emit(event)
+            yield event
+
+    @staticmethod
+    async def _confirm_checkpoint_before_emit(event: dict[str, Any]) -> None:
+        """方案 §2.3 铁律的落点：完成事件必须在检查点落盘之后。
+
+        内核已经保证"先写 Job 状态、再发事件"（``save_state`` 在 ``_settle`` 的 yield
+        之前），本函数在**应用层出口**再核对一次该步骤的检查点已落盘：核对通过才记
+        完成事件，未落盘时打警告——前端仍有 Job 快照兜底，但运维侧能立刻看到"这件事
+        不该发生"，而不是静默出一个"刷新后找不到结果"的完成态。
+
+        注意：这里不"吞掉"事件。吞掉会让前端停在中途（比快照不一致更糟），而方案的
+        铁律由**写入顺序**保证，这里只是把可能的顺序破坏变成可见告警。
+        """
+        from lumi_contracts.persistence.checkpoint import must_persist_before_emit
+
+        if not isinstance(event, dict):
+            return
+        event_type = str(event.get("type") or "")
+        if not must_persist_before_emit(event_type):
+            return
+        step_id = str(event.get("step_id") or "")
+        job_id = str(event.get("job_id") or "")
+        if not step_id or not job_id:
+            return
+        try:
+            from app.services.step_checkpoint import coordinator_for
+
+            coordinator = coordinator_for(job_id)
+            if not coordinator.enabled:
+                return
+            version = await coordinator.confirm_persisted_for_emit(step_id, event_type)
+            if version <= 0:
+                logger.warning(
+                    "[checkpoint] 完成事件缺少已落盘检查点 job={} step={} type={}（快照仍可恢复，请排查写入顺序）",
+                    job_id[:12],
+                    step_id[:24],
+                    event_type,
+                )
+        except Exception as exc:  # noqa: BLE001 - 核对失败不能影响事件投递
+            logger.debug("[checkpoint] 完成事件核对失败: {}", str(exc)[:120])
 
     @staticmethod
     async def _collect_capability_events(
@@ -411,6 +566,9 @@ class StepRunService:
 
         archive_process_log_overflow(job)
         await self._store.save_job(job)
+        # 方案 §2.3 第 6/7 步：结果引用与任务状态都落盘之后，才写步骤检查点。
+        # 完成事件由内核对这一份已保存状态发射 → "完成事件晚于检查点"由顺序保证。
+        await _record_step_checkpoints(job, state)
 
     async def acquire_capacity(self, state: StepRunState) -> bool:
         job = await self._store.get_job(state.job_id)
@@ -486,7 +644,17 @@ class StepRunService:
         status = str(getattr(outcome, "status", "failed") or "failed")
         result_ref = None
         if status == "completed":
-            result_ref = await _persist_node_result_ref(job.user_id, live.result or {})
+            # 方案 §1.3：引用携带**存储时**的 schema 版本，读取时按它解析历史数据。
+            live_result = live.result if isinstance(live.result, dict) else {}
+            result_ref = await _persist_node_result_ref(
+                job.user_id,
+                live.result or {},
+                job_id=job.job_id,
+                step_id=step_id,
+                tool_name=str(live_result.get("tool") or ""),
+                schema_name=str(live_result.get("schema_name") or "execution_result"),
+                schema_version=int(live_result.get("schema_version") or 1),
+            )
         return StepOutcome(
             status=status,
             result_summary=_result_summary(live.result, live.error or ""),

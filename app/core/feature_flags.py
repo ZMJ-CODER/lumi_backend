@@ -20,6 +20,15 @@ FEATURE_FLAGS: tuple[str, ...] = (
     "TASK_PROFILE_CANONICAL",
     "PLUGIN_QUOTA_ENFORCEMENT",
     "ARCHIVE_CONTENT_V2",
+    # ── 结果存储 / 检查点与恢复（方案《结果存储、检查点与恢复》）──
+    # 开启后结果统一进 ResultStore（分层 + schema_version + 过期 + 校验），
+    # Job/快照只留摘要与引用；关闭时保持既有 {id, sha256} 引用路径。
+    "RESULT_STORE_V2",
+    # 开启后每一步都写步骤检查点（planned→started→running→…→uncertain），
+    # 并保证"完成事件在检查点落盘之后"；关闭时不写检查点，行为与改造前一致。
+    "STEP_CHECKPOINT_V2",
+    # 开启后副作用日志同时记录 effect_type / effect_key，并支持 pending 在途核对。
+    "EFFECT_JOURNAL_TYPED_V2",
 )
 
 #: 影子模式开关（不属于上面六个：它控制"是否只观察"）。

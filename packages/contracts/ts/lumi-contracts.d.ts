@@ -1,7 +1,7 @@
 /**
  * 由 packages/contracts/scripts/export_ts.py 生成，请勿手工修改。
  *
- * 契约版本：ExecutionResult=lumi.execution_result@1, JobRunView=lumi.job_run_view@1, RouteDecision=lumi.route_decision@1, StreamEvent=lumi.stream_event@1, TaskProfile=lumi.task_profile@1, ToolRequest=lumi.tool_request@1
+ * 契约版本：ExecutionResult=lumi.execution_result@1, JobRunView=lumi.job_run_view@1, ResultRef=lumi.result_ref@1, RouteDecision=lumi.route_decision@1, StepCheckpoint=lumi.step_checkpoint@1, StreamEvent=lumi.stream_event@1, TaskProfile=lumi.task_profile@1, ToolRequest=lumi.tool_request@1
  * 后端模型：lumi_contracts（packages/contracts）
  * 重新生成：python packages/contracts/scripts/export_ts.py
  */
@@ -380,7 +380,7 @@ export interface ProcessLogEntry {
   title?: string;
   summary?: string;
   detail?: string;
-  status?: ProcessStatus;
+  status?: ProcessStatus | string;
   step_id?: string;
   call_id?: string;
   tool_name?: string;
@@ -389,7 +389,7 @@ export interface ProcessLogEntry {
   job_id?: string;
 }
 
-export type ProcessStatus = "running" | "completed" | "failed" | "pending";
+export type ProcessStatus = "running" | "completed" | "failed" | "pending" | "uncertain" | "cancelled" | "expired";
 
 export type ProviderHealth = "healthy" | "degraded" | "unhealthy" | "offline" | "unknown";
 
@@ -432,6 +432,26 @@ export interface ProviderRef {
   device_id?: string;
   health_status?: string;
 }
+
+/** 统一结果引用（业务层唯一可见的结果定位符）。 */
+
+export interface ResultRef {
+  id: string;
+  sha256?: string;
+  storage_kind?: string;
+  content_type?: string;
+  size?: number;
+  owner_id?: string;
+  job_id?: string;
+  step_id?: string;
+  schema_name?: string;
+  schema_version?: number;
+  expires_at?: number;
+  created_at?: number;
+  artifact_refs?: ArtifactRef[];
+}
+
+export type ResultStorageKind = "redis" | "local" | "blob";
 
 /** 路由决策：只描述"选了什么"，不携带工具实现。 */
 
@@ -517,6 +537,34 @@ export interface SkillStep {
   detail?: string;
 }
 
+/** 一步的检查点记录（方案 §2.2 的全部字段）。 */
+
+export interface StepCheckpoint {
+  checkpoint_contract_version?: number;
+  job_id?: string;
+  step_id?: string;
+  attempt?: number;
+  tool_name?: string;
+  step_type?: string;
+  effect_type?: string;
+  idempotency_key?: string;
+  status?: StepCheckpointState;
+  started_at?: number;
+  finished_at?: number;
+  input_digest?: string;
+  output_summary?: string;
+  result_ref?: Record<string, unknown> | null;
+  artifact_refs?: Record<string, unknown>[];
+  error_code?: string;
+  effect_status?: string;
+  checkpoint_version?: number;
+  updated_at?: number;
+}
+
+export type StepCheckpointState = "planned" | "started" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled" | "uncertain";
+
+export type StepRuntimeStatus = "idle" | "running" | "waiting_approval" | "settled";
+
 /** 单步展示与恢复信息。 */
 
 export interface StepView {
@@ -526,11 +574,13 @@ export interface StepView {
   runtime_status?: string;
   tool?: string;
   output?: string;
+  display_summary?: string;
   error?: string | null;
   error_code?: string | null;
   depends_on?: string[];
   resource_claims?: string[];
   effect_status?: string | null;
+  attempt?: number;
   started_at?: number | null;
   completed_at?: number | null;
   duration_ms?: number | null;

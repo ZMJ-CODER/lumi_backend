@@ -136,6 +136,14 @@ DOMAIN_ERROR_SPECS: dict[str, ErrorSpec] = {
     ),
     "resource.quota_exceeded": ErrorSpec("resource.quota_exceeded", ErrorCategory.BUSINESS, False, "已超出配额限制。", "调整用量"),
     "resource.result_ref_expired": ErrorSpec("resource.result_ref_expired", ErrorCategory.BUSINESS, False, "产物引用已过期，请重新生成或重新打开。", "重新生成"),
+    "resource.result_ref_unavailable": ErrorSpec(
+        "resource.result_ref_unavailable", ErrorCategory.BUSINESS, False,
+        "结果引用不可用（存储记录不存在或已被清理）。", "重新执行该步骤",
+    ),
+    "resource.result_ref_integrity_failed": ErrorSpec(
+        "resource.result_ref_integrity_failed", ErrorCategory.BUSINESS, False,
+        "结果完整性校验失败，已拒绝交付该内容。", "重新执行该步骤",
+    ),
     "system.cancelled": ErrorSpec("system.cancelled", ErrorCategory.BUSINESS, False, "任务已取消。", "重新发起"),
     "system.internal": ErrorSpec("system.internal", ErrorCategory.FATAL, False, "任务执行器内部发生错误，请稍后重试；若持续出现请联系管理员。", "稍后重试"),
 }
@@ -194,6 +202,11 @@ LEGACY_CODE_ALIASES: dict[str, str] = {
     "WEB_FETCH_FAILED": "tool.failed",
     # ── 资源 / 引用 ──
     "RESULT_REF_EXPIRED": "RESULT_REF_EXPIRED",
+    # 结果引用不可用的两个口径（方案《结果存储、检查点与恢复》§1.3）：保留原码便于排障，
+    # 文案与动作走已登记的域内口径。
+    "RESULT_REF_UNAVAILABLE": "resource.result_ref_unavailable",
+    "RESULT_REF_INTEGRITY_FAILED": "resource.result_ref_integrity_failed",
+    "RESULT_REF_FORBIDDEN": "PERMISSION_DENIED",
     "QUOTA_EXCEEDED": "resource.quota_exceeded",
     "OFFICE_JOB_LIMIT": "resource.quota_exceeded",
     "CHAT_STREAM_RATE_LIMIT": "resource.quota_exceeded",

@@ -48,6 +48,11 @@ EXPORTED_MODELS: tuple[str, ...] = (
     "StepView",
     "JobRunView",
     "ApprovalState",
+    # ── 结果存储 / 步骤检查点（《结果存储、检查点与恢复》方案）──
+    # 前端只消费**引用**（正文按引用另行获取）与检查点摘要，因此这两个类型必须
+    # 与后端逐字一致，不能手抄。
+    "ResultRef",
+    "StepCheckpoint",
     # ── 插件化/能力化（阶段 0 冻结）──
     "PluginManifest",
     "CapabilityDescriptor",
@@ -69,6 +74,9 @@ EXPORTED_ENUMS: tuple[str, ...] = (
     "ProviderHealth",
     "SideEffectKind",
     "TrustLevel",
+    "ResultStorageKind",
+    "StepCheckpointState",
+    "StepRuntimeStatus",
 )
 
 
@@ -210,7 +218,9 @@ def build() -> str:
     from lumi_contracts import (
         EXECUTION_RESULT,
         JOB_RUN_VIEW,
+        RESULT_REF,
         ROUTE_DECISION,
+        STEP_CHECKPOINT,
         STREAM_EVENT,
         TASK_PROFILE,
         TOOL_REQUEST,
@@ -220,6 +230,8 @@ def build() -> str:
     versions = {
         "ExecutionResult": str(EXECUTION_RESULT),
         "JobRunView": str(JOB_RUN_VIEW),
+        "ResultRef": str(RESULT_REF),
+        "StepCheckpoint": str(STEP_CHECKPOINT),
         "RouteDecision": str(ROUTE_DECISION),
         "StreamEvent": str(STREAM_EVENT),
         "TaskProfile": str(TASK_PROFILE),

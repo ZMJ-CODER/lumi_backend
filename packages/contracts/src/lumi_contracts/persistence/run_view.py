@@ -71,11 +71,15 @@ class StepView(BaseModel):
     tool: str = ""
     # 展示用短输出；完整结果按 result_ref 解析。
     output: str = ""
+    #: 快照收缩后保留的**展示摘要**（正文按 result_ref 解析；与过程日志 summary 同源文案）。
+    display_summary: str = ""
     error: str | None = None
     error_code: str | None = None
     depends_on: tuple[str, ...] = ()
     resource_claims: tuple[str, ...] = ()
     effect_status: str | None = None
+    #: 第几次尝试（同一逻辑步的重试）：前端据此显示"第 N 次尝试"。
+    attempt: int = 1
     started_at: float | None = None
     completed_at: float | None = None
     duration_ms: int | None = None

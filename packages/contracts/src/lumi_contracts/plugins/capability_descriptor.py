@@ -15,10 +15,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from lumi_contracts.plugins.manifest import CAPABILITY_NAME_RE
 from lumi_contracts.plugins.vocabulary import (
     DataLocality,
+    ExecutionPlane,
     IsolationLevel,
+    RuntimeKind,
     SideEffectKind,
     TrustLevel,
+    executor_type_for,
     parse_data_locality,
+    parse_execution_plane,
+    parse_runtime_kind,
 )
 
 
@@ -37,6 +42,10 @@ class CapabilityDescriptor(BaseModel):
     side_effects: list[SideEffectKind] = Field(default_factory=list)
     #: 未知/缺省按最保守的 ``local_only``（本地数据不允许被无声明地送到云端）。
     data_locality: DataLocality = DataLocality.LOCAL_ONLY
+    #: **执行位置**：这个能力声明在哪一侧执行（server/client）。与隔离方式正交。
+    execution_plane: ExecutionPlane | None = None
+    #: **运行方式**：进程内 / Worker / 容器 / 沙箱。
+    runtime_kind: RuntimeKind | None = None
     required_permissions: list[str] = Field(default_factory=list)
     #: 客户端本机是否必须再确认一次（服务端授权不能替用户扩大本机权限）。
     needs_local_confirmation: bool = False
@@ -63,6 +72,16 @@ class CapabilityDescriptor(BaseModel):
     def _parse_locality(cls, value: Any) -> Any:
         return parse_data_locality(value)
 
+    @field_validator("execution_plane", mode="before")
+    @classmethod
+    def _parse_plane(cls, value: Any) -> Any:
+        return None if value in (None, "") else parse_execution_plane(value)
+
+    @field_validator("runtime_kind", mode="before")
+    @classmethod
+    def _parse_runtime(cls, value: Any) -> Any:
+        return None if value in (None, "") else parse_runtime_kind(value)
+
     @field_validator("input_schema", "output_schema")
     @classmethod
     def _valid_schema(cls, value: dict[str, Any]) -> dict[str, Any]:
@@ -78,6 +97,16 @@ class CapabilityDescriptor(BaseModel):
             self.sensitivity = (
                 "private" if self.data_locality is DataLocality.LOCAL_ONLY else "internal"
             )
+        # 未显式声明时按数据本地性推导（local_only→client、cloud→server），
+        # 保证 executoin_plane 永远有值；hybrid 默认留在本地（数据不出本机）。
+        if self.execution_plane is None:
+            self.execution_plane = (
+                ExecutionPlane.CLIENT
+                if self.data_locality is not DataLocality.CLOUD
+                else ExecutionPlane.SERVER
+            )
+        if self.runtime_kind is None:
+            self.runtime_kind = RuntimeKind.IN_PROCESS
         return self
 
     @property
@@ -111,6 +140,13 @@ class CapabilityDescriptor(BaseModel):
             "capability": self.qualified_name,
             "side_effects": [str(item) for item in self.side_effects],
             "data_locality": str(self.data_locality),
+            "execution_plane": str(self.execution_plane or ExecutionPlane.CLIENT),
+            "runtime_kind": str(self.runtime_kind or RuntimeKind.IN_PROCESS),
+            # 兼容旧字段：前端既有读法（``provider.executor_type``）仍能拿到值。
+            "executor_type": executor_type_for(
+                self.execution_plane or ExecutionPlane.CLIENT,
+                self.runtime_kind or RuntimeKind.IN_PROCESS,
+            ),
             "sensitivity": self.sensitivity,
             "needs_local_confirmation": self.needs_local_confirmation,
             "streamable": self.streamable,

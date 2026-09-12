@@ -57,6 +57,14 @@ WORKSPACE_STAGE_WRITE_CAPABILITIES = frozenset({
     "workspace_stage_write",
     "workspace_stage_delete",
 })
+#: 四个**原子操作**工具（统一 OperationResult：版本校验 + 审批 + 回收站 + 读回校验）。
+#: 写阶段优先注入这四个；暂存对（stage_write/stage_delete）只在客户端没广告它们时兜底。
+WORKSPACE_OPERATION_CAPABILITIES = frozenset({
+    "workspace_write",
+    "workspace_edit",
+    "workspace_move",
+    "workspace_delete",
+})
 WORKSPACE_SANDBOX_CAPABILITIES = frozenset({
     "sandbox_prepare",
     "sandbox_run",
@@ -74,6 +82,7 @@ WORKSPACE_HIGH_RISK_CAPABILITIES = frozenset({
 WORKSPACE_ALL_CAPABILITIES = frozenset({
     *WORKSPACE_READ_CAPABILITIES,
     *WORKSPACE_STAGE_WRITE_CAPABILITIES,
+    *WORKSPACE_OPERATION_CAPABILITIES,
     *WORKSPACE_SANDBOX_CAPABILITIES,
     *WORKSPACE_COMMIT_CAPABILITIES,
 })
@@ -103,6 +112,7 @@ WORKSPACE_READ_TOOL_NAMES = frozenset({
 # 写入/沙箱/提交阶段才会按需注入的能力（不属于读取域）。
 WORKSPACE_STAGE_AND_EXEC_TOOL_NAMES = frozenset({
     *WORKSPACE_STAGE_WRITE_CAPABILITIES,
+    *WORKSPACE_OPERATION_CAPABILITIES,
     *WORKSPACE_SANDBOX_CAPABILITIES,
     *WORKSPACE_COMMIT_CAPABILITIES,
 })
@@ -610,6 +620,9 @@ async def load_workspace_context(
     capability_groups = {
         "read": sorted(WORKSPACE_READ_CAPABILITIES & advertised_set),
         "stage_write": sorted(WORKSPACE_STAGE_WRITE_CAPABILITIES & advertised_set),
+        # 原子操作工具（write/edit/move/delete）：客户端广告了才出现在这里，
+        # 写阶段据此注入候选窗（见 react_runner 的阶段窗口）。
+        "operations": sorted(WORKSPACE_OPERATION_CAPABILITIES & advertised_set),
         "sandbox": sorted(WORKSPACE_SANDBOX_CAPABILITIES & advertised_set),
         "commit": sorted(WORKSPACE_COMMIT_CAPABILITIES & advertised_set),
     }

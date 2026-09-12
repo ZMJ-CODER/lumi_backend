@@ -43,6 +43,10 @@ class ProviderRef(BaseModel):
     id: str
     version: str = ""
     deployment: str = ""
+    #: 实际执行位置与运行方式（来自租约；不是 Manifest 的声明值）。
+    execution_plane: str = ""
+    runtime_kind: str = ""
+    executor_type: str = ""
     plugin_id: str = ""
     device_id: str = ""
     #: 快照时刻的健康状态（"当时它是健康的"是可审计事实，与"现在"无关）。
@@ -57,6 +61,10 @@ class CapabilityBinding(BaseModel):
     capability: str
     provider_id: str = ""
     deployment: str = ""
+    #: 这次绑定实际在哪一侧、以什么运行方式执行。
+    execution_plane: str = ""
+    runtime_kind: str = ""
+    executor_type: str = ""
     device_id: str = ""
     workspace_id: str = ""
     contract_version: int = 1
@@ -110,6 +118,10 @@ class PluginSnapshot(BaseModel):
                     capability=lease.qualified_capability,
                     provider_id=lease.provider_id,
                     deployment=str(lease.deployment),
+                    # 实际值（租约推导），刷新后仍能回答"当时谁在执行"。
+                    execution_plane=str(lease.plane()),
+                    runtime_kind=str(lease.runtime()),
+                    executor_type=lease.executor_type(),
                     device_id=lease.device_id,
                     workspace_id=lease.workspace_id,
                     contract_version=int(lease.contract_version),
@@ -131,6 +143,9 @@ class PluginSnapshot(BaseModel):
                     id=lease.provider_id,
                     version=lease.provider_version,
                     deployment=str(lease.deployment),
+                    execution_plane=str(lease.plane()),
+                    runtime_kind=str(lease.runtime()),
+                    executor_type=lease.executor_type(),
                     plugin_id=lease.plugin_id,
                     device_id=lease.device_id,
                     health_status=str(lease.health_status),

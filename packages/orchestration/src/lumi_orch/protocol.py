@@ -139,6 +139,16 @@ _OPEN_TAG_PARTIAL = re.compile(r"<\s*[A-Za-z_][\w.:-]*(\s[^<>]*?)?$")
 _PROCESS_LEAD_RE = re.compile(r"^\s*(?:我来|我先|先|正在|接下来|现在先|让我|我需要)(?:读取|查看|核对|检查|分析|整理|梳理|处理|确认|了解)", re.IGNORECASE)
 
 
+def _looks_like_progress_preamble(text: str) -> bool:
+    """判断一段滞留文本是否只是紧贴工具调用的“进展开场白”。
+
+    只有 ``我来读取…`` / ``先查看…`` 这类自述句才允许改道过程通道。Markdown
+    标题、列表项、代码围栏和空行同样“短且以换行结尾”，但它们**是回答正文**：
+    它们后面跟着工具调用时，把整块搬进 thinking 会让标题和围栏从答案里消失。
+    """
+    return bool(_PROCESS_LEAD_RE.search(str(text or "")))
+
+
 class TextToolStripper:
     """跨增量、即时转发的工具标签剥离器（用于直答流的纯文本路径）。
 
@@ -167,7 +177,11 @@ class TextToolStripper:
         if self._process_candidate:
             self._process_candidate += text
             if looks_like_tool_markup(text) or self._text_starts_with_tag(text):
-                self._process_prefix += self._process_candidate
+                # 只把标签**之前**的自述句交给过程通道：标签本身随后仍由
+                # _scan 正常消费，不能借道过程通道漏出原始 XML/DSML。
+                prose = self._process_candidate
+                cut = self._next_tag_start(prose)
+                self._process_prefix += prose if cut is None else prose[:cut]
                 self._process_candidate = ""
             elif len(self._process_candidate) <= 120:
                 return []
@@ -181,12 +195,12 @@ class TextToolStripper:
             # 上一片断疑似标签起始，但还没有名字/属性结尾，先拼接再判断。
             text = self._pending + text
             self._pending = ""
-        # 上一片滞留的短句：若新片以工具标签开始则丢弃（“我来读取…”这类
-        # 开场白紧跟在工具调用前不应进正文），否则补发后继续扫描。
+        # 上一片滞留的短句：若新片以工具标签开始，只有“我来读取…”这类开场白
+        # 才改道过程通道；Markdown 块（标题/列表/围栏/空行）必须留在正文。
         held = self._short_hold
         self._short_hold = ""
         if held:
-            if looks_like_tool_markup(text) or self._text_starts_with_tag(text):
+            if (looks_like_tool_markup(text) or self._text_starts_with_tag(text)) and _looks_like_progress_preamble(held):
                 # This is a model-side progress sentence (for example
                 # “我来读取这份 PPT…”), not answer content.  Preserve it for
                 # the caller's process/thinking channel instead of leaking it
@@ -373,10 +387,17 @@ class TextToolStripper:
 
 
 def strip_tool_markup(text: str) -> str:
-    """尽力从文本中剥离工具调用形态；残余仅作为兜底（正常不应触发）。"""
+    """尽力从文本中剥离工具调用形态；残余仅作为兜底（正常不应触发）。
+
+    ⚠️ **绝不做 ``.strip()``**：本函数在流式路径里是**逐增量**调用的，任何"顺手的
+    去空白"都会吃掉 Markdown 的结构空白——``"##"`` + ``" 总体概况"`` 会粘成
+    ``"##总体概况"``，``"\\n\\n"`` 会整段消失，代码块围栏后的换行也会丢。
+    因此：没有协议残留时原样返回；真的剥掉了标记时也只删除被匹配的片段。
+    """
     if not text:
         return text
     cleaned = _normalize_protocol_text(text)
+    original = cleaned
     # 1) DSML 块：属性式自闭合 + 嵌套式
     cleaned = re.sub(
         r"(?s)<\|\|DSML\|\|\s*(?:invoke|召唤)\b.*?(?:/>|</\|\|DSML\|\|\s*(?:invoke|召唤)\s*>)",
@@ -398,7 +419,10 @@ def strip_tool_markup(text: str) -> str:
         lambda m: "" if _tag_is_tool_like(m.group("name"), m.group("attrs")) else m.group(0),
         cleaned,
     )
-    return cleaned.strip()
+    # 没有剥掉任何东西 → 原样返回（**不要**动空白：见上面的流式约束）。
+    if cleaned == original:
+        return text
+    return cleaned
 
 
 def normalize_native_tool_calls(

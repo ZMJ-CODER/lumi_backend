@@ -34,6 +34,7 @@ from lumi_contracts.plugins import (
     CapabilityInvocation,
     CapabilityResult,
     capability_failure,
+    executor_type_for,
 )
 
 from app.agents.capabilities.policy_guard import capability_fingerprint
@@ -152,6 +153,10 @@ class CapabilityAuditRecord:
     capability: str
     provider_id: str = ""
     deployment: str = ""
+    #: 实际执行来源（位置 + 运行方式 + 兼容派生值）：审计必须回答"当时谁在执行"。
+    execution_plane: str = ""
+    runtime_kind: str = ""
+    executor_type: str = ""
     device_id: str = ""
     workspace_id: str = ""
     contract_version: int = 1
@@ -171,6 +176,9 @@ class CapabilityAuditRecord:
             "capability": self.capability,
             "provider_id": self.provider_id,
             "deployment": self.deployment,
+            "execution_plane": self.execution_plane,
+            "runtime_kind": self.runtime_kind,
+            "executor_type": self.executor_type,
             "device_id": self.device_id,
             "workspace_id": self.workspace_id,
             "contract_version": int(self.contract_version),
@@ -195,13 +203,24 @@ def audit_record(
     device_id: str = "",
     workspace_id: str = "",
     deployment: str = "",
+    execution_plane: str = "",
+    runtime_kind: str = "",
     now: float | None = None,
 ) -> CapabilityAuditRecord:
-    """由调用与结果生成审计记录。"""
+    """由调用与结果生成审计记录。
+
+    执行来源优先取**结果里的实际值**（Broker/派发层回填），其次取调用方给的租约事实；
+    两者都没有时留空——绝不按 ``deployment`` 猜一个看起来合理的值。
+    """
+    plane = str(execution_plane or (result.plane() if result.execution_plane else ""))
+    runtime = str(runtime_kind or (result.runtime() if result.runtime_kind else ""))
     return CapabilityAuditRecord(
         capability=str(result.capability or invocation.qualified_capability),
         provider_id=str(result.provider_id or ""),
         deployment=str(deployment or ""),
+        execution_plane=plane,
+        runtime_kind=runtime,
+        executor_type=executor_type_for(plane, runtime) if plane else "",
         device_id=str(device_id or ""),
         workspace_id=str(workspace_id or ""),
         contract_version=int(result.contract_version or invocation.contract_version),

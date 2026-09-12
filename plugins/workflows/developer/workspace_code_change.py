@@ -11,8 +11,14 @@ from app.services.usage import CATEGORY_SKILL
 
 # 读取阶段只给聚合入口 workspace_navigator（action=list/search/read）；内部原子
 # 读取名保留在 MCP 注册表与后端内部依赖中，不再进入模型 function calling schema。
+# 写阶段优先原子操作四件套（CAPABILITY_BRIDGE.md §11.5），暂存对 + diff + commit
+# 保留给没有原子工具的老客户端。
 _TOOLS = (
     "mcp__lumi_client__workspace_navigator",
+    "mcp__lumi_client__workspace_write",
+    "mcp__lumi_client__workspace_edit",
+    "mcp__lumi_client__workspace_move",
+    "mcp__lumi_client__workspace_delete",
     "mcp__lumi_client__workspace_stage_write",
     "mcp__lumi_client__workspace_stage_delete",
     "mcp__lumi_client__workspace_diff",
@@ -23,6 +29,17 @@ _TOOLS = (
     "mcp__lumi_client__workspace_commit",
     "mcp__lumi_client__workspace_rollback",
 )
+
+# 原子写工具与沙箱辅助按可选依赖登记：老客户端只广告暂存对时工作流仍可用。
+_OPTIONAL_TOOLS = frozenset({
+    "mcp__lumi_client__workspace_write",
+    "mcp__lumi_client__workspace_edit",
+    "mcp__lumi_client__workspace_move",
+    "mcp__lumi_client__workspace_delete",
+    "mcp__lumi_client__sandbox_output_read",
+    "mcp__lumi_client__sandbox_reset",
+    "mcp__lumi_client__workspace_rollback",
+})
 
 
 def _tool_defs(capabilities):
@@ -72,7 +89,7 @@ class WorkspaceCodeChangeSkill(WorkflowSkill):
         "tools": [{
             "name": name,
             "min_version": "1.0.0",
-            "required": name not in {"mcp__lumi_client__sandbox_output_read", "mcp__lumi_client__sandbox_reset", "mcp__lumi_client__workspace_rollback"},
+            "required": name not in _OPTIONAL_TOOLS,
             "provider": "desktop_mcp",
         } for name in _TOOLS],
     }
@@ -103,14 +120,19 @@ class WorkspaceCodeChangeSkill(WorkflowSkill):
         system = (
             (context.skill_prompt or "你是一个谨慎的代码工作区执行 Agent。")
             + "\n你负责根据目标滚动执行，不要一次性假设完整计划。每轮最多调用一个工具。"
-            "先探索并读取，再修改；修改已有文件前必须先读取。写入只能使用暂存工具，"
-            "然后准备沙箱并运行合适测试。测试失败时分析输出、继续读取或修复并重测。"
-            "workspace_list 返回空列表或明确说明目录为空时，这表示工作区已成功读取且没有现有文件，"
+            "先探索并读取，再修改；修改已有文件前必须先读取。"
+            "改动优先用原子工具落地：新建/整体覆盖用 workspace_write，定点替换用 workspace_edit，"
+            "改名/移动用 workspace_move，删除用 workspace_delete；覆盖或替换已有文件必须带本轮读取得到的 "
+            "expected_revision，workspace_edit 的 old_string 必须唯一命中。原子工具自带版本校验与审批，"
+            "一次调用即生效，不需要再走 diff/commit。只有客户端没有广告原子工具时，才退回暂存路径"
+            "（workspace_stage_write / workspace_stage_delete → workspace_diff → workspace_commit）。"
+            "无论走哪条路，都要在改动后准备沙箱并运行合适测试。测试失败时分析输出、继续读取或修复并重测。"
+            "workspace_navigator(action=\"list\") 返回空列表或明确说明目录为空时，这表示工作区已成功读取且没有现有文件，"
             "不是错误、不是缺少能力，也不需要停止；在不覆盖任何现有文件的前提下继续创建用户要求的新文件。"
             "只有在工具明确返回失败、权限错误或工作区未注册时才停止并报告原因。"
-            "只有测试成功且查看过 workspace_diff 后，才可以调用 workspace_commit；"
+            "只有走暂存路径时才需要：测试成功且查看过 workspace_diff 后，才可以调用 workspace_commit；"
             "commit 不带 approved 或 approved=false 时表示等待用户审批。不要执行删除、提交或回滚之外的隐藏动作。"
-            "workspace_id 由系统注入，不要要求用户提供。完成时说明变更仍在暂存区还是已提交。"
+            "workspace_id 由系统注入，不要要求用户提供。结束时说清楚每个文件是已生效还是仍在暂存区待提交。"
         )
         messages = [
             {"role": "system", "content": system},

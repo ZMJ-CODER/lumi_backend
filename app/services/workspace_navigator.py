@@ -2,7 +2,7 @@
 
 模型只看到 **一个** 工作区读取工具::
 
-    workspace_navigator(action="list" | "search" | "read", ...)
+    workspace_navigator(action="list" | "search" | "read" | "scan", ...)
 
 它的内部结构不是“上帝函数”，而是：::
 
@@ -12,6 +12,7 @@
         ↓
     Electron MCP（workspace_list / workspace_search / workspace_content_extract…）
     + 内部处理器 NavigatorListHandler / NavigatorSearchHandler / NavigatorReadHandler
+      / NavigatorScanHandler（代码骨架，服务端 code_structure 纯函数解析）
 
 设计约束（与产品方案一致）：
 
@@ -55,11 +56,14 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from app.contracts.operations import TRASH_DIRNAME, RevisionRules, is_trash_path
+
 # ── 动作与参数契约 ──────────────────────────────────────────
 ACTION_LIST = "list"
 ACTION_SEARCH = "search"
 ACTION_READ = "read"
-ACTIONS: tuple[str, ...] = (ACTION_LIST, ACTION_SEARCH, ACTION_READ)
+ACTION_SCAN = "scan"
+ACTIONS: tuple[str, ...] = (ACTION_LIST, ACTION_SEARCH, ACTION_READ, ACTION_SCAN)
 
 SEARCH_MODE_AUTO = "auto"
 SEARCH_MODE_FILENAME = "filename"
@@ -84,10 +88,12 @@ WORKSPACE_UNSUPPORTED_FORMAT = "WORKSPACE_UNSUPPORTED_FORMAT"
 WORKSPACE_READ_FAILED = "WORKSPACE_READ_FAILED"
 SEARCH_TIMEOUT = "SEARCH_TIMEOUT"
 CURSOR_EXPIRED = "CURSOR_EXPIRED"
+#: 回收站路径：普通工作区操作（list/read/search/scan/write/edit/move/delete）一律拒止。
+TRASH_PATH_FORBIDDEN = "TRASH_PATH_FORBIDDEN"
 
 # 失败时给模型的自我修正提示（不是通用重试）
 _ERROR_SUGGESTIONS: dict[str, str] = {
-    INVALID_ACTION: "action 只能是 list/search/read；请重新选择动作。",
+    INVALID_ACTION: "action 只能是 list/search/read/scan；请重新选择动作。",
     INVALID_PARAMS: "请按工具 schema 补全或修正参数后重试一次。",
     WORKSPACE_NOT_BOUND: "本轮没有绑定工作区；不要编造文件内容，直接说明无法读取。",
     WORKSPACE_NOT_REGISTERED: "工作区未注册或没有可路由的桌面连接；请如实说明后停止读取。",
@@ -98,6 +104,7 @@ _ERROR_SUGGESTIONS: dict[str, str] = {
     WORKSPACE_READ_FAILED: "读取失败；可换一个候选文件，或先 search 缩小范围。",
     SEARCH_TIMEOUT: "搜索超时；请缩小 search_path 或改用更具体的关键词。",
     CURSOR_EXPIRED: "游标已过期；请重新发起本次 list/search/read，不要复用旧 cursor。",
+    TRASH_PATH_FORBIDDEN: "回收站 .lumi_trash 不是普通目录：内容只能用恢复/清理接口访问。",
 }
 
 # Electron 侧可能返回的“目录被当文件读”信号
@@ -182,6 +189,11 @@ MAX_READ_PAGES_PER_CALL = 8
 # consume several page batches in one atomic tool execution. This remains a
 # bounded safety valve; a request that reaches it still returns has_more/cursor.
 MAX_READ_PAGES_PER_REQUEST = 128
+# ``action=scan`` 的骨架必须覆盖**整份文件**才有意义（"只扫了前 4000 字符"的骨架
+# 会让模型以为文件里就这些符号），所以扫描时主动跟游标续读；同时给字符/页数预算
+# 兜底，预算耗尽就如实标 partial，不假装扫完了。
+MAX_SCAN_CHARS = 200_000
+MAX_SCAN_PAGES = 24
 # 敏感内容的脱敏类别（与 Electron 的 meta.sensitivity 取值对齐）。
 SENSITIVITY_CREDENTIAL = "CREDENTIAL"
 SENSITIVITY_KEY_MATERIAL = "KEY_MATERIAL"
@@ -624,7 +636,7 @@ class WorkspaceNavigatorService:
         if normalized_action not in ACTIONS:
             return build_error(
                 STATUS_ERROR, normalized_action or ACTION_LIST, INVALID_ACTION,
-                f"不支持的动作：{normalized_action or '（空）'}；只支持 list/search/read。",
+                f"不支持的动作：{normalized_action or '（空）'}；只支持 list/search/read/scan。",
             )
         try:
             bound = self._require_bound()
@@ -635,6 +647,8 @@ class WorkspaceNavigatorService:
                 payload = await NavigatorListHandler(self).run(args)
             elif normalized_action == ACTION_SEARCH:
                 payload = await NavigatorSearchHandler(self).run(args)
+            elif normalized_action == ACTION_SCAN:
+                payload = await NavigatorScanHandler(self).run(args)
             else:
                 payload = await NavigatorReadHandler(self).run(args)
             self._observe(normalized_action, args, payload)
@@ -935,6 +949,13 @@ class NavigatorListHandler:
             minimum=1,
             maximum=MAX_DEPTH,
         )
+        if is_trash_path(path):
+            # 回收站不是普通目录：不允许显式列它（内容只能经恢复/清理接口处理）。
+            return build_error(
+                STATUS_ERROR, ACTION_LIST, TRASH_PATH_FORBIDDEN,
+                f"{path} 位于回收站 {TRASH_DIRNAME}/ 内，不能用 list 浏览。",
+                suggested_action="普通浏览请换一个目录；回收站内容请用恢复/清理接口。",
+            )
         max_results = clamp_int(
             args.get("max_results"),
             default=service._list_max_entries,
@@ -1046,11 +1067,20 @@ class NavigatorListHandler:
             call_args["cursor"] = cursor
         payload = await service.call(tool, call_args)
         data = service.data_of(payload)
+        items = normalize_entries(data)
+        # 回收站默认不出现在 list 结果里：.lumi_trash 是删除内容的落点，
+        # 普通浏览看到它只会诱导模型去读"已经删掉的东西"。
+        hidden = [item for item in items if is_trash_path(str(item.get("path") or ""))]
+        if hidden:
+            items = [item for item in items if not is_trash_path(str(item.get("path") or ""))]
+        meta = payload_meta(payload)
+        if hidden:
+            meta = {**meta, "trash_hidden": len(hidden)}
         return {
-            "items": normalize_entries(data),
+            "items": items,
             "has_more": payload_has_more(payload),
             "cursor": payload_cursor(payload),
-            "meta": payload_meta(payload),
+            "meta": meta,
         }
 
 
@@ -1083,6 +1113,13 @@ class NavigatorSearchHandler:
             if state.get("search_path") is not None
             else clean_path(args.get("search_path") or args.get("path"))
         )
+        if is_trash_path(search_path):
+            # 回收站内容不参与检索：否则"已删除"的文件会被 search 重新带回上下文。
+            return build_error(
+                STATUS_ERROR, ACTION_SEARCH, TRASH_PATH_FORBIDDEN,
+                f"检索范围 {search_path} 位于回收站 {TRASH_DIRNAME}/ 内。",
+                suggested_action="换一个检索范围；回收站内容请用恢复/清理接口处理。",
+            )
         max_results = clamp_int(
             args.get("max_results"),
             default=service._search_max_results,
@@ -1119,6 +1156,10 @@ class NavigatorSearchHandler:
             offset=int(state.get("offset") or 0),
             size=max_results,
         )
+        # 命中结果里落入回收站的条目同样要过滤（客户端可能把 .lumi_trash 也检索出来）。
+        trash_hits = [item for item in page if is_trash_path(str(item.get("path") or ""))]
+        if trash_hits:
+            page = [item for item in page if not is_trash_path(str(item.get("path") or ""))]
 
         next_cursor = None
         if has_more:
@@ -1136,6 +1177,7 @@ class NavigatorSearchHandler:
             "search_mode": mode,
             "search_path": search_path or ".",
             "returned": len(page),
+            **({"trash_hidden": len(trash_hits)} if trash_hits else {}),
             **meta_extra,
         }
         if any(item.get("sensitive") for item in page):
@@ -1235,6 +1277,16 @@ class NavigatorReadHandler:
                 suggested_action="先用 action=list 或 search 定位文件，再用相对路径 read。",
             )
         cursor = str(args.get("cursor") or "").strip()
+        if is_trash_path(path):
+            # 回收站只能通过 restore/purge 接口访问：读取一律拒止（含索引文件），
+            # 否则"删掉的东西"会以另一种方式重新出现在模型上下文里。
+            return build_error(
+                STATUS_ERROR, ACTION_READ, TRASH_PATH_FORBIDDEN,
+                f"{path} 位于回收站 {TRASH_DIRNAME}/ 内，不能用 read 访问。",
+                suggested_action="如需恢复请用回收站恢复接口；普通读取请换一个路径。",
+                data={"path": path},
+                meta={**service.base_meta(), "path": path},
+            )
         max_chars = clamp_int(
             args.get("max_chars"),
             default=READ_MAX_CHARS,
@@ -1293,6 +1345,16 @@ class NavigatorReadHandler:
             )
 
         request = str(args.get("request") or service.request or f"读取文件 {path}")
+        # 行区间精读：给了 start_line/end_line 就**只取这一段**（配合 scan 返回的骨架行号），
+        # 而不是从头顺序读到目标位置。切片在服务端做，语义稳定、可测。
+        want_start = clamp_int(args.get("start_line"), default=0, minimum=0, maximum=10_000_000)
+        want_end = clamp_int(args.get("end_line"), default=0, minimum=0, maximum=10_000_000)
+        if want_start or want_end:
+            window = await self._read_line_window(
+                path=path, request=request, start_line=want_start, end_line=want_end
+            )
+            if window is not None:
+                return window
         if full_read:
             payload = await self._read_until_end(
                 path=path, cursor="", request=request, max_chars=max_chars,
@@ -1316,6 +1378,85 @@ class NavigatorReadHandler:
                     meta={**service.base_meta(), "path": path},
                 )
         return self._from_reader(payload, path=path, cursor_in="", full_read=full_read)
+
+    async def _read_line_window(
+        self, *, path: str, request: str, start_line: int, end_line: int
+    ) -> dict | None:
+        """按行区间读取（返回 None 表示应回退到常规按页读取）。
+
+        先取整篇正文（客户端解析器），再在服务端切出 ``start_line..end_line``。
+        这样"读到某个函数体"是一次调用，而不是从第 1 行翻页翻过去。
+        """
+        service = self.service
+        from app.services.code_structure import slice_lines
+
+        payload = await self._read_via_reader(
+            request=request, path=path, cursor="", max_chars=READ_MAX_CHARS
+        )
+        reader_status = str(payload.get("status") or "")
+        sections = [item for item in (payload.get("content") or []) if isinstance(item, dict)]
+        if reader_status == "failed" and not sections:
+            return None  # 让常规路径给出统一错误
+        full_text = "\n".join(str(item.get("text") or "") for item in sections)
+        if not full_text:
+            return None
+        window = slice_lines(
+            full_text, start_line=start_line or 1, end_line=end_line or 0
+        )
+        reader_meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        if not window.get("ok"):
+            return build_error(
+                STATUS_ERROR, ACTION_READ, INVALID_PARAMS,
+                str(window.get("reason") or "行区间不合法"),
+                data={"path": path, "total_lines": window.get("total_lines")},
+                meta={**service.base_meta(), "path": path},
+            )
+        detection = sensitivity_of(path, hint=str(reader_meta.get("sensitivity") or ""))
+        item = {
+            "source": path,
+            "location": f"第 {window['start_line']}-{window['end_line']} 行",
+            "title": f"{path}（行区间）",
+            "text": str(window.get("text") or ""),
+        }
+        redaction = redact_sections([item])
+        if redaction.redacted:
+            item = redaction.sections[0] if redaction.sections else item
+        meta = {
+            **service.base_meta(),
+            "path": path,
+            "format": reader_meta.get("format") or format_for(path),
+            "parser": reader_meta.get("parser"),
+            "sections_returned": 1,
+            "char_count": len(str(item.get("text") or "")),
+            "total_lines": int(window.get("total_lines") or 0),
+            "start_line": int(window.get("start_line") or 0),
+            "end_line": int(window.get("end_line") or 0),
+            "line_window": True,
+            "truncated": bool(window.get("truncated")),
+            "sensitive": bool(detection) or redaction.redacted,
+            "sensitivity": redaction.sensitivity if redaction.redacted else (detection or ""),
+            "redacted": redaction.redacted,
+            "redaction_count": redaction.count,
+            "workspace_version": reader_meta.get("workspace_version"),
+            # 行区间读取仍然基于**整篇原文**：因此可以给出整文件版本，供 edit/write
+            # 作为 expected_revision 使用（"先 scan 骨架 → 再读区间 → 再编辑"闭环）。
+            "revision": RevisionRules.for_file(full_text),
+        }
+        summary = (
+            f"已读取 {path} 第 {window['start_line']}-{window['end_line']} 行"
+            f"（共 {window['total_lines']} 行；revision {meta['revision']}）"
+        )
+        if window.get("truncated"):
+            summary += "；该区间之后还有内容，需要时用新的 start_line 继续"
+        if redaction.redacted:
+            summary += f"；已自动脱敏 {redaction.count} 处敏感内容"
+        return service.envelope(
+            ACTION_READ,
+            status=STATUS_PARTIAL if window.get("truncated") else STATUS_OK,
+            summary=summary,
+            data={"path": path, "sections": [item]},
+            meta=meta,
+        )
 
     async def _read_until_end(
         self, *, path: str, cursor: str, request: str, max_chars: int,
@@ -1473,6 +1614,10 @@ class NavigatorReadHandler:
         sections = normalize_sections(content)
         reader_meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
         format_value = reader_meta.get("format") or format_for(path)
+        # 版本：基于**整篇原文**（脱敏前的 sections）。只有"整篇读完"才给出，
+        # 分页中间页算出来的哈希没有意义（会诱导调用方拿半截内容的版本去写）。
+        raw_text = "\n".join(str(item.get("text") or "") for item in sections)
+        content_revision = RevisionRules.for_file(raw_text)
         # 敏感检测 → 自动脱敏：普通读取免确认，但凭据/密钥/PII 一律先脱敏，
         # 原文不进入模型上下文（不依赖文件名是否可疑）。
         detection = sensitivity_of(path, hint=str(reader_meta.get("sensitivity") or ""))
@@ -1503,6 +1648,13 @@ class NavigatorReadHandler:
             "read_full_requested": bool(full_read),
         }
         has_more = bool(payload.get("has_more"))
+        if not has_more and sections:
+            # 编辑/写入的版本前置条件：这里给出**当前版本**，调用方原样作为
+            # expected_revision 传回即可（同一个算法，见 workspace_revision.py）。
+            meta["revision"] = content_revision
+            meta["expected_revision_hint"] = (
+                "写入/编辑该文件时把 revision 作为 expected_revision 传回"
+            )
         summary = str(payload.get("summary") or f"已读取 {path}")
         if has_more:
             summary += (
@@ -1512,6 +1664,8 @@ class NavigatorReadHandler:
             )
         else:
             summary += "；已读到文件结尾"
+            if meta.get("revision"):
+                summary += f"（revision {meta['revision']}，写入/编辑时原样作为 expected_revision）"
         if redaction.redacted:
             summary += (
                 f"；已自动脱敏 {redaction.count} 处敏感内容"
@@ -1538,8 +1692,231 @@ class NavigatorReadHandler:
         )
 
 
-# ── 归一化工具（Electron 返回结构 → 稳定模型契约）──────────────
+class NavigatorScanHandler:
+    """``action=scan``：**代码骨架**扫描（类/函数/导入 + 行号区间）。
 
+    与 ``read`` 的分工：``read`` 给正文（按页），``scan`` 给**结构**——文件体不返回，
+    因此几百行的代码文件也只占很小上下文。拿到 ``line/end_line`` 后可用
+    ``action=read&start_line=&end_line=`` 精确读某一段，不必从头顺序读。
+
+    解析完全在服务端做（``app/services/code_structure.py``，纯函数）：即使客户端只提供
+    原始正文，也能给出骨架；Python 走 ``ast``，其余语言走保守正则。
+    """
+
+    def __init__(self, service: WorkspaceNavigatorService) -> None:
+        self.service = service
+
+    async def run(self, args: dict) -> dict:
+        service = self.service
+        path = clean_path(args.get("path"))
+        if not path:
+            return build_error(
+                STATUS_ERROR, ACTION_SCAN, INVALID_PARAMS,
+                "scan 必须提供单个文件的 path。",
+                suggested_action="先用 action=list 或 search 定位文件，再对代码文件 scan。",
+            )
+        if not _is_readable_format(path):
+            return build_error(
+                STATUS_ERROR, ACTION_SCAN, WORKSPACE_UNSUPPORTED_FORMAT,
+                f"不支持扫描的格式：{extension_of(path) or '（无扩展名）'}。",
+                data={"path": path, "format": format_for(path)},
+                meta={**service.base_meta(), "path": path},
+            )
+        if is_trash_path(path):
+            # 回收站内容不参与结构扫描（与 list/read/search 同一策略）。
+            return build_error(
+                STATUS_ERROR, ACTION_SCAN, TRASH_PATH_FORBIDDEN,
+                f"{path} 位于回收站 {TRASH_DIRNAME}/ 内，不能扫描。",
+                suggested_action="换一个路径；回收站内容请用恢复/清理接口处理。",
+                data={"path": path, "symbols": []},
+                meta={**service.base_meta(), "path": path},
+            )
+        kind = str(args.get("kind") or "").strip().casefold()
+        if kind and kind not in {"class", "function", "method", "import"}:
+            return build_error(
+                STATUS_ERROR, ACTION_SCAN, INVALID_PARAMS,
+                f"kind 只能是 class/function/method/import，收到：{kind}",
+            )
+        max_symbols = clamp_int(args.get("max_symbols"), default=200, minimum=1, maximum=400)
+        want_start = clamp_int(args.get("start_line"), default=0, minimum=0, maximum=10_000_000)
+        want_end = clamp_int(args.get("end_line"), default=0, minimum=0, maximum=10_000_000)
+
+        # 取正文：客户端解析器给整篇原文，**切片在服务端做**（纯函数、可测、不依赖客户端）。
+        payload = await self._fetch(path=path)
+        reader_status = str(payload.get("status") or "")
+        sections = [item for item in (payload.get("content") or []) if isinstance(item, dict)]
+        # ``WorkspaceReader`` 只在**完全没有正文**时才 failed/empty（见 workspace_reader）：
+        # 那就是失败，不能拿空正文扫出一个"空骨架"冒充成功。
+        if reader_status in {"failed", "empty"}:
+            code = str((payload.get("meta") or {}).get("error_code") or WORKSPACE_READ_FAILED)
+            if code in _DIRECTORY_ERROR_CODES:
+                code = WORKSPACE_PATH_NOT_DIRECTORY
+            elif code in _NOT_FOUND_ERROR_CODES:
+                code = WORKSPACE_PATH_NOT_FOUND
+            elif reader_status == "empty":
+                code = WORKSPACE_PATH_NOT_FOUND
+            return build_error(
+                STATUS_ERROR, ACTION_SCAN, code,
+                str(payload.get("summary") or "扫描失败。"),
+                data={"path": path, "symbols": []},
+                meta={**service.base_meta(), "path": path},
+            )
+        full_text = "\n".join(str(item.get("text") or "") for item in sections)
+        reader_meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        from app.services.code_structure import scan_text, slice_lines
+
+        text = full_text
+        sliced = False
+        total_lines = len(full_text.splitlines())
+        if want_start or want_end:
+            window = slice_lines(
+                full_text,
+                start_line=want_start or 1,
+                end_line=want_end or (want_start + 2000),
+            )
+            text = str(window.get("text") or "")
+            sliced = True
+        skeleton = scan_text(text, path=path, max_symbols=max_symbols)
+        # 骨架不完整的两种情形都要标出来：只扫了窗口（sliced）、或文件太长没抓完
+        # （预算耗尽）。否则模型会把局部骨架当成全文。
+        budget_exhausted = bool(reader_meta.get("budget_exhausted"))
+        skeleton["partial"] = bool(sliced or budget_exhausted)
+        if sliced:
+            skeleton["partial_from_line"] = int(want_start or 1)
+        if budget_exhausted:
+            skeleton.setdefault("notes", []).append(
+                f"文件较长，本次只扫描了前 {len(full_text)} 个字符（骨架可能不完整）；"
+                "可用 action=read 配合 line 区间分段精读"
+            )
+        # 敏感文件：骨架里的签名/文档串同样可能夹带凭据，标注出来让调用方注意。
+        detection = sensitivity_of(path, hint=str(reader_meta.get("sensitivity") or ""))
+        if detection:
+            skeleton["sensitive"] = True
+            skeleton["sensitivity"] = str(detection)
+        if kind:
+            skeleton["symbols"] = [
+                item for item in skeleton.get("symbols") or []
+                if str(item.get("kind") or "") == kind
+            ]
+        if not bool(args.get("include_imports", True)):
+            skeleton.pop("imports", None)
+        find_name = str(args.get("find") or "").strip()
+        found = None
+        if find_name:
+            from app.services.code_structure import find_symbol
+
+            found = find_symbol(skeleton, find_name)
+            if found is None:
+                # 没找到就明确说"没找到"，而不是给空骨架让人以为文件是空的。
+                skeleton.setdefault("notes", []).append(f"未找到名为 {find_name} 的符号")
+        stats = skeleton.get("stats") or {}
+        meta = {
+            **service.base_meta(),
+            "path": path,
+            "language": skeleton.get("language"),
+            "parser": "ast" if skeleton.get("language") == "python" else "regex",
+            "symbols_returned": len(skeleton.get("symbols") or []),
+            "total_lines": total_lines,
+            "scanned_chars": len(full_text),
+            "pages_read": int(reader_meta.get("pages_read") or 1),
+            "budget_exhausted": budget_exhausted,
+            "partial": bool(skeleton.get("partial")),
+            "sensitive": bool(detection),
+            "sensitivity": str(detection or ""),
+            "workspace_version": reader_meta.get("workspace_version"),
+            "sliced": sliced,
+            "start_line": int(want_start or 0) or None,
+            "end_line": int(want_end or 0) or None,
+        }
+        summary = (
+            f"已扫描 {path}（{skeleton.get('language')}）："
+            f"{stats.get('classes', 0)} 个类、{stats.get('functions', 0)} 个函数、"
+            f"{stats.get('methods', 0)} 个方法、{stats.get('imports', 0)} 个导入，"
+            f"共 {total_lines} 行；未返回函数体，可用 action=read 配合 line 区间精读。"
+        )
+        if skeleton.get("truncated"):
+            summary += "；符号过多已截断"
+        if skeleton.get("notes"):
+            summary += "；" + "；".join(str(item) for item in skeleton["notes"][:3])
+        data = {
+            "path": path,
+            "language": skeleton.get("language"),
+            "symbols": skeleton.get("symbols") or [],
+            "imports": skeleton.get("imports") or [],
+            "stats": stats,
+            "truncated": bool(skeleton.get("truncated")),
+            "notes": skeleton.get("notes") or [],
+            "partial": bool(skeleton.get("partial")),
+            "found": found,
+        }
+        return service.envelope(
+            ACTION_SCAN,
+            status=STATUS_OK if skeleton.get("ok") else STATUS_PARTIAL,
+            summary=summary,
+            data=data,
+            meta=meta,
+        )
+
+    async def _fetch(self, *, path: str) -> dict:
+        """取整篇正文（切片由服务端纯函数完成，客户端只需给原文）。
+
+        ``WorkspaceReader`` 是**按页**返回的（每页 ``READ_MAX_CHARS``）：只读第一页
+        会让大文件的骨架缺掉后半段符号，还会让模型以为"文件里就这些"。所以这里主动
+        跟游标续读，直到读完或触到字符/页数预算；预算耗尽时把 ``budget_exhausted``
+        放进 meta，由调用方标成 partial。
+        """
+        service = self.service
+        from app.services.workspace_reader import WorkspaceReader
+
+        reader = WorkspaceReader(
+            user_id=service.user_id,
+            user_role=service.user_role,
+            workspace_id=service.workspace_id,
+            conversation_id=service.conversation_id,
+        )
+        payload = await reader.read("", path=path, cursor="", max_chars=READ_MAX_CHARS)
+        if str(payload.get("status") or "") in {"failed", "empty"}:
+            return payload
+        sections = [item for item in (payload.get("content") or []) if isinstance(item, dict)]
+        chars = sum(len(str(item.get("text") or "")) for item in sections)
+        pages = 1
+        cursor = str(payload.get("cursor") or "")
+        has_more = bool(payload.get("has_more"))
+        budget_exhausted = False
+        seen: set[str] = set()
+        while has_more and cursor and pages < MAX_SCAN_PAGES and chars < MAX_SCAN_CHARS:
+            if cursor in seen:  # 游标不前进 → 停下，别死循环
+                budget_exhausted = True
+                break
+            seen.add(cursor)
+            try:
+                page = await reader.read("", path=path, cursor=cursor, max_chars=READ_MAX_CHARS)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("scan 续读失败（{}）：{}", path, str(exc)[:160])
+                budget_exhausted = True
+                break
+            new_sections = [item for item in (page.get("content") or []) if isinstance(item, dict)]
+            if not new_sections and not page.get("has_more"):
+                break
+            sections.extend(new_sections)
+            chars += sum(len(str(item.get("text") or "")) for item in new_sections)
+            pages += 1
+            has_more = bool(page.get("has_more"))
+            cursor = str(page.get("cursor") or "")
+            if str(page.get("status") or "") == "failed":
+                break
+        # 只要还剩 has_more，就说明这份文件**没抓完**（页数/字符预算用完，或游标
+        # 不再前进）：如实标 partial，不假装骨架是全文。
+        if has_more:
+            budget_exhausted = True
+        meta = dict(payload.get("meta") or {})
+        meta["pages_read"] = pages
+        meta["scanned_chars"] = chars
+        meta["budget_exhausted"] = budget_exhausted
+        return {**payload, "content": sections, "has_more": has_more, "cursor": cursor, "meta": meta}
+
+
+# ── 归一化工具（Electron 返回结构 → 稳定模型契约）──────────────
 def payload_has_more(payload: Any) -> bool:
     """Electron 侧是否还有下一页（先看信封，再看 meta）。"""
     if not isinstance(payload, dict):
@@ -1960,7 +2337,31 @@ def model_text(payload: dict, *, limit: int = MODEL_TEXT_MAX_CHARS) -> str:
         if len(text) > remaining:
             lines.append("…（本段已截断，可用 cursor 继续）")
             break
-    if not lines[1:]:
+    # scan：骨架必须逐行给出（类/函数/方法 + 行区间），否则模型只看到一个
+    # 摘要数字，等于白扫；这里直接复用 code_structure 的纯函数渲染。
+    if action == ACTION_SCAN:
+        from app.services.code_structure import render_skeleton_lines
+
+        skeleton_lines = render_skeleton_lines(
+            data.get("symbols"),
+            imports=data.get("imports"),
+            stats=data.get("stats"),
+            max_lines=200,
+        )
+        for line in skeleton_lines:
+            if used + len(line) > content_budget:
+                lines.append("…（骨架较长，已截断；可用 kind/find/行区间缩小范围）")
+                break
+            lines.append(line)
+            used += len(line)
+        found = data.get("found")
+        if isinstance(found, dict):
+            lines.append(
+                f"命中：{found.get('name')} [{found.get('kind')}] "
+                f"L{found.get('line')}-{found.get('end_line')}；"
+                "可用 action=read 配合 start_line/end_line 精读"
+            )
+    if len(lines) <= 1:
         lines.append("（没有结果）")
     if payload.get("has_more"):
         lines.append(f"has_more=true，继续读取请复用 cursor={payload.get('cursor')}")

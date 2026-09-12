@@ -22,8 +22,14 @@ from lumi_contracts.plugins.capability_invocation import SessionBinding
 from lumi_contracts.plugins.manifest import CAPABILITY_NAME_RE
 from lumi_contracts.plugins.vocabulary import (
     Deployment,
+    ExecutionPlane,
     ProviderHealth,
+    RuntimeKind,
     TrustLevel,
+    executor_type_for,
+    parse_execution_plane,
+    parse_runtime_kind,
+    plane_for_deployment,
 )
 
 
@@ -49,6 +55,10 @@ class ProviderLease(BaseModel):
 
     # ── 运行位置与信任 ──
     deployment: Deployment = Deployment.CLIENT
+    #: **本次租约实际绑定的执行位置**与运行方式（Provider 注册/心跳时上报；
+    #: 缺省按 ``deployment`` 推导，保证租约永远能回答"谁在执行"）。
+    execution_plane: ExecutionPlane | None = None
+    runtime_kind: RuntimeKind | None = None
     trust_level: TrustLevel = TrustLevel.THIRD_PARTY
     plugin_id: str = ""
     plugin_version: str = ""
@@ -80,6 +90,36 @@ class ProviderLease(BaseModel):
         if not text:
             raise ValueError("provider_id 不能为空")
         return text[:160]
+
+    @field_validator("execution_plane", mode="before")
+    @classmethod
+    def _parse_plane(cls, value: Any) -> Any:
+        return None if value in (None, "") else parse_execution_plane(value)
+
+    @field_validator("runtime_kind", mode="before")
+    @classmethod
+    def _parse_runtime(cls, value: Any) -> Any:
+        return None if value in (None, "") else parse_runtime_kind(value)
+
+    def plane(self) -> ExecutionPlane:
+        """生效执行位置（显式声明优先，否则由 ``deployment`` 推导）。
+
+        用解析函数兜底：``model_copy`` 之类的路径可能把字符串塞进来（不做校验），
+        访问器必须保证返回枚举，否则调用方 ``is ExecutionPlane.CLIENT`` 会静默失败。
+        """
+        if self.execution_plane is None or self.execution_plane == "":
+            return plane_for_deployment(self.deployment)
+        return parse_execution_plane(self.execution_plane)
+
+    def runtime(self) -> RuntimeKind:
+        """生效运行方式（显式声明优先，否则进程内）。"""
+        if self.runtime_kind is None or self.runtime_kind == "":
+            return RuntimeKind.IN_PROCESS
+        return parse_runtime_kind(self.runtime_kind)
+
+    def executor_type(self) -> str:
+        """兼容旧字段的派生值（``server``/``client``/``worker``/``container``/``sandbox``）。"""
+        return executor_type_for(self.plane(), self.runtime())
 
     def is_expired(self, *, now: float | None = None) -> bool:
         """过期判定；``expires_at<=0`` 视为**未设租约**（过期）。"""
@@ -148,6 +188,10 @@ class ProviderLease(BaseModel):
             "provider_id": self.provider_id,
             "capability": self.qualified_capability,
             "deployment": str(self.deployment),
+            # 本次租约实际绑定的位置与运行方式（不是"配置里写了什么"）。
+            "execution_plane": str(self.plane()),
+            "runtime_kind": str(self.runtime()),
+            "executor_type": self.executor_type(),
             "device_id": self.device_id,
             "plugin_id": self.plugin_id,
             "plugin_version": self.plugin_version,

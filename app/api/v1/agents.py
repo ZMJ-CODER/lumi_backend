@@ -174,6 +174,40 @@ async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     from app.contracts.process_log import merge_job_process_log, process_log_payload
 
     view["process_log"] = process_log_payload(merge_job_process_log(job))
+    # 产物与声明式视图（刷新恢复 Artifact 卡片 / View 容器）：只放引用与元数据，
+    # 下载仍走受权限保护的 /api/v1/artifacts/{artifact_id}/download。
+    try:
+        from app.services import artifacts as artifact_service
+        from app.services import views as view_service
+
+        refs = artifact_service.validate_artifacts(
+            payload["sub"], artifact_service.artifacts_for_job(payload["sub"], job)
+        )
+        view["artifact_refs"] = refs
+        job_views = view_service.views_for_job(payload["sub"], job, artifacts=refs)
+        view["views"] = job_views
+        # 前端既有渲染入口读的是 run_view.view_contributions；两个键同源，
+        # 快照投影去掉 action（语义不同名），见 app/services/views.snapshot_contributions。
+        view["view_contributions"] = view_service.snapshot_contributions(job_views)
+    except Exception as exc:  # noqa: BLE001 - 产物/视图恢复失败不能影响任务详情
+        logger.debug("产物/视图恢复失败（降级）: {}", str(exc)[:120])
+    # 事件水位：前端把自己的 lastSeq 与它比较，决定是否走增量补拉。
+    try:
+        from app.services import job_event_log
+
+        frames = await job_event_log.read_frames(job.job_id, after_seq=0, limit=1000)
+        view["last_seq"] = job_event_log.last_seq_of(frames)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("事件水位读取失败（降级）: {}", str(exc)[:120])
+    # 工作区操作快照（统一 OperationResult）：operation_summary / changed_files /
+    # approval_state / rollback_available。完整 Diff 或文件内容不在这里，
+    # 需要时走受权限保护的接口按需获取。读取失败降级为"没有操作记录"。
+    try:
+        from app.services.operation_snapshots import operation_summary_view
+
+        view["operation_summary"] = await operation_summary_view(job.job_id)
+    except Exception as exc:  # noqa: BLE001 - 快照读取失败不能影响任务详情
+        logger.debug("操作快照读取失败（降级）: {}", str(exc)[:120])
     data["run_view"] = view
     # 契约校验：形状漂移（未知状态/丢步骤/缺按钮状态）在这里暴露，但**不改动**
     # 返回给前端的形状。
@@ -344,10 +378,13 @@ async def resume_agent_job(
 def _run_next_sse_response(job_id: str, *, expected_step_id: str, plan_revision: int | None, idempotency_key: str):
     """构造 run_next 的 SSE 响应（事件流见 orchestrator.stream_run_next）。"""
     from app.contracts.events import SseEventEncoder
+    from app.services.job_event_log import FrameRecorder
 
     async def event_gen():
         # 每条流一个编码器：seq 单调递增，前端据此发现丢帧；未知事件不抛错。
         encoder = SseEventEncoder(job_id=job_id)
+        # 断线续传：帧同时写进任务事件日志（GET /agents/jobs/{id}/events?after_seq=）。
+        recorder = FrameRecorder()
         try:
             async for evt in orchestrator.stream_run_next(
                 job_id=job_id,
@@ -355,21 +392,70 @@ def _run_next_sse_response(job_id: str, *, expected_step_id: str, plan_revision:
                 plan_revision=plan_revision,
                 idempotency_key=idempotency_key,
             ):
-                yield encoder.encode(evt)
+                for _frame, _line in encoder.encode_frames(evt):
+                    if recorder.add(_frame):
+                        await recorder.flush()
+                    yield _line
         except Exception as exc:  # noqa: BLE001
             logger.warning("run_next SSE 中断 job={} err={}", str(job_id)[:12], str(exc)[:200])
-            yield encoder.encode({
+            for _frame, _line in encoder.encode_frames({
                 "type": "error",
                 "message": "单步执行流中断，请刷新任务状态后重试",
                 "status": 500,
                 "code": "RUN_NEXT_STREAM_INTERRUPTED",
-            })
+            }):
+                if recorder.add(_frame):
+                    await recorder.flush()
+                yield _line
+        finally:
+            try:
+                await recorder.flush()
+            except Exception:  # noqa: BLE001 - 日志失败不影响已交付的事件
+                pass
 
     return StreamingResponse(
         event_gen(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/jobs/{job_id}/events")
+async def replay_agent_job_events(
+    job_id: str,
+    after_seq: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=1000),
+    payload: dict = Depends(require_auth),
+):
+    """按 ``seq`` 补拉任务事件（断线续传）。
+
+    与实时流**同一份标准帧**：同一个 ``event_id`` / ``seq`` / ``type`` / ``payload``，
+    因此前端可以"先 ``JSON.parse`` 增量，再按 ``event_id`` 去重"，不会重复渲染。
+
+    * ``after_seq``：只返回 ``seq`` 严格大于该值的事件（前端传自己的 ``lastSeq``）；
+    * ``limit``：单次上限（默认 500，最大 1000）；返回体里的 ``last_seq`` 可直接
+      写回前端的 ``lastSeq``；
+    * 事件日志不可用（Redis 降级/过期）时返回空列表 + ``truncated=true``，
+      此时应以 ``GET /agents/jobs/{job_id}`` 的 ``JobRunView`` 快照恢复为准。
+    """
+    await _get_owned_job(job_id, payload["sub"])
+    from app.services import job_event_log
+
+    frames = await job_event_log.read_frames(job_id, after_seq=after_seq, limit=limit)
+    return {
+        "code": 0,
+        "data": {
+            "job_id": job_id,
+            "protocol": "canonical",
+            "version": 2,
+            "after_seq": int(after_seq),
+            "last_seq": job_event_log.last_seq_of(frames),
+            "count": len(frames),
+            "truncated": len(frames) >= limit,
+            "events": frames,
+        },
+        "message": "已返回增量事件" if frames else "没有新的增量事件（可用快照恢复）",
+    }
 
 
 @router.post("/jobs/{job_id}/plan-patches")

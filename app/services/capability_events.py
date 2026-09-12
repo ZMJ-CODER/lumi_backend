@@ -69,6 +69,10 @@ _ALLOWED_FIELDS: tuple[str, ...] = (
     "device_id",
     "workspace_id",
     "conversation_id",
+    # 实际执行来源（位置 + 运行方式 + 兼容派生值）：前端展示"隔离 Worker · 服务端/客户端"。
+    "execution_plane",
+    "runtime_kind",
+    "executor_type",
     "plugin_id",
     "plugin_version",
     "skill_id",
@@ -174,6 +178,9 @@ def events_for_result(
     * 需要审批 → ``approval_required``（前端只对这个类型置 ``waiting_approval``，
       若塞进 ``capability_failed`` 会被渲染成普通失败，审批入口就没了）
     * 其余失败按错误码映射到 ``waiting_approval`` / ``denied`` / ``unavailable`` / ``failed``
+
+    执行来源（``execution_plane`` / ``runtime_kind`` / ``executor_type``）随事件一起发，
+    前端不必从 ``deployment`` 猜"谁在执行"。
     """
     capability_name = str(capability or result.capability or "")
     payload: dict[str, Any] = {
@@ -182,6 +189,9 @@ def events_for_result(
         "contract_version": int(result.contract_version or 1),
         "trace_id": result.trace_id,
         "request_id": result.request_id,
+        "execution_plane": str(result.plane()) if result.execution_plane else "",
+        "runtime_kind": str(result.runtime()) if result.runtime_kind else "",
+        "executor_type": result.executor_type() if result.execution_plane or result.runtime_kind else "",
         **fields,
     }
     if result.ok:

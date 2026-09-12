@@ -19,13 +19,20 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lumi_contracts.common.errors import ErrorEnvelope
 from lumi_contracts.common.status import ExecutionStatus
 from lumi_contracts.execution.artifacts import ArtifactRef, artifact_refs_from
 from lumi_contracts.plugins.capability_invocation import SessionBinding
-from lumi_contracts.plugins.vocabulary import CapabilityStatus
+from lumi_contracts.plugins.vocabulary import (
+    CapabilityStatus,
+    ExecutionPlane,
+    RuntimeKind,
+    executor_type_for,
+    parse_execution_plane,
+    parse_runtime_kind,
+)
 
 
 class CapabilityErrorCode(StrEnum):
@@ -175,6 +182,32 @@ class CapabilityResult(BaseModel):
     stream_cursor: str = ""
     #: 结果是否来自本地（客户端 Provider 置 True）；投影据此避免把本地正文出网。
     served_locally: bool = False
+    #: **实际执行来源**：这次调用最终在哪一侧、以什么运行方式执行。
+    #: 与 Manifest/描述符的"声明"不同——这里是事实，审计与 Job 快照都记它。
+    execution_plane: ExecutionPlane | None = None
+    runtime_kind: RuntimeKind | None = None
+
+    @field_validator("execution_plane", mode="before")
+    @classmethod
+    def _parse_plane(cls, value: Any) -> Any:
+        return None if value in (None, "") else parse_execution_plane(value)
+
+    @field_validator("runtime_kind", mode="before")
+    @classmethod
+    def _parse_runtime(cls, value: Any) -> Any:
+        return None if value in (None, "") else parse_runtime_kind(value)
+
+    def plane(self) -> ExecutionPlane:
+        """生效执行位置（未声明时按 ``served_locally`` 推导：本地=客户端）。"""
+        if self.execution_plane is not None:
+            return self.execution_plane
+        return ExecutionPlane.CLIENT if self.served_locally else ExecutionPlane.SERVER
+
+    def runtime(self) -> RuntimeKind:
+        return self.runtime_kind or RuntimeKind.IN_PROCESS
+
+    def executor_type(self) -> str:
+        return executor_type_for(self.plane(), self.runtime())
 
     @property
     def ok(self) -> bool:
@@ -207,6 +240,9 @@ class CapabilityResult(BaseModel):
             "sensitivity": self.sensitivity,
             "served_locally": self.served_locally,
             "stream_cursor": self.stream_cursor,
+            "execution_plane": str(self.plane()),
+            "runtime_kind": str(self.runtime()),
+            "executor_type": self.executor_type(),
         }
 
 
@@ -225,6 +261,8 @@ def capability_ok(
     status: ExecutionStatus = ExecutionStatus.SUCCESS,
     request_id: str = "",
     trace_id: str = "",
+    execution_plane: ExecutionPlane | str | None = None,
+    runtime_kind: RuntimeKind | str | None = None,
 ) -> CapabilityResult:
     """构造成功结果（``partial``/``empty`` 由 ``status`` 指定）。"""
     return CapabilityResult(
@@ -241,6 +279,8 @@ def capability_ok(
         contract_version=int(contract_version),
         request_id=str(request_id),
         trace_id=str(trace_id),
+        execution_plane=execution_plane,
+        runtime_kind=runtime_kind,
     )
 
 
@@ -257,6 +297,8 @@ def capability_failure(
     status: ExecutionStatus = ExecutionStatus.FAILED,
     request_id: str = "",
     trace_id: str = "",
+    execution_plane: ExecutionPlane | str | None = None,
+    runtime_kind: RuntimeKind | str | None = None,
 ) -> CapabilityResult:
     """构造失败结果；``retryable`` 缺省按错误码白名单判定。"""
     key = str(code)
@@ -269,6 +311,8 @@ def capability_failure(
         contract_version=int(contract_version),
         request_id=str(request_id),
         trace_id=str(trace_id),
+        execution_plane=execution_plane,
+        runtime_kind=runtime_kind,
         error=ErrorEnvelope(
             code=key,
             message=str(message or key),

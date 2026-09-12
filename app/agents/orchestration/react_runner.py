@@ -131,9 +131,13 @@ class OfficeReactRunner:
         # Write may legitimately create a new file; in-place mutation and
         # destructive operations must be preceded by a read of the same
         # target. The client/server tool still performs its own path check.
+        #
+        # ``workspace_edit`` 必须前置读取：它的契约要求 expected_revision，
+        # 而 revision 只能从 workspace_navigator(action=read) 拿到。
         return str(name or "").casefold() in {
             "edit", "delete", "rename", "office_doc_edit",
             "workspace_stage_write", "workspace_stage_delete",
+            "workspace_edit",
         }
 
     @staticmethod
@@ -171,9 +175,11 @@ class OfficeReactRunner:
     async def _maybe_inject_workspace_stage_window(self, capabilities: list[Any], route_text: str) -> list[Any]:
         """按阶段把工作区能力并入候选窗，不因 write_op 永久隐藏写工具。
 
-        读取阶段：只并入聚合入口 workspace_navigator（list/search/read），内部原子
+        读取阶段：只并入聚合入口 workspace_navigator（list/search/read/scan），内部原子
         读取名不再进窗；
-        暂存写：出现修改/创建/删除/移动等意图时注入（仍只写暂存层）；
+        写阶段：出现修改/创建/删除/移动等意图时注入**四个原子操作工具**
+        （workspace_write/edit/move/delete：版本校验 + 审批 + 回收站 + 读回校验）；
+        只有客户端还没广告这些工具时，才退回旧的暂存对（stage_write/stage_delete）；
         沙箱：出现测试/运行/构建/验证意图时注入；
         提交域：出现提交/回滚意图时注入（实际提交仍由 ApprovalPolicyEngine
         决定是否需要确认，回滚始终确认）。
@@ -183,28 +189,34 @@ class OfficeReactRunner:
         from app.services.workspace_context import (
             WORKSPACE_COMMIT_CAPABILITIES,
             WORKSPACE_NAVIGATOR,
+            WORKSPACE_OPERATION_CAPABILITIES,
             WORKSPACE_SANDBOX_CAPABILITIES,
             WORKSPACE_STAGE_WRITE_CAPABILITIES,
         )
 
-        desired: list[Any] = []
         value = (route_text or "").casefold()
         modify_tokens = ("修改", "写入", "创建", "新建", "删除", "移动", "重命名", "复制", "暂存", "覆盖",
                          "write", "create", "delete", "rename", "move", "copy", "stage")
         verify_tokens = ("测试", "运行", "执行", "构建", "验证", "沙箱", "test", "run", "build", "check")
         commit_tokens = ("提交", "回滚", "commit", "rollback")
 
-        groups: list[tuple[frozenset[str], bool]] = [
-            # 读取域只暴露聚合入口，模型不会同时看到 6 个读取别名。
-            (frozenset({WORKSPACE_NAVIGATOR}), True),
-            (WORKSPACE_STAGE_WRITE_CAPABILITIES, any(token in value for token in modify_tokens)),
-            (WORKSPACE_SANDBOX_CAPABILITIES, any(token in value for token in verify_tokens)),
-            (WORKSPACE_COMMIT_CAPABILITIES, any(token in value for token in commit_tokens)),
-        ]
-        for group, enabled in groups:
-            if not enabled:
-                continue
-            desired.extend(await self._workspace_caps_for_group(group))
+        desired: list[Any] = list(
+            await self._workspace_caps_for_group(frozenset({WORKSPACE_NAVIGATOR}))
+        )
+        if any(token in value for token in modify_tokens):
+            operations = await self._workspace_caps_for_group(WORKSPACE_OPERATION_CAPABILITIES)
+            if operations:
+                desired.extend(operations)
+            else:
+                # 兼容老客户端：没有原子操作工具时退回暂存写。
+                desired.extend(
+                    await self._workspace_caps_for_group(WORKSPACE_STAGE_WRITE_CAPABILITIES)
+                )
+        if any(token in value for token in verify_tokens):
+            desired.extend(await self._workspace_caps_for_group(WORKSPACE_SANDBOX_CAPABILITIES))
+        if any(token in value for token in commit_tokens):
+            desired.extend(await self._workspace_caps_for_group(WORKSPACE_COMMIT_CAPABILITIES))
+
         injected = [item for item in desired if item.name not in {c.name for c in capabilities}]
         if not injected:
             return capabilities
@@ -212,7 +224,14 @@ class OfficeReactRunner:
             item for item in capabilities
             if item.name not in {candidate.name for candidate in injected}
         ][: max(0, 8 - len(injected))]
-        return [*keep, *injected]
+        window = [*keep, *injected]
+        # 诊断（用户排查"模型这次到底拿到了哪些工具"）：只记工具名，不记参数。
+        logger.info(
+            "[react] 工作区工具窗口注入: injected={} window={}",
+            [item.name for item in injected],
+            [item.name for item in window],
+        )
+        return window
 
     def _emit(self, value: str | dict) -> None:
         if self.on_progress:

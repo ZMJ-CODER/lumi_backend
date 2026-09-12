@@ -31,13 +31,14 @@ from app.services.workspace_navigator import (
 
 
 class WorkspaceNavigatorTool(Tool):
-    """读取阶段唯一的内部原子入口：action=list/search/read。"""
+    """读取阶段唯一的内部原子入口：action=list/search/read/scan。"""
 
     name = "workspace_navigator"
     description = (
-        "浏览、搜索并读取当前已授权工作区的本地资料。"
+        "浏览、搜索、扫描并读取当前已授权工作区的本地资料。"
         "action=list 列出目录条目（不读正文）；action=search 按关键词定位文件；"
-        "action=read 读取单个文件正文（目录请用 list）。"
+        "action=scan 提取代码骨架（类/函数/方法/导入 + 行号区间，不含函数体）；"
+        "action=read 读取单个文件正文（目录请用 list），可用 start_line/end_line 精读某一段。"
     )
     version = "1.0.0"
     status = "stable"
@@ -53,20 +54,42 @@ class WorkspaceNavigatorTool(Tool):
     requires_confirmation = False
     idempotent = True
     user_workflow_allowed = False
-    intent_tags = ["工作区", "读取", "文件", "目录", "搜索", "资料", "代码"]
-    use_when = ["需要查看工作区目录结构、定位文件或读取某个文件正文"]
+    intent_tags = ["工作区", "读取", "文件", "目录", "搜索", "资料", "代码", "结构", "骨架"]
+    use_when = [
+        "需要查看工作区目录结构、定位文件或读取某个文件正文",
+        "需要先摸清代码文件骨架（类/函数/导入与行号）再精确精读某一段",
+    ]
     do_not_use_when = ["没有绑定工作区时；需要写入/提交时改用对应的写入与提交能力"]
     result_contract = "返回统一信封：status/action/summary/data/has_more/cursor/meta/error。"
     parameters_schema = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": list(ACTIONS), "description": "要执行的动作"},
-            "path": {"type": "string", "description": "工作区内相对路径；read 必填且必须是单个文件"},
+            "path": {
+                "type": "string",
+                "description": "工作区内相对路径；read/scan 必填且必须是单个文件",
+            },
             "query": {"type": "string", "description": "search 的关键词或短句（OR 匹配，非正则）"},
             "search_path": {"type": "string", "description": "search 的限定目录"},
             "search_mode": {"type": "string", "enum": ["auto", "filename", "content"]},
             "depth": {"type": "integer", "description": "list 的递归深度（1-4）"},
             "cursor": {"type": "string", "description": "同一次动作的后续分页游标"},
+            "start_line": {
+                "type": "integer",
+                "description": (
+                    "scan 的扫描起始行；read 的读取起始行（配合 end_line 精读某一段，"
+                    "而不是从头顺序读）"
+                ),
+            },
+            "end_line": {"type": "integer", "description": "scan/read 的结束行（含端点）"},
+            "kind": {
+                "type": "string",
+                "enum": ["class", "function", "method", "import"],
+                "description": "scan 只返回该类型的符号",
+            },
+            "find": {"type": "string", "description": "scan 时按名字定位单个符号（给出它的行区间）"},
+            "max_symbols": {"type": "integer", "description": "scan 返回的符号上限（1-400）"},
+            "include_imports": {"type": "boolean", "description": "scan 是否返回导入依赖列表"},
             "max_chars": {
                 "type": "integer",
                 "description": "read 每页返回的字符数（分页粒度，不是文件可读总量）",
@@ -112,9 +135,10 @@ class WorkspaceNavigatorTool(Tool):
         args.pop("workspace_id", None)
         action = str(args.get("action") or ACTION_LIST).strip().casefold()
         if action not in ACTIONS:
+            allowed = "/".join(str(item) for item in ACTIONS)
             return ToolOutput(
                 success=False,
-                error=f"action 只能是 list/search/read，收到：{action or '（空）'}",
+                error=f"action 只能是 {allowed}，收到：{action or '（空）'}",
                 error_code="INVALID_ACTION",
                 retryable=False,
             )
@@ -131,7 +155,8 @@ class WorkspaceNavigatorTool(Tool):
         ok = status in {"ok", "partial", "empty"}
         counts = 0
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-        for key in ("entries", "matches", "sections"):
+        # symbols 也计数：scan 的结果条数是骨架里的符号数（不含正文）。
+        for key in ("entries", "matches", "sections", "symbols"):
             value = data.get(key)
             if isinstance(value, list):
                 counts += len(value)

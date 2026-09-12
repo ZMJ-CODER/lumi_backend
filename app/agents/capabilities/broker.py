@@ -29,8 +29,12 @@ from lumi_contracts.plugins import (
     DataLocality,
     Deployment,
     ProviderLease,
+    RuntimeKind,
     SessionBinding,
     capability_failure,
+    executor_type_for,
+    parse_execution_plane,
+    parse_runtime_kind,
 )
 
 from app.agents.capabilities.catalog import (
@@ -72,9 +76,32 @@ class CapabilitySelection:
     provider_id: str = ""
     deployment: Deployment | None = None
     lease: ProviderLease | None = None
+    #: Broker 最终选中的 Provider **实际**执行位置与运行方式（取自租约）。
+    execution_plane: str = ""
+    runtime_kind: str = ""
     #: 位置切换是否由策略放行（hybrid 才可能出现 True）。
     routed_by_policy: bool = False
     reason: str = ""
+
+    @property
+    def executor_type(self) -> str:
+        """兼容旧字段（``server``/``client``/``worker``/``container``/``sandbox``）。"""
+        if not self.execution_plane:
+            return ""
+        return executor_type_for(self.execution_plane, self.runtime_kind or RuntimeKind.IN_PROCESS)
+
+    def to_snapshot(self) -> dict[str, Any]:
+        return {
+            "capability": self.descriptor.qualified_name if self.descriptor else "",
+            "provider_id": self.provider_id,
+            "deployment": str(self.deployment or ""),
+            "execution_plane": self.execution_plane,
+            "runtime_kind": self.runtime_kind,
+            "executor_type": self.executor_type,
+            "lease_id": self.lease.lease_id if self.lease else "",
+            "routed_by_policy": bool(self.routed_by_policy),
+            "reason": self.reason,
+        }
 
 
 @dataclass(slots=True)
@@ -187,6 +214,9 @@ class CapabilityBroker:
             provider_id=head.provider_id,
             deployment=head.deployment,
             lease=head,
+            # 选中即记录实际执行位置/运行方式（不是"目录里声明了什么"）。
+            execution_plane=str(head.plane()),
+            runtime_kind=str(head.runtime()),
             routed_by_policy=routed_by_policy,
             reason="ok",
         )
@@ -297,6 +327,19 @@ class CapabilityBroker:
                 "contract_version": invocation.contract_version,
                 "request_id": invocation.request_id,
                 "trace_id": invocation.trace_id,
+                # 实际执行来源：以 Broker 选中的租约为准（Provider 自己没填就补上）。
+                "execution_plane": result.execution_plane or (
+                    parse_execution_plane(selection.execution_plane)
+                    if selection.execution_plane
+                    else None
+                ),
+                "runtime_kind": result.runtime_kind or (
+                    parse_runtime_kind(selection.runtime_kind)
+                    if selection.runtime_kind
+                    else None
+                ),
+                "served_locally": bool(result.served_locally)
+                or str(selection.execution_plane) == "client",
                 "usage": result.usage.model_copy(
                     update={"duration_ms": elapsed_ms, "finished_at": time.time()}
                 ),
@@ -547,6 +590,10 @@ class CapabilityBroker:
                     "capability": lease.qualified_capability,
                     "provider_id": lease.provider_id,
                     "deployment": str(lease.deployment),
+                    # 租约实际绑定的位置与运行方式（Job 快照据此回答"当时谁在执行"）。
+                    "execution_plane": str(lease.plane()),
+                    "runtime_kind": str(lease.runtime()),
+                    "executor_type": lease.executor_type(),
                     "device_id": lease.device_id,
                     "workspace_id": lease.workspace_id,
                     "contract_version": int(lease.contract_version),

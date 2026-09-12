@@ -199,11 +199,16 @@ class CapabilityLeaseService:
         ttl_seconds: Any = None,
         health_status: str = ProviderHealth.UNKNOWN.value,
         job_id: str = "",
+        execution_plane: str = "",
+        runtime_kind: str = "",
     ) -> list[ProviderLease]:
         """签发（或覆盖）一个 Provider 的若干能力租约。
 
         注册主体必须由**鉴权结果**给出（``user_id`` 来自 token，不接受客户端自述），
         能力必须在目录里已声明，且注册位置必须满足该能力的数据本地性。
+
+        ``execution_plane`` / ``runtime_kind`` 为客户端可选上报（缺省按 ``deployment``
+        推导）：租约要能回答"这次到底谁在执行、用什么运行方式"，而不是只写一个混用词表。
         """
         pid = str(provider_id or "").strip()
         if not pid:
@@ -263,6 +268,9 @@ class CapabilityLeaseService:
                 workspace_id=str(workspace_id or ""),
                 session_id=str(session_id or ""),
                 deployment=site,
+                # 显式上报优先；缺省 None → 由 ProviderLease 按 deployment 推导。
+                execution_plane=str(execution_plane or "") or None,
+                runtime_kind=str(runtime_kind or "") or None,
                 trust_level=trust,
                 plugin_id=str(plugin_id or ""),
                 plugin_version=str(plugin_version or ""),
@@ -289,6 +297,9 @@ class CapabilityLeaseService:
                 plugin_version=lease.plugin_version,
                 status="idle",
                 health_status=str(lease.health_status),
+                execution_plane=str(lease.plane()),
+                runtime_kind=str(lease.runtime()),
+                executor_type=lease.executor_type(),
             )
         # 跨 worker 可见性：写进 Redis 权威副本（Redis 不可用时只保留本地，返回值可判）。
         published = await self._redis_registry.publish_leases(
@@ -320,12 +331,17 @@ class CapabilityLeaseService:
         ttl_seconds: Any = None,
         health_status: str = "",
         job_id: str = "",
+        execution_plane: str = "",
+        runtime_kind: str = "",
     ) -> list[ProviderLease]:
         """续期：未过期的租约延长存活；已过期的不复活（必须重新注册）。
 
         返回**实际续期成功**的租约。返回空列表表示"这次心跳没有任何东西需要续期"
         （例如客户端刚撤销了全部能力）——这是合法状态，不是错误；调用方若需要区分
         "请求了却一个都没续上"，用返回的列表是否为空自行判断。
+
+        ``execution_plane`` / ``runtime_kind`` 给了就更新（插件可能从进程内迁到 Worker），
+        没给则沿用租约里已有的值。
         """
         pid = str(provider_id or "").strip()
         owner = str(user_id or "").strip()
@@ -362,6 +378,24 @@ class CapabilityLeaseService:
                     provider_id=pid,
                     health_status=str(updated.health_status),
                     contract_version=updated.contract_version,
+                )
+            # 执行位置/运行方式可以在心跳里纠正（缺省沿用租约现值）。
+            # 注意必须显式解析成枚举：model_copy 不做校验，塞字符串会让后续
+            # `is ExecutionPlane.CLIENT` 之类的判断静默失败。
+            plane = str(execution_plane or "").strip()
+            runtime = str(runtime_kind or "").strip()
+            if plane or runtime:
+                from lumi_contracts.plugins import parse_execution_plane, parse_runtime_kind
+
+                updated = updated.model_copy(
+                    update={
+                        "execution_plane": (
+                            parse_execution_plane(plane) if plane else updated.plane()
+                        ),
+                        "runtime_kind": (
+                            parse_runtime_kind(runtime) if runtime else updated.runtime()
+                        ),
+                    }
                 )
             self._leases[(qualified, pid)] = updated
             renewed.append(updated)
@@ -479,6 +513,9 @@ class CapabilityLeaseService:
                 plugin_version=head.plugin_version,
                 provider_version=head.provider_version,
                 health_status=head.health_status,
+                # 租约里的实际执行位置/运行方式同步进注册表（不是重新猜 deployment）。
+                execution_plane=head.plane(),
+                runtime_kind=head.runtime(),
             )
         except ValueError as exc:  # noqa: BLE001 - 注册约束不满足时不进入注册表
             logger.warning(

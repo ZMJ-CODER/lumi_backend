@@ -65,6 +65,16 @@ class WorkspaceNavigatorResult(BaseModel):
     sections: list[WorkspaceSection] = Field(default_factory=list)
     entries: list[WorkspaceEntry] = Field(default_factory=list)
     matches: list[WorkspaceMatch] = Field(default_factory=list)
+    # scan（code.scan）动作的骨架：类/函数/方法的嵌套 dict（含 children/行区间）。
+    # 必须在这里声明：类型化 payload 会**丢掉**未声明的字段，scan 结果若被丢掉就只剩
+    # 一个空信封，模型拿不到任何结构。
+    symbols: list[dict] = Field(default_factory=list)
+    imports: list[str] = Field(default_factory=list)
+    stats: dict = Field(default_factory=dict)
+    found: dict | None = None
+    notes: list[str] = Field(default_factory=list)
+    partial: bool = False
+    truncated: bool = False
     has_more: bool = False
     cursor: str | None = None
     meta: dict = Field(default_factory=dict)
@@ -72,7 +82,7 @@ class WorkspaceNavigatorResult(BaseModel):
 
     @property
     def item_count(self) -> int:
-        return len(self.sections) + len(self.entries) + len(self.matches)
+        return len(self.sections) + len(self.entries) + len(self.matches) + len(self.symbols)
 
     @classmethod
     def from_envelope(cls, envelope: Any) -> "WorkspaceNavigatorResult":
@@ -96,6 +106,13 @@ class WorkspaceNavigatorResult(BaseModel):
                      if isinstance(item, dict)],
             matches=[WorkspaceMatch.model_validate(item) for item in (payload.get("matches") or [])
                      if isinstance(item, dict)],
+            symbols=[item for item in (payload.get("symbols") or []) if isinstance(item, dict)],
+            imports=[str(item) for item in (payload.get("imports") or [])],
+            stats=payload.get("stats") if isinstance(payload.get("stats"), dict) else {},
+            found=payload.get("found") if isinstance(payload.get("found"), dict) else None,
+            notes=[str(item) for item in (payload.get("notes") or [])],
+            partial=bool(payload.get("partial")),
+            truncated=bool(payload.get("truncated")),
             has_more=bool(has_more_raw),
             cursor=(str(cursor_raw) if cursor_raw else None),
             meta=meta,

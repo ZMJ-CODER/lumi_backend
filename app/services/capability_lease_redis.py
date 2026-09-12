@@ -118,6 +118,10 @@ class RedisLeaseRegistry:
                 "workspace_id": lease.workspace_id,
                 "session_id": lease.session_id,
                 "deployment": str(lease.deployment),
+                # 本次租约实际绑定的位置与运行方式：跨 worker/重启后必须还读得到，
+                # 否则审计与 Job 快照会退化成"按 deployment 猜"。
+                "execution_plane": str(lease.plane()),
+                "runtime_kind": str(lease.runtime()),
                 "trust_level": str(lease.trust_level),
                 "health_status": str(lease.health_status),
                 "scope": json.dumps(dict(lease.scope or {}), ensure_ascii=False),
@@ -239,6 +243,10 @@ class RedisLeaseRegistry:
                 workspace_id=str(payload.get("workspace_id") or ""),
                 session_id=str(payload.get("session_id") or ""),
                 deployment=str(payload.get("deployment") or "client"),
+                # 老记录没有这两个字段 → 传 None，由 ProviderLease 按 deployment 推导，
+                # 这样"旧租约"也能给出稳定值（不会因为缺字段而报错或写空）。
+                execution_plane=str(payload["execution_plane"]) if payload.get("execution_plane") else None,
+                runtime_kind=str(payload["runtime_kind"]) if payload.get("runtime_kind") else None,
                 trust_level=str(payload.get("trust_level") or "third_party"),
                 plugin_id=str(payload.get("plugin_id") or ""),
                 plugin_version=str(payload.get("plugin_version") or ""),

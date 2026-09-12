@@ -10,6 +10,17 @@
 
 编码必须是**无损**的：原有扁平字段一个不改、一个不少，只是多了 ``version`` /
 ``seq``；未知事件类型也不得抛错（后端不因为新类型失败）。
+
+**过渡期双投影（方案第一阶段）**：内部只生成一套标准事件
+（``app.contracts.event_adapter`` + ``lumi_contracts.events.envelope``），本编码器
+负责把它投影成两种 SSE 形状：
+
+* ``legacy``（默认，前端当前消费的形状）：扁平字段 + ``version`` / ``seq``，
+  与历史输出逐字节一致；
+* ``canonical``（开关 ``STREAM_EVENT_PROTOCOL=canonical``）：统一信封
+  ``event_id/version/seq/type/trace_id/conversation_id/job_id/occurred_at/payload``。
+
+业务代码不需要知道投影方式：两种投影来自同一份标准事件。
 """
 
 from __future__ import annotations
@@ -47,6 +58,13 @@ _PROCESS_EVENT_TYPES = frozenset({
     "capability_completed",
     "capability_failed",
     "plugin_health_changed",
+    # 工作区操作事件（统一 OperationResult）：与能力帧同一气泡里渲染
+    # "开始/预览/等待确认/完成/失败/已回滚"。
+    "operation_started",
+    "operation_preview",
+    "operation_completed",
+    "operation_failed",
+    "operation_rolled_back",
 })
 
 
@@ -61,6 +79,17 @@ _CAPABILITY_STATUS_EVENT_TYPES = frozenset(
         "capability_completed",
         "capability_failed",
         "plugin_health_changed",
+    }
+)
+
+#: 操作帧的类型集合（``status`` 用操作状态词表：no_change / already_absent / denied / …）。
+_OPERATION_STATUS_EVENT_TYPES = frozenset(
+    {
+        "operation_started",
+        "operation_preview",
+        "operation_completed",
+        "operation_failed",
+        "operation_rolled_back",
     }
 )
 
@@ -82,6 +111,12 @@ _CAPABILITY_EVENT_TITLE = {
     "capability_failed": "能力未完成",
     "plugin_health_changed": "插件健康状态变化",
     "approval_required": "等待确认",
+    # 工作区操作帧（operation 名由后端给，前端不猜）。
+    "operation_started": "开始工作区操作",
+    "operation_preview": "操作预览",
+    "operation_completed": "工作区操作完成",
+    "operation_failed": "工作区操作未完成",
+    "operation_rolled_back": "工作区操作已回滚",
 }
 
 _CAPABILITY_EVENT_SUMMARY = {
@@ -94,31 +129,43 @@ _CAPABILITY_EVENT_SUMMARY = {
     "capability_failed": "{capability} 未完成：{error_code}",
     "plugin_health_changed": "插件健康状态：{health_status}",
     "approval_required": "{capability} 需要你确认后继续",
+    # 工作区操作帧：只报路径与状态，正文永远不进事件流。
+    "operation_started": "正在执行 {operation}：{path}",
+    "operation_preview": "{operation} 预览：{path}（尚未执行）",
+    "operation_completed": "{operation} 完成：{path}",
+    "operation_failed": "{operation} 未完成：{path}（{error_code}）",
+    "operation_rolled_back": "{operation} 已回滚：{path}",
 }
 
 
 def _capability_display_fields(payload: Mapping[str, Any]) -> dict[str, str]:
-    """能力状态帧的 title/summary（缺省时按事件类型现算，避免空行）。
+    """能力/操作状态帧的 title/summary（缺省时按事件类型现算，避免空行）。
 
     与过程帧同样的道理：出口只能复制它拿到的字段，所以这里给兜底文案；
-    文案里只放能力名/Provider/错误码/健康状态，不涉及参数与正文。
+    文案里只放能力名/Provider/错误码/健康状态/工作区相对路径，不涉及参数与正文。
     """
     event_type = str(payload.get("type") or "")
     if event_type not in _CAPABILITY_EVENT_TITLE:
         return {}
     capability = str(payload.get("capability") or "该能力")
     provider = str(payload.get("provider_id") or "客户端")
+    operation = str(payload.get("operation") or "操作")
+    path = str(payload.get("logical_path") or payload.get("target_path") or "（未指定路径）")
     fields: dict[str, str] = {
         "title": _CAPABILITY_EVENT_TITLE[event_type],
         "summary": _CAPABILITY_EVENT_SUMMARY[event_type].format(
             capability=capability,
             provider=provider,
+            operation=operation,
+            path=path,
             error_code=str(payload.get("error_code") or "未说明原因"),
             health_status=str(payload.get("health_status") or "unknown"),
         ),
     }
     if capability and capability != "该能力":
         fields["tool_name"] = capability[:80]
+    elif event_type in _OPERATION_STATUS_EVENT_TYPES:
+        fields["tool_name"] = f"workspace_{operation}"[:80]
     return fields
 
 
@@ -130,7 +177,11 @@ def encode_sse(frame: Mapping[str, Any]) -> str:
 
 
 class SseEventEncoder:
-    """一条流的 SSE 编码器：保证 ``seq`` 单调递增，且载荷无损。"""
+    """一条流的 SSE 编码器：保证 ``seq`` 单调递增，且载荷无损。
+
+    ``protocol`` 决定投影形状（``legacy`` 默认 / ``canonical``）；两种投影都来自
+    同一份标准事件，调用方不需要维护第二套事件逻辑。
+    """
 
     def __init__(
         self,
@@ -138,17 +189,34 @@ class SseEventEncoder:
         version: int = STREAM_EVENT_VERSION,
         job_id: str = "",
         conversation_id: str = "",
+        trace_id: str = "",
         start_seq: int = 0,
+        protocol: str = "",
     ) -> None:
         self._sequencer = EventSequencer(start=start_seq)
         self._version = int(version)
         self._job_id = str(job_id or "")
         self._conversation_id = str(conversation_id or "")
+        self._trace_id = str(trace_id or "")
+        self._protocol = str(protocol or "").strip().casefold()
         self._last_seq = int(start_seq)
 
     @property
     def last_seq(self) -> int:
         return self._last_seq
+
+    @property
+    def protocol(self) -> str:
+        """当前投影协议：``legacy``（默认）或 ``canonical``。"""
+        if self._protocol in {"legacy", "canonical"}:
+            return self._protocol
+        try:
+            from app.core.config import settings
+
+            configured = str(getattr(settings, "STREAM_EVENT_PROTOCOL", "legacy") or "legacy")
+        except Exception:  # noqa: BLE001 - 配置不可用时保持旧协议（前端兼容优先）
+            configured = "legacy"
+        return "canonical" if configured.strip().casefold() == "canonical" else "legacy"
 
     def frame(self, event: Mapping[str, Any]) -> dict[str, Any]:
         """事件字典 → 扁平 SSE 帧（``type`` / ``version`` / ``seq`` + 原字段）。
@@ -183,6 +251,11 @@ class SseEventEncoder:
                 # ``process_status`` 里，让按过程契约消费的旧读法仍然拿得到合法值。
                 payload["process_status"] = str(entry.status)
                 payload["status"] = str(event.get("status") or entry.status)
+            elif event_type in _OPERATION_STATUS_EVENT_TYPES and payload.get("status"):
+                # 操作帧同理：no_change / already_absent / denied 都不是过程状态值，
+                # 必须原样保留给前端，过程状态放 process_status。
+                payload["process_status"] = str(entry.status)
+                payload["status"] = str(event.get("status") or entry.status)
         return StreamEvent(
             type=event_type,
             version=self._version,
@@ -194,9 +267,71 @@ class SseEventEncoder:
             data=payload,
         ).to_sse()
 
+    def canonical_frames(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """事件字典 → 标准信封帧（1..2 帧；终态事件附兼容伴随帧）。
+
+        载荷来自 :mod:`app.contracts.event_adapter`：原始思维链/工具参数/完整结果
+        在适配器与契约工厂两处被白名单剔除，因此新投影天然不含这些字段。
+        """
+        from app.contracts.event_adapter import canonical_events
+
+        envelopes = canonical_events(
+            event,
+            job_id=self._job_id,
+            conversation_id=self._conversation_id,
+            trace_id=self._trace_id,
+        )
+        frames: list[dict[str, Any]] = []
+        for envelope in envelopes:
+            seq = self._sequencer.next_seq()
+            self._last_seq = seq
+            frame = envelope.with_seq(seq).to_canonical_frame()
+            frame["payload"] = self._bind_process_sequence(frame.get("payload"), seq)
+            frames.append(frame)
+        return frames
+
+    def _bind_process_sequence(self, payload: Any, seq: int) -> dict[str, Any]:
+        """把过程条目的 ``sequence``/``entry_id`` 绑到本流序号（与旧投影同规则）。
+
+        适配器不知道流序号，因此过程帧先按"仅 job 已知"构造；这里补齐后，
+        SSE 重连/快照恢复的同一条日志仍然命中同一个 ``entry_id``。
+        """
+        data = dict(payload) if isinstance(payload, Mapping) else {}
+        if not data or "kind" not in data:
+            return data
+        try:
+            current = int(data.get("sequence") or 0)
+        except (TypeError, ValueError):
+            current = 0
+        if current:
+            return data
+        data["sequence"] = int(seq)
+        entry_id = str(data.get("entry_id") or "")
+        if not entry_id or entry_id.startswith("seq:"):
+            data["entry_id"] = f"seq:{self._job_id}:{int(seq)}"
+        return data
+
+    def frames(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """按当前协议产出帧列表（``legacy`` → 1 帧；``canonical`` → 1..2 帧）。"""
+        if self.protocol == "canonical":
+            return self.canonical_frames(event)
+        return [self.frame(event)]
+
     def encode(self, event: Mapping[str, Any]) -> str:
         """事件字典 → SSE 行（含版本与序号）。"""
         return encode_sse(self.frame(event))
+
+    def encode_all(self, event: Mapping[str, Any]) -> list[str]:
+        """按当前协议产出 SSE 行列表（切换新协议时调用方只需改这一个方法）。"""
+        return [encode_sse(frame) for frame in self.frames(event)]
+
+    def encode_frames(self, event: Mapping[str, Any]) -> list[tuple[dict[str, Any], str]]:
+        """按当前协议产出 ``(帧, SSE 行)`` 列表。
+
+        需要把帧同时写进任务事件日志（断线续传）的出口用这个：直接拿到帧对象，
+        不必再解析已经序列化好的 SSE 行。
+        """
+        return [(frame, encode_sse(frame)) for frame in self.frames(event)]
 
 
 __all__ = ["STREAM_EVENT_VERSION", "SseEventEncoder", "encode_sse"]

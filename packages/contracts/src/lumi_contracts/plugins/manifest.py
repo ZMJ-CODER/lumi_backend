@@ -23,13 +23,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from lumi_contracts.plugins.vocabulary import (
     DataLocality,
     Deployment,
+    ExecutionPlane,
     IsolationLevel,
     PluginKind,
+    RuntimeKind,
     SideEffectKind,
     TrustLevel,
+    executor_type_for,
     isolation_for_trust,
     parse_data_locality,
+    parse_execution_plane,
     parse_plugin_kind,
+    parse_runtime_kind,
+    plane_for_deployment,
+    runtime_kind_for_isolation,
 )
 
 # 插件 id 采用反向域名风格：小写字母/数字/点/横线/下划线，必须以字母开头。
@@ -179,6 +186,10 @@ class PluginManifest(BaseModel):
     #: 数据本地性：未知值按最保守的 ``local_only``（见 vocabulary）。
     data_locality: DataLocality = DataLocality.LOCAL_ONLY
     isolation: IsolationLevel = IsolationLevel.SANDBOXED
+    #: **声明**的执行位置与运行方式（不是实际执行结果——实际值在租约/结果/审计里）。
+    #: 缺省由 ``deployment`` / ``isolation`` 推导，显式声明优先。
+    execution_plane: ExecutionPlane | None = None
+    runtime_kind: RuntimeKind | None = None
     side_effects: list[SideEffectKind] = Field(default_factory=list)
     resource_limits: PluginResourceLimits = Field(default_factory=PluginResourceLimits)
     healthcheck: PluginHealthcheck = Field(default_factory=PluginHealthcheck)
@@ -216,6 +227,24 @@ class PluginManifest(BaseModel):
     @classmethod
     def _parse_locality(cls, value: Any) -> Any:
         return parse_data_locality(value)
+
+    @field_validator("execution_plane", mode="before")
+    @classmethod
+    def _parse_plane(cls, value: Any) -> Any:
+        return None if value in (None, "") else parse_execution_plane(value)
+
+    @field_validator("runtime_kind", mode="before")
+    @classmethod
+    def _parse_runtime(cls, value: Any) -> Any:
+        return None if value in (None, "") else parse_runtime_kind(value)
+
+    def declared_plane(self) -> ExecutionPlane:
+        """Manifest **声明**的执行位置（缺省由 ``deployment`` 推导）。"""
+        return self.execution_plane or plane_for_deployment(self.deployment)
+
+    def declared_runtime(self) -> RuntimeKind:
+        """Manifest **声明**的运行方式（缺省由 ``isolation`` 推导）。"""
+        return self.runtime_kind or runtime_kind_for_isolation(self.isolation)
 
     @model_validator(mode="after")
     def _check_consistency(self) -> "PluginManifest":
@@ -263,7 +292,12 @@ class PluginManifest(BaseModel):
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
     def to_snapshot(self) -> dict[str, Any]:
-        """落库快照（JSON-safe；只放恢复/审计需要的字段）。"""
+        """落库快照（JSON-safe；只放恢复/审计需要的字段）。
+
+        ⚠️ 这里放的是**插件声明**（declared），不是实际执行结果：实际用了哪一侧、
+        什么运行方式，以租约（``ProviderLease``）/结果（``CapabilityResult``）/
+        审计记录为准。
+        """
         return {
             "id": self.id,
             "version": self.version,
@@ -271,6 +305,12 @@ class PluginManifest(BaseModel):
             "deployment": str(self.deployment),
             "trust_level": str(self.trust_level),
             "data_locality": str(self.data_locality),
+            # 声明值（declared_*）：前端可据此展示"插件声称跑在哪"，与实际执行值区分。
+            "execution_plane": str(self.declared_plane()),
+            "runtime_kind": str(self.declared_runtime()),
+            "executor_type": executor_type_for(self.declared_plane(), self.declared_runtime()),
+            "declared_execution_plane": str(self.declared_plane()),
+            "declared_runtime_kind": str(self.declared_runtime()),
             "digest": self.digest(),
             "provides": self.provides.model_dump(mode="json"),
             "requires": self.requires.model_dump(mode="json"),

@@ -134,6 +134,11 @@ def installation_record(
         "version": manifest.version,
         "kind": str(manifest.kind),
         "deployment": str(manifest.deployment),
+        # 安装记录只记**声明**：实际执行位置/方式在租约与结果里（见 docs/EXECUTION_PLANE_CONTRACT.md）。
+        "execution_plane": str(manifest.declared_plane()),
+        "runtime_kind": str(manifest.declared_runtime()),
+        "declared_execution_plane": str(manifest.declared_plane()),
+        "declared_runtime_kind": str(manifest.declared_runtime()),
         "trust_level": str(manifest.trust_level),
         "data_locality": str(manifest.data_locality),
         "enabled": bool(enabled),

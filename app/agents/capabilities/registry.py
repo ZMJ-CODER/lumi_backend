@@ -22,9 +22,15 @@ from lumi_contracts.plugins import (
     CapabilityInvocation,
     CapabilityResult,
     Deployment,
+    ExecutionPlane,
     ProviderHealth,
+    RuntimeKind,
     TrustLevel,
     capability_failure,
+    executor_type_for,
+    parse_execution_plane,
+    parse_runtime_kind,
+    plane_for_deployment,
 )
 
 from app.agents.capabilities.catalog import (
@@ -62,6 +68,8 @@ class ProviderRegistration:
         "provider",
         "provider_id",
         "deployment",
+        "execution_plane",
+        "runtime_kind",
         "trust_level",
         "plugin_id",
         "plugin_version",
@@ -82,16 +90,45 @@ class ProviderRegistration:
         plugin_version: str = "",
         provider_version: str = "",
         health_status: ProviderHealth = ProviderHealth.UNKNOWN,
+        execution_plane: ExecutionPlane | str | None = None,
+        runtime_kind: RuntimeKind | str | None = None,
     ) -> None:
         self.provider = provider
         self.provider_id = str(provider_id)
         self.deployment = deployment
+        #: 注册方声明的执行位置 / 运行方式（缺省按 deployment 推导）。
+        self.execution_plane = (
+            parse_execution_plane(execution_plane) if execution_plane else plane_for_deployment(deployment)
+        )
+        self.runtime_kind = (
+            parse_runtime_kind(runtime_kind) if runtime_kind else RuntimeKind.IN_PROCESS
+        )
         self.descriptors = descriptors
         self.trust_level = trust_level
         self.plugin_id = str(plugin_id)
         self.plugin_version = str(plugin_version)
         self.provider_version = str(provider_version)
         self.health_status = health_status
+
+    def executor_type(self) -> str:
+        """兼容旧字段的派生值（``server``/``client``/``worker``/``container``/``sandbox``）。"""
+        return executor_type_for(self.execution_plane, self.runtime_kind)
+
+    def to_snapshot(self) -> dict[str, Any]:
+        """注册项的机器可读快照（`/capabilities` 与审计都读它）。"""
+        return {
+            "provider_id": self.provider_id,
+            "deployment": str(self.deployment),
+            "execution_plane": str(self.execution_plane),
+            "runtime_kind": str(self.runtime_kind),
+            "executor_type": self.executor_type(),
+            "trust_level": str(self.trust_level),
+            "plugin_id": self.plugin_id,
+            "plugin_version": self.plugin_version,
+            "provider_version": self.provider_version,
+            "health_status": str(self.health_status),
+            "capabilities": [item.qualified_name for item in self.descriptors],
+        }
 
     def supports(self, capability: str, *, version: int | None = None) -> bool:
         base = str(capability or "").split("@", 1)[0]
@@ -138,11 +175,17 @@ class CapabilityRegistry:
         provider_version: str = "",
         health_status: ProviderHealth = ProviderHealth.UNKNOWN,
         check_catalog: bool = True,
+        execution_plane: ExecutionPlane | str | None = None,
+        runtime_kind: RuntimeKind | str | None = None,
     ) -> ProviderRegistration:
         """注册一个 Provider；描述符缺省取 Provider 自述。
 
         ``check_catalog=True``（默认）时强制与内置目录一致：注册方不能放宽本地性、
         副作用或本机确认要求。第三方/客户端 Provider 在阶段 2 走同一入口。
+
+        ``execution_plane`` / ``runtime_kind`` 记录注册方**声明**的执行位置与运行方式：
+        ``deployment`` 把两者混在一起（``worker`` 到底在服务端还是客户端说不清），
+        新字段是唯一权威表达。
         """
         declared = tuple(descriptors if descriptors is not None else provider.descriptors)
         if not declared:
@@ -170,6 +213,8 @@ class CapabilityRegistry:
             plugin_version=plugin_version,
             provider_version=provider_version,
             health_status=health_status,
+            execution_plane=execution_plane,
+            runtime_kind=runtime_kind,
         )
         # 先清掉这个 Provider 的旧登记（同一 Provider 重新注册 = 覆盖，不是叠加），
         # 否则改了描述符/位置之后旧能力仍会留在注册表里（幽灵路由）。

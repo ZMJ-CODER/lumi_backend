@@ -599,7 +599,10 @@ async def get_workspace_navigator_capability(
             "action=list 列出目录条目（不读正文，默认不返回隐藏项与 node_modules/构建/缓存）；"
             "action=search 按关键词检索文件名或内容，匹配是 OR（任一关键词命中即返回，按相关度排序），"
             "只返回命中位置与少量上下文；action=read 一次只读取一个文件并返回结构化正文，"
-            "内容过长时用 cursor 继续。读取目录请用 list，不要用 read。"
+            "内容过长时用 cursor 继续；action=scan 扫描**代码骨架**"
+            "（类/函数/方法/导入 + 行号区间，不返回函数体）——了解代码结构时先用它，"
+            "再从骨架的行号用 read+start_line/end_line 精读某一段，不要直接整篇读取代码文件。"
+            "读取目录请用 list，不要用 read。"
         ),
         category="workspace",
         domain="workspace",
@@ -608,12 +611,14 @@ async def get_workspace_navigator_capability(
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "search", "read"],
+                    "enum": ["list", "search", "read", "scan"],
                     "description": "要执行的动作",
                 },
                 "path": {
                     "type": "string",
-                    "description": "工作区内的相对路径；list 省略=根目录，read 必填且必须是单个文件",
+                    "description": (
+                        "工作区内的相对路径；list 省略=根目录，read/scan 必填且必须是单个文件"
+                    ),
                 },
                 "query": {
                     "type": "string",
@@ -656,6 +661,31 @@ async def get_workspace_navigator_capability(
                     "type": "boolean",
                     "description": "list 是否返回被忽略条目（隐藏项与 node_modules/构建/缓存目录），默认 false",
                 },
+                "start_line": {
+                    "type": "integer",
+                    "description": "read/scan 的起始行（1-based，含）；配合骨架返回的 line 精确精读",
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "read/scan 的结束行（含）；省略时 read 按页、scan 扫到文件尾",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["class", "function", "method", "import"],
+                    "description": "scan 只返回该类型的符号（省略=全部）",
+                },
+                "find": {
+                    "type": "string",
+                    "description": "scan 时按名字定位一个类/函数/方法，直接返回它的行区间",
+                },
+                "max_symbols": {
+                    "type": "integer",
+                    "description": "scan 返回的符号条数上限（默认 200，上限 400）",
+                },
+                "include_imports": {
+                    "type": "boolean",
+                    "description": "scan 是否返回导入列表，默认 true",
+                },
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -675,7 +705,7 @@ async def get_workspace_navigator_capability(
             "workspace_id": str(workspace_id).strip(),
             "workspace_read_domain": True,
             "unified_read": True,
-            "navigator_actions": ["list", "search", "read"],
+            "navigator_actions": ["list", "search", "read", "scan"],
             "internal_atomic_tools": sorted(WORKSPACE_INTERNAL_READ_CAPABILITIES),
             "availability_hint": "available" if healthy else "offline",
             "trusted_local_provider": True,
@@ -1336,7 +1366,8 @@ def _navigator_result_count(payload: dict) -> int:
         return 0
     data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
     total = 0
-    for key in ("entries", "matches", "sections"):
+    # symbols 也计入：scan 的结果条数是"骨架里有多少符号"，不参与正文统计。
+    for key in ("entries", "matches", "sections", "symbols"):
         value = data.get(key)
         if isinstance(value, list):
             total += len(value)
@@ -1539,6 +1570,28 @@ async def execute_tool_call(
         except ResourcePolicyError as exc:
             return SkillResult(success=False, error=str(exc), error_code="RESOURCE_FORBIDDEN", retryable=False, metadata={"tool": name})
 
+    # ── 统一工作区操作契约（workspace.write/edit/move/delete）──
+    # 位置：参数校验与资源策略之后、能力租约门禁之前。四个操作能力的执行体是服务端
+    # 操作网关（版本校验 → 审批 → 回收站 → 提交 → 读回校验 → OperationResult），
+    # 结果再折进既有 ToolOutput/SkillResult；审批仍然走同一套 policy_guard 指纹校验。
+    from app.agents.skills.workspace_operation_route import try_workspace_operation
+
+    operation_result = await try_workspace_operation(
+        tool_name=name,
+        args=args,
+        user_id=user_id,
+        user_role=user_role,
+        conversation_id=conversation_id,
+        workspace_id=str(authorized_workspace_id or ""),
+        device_id="",
+        task_id=execution_scope or None,
+        call_id=mcp_call_id,
+        approved_tool_calls=confirmed_tool_calls,
+        upstream_sha256=approval_context_sha256,
+    )
+    if operation_result is not None:
+        return operation_result
+
     # ── 能力路由门禁（灰度旁路；默认 off = 零开销，行为与旧版逐字相同）──
     # 位置：参数校验与资源策略之后、MCP 分支之前——即"授权已确认，但还没决定谁执行"。
     from app.agents.skills.capability_route import try_capability_route
@@ -1595,7 +1648,7 @@ async def execute_tool_call(
                     metadata={"server": server_name, "tool": tool_name},
                 )
         if tool_name == "workspace_navigator":
-            # 唯一模型可见的读取入口：action=list/search/read 由后端聚合服务分发到
+            # 唯一模型可见的读取入口：action=list/search/read/scan 由后端聚合服务分发到
             # 内部处理器，再复用 Electron 原子工具与格式解析器。
             # workspace_id 一律取服务端注入值，模型传值被忽略。
             from app.services.workspace_navigator import (
@@ -1606,9 +1659,10 @@ async def execute_tool_call(
 
             action = str(args.get("action") or "").strip().casefold()
             if action not in NAVIGATOR_ACTIONS:
+                allowed = "/".join(str(item) for item in NAVIGATOR_ACTIONS)
                 return SkillResult(
                     success=False,
-                    error=f"workspace_navigator.action 只能是 list/search/read，收到：{action or '（空）'}",
+                    error=f"workspace_navigator.action 只能是 {allowed}，收到：{action or '（空）'}",
                     error_code="INVALID_ACTION",
                     retryable=False,
                     metadata={"tool": tool_name, "action": action, "allowed": list(NAVIGATOR_ACTIONS)},

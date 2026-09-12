@@ -29,6 +29,8 @@ from lumi_contracts.plugins import (
     CapabilityResult,
     DataLocality,
     Deployment,
+    ExecutionPlane,
+    RuntimeKind,
     TrustLevel,
     capability_failure,
     capability_ok,
@@ -37,7 +39,11 @@ from lumi_contracts.plugins import (
 from app.agents.capabilities.catalog import (
     CAPABILITY_ARTIFACT_CREATE,
     CAPABILITY_CODE_EXECUTE,
+    CAPABILITY_CODE_SCAN,
     CAPABILITY_GIT_OPERATIONS,
+    CAPABILITY_WORKSPACE_DELETE,
+    CAPABILITY_WORKSPACE_EDIT,
+    CAPABILITY_WORKSPACE_MOVE,
     CAPABILITY_WORKSPACE_READ,
     CAPABILITY_WORKSPACE_WRITE,
     CapabilityCatalog,
@@ -68,6 +74,15 @@ class ServerArtifactProvider:
     @property
     def deployment(self) -> Deployment:
         return Deployment.SERVER
+
+    @property
+    def execution_plane(self) -> ExecutionPlane:
+        """服务端内置 Provider：在 API 进程内执行（没有独立 Worker）。"""
+        return ExecutionPlane.SERVER
+
+    @property
+    def runtime_kind(self) -> RuntimeKind:
+        return RuntimeKind.IN_PROCESS
 
     @property
     def descriptors(self) -> tuple[CapabilityDescriptor, ...]:
@@ -119,6 +134,8 @@ class ServerArtifactProvider:
             ],
             sensitivity="internal",
             served_locally=False,
+            execution_plane=ExecutionPlane.SERVER,
+            runtime_kind=RuntimeKind.IN_PROCESS,
         )
 
 
@@ -138,9 +155,13 @@ class ClientForwardingProvider:
         provider_id: str,
         descriptors: tuple[CapabilityDescriptor, ...],
         catalog: CapabilityCatalog | None = None,
+        runtime_kind: RuntimeKind = RuntimeKind.IN_PROCESS,
     ) -> None:
         self._provider_id = provider_id
         self._descriptors = descriptors
+        #: 客户端能力的实现跑在用户设备上；默认是设备主进程（进程内），
+        #: 平台侧插件宿主可以声明为 ``worker``。
+        self._runtime_kind = runtime_kind
 
     @property
     def provider_id(self) -> str:
@@ -149,6 +170,14 @@ class ClientForwardingProvider:
     @property
     def deployment(self) -> Deployment:
         return Deployment.CLIENT
+
+    @property
+    def execution_plane(self) -> ExecutionPlane:
+        return ExecutionPlane.CLIENT
+
+    @property
+    def runtime_kind(self) -> RuntimeKind:
+        return self._runtime_kind
 
     @property
     def descriptors(self) -> tuple[CapabilityDescriptor, ...]:
@@ -166,6 +195,8 @@ class ClientForwardingProvider:
             capability=invocation.qualified_capability,
             provider_id=self.provider_id,
             retryable=True,
+            execution_plane=ExecutionPlane.CLIENT,
+            runtime_kind=self._runtime_kind,
         )
 
 
@@ -186,7 +217,13 @@ def builtin_providers(
         ),
         ClientForwardingProvider(
             provider_id=PROVIDER_CLIENT_CODE,
-            descriptors=(catalog.require(CAPABILITY_CODE_EXECUTE),),
+            descriptors=(
+                catalog.require(CAPABILITY_CODE_EXECUTE),
+                # 代码扫描与执行同属客户端代码域（**数据**都依赖客户端在线），归到同一 Provider。
+                # 注意：扫描的**解析实现**在服务端聚合服务里（code_structure 纯函数），
+                # 客户端只登记描述、不广告 code.scan 租约；这里声明的是"数据域"而非执行位置。
+                catalog.require(CAPABILITY_CODE_SCAN),
+            ),
             catalog=catalog,
         ),
         ClientForwardingProvider(
@@ -214,6 +251,9 @@ def register_builtin_providers(
             deployment=provider.deployment,
             trust_level=TrustLevel.BUILTIN,
             provider_version="1.0.0",
+            # Provider 自述的执行位置/运行方式优先（缺省按 deployment 推导）。
+            execution_plane=getattr(provider, "execution_plane", None),
+            runtime_kind=getattr(provider, "runtime_kind", None),
         )
     return [provider.provider_id for provider in providers]
 
@@ -234,10 +274,18 @@ TOOL_CAPABILITY_MAP: dict[str, str | None] = {
     "workspace_read": CAPABILITY_WORKSPACE_READ,
     "workspace_search": CAPABILITY_WORKSPACE_READ,
     "workspace_content_extract": CAPABILITY_WORKSPACE_READ,
+    # 代码骨架扫描：与读取同域但**独立能力**（模型可用它替代"整篇读代码"）。
+    "workspace_code_scan": CAPABILITY_CODE_SCAN,
     "workspace_write": CAPABILITY_WORKSPACE_WRITE,
     "workspace_stage_write": CAPABILITY_WORKSPACE_WRITE,
     "workspace_stage_delete": CAPABILITY_WORKSPACE_WRITE,
     "workspace_rollback": CAPABILITY_WORKSPACE_WRITE,
+    # 统一操作契约（OperationResult）：编辑/移动/删除各自独立声明，
+    # 因为审批与版本前置条件不同（见 app/contracts/operations）。
+    "workspace_edit": CAPABILITY_WORKSPACE_EDIT,
+    "code.edit": CAPABILITY_WORKSPACE_EDIT,
+    "workspace_move": CAPABILITY_WORKSPACE_MOVE,
+    "workspace_delete": CAPABILITY_WORKSPACE_DELETE,
     "workspace_diff": CAPABILITY_GIT_OPERATIONS,
     "workspace_commit": CAPABILITY_GIT_OPERATIONS,
     "sandbox_prepare": CAPABILITY_CODE_EXECUTE,

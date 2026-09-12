@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.deps import require_auth
@@ -45,12 +46,19 @@ class CapabilityDeclaration(BaseModel):
     客户端会**额外**带上 ``provider_id`` / ``provider_version`` / ``data_locality`` /
     ``requires_approval`` / ``health_status`` 等字段（扁平兼容写法）。服务端全部接受但
     **不采信**：本地性与审批要求以服务端能力目录为准，客户端声明只能"更保守"，不能放宽。
+
+    ``execution_plane`` / ``runtime_kind`` 是**唯一**表达"谁在执行、怎么执行"的字段
+    （``deployment``/``isolation`` 混用了位置与隔离方式，只作为兼容输入接受）。
     """
 
     model_config = ConfigDict(extra="allow")
 
     capability: str = Field(..., min_length=3, max_length=160, description="如 workspace.read@1")
     contract_version: int = Field(default=1, ge=1, le=1000)
+    #: server | client
+    execution_plane: str = Field(default="", max_length=20)
+    #: in_process | worker | container | sandbox
+    runtime_kind: str = Field(default="", max_length=20)
 
 
 class ProviderBlock(BaseModel):
@@ -64,6 +72,9 @@ class ProviderBlock(BaseModel):
     plugin_id: str = Field(default="", max_length=160)
     plugin_version: str = Field(default="", max_length=60)
     provider_version: str = Field(default="", max_length=60)
+    #: 该 Provider 实际所在的一侧与运行方式（可选；缺省按 deployment 推导）。
+    execution_plane: str = Field(default="", max_length=20)
+    runtime_kind: str = Field(default="", max_length=20)
     capabilities: list[CapabilityDeclaration] = Field(default_factory=list, max_length=64)
 
 
@@ -104,6 +115,9 @@ class RegisterProviderRequest(BaseModel):
     user_id: str = Field(default="", max_length=160, description="仅用于核对，服务端以 token 为准")
     deployment: str = Field(default="client", max_length=40)
     trust_level: str = Field(default="official", max_length=40)
+    #: 可选：本机 Provider 的整体执行位置 / 运行方式（缺省按 deployment 推导）。
+    execution_plane: str = Field(default="", max_length=20)
+    runtime_kind: str = Field(default="", max_length=20)
     plugin_id: str = Field(default="", max_length=160)
     plugin_version: str = Field(default="", max_length=60)
     provider_version: str = Field(default="", max_length=60)
@@ -125,6 +139,9 @@ class HeartbeatRequest(BaseModel):
     revoked_providers: list[RevokedProvider] = Field(default_factory=list, max_length=16)
     ttl_seconds: float | None = Field(default=None, gt=0, le=3600)
     health_status: str = Field(default="", max_length=40)
+    #: 心跳也可以纠正执行位置/运行方式（例如插件从进程内迁到 Worker）。
+    execution_plane: str = Field(default="", max_length=20)
+    runtime_kind: str = Field(default="", max_length=20)
     job_id: str = Field(default="", max_length=160)
 
 
@@ -207,6 +224,8 @@ def _flatten_declarations(req: Any) -> list[dict[str, Any]]:
         plugin_id: str = "",
         plugin_version: str = "",
         health_status: str = "",
+        execution_plane: str = "",
+        runtime_kind: str = "",
     ) -> None:
         capability = str(getattr(declaration, "capability", "") or "").strip()
         if not capability:
@@ -225,6 +244,13 @@ def _flatten_declarations(req: Any) -> list[dict[str, Any]]:
                 "plugin_id": str(plugin_id or fallback_plugin),
                 "plugin_version": str(plugin_version or fallback_plugin_version),
                 "health_status": str(health_status or ""),
+                # 声明粒度：能力级 > Provider 级 > 请求级（越具体越优先）。
+                "execution_plane": str(
+                    getattr(declaration, "execution_plane", "") or execution_plane or ""
+                ),
+                "runtime_kind": str(
+                    getattr(declaration, "runtime_kind", "") or runtime_kind or ""
+                ),
             }
         )
 
@@ -240,10 +266,17 @@ def _flatten_declarations(req: Any) -> list[dict[str, Any]]:
                 plugin_id=getattr(block, "plugin_id", ""),
                 plugin_version=getattr(block, "plugin_version", ""),
                 health_status=getattr(block, "health_status", ""),
+                execution_plane=getattr(block, "execution_plane", ""),
+                runtime_kind=getattr(block, "runtime_kind", ""),
             )
     if not rows:
         for declaration in getattr(req, "capabilities", None) or []:
-            add(fallback_provider, declaration)
+            add(
+                fallback_provider,
+                declaration,
+                execution_plane=str(getattr(req, "execution_plane", "") or ""),
+                runtime_kind=str(getattr(req, "runtime_kind", "") or ""),
+            )
     return rows
 
 
@@ -314,13 +347,26 @@ def _lease_envelope(leases: list[Any], *, revoked: list[dict[str, Any]] | None =
 
 @router.get("")
 async def list_capabilities(payload: dict = Depends(require_auth)):
-    """能力目录 + 我的活跃租约（前端"已安装/可用能力"面板的数据源）。"""
+    """能力目录 + 我的活跃租约（前端"已安装/可用能力"面板的数据源）。
+
+    每条目录项与租约都带 ``execution_plane``（server/client）+ ``runtime_kind``
+    （in_process/worker/container/sandbox），另有派生 ``executor_type`` 兼容旧读法：
+    前端据此显示"隔离 Worker · 服务端 / 客户端"，不必再从 ``deployment`` 猜。
+    """
     catalog = lease_service.catalog
+    providers: list[dict[str, Any]] = []
+    try:
+        from app.agents.capabilities.registry import capability_registry
+
+        providers = [item.to_snapshot() for item in capability_registry.providers()]
+    except Exception as exc:  # noqa: BLE001 - 注册表快照失败不影响目录读取
+        logger.debug("能力注册表快照失败（降级）: {}", str(exc)[:120])
     return {
         "code": 0,
         "data": {
             "catalog": catalog.to_snapshot(),
             "leases": _leases_for_tenant(payload["sub"]),
+            "providers": providers,
             "ladder_note": "local_only 能力必须在客户端注册；cloud 能力不允许注册到客户端",
         },
     }
@@ -375,6 +421,8 @@ async def register_capability_provider(
                     ttl_seconds=clamp_ttl(req.ttl_seconds or CLIENT_LEASE_TTL_SECONDS),
                     health_status=str(head.get("health_status") or req.health_status),
                     job_id=req.job_id,
+                    execution_plane=str(head.get("execution_plane") or req.execution_plane or ""),
+                    runtime_kind=str(head.get("runtime_kind") or req.runtime_kind or ""),
                 )
             )
     except LeaseRejected as exc:
@@ -432,6 +480,16 @@ async def heartbeat_capability_provider(
                         (group[0].get("health_status") if group else "") or req.health_status
                     ),
                     job_id=req.job_id,
+                    execution_plane=str(
+                        (group[0].get("execution_plane") if group else "")
+                        or getattr(req, "execution_plane", "")
+                        or ""
+                    ),
+                    runtime_kind=str(
+                        (group[0].get("runtime_kind") if group else "")
+                        or getattr(req, "runtime_kind", "")
+                        or ""
+                    ),
                 )
             )
         except LeaseRejected as exc:

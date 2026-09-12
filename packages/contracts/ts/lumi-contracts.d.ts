@@ -46,6 +46,9 @@ export interface CapabilityBinding {
   capability: string;
   provider_id?: string;
   deployment?: string;
+  execution_plane?: string;
+  runtime_kind?: string;
+  executor_type?: string;
   device_id?: string;
   workspace_id?: string;
   contract_version?: number;
@@ -63,6 +66,8 @@ export interface CapabilityDescriptor {
   output_schema?: Record<string, unknown>;
   side_effects?: SideEffectKind[];
   data_locality?: DataLocality;
+  execution_plane?: ExecutionPlane | null;
+  runtime_kind?: RuntimeKind | null;
   required_permissions?: string[];
   needs_local_confirmation?: boolean;
   streamable?: boolean;
@@ -111,6 +116,8 @@ export interface CapabilityResult {
   contract_version?: number;
   stream_cursor?: string;
   served_locally?: boolean;
+  execution_plane?: ExecutionPlane | null;
+  runtime_kind?: RuntimeKind | null;
 }
 
 export type CapabilityStatus = "idle" | "requested" | "waiting_provider" | "waiting_approval" | "running" | "completed" | "failed" | "denied" | "unavailable";
@@ -141,6 +148,8 @@ export interface ErrorEnvelope {
   suggested_action?: string;
   details?: Record<string, unknown>;
 }
+
+export type ExecutionPlane = "server" | "client";
 
 /** 一次执行的请求：服务端上下文 + 指令 + 能力约束。 */
 
@@ -212,6 +221,9 @@ export interface JobRunView {
   routing?: Record<string, unknown>;
   process_log?: ProcessLogEntry[];
   final_answer?: string;
+  last_seq?: number;
+  artifact_refs?: Record<string, unknown>[];
+  views?: Record<string, unknown>[];
   error?: string | null;
   error_code?: string | null;
   updated_at?: number;
@@ -257,6 +269,8 @@ export interface PluginManifest {
   permissions?: PluginPermission[];
   data_locality?: DataLocality;
   isolation?: IsolationLevel;
+  execution_plane?: ExecutionPlane | null;
+  runtime_kind?: RuntimeKind | null;
   side_effects?: SideEffectKind[];
   resource_limits?: PluginResourceLimits;
   healthcheck?: PluginHealthcheck;
@@ -378,6 +392,8 @@ export interface ProviderLease {
   workspace_id?: string;
   session_id?: string;
   deployment?: Deployment;
+  execution_plane?: ExecutionPlane | null;
+  runtime_kind?: RuntimeKind | null;
   trust_level?: TrustLevel;
   plugin_id?: string;
   plugin_version?: string;
@@ -395,6 +411,9 @@ export interface ProviderRef {
   id: string;
   version?: string;
   deployment?: string;
+  execution_plane?: string;
+  runtime_kind?: string;
+  executor_type?: string;
   plugin_id?: string;
   device_id?: string;
   health_status?: string;
@@ -414,6 +433,8 @@ export interface RouteDecision {
 export type RouteMode = "direct_chat" | "m1_atomic_read" | "single_action_skill" | "planner_dag" | "react" | "blocked";
 
 export type RunState = "pending" | "planning" | "waiting_run" | "running" | "running_step" | "waiting_approval" | "waiting_next" | "completed" | "failed" | "cancelled" | "interrupted";
+
+export type RuntimeKind = "in_process" | "worker" | "container" | "sandbox";
 
 export type Sensitivity = "PUBLIC" | "INTERNAL" | "CONFIDENTIAL" | "CREDENTIAL";
 

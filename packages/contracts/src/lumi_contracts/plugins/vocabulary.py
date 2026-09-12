@@ -47,7 +47,13 @@ DEVELOPER_ONLY_PLUGIN_KINDS: frozenset[str] = frozenset(
 
 
 class Deployment(StrEnum):
-    """插件/Provider 的运行位置。"""
+    """插件/Provider 的**历史**运行位置（保留兼容，新代码用 execution_plane + runtime_kind）。
+
+    ⚠️ 这个枚举把两个维度混在一起了：``worker`` 既可能是服务端的受限 Worker，也可能是
+    客户端的隔离 Worker；前端无法据此稳定回答"到底谁在执行"。新契约拆成
+    :class:`ExecutionPlane`（哪一侧）+ :class:`RuntimeKind`（什么隔离方式），
+    ``deployment`` 继续作为兼容字段保留（见 :func:`plane_for_deployment`）。
+    """
 
     SERVER = "server"
     CLIENT = "client"
@@ -55,6 +61,34 @@ class Deployment(StrEnum):
     WORKER = "worker"
     #: 仅开发者模式的本地插件（生产禁止任意路径加载）。
     LOCAL_DEV = "local_dev"
+
+
+class ExecutionPlane(StrEnum):
+    """**执行位置**：这次执行发生在服务端还是客户端（与隔离方式正交）。"""
+
+    SERVER = "server"
+    CLIENT = "client"
+
+
+class RuntimeKind(StrEnum):
+    """**运行方式**：具体用什么隔离方式执行（与位置正交）。
+
+    * ``in_process``：与宿主同进程（内置实现；第三方插件不得使用）；
+    * ``worker``：独立 Worker 进程（官方签名插件 / 客户端插件宿主）；
+    * ``container``：容器隔离（第三方服务端插件）；
+    * ``sandbox``：受限沙箱（代码执行类能力的执行环境）。
+    """
+
+    IN_PROCESS = "in_process"
+    WORKER = "worker"
+    CONTAINER = "container"
+    SANDBOX = "sandbox"
+
+
+#: 兼容旧字段 ``executor_type`` 的取值（``server``/``client`` 表示进程内）。
+LEGACY_EXECUTOR_TYPES: frozenset[str] = frozenset(
+    {"server", "client", "worker", "container", "sandbox"}
+)
 
 
 class CapabilityStatus(StrEnum):
@@ -172,6 +206,68 @@ def isolation_for_trust(trust: TrustLevel | str) -> IsolationLevel:
     return IsolationLevel.SANDBOXED
 
 
+# ── 执行位置 / 运行方式（与 deployment / isolation 的稳定映射）──────
+
+
+def parse_execution_plane(value: object, *, default: ExecutionPlane | None = None) -> ExecutionPlane:
+    """解析执行位置；未知值折叠为 ``default or CLIENT``（最保守：不要误判成服务端）。"""
+    key = str(getattr(value, "value", value) or "").strip().casefold()
+    for item in ExecutionPlane:
+        if item.value == key:
+            return item
+    return default or ExecutionPlane.CLIENT
+
+
+def parse_runtime_kind(value: object, *, default: RuntimeKind | None = None) -> RuntimeKind:
+    """解析运行方式；未知值折叠为 ``default or IN_PROCESS``（进程内是最弱隔离，需上层把关）。"""
+    key = str(getattr(value, "value", value) or "").strip().casefold()
+    for item in RuntimeKind:
+        if item.value == key:
+            return item
+    return default or RuntimeKind.IN_PROCESS
+
+
+def plane_for_deployment(deployment: Deployment | str) -> ExecutionPlane:
+    """``deployment`` → 执行位置。
+
+    ``worker`` 在旧词表里语义含糊（服务端受限 Worker / 客户端 Worker 都可能），这里按
+    **服务端受限 Worker** 处理并在调用方优先使用显式声明的 ``execution_plane``。
+    """
+    site = str(getattr(deployment, "value", deployment) or "").strip().casefold()
+    if site in {Deployment.SERVER.value, Deployment.WORKER.value}:
+        return ExecutionPlane.SERVER
+    return ExecutionPlane.CLIENT
+
+
+def runtime_kind_for_isolation(isolation: IsolationLevel | str) -> RuntimeKind:
+    """``isolation`` → 运行方式。"""
+    key = str(getattr(isolation, "value", isolation) or "").strip().casefold()
+    if key == IsolationLevel.RESTRICTED_WORKER.value:
+        return RuntimeKind.WORKER
+    if key == IsolationLevel.SANDBOXED.value:
+        return RuntimeKind.CONTAINER
+    if key == IsolationLevel.CLIENT_DEVICE.value:
+        # 客户端 Provider：代码跑在用户设备上（Electron 主进程/插件宿主 Worker）。
+        return RuntimeKind.WORKER
+    return RuntimeKind.IN_PROCESS
+
+
+def executor_type_for(
+    execution_plane: ExecutionPlane | str,
+    runtime_kind: RuntimeKind | str,
+) -> str:
+    """兼容旧字段 ``executor_type`` 的派生值。
+
+    旧字段把位置与隔离混成一个值（``server|client|container|sandbox``）。为了让已经读
+    它的前端不炸，这里派生：进程内 → 该侧名字（``server``/``client``），其余 → 隔离方式。
+    """
+    plane = parse_execution_plane(execution_plane)
+    runtime = parse_runtime_kind(runtime_kind)
+    if runtime is RuntimeKind.IN_PROCESS:
+        return plane.value
+    return runtime.value
+
+
 def deployment_allows(
     locality: DataLocality | str,
     deployment: Deployment | str,
@@ -209,13 +305,21 @@ __all__ = [
     "DEVELOPER_ONLY_PLUGIN_KINDS",
     "DataLocality",
     "Deployment",
+    "ExecutionPlane",
     "IsolationLevel",
+    "LEGACY_EXECUTOR_TYPES",
     "PluginKind",
     "ProviderHealth",
+    "RuntimeKind",
     "SideEffectKind",
     "TrustLevel",
     "deployment_allows",
+    "executor_type_for",
     "isolation_for_trust",
     "parse_data_locality",
+    "parse_execution_plane",
     "parse_plugin_kind",
+    "parse_runtime_kind",
+    "plane_for_deployment",
+    "runtime_kind_for_isolation",
 ]

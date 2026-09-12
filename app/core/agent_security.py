@@ -42,6 +42,9 @@ _WORKSPACE_FIELD_ALLOWLIST = frozenset({
     "sensitive", "redacted", "redaction_count", "sensitivity",
     "has_more", "cursor", "status", "error", "meta", "data", "parser", "error_code",
     "navigator_action", "result_count", "workspace_id", "workspace_version",
+    # 代码骨架（action=scan）：结构化字段必须显式放行，否则会被通用清洗静默丢掉。
+    "symbols", "children", "signature", "doc", "parent", "end_line", "imports",
+    "stats", "truncated", "partial", "notes", "found",
 })
 _WORKSPACE_META_ALLOWLIST = frozenset({
     "workspace_id", "workspace_version", "server_name", "limits", "skipped_dirs",
@@ -51,6 +54,9 @@ _WORKSPACE_META_ALLOWLIST = frozenset({
     "sensitivity", "redacted", "redaction_count", "page_chars",
     "max_pages_per_call", "pages_read", "page_budget_exhausted",
     "read_full_requested", "read_to_end", "has_more", "cursor", "truncated",
+    # scan 的元信息：语言、抓取页数/字符数、是否只抓了一部分。
+    "language", "sliced", "start_line", "end_line", "total_lines",
+    "scanned_chars", "symbols_returned", "budget_exhausted", "partial",
 })
 # 白名单字段的值里仍然不允许出现"服务端路径"形态；做文本级清洗后再放行。
 _WORKSPACE_TEXT_FIELDS = frozenset({"text", "context", "summary", "title", "name"})

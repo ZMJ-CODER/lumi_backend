@@ -108,6 +108,11 @@ class PluginInstallation:
             "version": manifest.version,
             "kind": str(manifest.kind),
             "deployment": str(manifest.deployment),
+            # **声明**的执行位置/运行方式（插件声称跑在哪）；实际执行值以租约/结果为准。
+            "execution_plane": str(manifest.declared_plane()),
+            "runtime_kind": str(manifest.declared_runtime()),
+            "declared_execution_plane": str(manifest.declared_plane()),
+            "declared_runtime_kind": str(manifest.declared_runtime()),
             "trust_level": str(manifest.trust_level),
             "data_locality": str(manifest.data_locality),
             "isolation": str(manifest.isolation),

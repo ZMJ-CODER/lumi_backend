@@ -17,8 +17,18 @@ from app.services.usage import CATEGORY_SKILL
 # 与 workspace_code_change 保持一致的前缀约定：正式桌面 MCP 能力名
 # mcp__{server}__{tool}；多设备部署时按工作区注册的 server 路由。
 # 读取阶段只声明聚合入口；目录/搜索/单文件读取都由它的 action 完成。
+#
+# 写阶段分两条路（客户端两套都还在广告，见 CAPABILITY_BRIDGE.md §2/§11.5）：
+#   首选 —— 原子操作四件套（write/edit/move/delete）：自带版本校验、审批、
+#          回收站与读回校验，一次调用即生效，不需要 diff/commit 收尾；
+#   遗留 —— 暂存对（stage_write/stage_delete）+ diff + commit + rollback，
+#          仅在客户端没有原子工具时使用。
 _TOOLS = (
     "mcp__lumi_client__workspace_navigator",
+    "mcp__lumi_client__workspace_write",
+    "mcp__lumi_client__workspace_edit",
+    "mcp__lumi_client__workspace_move",
+    "mcp__lumi_client__workspace_delete",
     "mcp__lumi_client__workspace_stage_write",
     "mcp__lumi_client__workspace_stage_delete",
     "mcp__lumi_client__workspace_diff",
@@ -29,6 +39,21 @@ _TOOLS = (
     "mcp__lumi_client__workspace_commit",
     "mcp__lumi_client__workspace_rollback",
 )
+
+# 原子写工具按可选依赖登记：老客户端只广告暂存对时工作流仍可用，
+# 不会因为新增工具把整个 Skill 判成不可用。
+_OPTIONAL_TOOLS = frozenset({
+    "mcp__lumi_client__workspace_write",
+    "mcp__lumi_client__workspace_edit",
+    "mcp__lumi_client__workspace_move",
+    "mcp__lumi_client__workspace_delete",
+    "mcp__lumi_client__workspace_stat",
+    "mcp__lumi_client__workspace_catalog",
+    "mcp__lumi_client__sandbox_prepare",
+    "mcp__lumi_client__sandbox_output_read",
+    "mcp__lumi_client__sandbox_reset",
+    "mcp__lumi_client__workspace_rollback",
+})
 
 
 def _tool_defs(capabilities):
@@ -70,14 +95,7 @@ class WorkspaceOperationSkill(WorkflowSkill):
         "tools": [{
             "name": name,
             "min_version": "1.0.0",
-            "required": name not in {
-                "mcp__lumi_client__workspace_stat",
-                "mcp__lumi_client__workspace_catalog",
-                "mcp__lumi_client__sandbox_prepare",
-                "mcp__lumi_client__sandbox_output_read",
-                "mcp__lumi_client__sandbox_reset",
-                "mcp__lumi_client__workspace_rollback",
-            },
+            "required": name not in _OPTIONAL_TOOLS,
             "provider": "desktop_mcp",
         } for name in _TOOLS],
     }

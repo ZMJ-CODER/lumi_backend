@@ -24,6 +24,7 @@ from lumi_contracts.plugins import (
     DataLocality,
     SessionBinding,
     capability_failure,
+    executor_type_for,
 )
 
 from app.agents.capabilities.catalog import CapabilityCatalog, capability_catalog
@@ -72,6 +73,9 @@ class CapabilityResolution:
     optional: bool = False
     provider_id: str = ""
     deployment: str = ""
+    #: 选中 Provider 的实际执行位置与运行方式（计划门禁/前端提示都用它）。
+    execution_plane: str = ""
+    runtime_kind: str = ""
     device_id: str = ""
     contract_version: int = 1
     data_locality: str = ""
@@ -84,6 +88,13 @@ class CapabilityResolution:
             "optional": self.optional,
             "provider_id": self.provider_id,
             "deployment": self.deployment,
+            "execution_plane": self.execution_plane,
+            "runtime_kind": self.runtime_kind,
+            "executor_type": (
+                executor_type_for(self.execution_plane, self.runtime_kind or "in_process")
+                if self.execution_plane
+                else ""
+            ),
             "device_id": self.device_id,
             "contract_version": self.contract_version,
             "data_locality": self.data_locality,
@@ -232,6 +243,8 @@ class CapabilityResolver:
         base.available = True
         base.provider_id = selection.provider_id
         base.deployment = str(selection.deployment or "")
+        base.execution_plane = str(selection.execution_plane or "")
+        base.runtime_kind = str(selection.runtime_kind or "")
         base.device_id = str(getattr(selection.lease, "device_id", "") or "")
         base.reason = "ok"
         return base

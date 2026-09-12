@@ -218,7 +218,7 @@ def is_workspace_envelope(value: Any) -> bool:
         return False
     return (
         {"status", "action"} <= set(envelope)
-        and envelope.get("action") in {"list", "search", "read"}
+        and envelope.get("action") in {"list", "search", "read", "scan"}
         and "data" in envelope
     )
 
@@ -263,6 +263,30 @@ class WorkspaceNavigatorModelProjection(ModelProjection):
                 has_more = payload.get("has_more")
             if cursor is None:
                 cursor = payload.get("cursor")
+        # scan 的骨架是"列表型"数据，通用投影会把它序列化成 JSON（既长又难读）；
+        # 这里换成紧凑逐行骨架，模型才能一眼看清结构并据此决定精读哪一段。
+        if action == "scan":
+            symbols = getattr(payload, "symbols", None)
+            imports = getattr(payload, "imports", None)
+            stats = getattr(payload, "stats", None)
+            notes = getattr(payload, "notes", None)
+            if isinstance(payload, dict):
+                symbols = symbols or payload.get("symbols")
+                imports = imports or payload.get("imports")
+                stats = stats or payload.get("stats")
+                notes = notes or payload.get("notes")
+            from app.services.code_structure import render_skeleton_lines
+
+            summary = str(getattr(payload, "summary", "") or "")
+            if isinstance(payload, dict):
+                summary = summary or str(payload.get("summary") or "")
+            skeleton = render_skeleton_lines(symbols, imports=imports, stats=stats)
+            if summary:
+                skeleton.insert(0, summary)
+            for note in list(notes or [])[:3]:
+                skeleton.append(f"备注：{note}")
+            if skeleton:
+                view["text"] = "\n".join(skeleton)
         if action:
             view["action"] = action
         if has_more and cursor:

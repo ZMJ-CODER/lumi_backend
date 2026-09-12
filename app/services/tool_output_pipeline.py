@@ -330,7 +330,8 @@ def _has_structured_sections(tool_output: ToolOutput) -> bool:
 
     * ``sections``：读取正文分段；
     * ``matches``：检索命中（路径 + 位置 + 固定长度上下文）；
-    * ``entries``：目录列举。
+    * ``entries``：目录列举；
+    * ``symbols``：代码骨架（``action=scan``：类/函数/方法 + 行区间，无正文）。
 
     其他结构化 payload 保持既有 JSON 渲染行为不变。
     """
@@ -340,7 +341,7 @@ def _has_structured_sections(tool_output: ToolOutput) -> bool:
     for source in (data, data.get("data")):
         if not isinstance(source, dict):
             continue
-        for key in ("sections", "matches", "entries"):
+        for key in ("sections", "matches", "entries", "symbols"):
             value = source.get(key)
             if isinstance(value, list) and value:
                 return True

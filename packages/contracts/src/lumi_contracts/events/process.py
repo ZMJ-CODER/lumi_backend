@@ -49,6 +49,9 @@ _READ_TOOLS = frozenset({
 })
 _EDIT_TOOLS = frozenset({
     "workspace_stage_write", "workspace_stage_delete", "workspace_commit", "workspace_rollback",
+    # 统一操作契约（OperationResult）：编辑/移动/删除都是工作区改动，
+    # 过程日志必须把它们显示成"编辑"而不是泛化工具。
+    "workspace_write", "workspace_edit", "workspace_move", "workspace_delete",
     "apply_patch", "edit", "write", "notebookedit", "delete", "rename",
     "office_doc_edit", "create_office_document", "install_new_dependencies",
     "rollback_dependency_manifests",

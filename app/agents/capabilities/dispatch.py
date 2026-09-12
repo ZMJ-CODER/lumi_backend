@@ -33,8 +33,10 @@ from lumi_contracts.plugins import (
     DataLocality,
     ProviderHealth,
     ProviderLease,
+    RuntimeKind,
     capability_failure,
     capability_ok,
+    executor_type_for,
 )
 
 from app.agents.capabilities.builtin import capability_for_tool
@@ -42,17 +44,38 @@ from app.agents.capabilities.catalog import CapabilityCatalog, capability_catalo
 from app.agents.capabilities.context import AgentExecutionContext
 
 #: 能力 → 首选 MCP 原子工具名（客户端路由表里的规范入口）。
+#:
+#: ``code.scan`` 刻意**不在这里**：客户端没有等价的 MCP 工具（骨架由服务端聚合服务
+#: 用客户端提供的原文解析，见 catalog 里的 code.scan 说明）。客户端只登记描述、
+#: 不广告租约，因此派发时用调用方给的兜底工具名，且在无租约时按只读能力回退到
+#: ``workspace_navigator(action=scan)``。
 CAPABILITY_TOOL_MAP: dict[str, str] = {
     "workspace.read": "workspace_navigator",
     "workspace.write": "workspace_write",
+    # 操作契约族：编辑/移动/删除没有独立的客户端原子工具，由服务端操作网关
+    # （app/services/workspace_operations.py）在客户端原子工具之上编排；这里登记
+    # 规范入口名只为审批/审计/dispatch-map 有稳定的工具↔能力对照。
+    "workspace.edit": "workspace_edit",
+    "workspace.move": "workspace_move",
+    "workspace.delete": "workspace_delete",
     "code.execute": "sandbox_run",
     "git.operations": "workspace_diff",
     "artifact.create": "create_office_document",
 }
 
 #: 写/执行类能力：**不允许**静默回退到旧执行路径（避免绕过租约/授权模型）。
+#:
+#: 四个工作区操作能力都在这里：它们的失败面包含"半截副作用"，任何"回退到直接调
+#: 客户端原子工具"的做法都会绕过版本校验与回收站语义。
 NEVER_FALLBACK_CAPABILITIES: frozenset[str] = frozenset(
-    {"workspace.write", "code.execute", "git.operations"}
+    {
+        "workspace.write",
+        "workspace.edit",
+        "workspace.move",
+        "workspace.delete",
+        "code.execute",
+        "git.operations",
+    }
 )
 
 
@@ -68,6 +91,15 @@ class DispatchOutcome:
     capability: str = ""
     reason: str = ""
     route: dict[str, Any] = field(default_factory=dict)
+    #: 本次派发实际执行的来源（位置 + 运行方式），取自选中的租约。
+    execution_plane: str = ""
+    runtime_kind: str = ""
+
+    @property
+    def executor_type(self) -> str:
+        if not self.execution_plane:
+            return ""
+        return executor_type_for(self.execution_plane, self.runtime_kind or RuntimeKind.IN_PROCESS)
 
     def to_snapshot(self) -> dict[str, Any]:
         return {
@@ -77,6 +109,9 @@ class DispatchOutcome:
             "lease_id": self.lease_id,
             "mcp_tool": self.mcp_tool,
             "reason": self.reason,
+            "execution_plane": self.execution_plane,
+            "runtime_kind": self.runtime_kind,
+            "executor_type": self.executor_type,
             "ok": bool(self.result and self.result.ok),
             "error_code": self.result.error_code if self.result else "",
         }
@@ -291,6 +326,10 @@ class CapabilityDispatchAdapter:
             "plugin_id": lease.plugin_id,
             "lease_id": lease.lease_id,
             "capability": lease.qualified_capability,
+            # 实际执行来源随路由一起下发：客户端日志/审计能对上"谁在执行"。
+            "execution_plane": str(lease.plane()),
+            "runtime_kind": str(lease.runtime()),
+            "executor_type": lease.executor_type(),
         }
         caller = self._caller()
         try:
@@ -329,6 +368,9 @@ class CapabilityDispatchAdapter:
             )
         status = str((payload or {}).get("status") or "ok")
         ok = status in {"ok", "success", "partial", "empty"}
+        # 客户端派发：实际执行在用户设备上（位置来自租约，运行方式由租约推导/声明）。
+        plane = str(lease.plane())
+        runtime = str(lease.runtime())
         return DispatchOutcome(
             handled=True,
             capability=base,
@@ -337,6 +379,8 @@ class CapabilityDispatchAdapter:
             mcp_tool=mcp_tool,
             route=route,
             reason="ok" if ok else status,
+            execution_plane=plane,
+            runtime_kind=runtime,
             result=(
                 capability_ok(
                     payload,
@@ -344,6 +388,8 @@ class CapabilityDispatchAdapter:
                     provider_id=lease.provider_id,
                     served_locally=True,
                     request_id=str(call_id or ""),
+                    execution_plane=plane,
+                    runtime_kind=runtime,
                 )
                 if ok
                 else capability_failure(
@@ -352,6 +398,8 @@ class CapabilityDispatchAdapter:
                     capability=descriptor.qualified_name,
                     provider_id=lease.provider_id,
                     details={"status": status},
+                    execution_plane=plane,
+                    runtime_kind=runtime,
                 )
             ),
         )

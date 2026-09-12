@@ -20,10 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.llm import LLMClient
+from app.core.model_roles import ROLE_MEMORY_EXTRACT
 from app.core.redis import get_redis
 from app.models.db_models import ConversationMemoryState, ConversationSegment, Message
 from app.services.content_codec import normalize_content
 from app.services.rag.embeddings import embed_query, embed_texts
+from app.services.usage import CATEGORY_MEMORY_EXTRACT
 
 
 _HISTORY_MARKERS = (
@@ -143,14 +145,14 @@ async def _summarize_segment(
     try:
         raw = await LLMClient().chat(
             [{"role": "user", "content": prompt}],
-            model=settings.MEMORY_EXTRACTION_MODEL,
-            base_url=settings.QWEN_BASE_URL,
-            api_key=settings.QWEN_API_KEY,
+            # 记忆抽取属于低成本场景（role=memory_extract → cheap 档位）；
+            # 结果仍要过后端 JSON 校验与规则过滤，不能直接当事实落库。
+            role=ROLE_MEMORY_EXTRACT,
             timeout=120,
             temperature=0,
             max_tokens=900,
             usage_user_id=user_id,
-            usage_category="summary",
+            usage_category=CATEGORY_MEMORY_EXTRACT,
             disable_reasoning_effort=True,
         )
     except Exception as exc:  # noqa: BLE001

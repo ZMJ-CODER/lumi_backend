@@ -26,6 +26,7 @@ from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.llm import LLMClient
 from app.core.llm_config import get_llm_config
+from app.core.model_roles import ROLE_SUMMARY, ROLE_TITLE
 from app.core.redis import get_redis
 from app.models.db_models import Message
 from app.services.speech import speech_to_text
@@ -516,10 +517,13 @@ class Orchestrator:
     async def _generate_summary(
         self, prev_summary: str | None, messages: list[dict], user_id: str
     ) -> str:
-        """用 qwen-turbo 生成/接力对话"剧情梗概"（轻量低成本）.
+        """用低成本档位生成/接力对话"剧情梗概"（role=summary → cheap 档位）.
 
         旧的 10 万 token 原始对话 → 约 5000 token 的中文回顾（10:1 压缩），
         保留用户偏好与关键事实、结论/约定、未完成的任务。
+
+        为什么用角色而不是模型名：摘要失败不阻塞对话（保留旧摘要即可），
+        属于最安全的低成本化场景；模型档位由 ``LLM_ROLE_SUMMARY`` 决定。
         """
         parts: list[str] = []
         if prev_summary:
@@ -543,9 +547,7 @@ class Orchestrator:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"对话内容：\n\n{dialog}"},
                 ],
-                model=settings.QWEN_TURBO_MODEL,
-                base_url=settings.QWEN_BASE_URL,
-                api_key=settings.QWEN_API_KEY,
+                role=ROLE_SUMMARY,
                 timeout=120,
                 temperature=0.3,
                 max_tokens=8192,
@@ -692,13 +694,14 @@ class Orchestrator:
         user_id: str,
         llm_api_key: str | None = None,
     ) -> str:
-        """用大模型生成会话标题（轻量调用，首条消息时与回复并行）."""
+        """用低成本档位生成会话标题（role=title → cheap；失败返回空串）."""
         try:
             reply = await self._llm.chat(
                 [
                     {"role": "system", "content": _TITLE_SYSTEM_PROMPT},
                     {"role": "user", "content": content},
                 ],
+                role=ROLE_TITLE,
                 max_tokens=32,
                 usage_user_id=user_id,
                 usage_category=CATEGORY_TITLE,
@@ -1394,6 +1397,10 @@ class Orchestrator:
                         )
             else:
                 job_stream_used = True
+                # 终态承载：办公任务结束时把 job 的最终状态交给外层 done 帧。
+                # 否则 `done` 一律被投影成 control(state=completed)，失败/取消的任务
+                # 会被前端显示成"已完成"。
+                job_terminal: dict[str, str] = {}
                 stream = self._stream_office_job(
                     user_id,
                     conversation_id,
@@ -1404,6 +1411,7 @@ class Orchestrator:
                     user_role,
                     workspace_id,
                     execution_preference,
+                    terminal_state=job_terminal,
                 )
         else:
             stream = self._stream_llm_auto(
@@ -1523,6 +1531,18 @@ class Orchestrator:
             "segments": segments,
             "steps": list(atomic_steps.values()),
         }
+        if job_stream_used and job_terminal:
+            # 办公任务的最终状态（含 job_id，便于任务事件日志按 job 归档与补拉）。
+            if job_terminal.get("job_id"):
+                done_event["job_id"] = job_terminal["job_id"]
+            if job_terminal.get("status"):
+                # 标准事件投影读 `job_status`/`status`：失败/取消不再显示成"已完成"。
+                done_event["status"] = job_terminal["status"]
+                done_event["job_status"] = job_terminal["status"]
+            if job_terminal.get("error"):
+                done_event["error"] = job_terminal["error"]
+            if job_terminal.get("error_code"):
+                done_event["error_code"] = job_terminal["error_code"]
         if policy_public is not None:
             # done 携带最终完整内容与任务元数据（v2 契约）。
             done_event.update(policy_public)
@@ -1578,6 +1598,150 @@ class Orchestrator:
                 else None
             ),
         }
+
+    @staticmethod
+    def _result_side_events(
+        job,
+        *,
+        payload_sub: str,
+        emitted_artifacts: set[str],
+        emitted_views: set[str],
+        emitted_approvals: set[str],
+        resolved_approvals: set[str] | None = None,
+    ) -> list[dict]:
+        """任务快照 → 结果类事件（**经 ExecutionResult + UI 投影**，不直接读散字段）。
+
+        链路（方案 §二.3）：``node.result`` → ``ExecutionResult`` → UI Projection
+        → ``artifact_created`` / ``view_updated``；审批门另出
+        ``approval_required`` / ``approval_resolved``（既有审批 REST 执行决定，
+        这里只做状态变化的投影）。
+
+        已发过的事件不再重复（轮询/重连不会叠加卡片）；原始响应/参数/正文
+        不进入任何事件。
+        """
+        events: list[dict] = []
+        job_id = str(getattr(job, "job_id", "") or "")
+        resolved = resolved_approvals if resolved_approvals is not None else set()
+        try:
+            from app.contracts.node_result import execution_result_from_node
+            from app.contracts.ui_projection import artifact_refs_of
+            from app.services import views as view_service
+
+            for node in getattr(job, "nodes", []) or []:
+                node_id = str(getattr(node, "id", "") or "")
+                # 结果归一化：节点结果先变成 ExecutionResult，再投影成事件。
+                result = execution_result_from_node(node, container_id=job_id, user_id=payload_sub)
+                if not result.ok or not result.artifact_refs:
+                    continue
+                view_summary = ""
+                try:
+                    from app.contracts.ui_projection import ui_view
+
+                    view_summary = str(ui_view(result).get("summary") or "")
+                except Exception:  # noqa: BLE001 - 投影失败不影响产物事件
+                    view_summary = ""
+                for ref in artifact_refs_of(result):
+                    artifact_id = str(ref.get("artifact_id") or "")
+                    if not artifact_id:
+                        continue
+                    if artifact_id not in emitted_artifacts:
+                        emitted_artifacts.add(artifact_id)
+                        events.append({
+                            "type": "artifact_created",
+                            "job_id": job_id,
+                            "step_id": node_id,
+                            # 产物引用嵌在 ``artifact`` 下：引用自带 ``type``（文件类型），
+                            # 扁平展开会把事件的 ``type`` 覆盖成 "csv" 之类。
+                            "artifact": ref,
+                        })
+                    view = view_service.artifact_view(payload_sub, ref)
+                    if view is None:
+                        continue
+                    view_id = str(view.get("view_id") or "")
+                    if not view_id or view_id in emitted_views:
+                        continue
+                    emitted_views.add(view_id)
+                    events.append({"type": "view_updated", "job_id": job_id, "view": view})
+                del view_summary
+        except Exception as exc:  # noqa: BLE001 - 事件生成失败不影响任务执行
+            logger.debug("[react] 产物/视图事件生成失败（降级）: {}", str(exc)[:160])
+        events.extend(
+            Orchestrator._approval_events(
+                job, job_id=job_id, emitted=emitted_approvals, resolved=resolved
+            )
+        )
+        return events
+
+    @staticmethod
+    def _approval_events(job, *, job_id: str, emitted: set[str], resolved: set[str]) -> list[dict]:
+        """审批门事件：等待下发 ``approval_required``，决定后下发 ``approval_resolved``。
+
+        决议由既有审批 REST 写入 Job（``approval_service.resolve``）：批准会移除
+        ``awaiting_approval`` 并写入 ``confirmed_tool_calls``；拒绝/超时把节点置为
+        ``skipped``。这里只把**状态变化**投影成事件，不重新判断权限。
+        """
+        events: list[dict] = []
+        try:
+            for node in getattr(job, "nodes", []) or []:
+                node_id = str(getattr(node, "id", "") or "")
+                if not node_id:
+                    continue
+                metadata = getattr(node, "metadata", None) or {}
+                metadata = metadata if isinstance(metadata, dict) else {}
+                status = str(getattr(getattr(node, "status", None), "value", getattr(node, "status", "")) or "")
+                awaiting = bool(metadata.get("awaiting_approval"))
+                if awaiting and node_id not in emitted:
+                    emitted.add(node_id)
+                    params = getattr(node, "params", None) or {}
+                    tool = str(
+                        metadata.get("approval_tool")
+                        or (params or {}).get("preferred_tool")
+                        or getattr(node, "agent", "")
+                        or ""
+                    )
+                    events.append({
+                        "type": "approval_required",
+                        "job_id": job_id,
+                        "request_id": str(metadata.get("approval_request_id") or node_id)[:120],
+                        "node_id": node_id,
+                        "step_id": node_id,
+                        "capability": str(metadata.get("capability") or "")[:120],
+                        "action": tool[:80],
+                        "target": str(
+                            metadata.get("approval_target") or (params or {}).get("instruction") or ""
+                        )[:200],
+                        "risk_level": str(metadata.get("risk_level") or metadata.get("risk") or "")[:40],
+                        "preview_ref": str(metadata.get("preview_ref") or "")[:200],
+                        "expires_at": str(
+                            metadata.get("approval_expires_at") or metadata.get("expires_at") or ""
+                        )[:64],
+                    })
+                    continue
+                if node_id not in emitted or node_id in resolved:
+                    continue
+                confirmed = bool(metadata.get("confirmed_tool_calls") or metadata.get("confirmed_tools"))
+                approved = bool(confirmed) and not awaiting
+                if status == "skipped":
+                    approved = False
+                elif not approved and status not in {"completed", "failed", "cancelled", "interrupted"}:
+                    # 仍在等待（或状态无法判断）：不下发决议
+                    continue
+                resolved.add(node_id)
+                reason = "" if approved else str(node.error or "用户拒绝了该步骤")
+                events.append({
+                    "type": "approval_resolved",
+                    "job_id": job_id,
+                    "request_id": str(metadata.get("approval_request_id") or node_id)[:120],
+                    "node_id": node_id,
+                    "step_id": node_id,
+                    "approved": approved,
+                    "resolved_by": str(metadata.get("approved_by") or "")[:80],
+                    "reason": reason[:300],
+                    "decided_at": datetime.now(timezone.utc).isoformat(),
+                })
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[react] 审批事件生成失败（降级）: {}", str(exc)[:160])
+        return events
 
     @classmethod
     async def _logical_plan_steps(cls, user_id: str, routing: dict) -> list[dict]:
@@ -2045,6 +2209,7 @@ class Orchestrator:
         user_role: str = "user",
         workspace_id: str | None = None,
         execution_preference: str = "use_workspace_policy",
+        terminal_state: dict | None = None,
     ):
         from app.agents.orchestration.orchestrator import orchestrator as agent_orchestrator
         from app.agents.orchestration.models import JobStatus
@@ -2078,6 +2243,12 @@ class Orchestrator:
         completion_waits = 0
         output_cursor = 0
         streamed_answer = ""
+        # 事件去重（同一产物/视图/审批只发一次）：断线重连与快照轮询都会重复看到
+        # 同一节点，重复下发会让前端的卡片叠加。
+        emitted_artifacts: set[str] = set()
+        emitted_views: set[str] = set()
+        emitted_approvals: set[str] = set()
+        resolved_approvals: set[str] = set()
         try:
             while True:
                 routing = getattr(job, "routing", None) or {}
@@ -2175,6 +2346,17 @@ class Orchestrator:
                             # title/summary 非空（原来只有 step.output，实时帧是空行）。
                             **_step_frame_fields(step),
                         }
+                # ── 产物 / 视图 / 审批事件（方案 §二：结果先归一，再发事件）──
+                # 只在"新出现"时下发；重复轮询同一快照不会重复推送。
+                for event in self._result_side_events(
+                    job,
+                    payload_sub=user_id,
+                    emitted_artifacts=emitted_artifacts,
+                    emitted_views=emitted_views,
+                    emitted_approvals=emitted_approvals,
+                    resolved_approvals=resolved_approvals,
+                ):
+                    yield event
                 # Text-producing office skills publish deltas independently of
                 # status snapshots. Drain them while the node is still running.
                 from app.services.office_stream import read_deltas
@@ -2270,6 +2452,17 @@ class Orchestrator:
             logger.info("办公任务流断开，任务继续后台执行: {}", job.job_id)
             raise
         citations.extend(self._job_citations(job))
+        # 终态交给外层 done 帧：`status`/`job_status` 让标准事件的
+        # `control.state` 与真实任务状态一致（completed/failed/cancelled/interrupted）。
+        if terminal_state is not None:
+            raw_status = getattr(job.status, "value", job.status)
+            terminal_state["status"] = str(raw_status or "")
+            terminal_state["job_id"] = str(getattr(job, "job_id", "") or "")
+            if getattr(job, "error", None):
+                terminal_state["error"] = str(job.error)[:300]
+            code = str(getattr(job, "error_code", "") or "")
+            if code:
+                terminal_state["error_code"] = code[:80]
         answer = self._job_answer(job)
         if answer and not streamed_answer:
             yield {"type": "delta", "content": answer}

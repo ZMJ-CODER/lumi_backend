@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from typing import Any
+
 from app.core.deps import get_admin_verified_token, require_admin, require_superadmin
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException
 from app.core.rag_config import set_rag_overrides
@@ -17,6 +19,11 @@ from app.core.security import create_admin_verified_token, verify_admin_verified
 from app.models.admin import (
     LLMConfigRequest,
     LLMResetRequest,
+    ModelProfileRequest,
+    ModelRoleRequest,
+    ModelRolesResetRequest,
+    ModelRolesTestRequest,
+    ModelRolesUpdateRequest,
     RAGConfigRequest,
     StrategyPolicyToggleRequest,
     UpdateUserRequest,
@@ -393,6 +400,251 @@ async def reset_llm_config_view(
     await reset_llm_config(req.scene)
     scope = f"场景 {req.scene}" if req.scene else "全局"
     return {"code": 0, "message": f"已重置{scope} LLM 配置，回落 .env 默认值"}
+
+
+# ── 模型档位 / 职责角色（方案 §五、§十：后台一处切换所有同档位功能）──
+#
+# 路径以**前端契约**为准（``src/services/adminSystem.js::LLM_CONFIG_ENDPOINTS``）：
+#   GET  /admin/llm-config/models       读取档位 + 角色映射（无需二次验证）
+#   PUT  /admin/llm-config/models       保存（body: {profiles?:{...}, roles?:{...}}）
+#   POST /admin/llm-config/models/reset 重置（body: {profile?}；空=全部）
+#   POST /admin/llm-config/models/test  连通性测试（body: {profile}）
+# 写操作沿用本仓库既有范式：超管 JWT + ``X-Admin-Token``（来自 /admin/verify-password）。
+# 旧的 ``/admin/model-roles*`` 保留为兼容别名（同语义）。
+
+
+def _profile_payload(profiles: Any, roles: Any) -> tuple[dict[str, dict], dict[str, str]]:
+    """解析前端提交的 ``{profiles, roles}``（只取被改动的部分）。"""
+    profile_updates: dict[str, dict] = {}
+    role_updates: dict[str, str] = {}
+    if isinstance(profiles, dict):
+        for name, cfg in profiles.items():
+            if isinstance(cfg, dict):
+                profile_updates[str(name)] = dict(cfg)
+    if isinstance(roles, dict):
+        for role, profile in roles.items():
+            role_updates[str(role)] = str(profile or "")
+    return profile_updates, role_updates
+
+
+async def _apply_role_config(profile_updates: dict[str, dict], role_updates: dict[str, str]) -> dict:
+    """写入档位覆盖与角色映射；返回生效摘要（供回执/审计）。"""
+    from app.core.model_roles import ALL_PROFILES, set_profile_config, set_role_profile
+
+    applied_profiles: list[str] = []
+    applied_roles: list[str] = []
+    for name, cfg in profile_updates.items():
+        if name not in ALL_PROFILES:
+            raise BadRequestException(f"未知模型档位：{name}")
+        await set_profile_config(name, cfg)
+        applied_profiles.append(name)
+    for role, profile in role_updates.items():
+        try:
+            await set_role_profile(role, profile or None)
+        except ValueError as exc:
+            raise BadRequestException(str(exc)) from exc
+        applied_roles.append(role)
+    return {"profiles": applied_profiles, "roles": applied_roles}
+
+
+@router.get("/llm-config/models")
+async def get_llm_models_view(payload: dict = Depends(require_superadmin)):
+    """当前生效的档位与角色映射（密钥只回脱敏文本，管理页读取用）。"""
+    from app.core.model_roles import role_config_view
+
+    return {"code": 0, "data": await role_config_view()}
+
+
+@router.put("/llm-config/models")
+async def update_llm_models(
+    req: ModelRolesUpdateRequest,
+    payload: dict = Depends(require_superadmin),
+    x_admin_token: str | None = Depends(get_admin_verified_token),
+):
+    """保存档位 / 角色映射（只提交被改动的部分，写 Redis 后立即生效、无需重启）."""
+    _require_admin_verified(x_admin_token, payload)
+    profile_updates, role_updates = _profile_payload(req.profiles, req.roles)
+    if not profile_updates and not role_updates:
+        raise BadRequestException("没有需要保存的改动")
+    applied = await _apply_role_config(profile_updates, role_updates)
+    parts = []
+    if applied["profiles"]:
+        parts.append("档位 " + "、".join(applied["profiles"]))
+    if applied["roles"]:
+        parts.append(f"{len(applied['roles'])} 个角色映射")
+    return {"code": 0, "data": {**applied, "message": f"已保存：{'；'.join(parts)}（立即生效）"}}
+
+
+@router.post("/llm-config/models/reset")
+async def reset_llm_models(
+    req: ModelRolesResetRequest,
+    payload: dict = Depends(require_superadmin),
+    x_admin_token: str | None = Depends(get_admin_verified_token),
+):
+    """重置为 .env 默认：给了 ``profile`` 只重置该档位，否则清空全部动态覆盖."""
+    _require_admin_verified(x_admin_token, payload)
+    from app.core.model_roles import (
+        ALL_PROFILES,
+        ALL_ROLES,
+        CHAT_PROFILES,
+        set_profile_config,
+        set_role_profile,
+    )
+
+    if req.profile:
+        if req.profile not in CHAT_PROFILES:
+            raise BadRequestException(f"未知模型档位：{req.profile}")
+        await set_profile_config(req.profile, None)
+        return {"code": 0, "data": {"message": f"已重置 {req.profile} 档位为 .env 默认"}}
+    for profile in ALL_PROFILES:
+        await set_profile_config(profile, None)
+    for role in ALL_ROLES:
+        await set_role_profile(role, None)
+    return {"code": 0, "data": {"message": "已恢复全部模型档位/角色为 .env 默认"}}
+
+
+@router.post("/llm-config/models/test")
+async def test_llm_model_profile(
+    req: ModelRolesTestRequest,
+    payload: dict = Depends(require_superadmin),
+    x_admin_token: str | None = Depends(get_admin_verified_token),
+):
+    """测试某档位连通性（不返回密钥）；结果写入状态供管理页展示."""
+    _require_admin_verified(x_admin_token, payload)
+    import time
+
+    from app.core.llm_config import validate_llm_config
+    from app.core.model_roles import CHAT_PROFILES, resolve_role, set_profile_status
+
+    profile = str(req.profile or "").strip()
+    if not profile:
+        raise BadRequestException("缺少 profile")
+    if profile not in CHAT_PROFILES:
+        raise BadRequestException(f"未知模型档位：{profile}")
+    role_of = {
+        "cheap": "title",
+        "reasoning": "code_reviewer",
+        "vision": "vision",
+    }.get(profile, "direct_answer")
+    resolved = await resolve_role(role_of)
+    started = time.perf_counter()
+    ok, err = await validate_llm_config({
+        "base_url": resolved.base_url,
+        "api_key": resolved.api_key,
+        "model": resolved.model,
+        "timeout": min(float(resolved.timeout or 120.0), 15.0),
+    })
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    await set_profile_status(profile, {
+        "status": "ok" if ok else "error",
+        "error": "" if ok else err,
+        "latency_ms": latency_ms if ok else None,
+    })
+    return {"code": 0, "data": {"ok": ok, "error": err, "latency_ms": latency_ms, "profile": profile}}
+
+
+# ── 兼容别名（旧路径；语义与上面完全一致）──
+
+
+@router.get("/model-roles")
+async def get_model_roles_view(payload: dict = Depends(require_superadmin)):
+    """（兼容别名）当前生效的档位与角色配置。"""
+    from app.core.model_roles import role_config_view
+
+    return {"code": 0, "data": await role_config_view()}
+
+
+@router.put("/model-roles/profile/{profile}")
+async def update_model_profile(
+    profile: str,
+    req: ModelProfileRequest,
+    payload: dict = Depends(require_superadmin),
+    x_admin_token: str | None = Depends(get_admin_verified_token),
+):
+    """（兼容别名）覆盖一个档位的 provider/base_url/api_key/model 与能力声明。"""
+    _require_admin_verified(x_admin_token, payload)
+    from app.core.model_roles import resolve_role, set_profile_config
+
+    if req.reset:
+        await set_profile_config(profile, None)
+        return {"code": 0, "data": {"message": f"已清除 {profile} 档位的动态覆盖（回落 .env）"}}
+
+    candidate: dict = {}
+    if req.provider:
+        candidate["provider"] = req.provider
+    if req.base_url:
+        candidate["base_url"] = req.base_url
+    if req.model:
+        candidate["model"] = req.model
+    if req.api_key:
+        candidate["api_key"] = req.api_key
+    if req.timeout is not None:
+        candidate["timeout_ms"] = float(req.timeout) * 1000
+    for key in ("max_output_tokens", "max_context_tokens", "supports_tools",
+                "supports_json", "supports_vision", "supports_reasoning"):
+        value = getattr(req, key, None)
+        if value is not None:
+            candidate[key] = value
+    if not candidate and not req.test_only:
+        raise BadRequestException("没有可更新的字段")
+
+    if req.test_only or req.check_connection:
+        from app.core.llm_config import validate_llm_config
+
+        probe = {
+            "base_url": candidate.get("base_url") or "",
+            "api_key": candidate.get("api_key") or "",
+            "model": candidate.get("model") or "",
+            "timeout": min(float(candidate.get("timeout_ms") or 0) / 1000.0 or 120.0, 15.0),
+        }
+        if not (probe["base_url"] and probe["api_key"] and probe["model"]):
+            current = await resolve_role("direct_answer")
+            probe["base_url"] = probe["base_url"] or current.base_url
+            probe["api_key"] = probe["api_key"] or current.api_key
+            probe["model"] = probe["model"] or current.model
+        ok, err = await validate_llm_config(probe)
+        if req.test_only:
+            return {"code": 0, "data": {"ok": ok, "error": err}}
+        if not ok:
+            raise BadRequestException(f"候选配置验证失败，未写入: {err}")
+
+    await set_profile_config(profile, candidate)
+    return {"code": 0, "data": {"message": f"已更新 {profile} 档位配置（立即生效，无需重启）"}}
+
+
+@router.put("/model-roles/role/{role}")
+async def update_model_role(
+    role: str,
+    req: ModelRoleRequest,
+    payload: dict = Depends(require_superadmin),
+    x_admin_token: str | None = Depends(get_admin_verified_token),
+):
+    """（兼容别名）把一个逻辑角色固定到某个档位（空 = 清除，回落 LLM_ROLE_*）."""
+    _require_admin_verified(x_admin_token, payload)
+    from app.core.model_roles import set_role_profile
+
+    try:
+        await set_role_profile(role, req.profile)
+    except ValueError as exc:
+        raise BadRequestException(str(exc)) from exc
+    scope = req.profile or "默认（LLM_ROLE_*）"
+    return {"code": 0, "data": {"message": f"角色 {role} 已指向 {scope}"}}
+
+
+@router.post("/model-roles/reset")
+async def reset_model_roles(
+    payload: dict = Depends(require_superadmin),
+    x_admin_token: str | None = Depends(get_admin_verified_token),
+):
+    """（兼容别名）一键恢复：清除全部角色与档位的动态覆盖（回落 .env）。"""
+    _require_admin_verified(x_admin_token, payload)
+    from app.core.model_roles import ALL_PROFILES, ALL_ROLES, set_profile_config, set_role_profile
+
+    for role in ALL_ROLES:
+        await set_role_profile(role, None)
+    for profile in ALL_PROFILES:
+        await set_profile_config(profile, None)
+    return {"code": 0, "data": {"message": "已恢复全部模型角色/档位为 .env 默认配置"}}
 
 
 # ── 编排策略管理（管理员 + 二次验证） ─────────────────

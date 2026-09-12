@@ -111,6 +111,22 @@ class JobSubmissionService:
         planning_context = prepared.planning_context
         routing: dict = {"llm": routing_model} if scene == "office" else {}
 
+        # ── 模型计划冻结（方案 §七）──
+        # 任务创建时解析一次"角色 → 档位 → 模型"，之后计划/执行/重试/恢复都用这份
+        # 计划，避免管理员中途改配置导致同一任务前后用不同模型。Job 快照里只放
+        # 公开部分（角色/档位/模型/来源），**不含任何 API Key**。
+        try:
+            from app.core.model_plan import build_model_plan
+
+            model_plan = await build_model_plan(
+                scene=scene,
+                user_id=user_id,
+                byok_key=str(llm_api_key or "") if effective_llm.byok else None,
+            )
+            routing["model_plan"] = model_plan.public_dict()
+        except Exception as exc:  # noqa: BLE001 - 计划冻结失败不能阻断任务提交
+            logger.warning("[model-plan] 冻结失败（继续用现有配置链）: {}", str(exc)[:160])
+
         if scene == "office":
             selection = await self._office_plan_selection.select(
                 user_id=user_id,

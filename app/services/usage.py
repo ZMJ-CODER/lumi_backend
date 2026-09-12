@@ -38,8 +38,26 @@ async def record_usage(
     model: str,
     prompt_tokens: int | None,
     completion_tokens: int | None,
+    *,
+    model_role: str | None = None,
+    model_profile: str | None = None,
+    config_source: str | None = None,
+    fallback_used: bool = False,
+    duration_ms: int = 0,
+    structured_ok: bool | None = None,
+    tool_calls: int = 0,
+    complexity: str | None = None,
 ) -> None:
-    """记录一次 LLM 调用用量（直接 await，单条 INSERT）."""
+    """记录一次 LLM 调用用量（直接 await，单条 INSERT）。
+
+    除既有的 category/model/token 外，额外记录**模型角色遥测**（方案 §九.5）：
+    ``model_role`` / ``model_profile`` / ``config_source`` / ``fallback_used`` /
+    ``duration_ms`` / ``structured_ok`` / ``tool_calls`` / ``complexity``。
+    这样可以直接对比"切 cheap 前后"的调用次数、token、失败率、回退率与总成本。
+
+    新增列在任何写入失败（老库未迁移）时降级为**只记旧字段**，绝不因为遥测失败
+    影响主流程。
+    """
     prompt_tokens = int(prompt_tokens or 0)
     completion_tokens = int(completion_tokens or 0)
     if prompt_tokens + completion_tokens <= 0:
@@ -50,6 +68,16 @@ async def record_usage(
             uid = uuid.UUID(str(user_id))
         except (ValueError, TypeError):
             uid = None
+    telemetry = {
+        "model_role": (str(model_role or "")[:40] or None),
+        "model_profile": (str(model_profile or "")[:20] or None),
+        "config_source": (str(config_source or "")[:40] or None),
+        "fallback_used": bool(fallback_used),
+        "duration_ms": int(duration_ms or 0),
+        "structured_ok": structured_ok,
+        "tool_calls": int(tool_calls or 0),
+        "complexity": (str(complexity or "")[:20] or None),
+    }
     try:
         async with async_session_factory() as session:
             session.add(
@@ -59,6 +87,7 @@ async def record_usage(
                     model=(model or "")[:100],
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
+                    **telemetry,
                 )
             )
             await session.commit()
@@ -66,6 +95,21 @@ async def record_usage(
         # 用量统计属于可观测性：写入失败绝不能影响聊天/检索等主流程
         # （典型场景：llm_usage 表缺失时仅降级为不统计，而不是让整个请求失败）
         logger.warning("LLM 用量记录失败（不影响主流程）: {}", exc)
+        if any(value not in (None, False, 0) for value in telemetry.values()):
+            try:
+                async with async_session_factory() as session:
+                    session.add(
+                        LLMUsage(
+                            user_id=uid,
+                            category=category or CATEGORY_CHAT,
+                            model=(model or "")[:100],
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                        )
+                    )
+                    await session.commit()
+            except Exception as inner:  # noqa: BLE001
+                logger.debug("LLM 用量旧字段回退写入也失败: {}", inner)
 
 
 def estimate_tokens(text: str) -> int:

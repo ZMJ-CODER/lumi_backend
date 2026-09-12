@@ -61,6 +61,13 @@ class JobRunView(BaseModel):
     # 只放过程（不含原始参数/原始响应/模型内部推理），正文走 result_ref/artifact。
     process_log: list[ProcessLogEntry] = Field(default_factory=list)
     final_answer: str = ""
+    # 事件顺序水位：与 SSE ``seq`` 同源，前端据此判断"快照是否已覆盖到我的 lastSeq"。
+    last_seq: int = 0
+    # 产物引用（只放引用与元数据，不放下载地址/令牌/正文）：
+    # 刷新后据此恢复 Artifact 卡片，下载仍走受权限保护的下载接口。
+    artifact_refs: list[dict[str, Any]] = Field(default_factory=list)
+    # 声明式视图引用（``view_id`` + ``data_ref``；数据本身按需再取）。
+    views: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
     error_code: str | None = None
     updated_at: float = 0.0
@@ -84,6 +91,36 @@ class JobRunView(BaseModel):
 
         merged = merge_process_log(self.process_log, entries, limit=PROCESS_LOG_MAX_ENTRIES)
         return self.model_copy(update={"process_log": merged})
+
+    def note_seq(self, seq: int) -> "JobRunView":
+        """推进事件水位（只增不减；乱序/重复的快照不得把水位拉回去）。"""
+        try:
+            value = int(seq)
+        except (TypeError, ValueError):
+            return self
+        if value <= int(self.last_seq or 0):
+            return self
+        return self.model_copy(update={"last_seq": value})
+
+    def with_artifacts(self, refs: list[Any] | None, *, limit: int = 50) -> "JobRunView":
+        """按 ``artifact_id`` 去重合并产物引用（保序、有界）。"""
+        merged: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for source in (self.artifact_refs or [], refs or []):
+            for raw in source or []:
+                item = raw if isinstance(raw, dict) else (
+                    raw.model_dump(mode="json", exclude_none=True) if hasattr(raw, "model_dump") else None
+                )
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("artifact_id") or item.get("ref_id") or item.get("filename") or "")
+                if not key:
+                    continue
+                if key not in merged:
+                    order.append(key)
+                merged[key] = {**merged.get(key, {}), **item}
+        rows = [merged[key] for key in order]
+        return self.model_copy(update={"artifact_refs": rows[-limit:] if limit else rows})
 
     def to_snapshot(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude_none=True)

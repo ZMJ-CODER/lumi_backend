@@ -98,9 +98,12 @@ async def chat_stream(
 
     async def event_gen():
         from app.contracts.events import SseEventEncoder
+        from app.services.job_event_log import FrameRecorder
 
         # 每条流一个编码器：所有帧都带契约版本与单调递增 seq（前端可发现丢帧）。
         encoder = SseEventEncoder(conversation_id=conversation_id)
+        # 任务事件日志（断线续传）：只记带 job_id 的帧，普通闲聊帧自动跳过。
+        recorder = FrameRecorder()
         result = None
         lock = None
         started = False
@@ -130,7 +133,7 @@ async def chat_stream(
             if not is_guest and req.message_id:
                 replay = await _find_duplicate(db, conversation_id, req.message_id)
                 if replay is not None:
-                    yield encoder.encode(
+                    for _line in encoder.encode_all(
                         {
                             "type": "done",
                             "message_id": replay.get("message_id"),
@@ -140,7 +143,8 @@ async def chat_stream(
                             "scene": req.scene,
                             "title": "",
                         }
-                    )
+                    ):
+                        yield _line
                     return
 
             async for evt in orchestrator.handle_message_stream(
@@ -174,7 +178,10 @@ async def chat_stream(
                         elapsed_ms=int((time.perf_counter() - acceptance_started_at) * 1000),
                         event=evt,
                     )
-                yield encoder.encode(evt)
+                for _frame, _line in encoder.encode_frames(evt):
+                    if recorder.add(_frame):
+                        await recorder.flush()
+                    yield _line
                 if evt["type"] == "done":
                     # Anything after a terminal SSE event is best-effort
                     # persistence/notification work.  It must never append an
@@ -216,17 +223,19 @@ async def chat_stream(
             code = "OFFICE_JOB_CONFLICT" if status == 409 else (
                 "OFFICE_JOB_BACKPRESSURE" if isinstance(exc, AgentBackpressureError) else "OFFICE_JOB_LIMIT"
             )
-            yield encoder.encode({"type": "error", "message": str(exc), "status": status, "code": code})
+            for _line in encoder.encode_all({"type": "error", "message": str(exc), "status": status, "code": code}):
+                yield _line
         except StatePersistenceError:
             # 禁止先发 job_id 再让客户端轮询一个不存在的快照。这里明确告诉用户
             # 状态库不可用，避免前端把它误显示为“回复中断”。
             logger.error("办公任务状态库写后读校验失败")
-            yield encoder.encode({
+            for _line in encoder.encode_all({
                 "type": "error",
                 "message": "办公任务未能提交：任务状态库暂不可用，请检查 Redis 后重试。",
                 "status": 503,
                 "code": "OFFICE_JOB_STATE_UNAVAILABLE",
-            })
+            }):
+                yield _line
         except Exception as exc:  # noqa: BLE001
             logger.warning("流式聊天失败: {}", exc)
             if done_emitted:
@@ -264,13 +273,19 @@ async def chat_stream(
                 "MODEL_CONNECTION_ERROR": 503,
                 "MODEL_UNAVAILABLE": 503,
             }.get(model_code)
-            yield encoder.encode({
+            for _line in encoder.encode_all({
                 "type": "error",
                 "message": model_message if model_status else "服务器内部错误",
                 "status": model_status or 500,
                 "code": model_code if model_status else "CHAT_STREAM_INTERNAL_ERROR",
-            })
+            }):
+                yield _line
         finally:
+            # 尾帧必须落日志：断线续传时不能丢最后一批过程/终态事件。
+            try:
+                await recorder.flush()
+            except Exception:  # noqa: BLE001 - 日志失败不影响已交付的回复
+                pass
             if lock is not None:
                 try:
                     await lock.release()

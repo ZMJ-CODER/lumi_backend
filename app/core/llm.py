@@ -109,9 +109,61 @@ class LLMClient:
         disable_reasoning_effort: bool,
         messages: list[dict],
         llm_config: dict[str, Any] | None = None,
+        role: str | None = None,
+        require_tools: bool = False,
     ):
-        cfg = dict(llm_config or await get_llm_config(scene, self.provider, user_id=user_id))
-        # 所有入口（.env、Redis 动态配置、用户 BYOK）在真正创建客户端前走
+        """解析一次调用用的模型。
+
+        优先级：显式 ``llm_config``（BYOK / Job 冻结）→ 显式 model/base_url →
+        **角色档位**（``role=``，见 ``app.core.model_roles``）→ 既有 scene 链。
+
+        ``require_tools=True`` 时，若角色档位声明"不支持工具调用"，则按角色回退
+        策略升级到 ``main``（例如写入类决策不能由低成本模型在没有工具能力时继续）。
+        """
+        role_name = str(role or "").strip()
+        role_info = None
+        if role_name and llm_config is None and not (model or base_url):
+            from app.core import model_roles
+
+            role_info = await model_roles.resolve_role(
+                role_name, scene=scene, user_id=user_id, request_api_key=api_key
+            )
+            if require_tools and not role_info.supports_tools:
+                policy = model_roles.role_fallback_policy(role_name)
+                upgraded = await model_roles.resolve_role(
+                    role_name, scene=scene, user_id=user_id, request_api_key=None
+                )
+                from app.core.model_roles import PROFILE_MAIN
+
+                if policy == "main" and upgraded.profile != PROFILE_MAIN:
+                    main_cfg = await model_roles.resolve_role(
+                        model_roles.ROLE_DIRECT_ANSWER, scene=scene, user_id=user_id
+                    )
+                    logger.warning(
+                        "[model-role] {} 档位不支持工具调用，按回退策略升级到 main（{} → {}）",
+                        role_name, role_info.model, main_cfg.model,
+                    )
+                    role_info = main_cfg
+                else:
+                    logger.warning(
+                        "[model-role] {} 使用的档位声明不支持工具调用（model={}）；"
+                        "如需工具能力请在后台把该角色指向 main 档位",
+                        role_name, role_info.model,
+                    )
+            cfg = dict(role_info.api_dict())
+        else:
+            cfg = dict(llm_config or await get_llm_config(scene, self.provider, user_id=user_id))
+            # 角色给"默认模型"，显式参数仍可覆盖（调用方知道自己在做什么）。
+            if role_name and (model or base_url) and llm_config is None:
+                from app.core import model_roles
+
+                fallback_role = await model_roles.resolve_role(
+                    role_name, scene=scene, user_id=user_id, request_api_key=api_key
+                )
+                cfg.setdefault("model", fallback_role.model)
+                cfg.setdefault("base_url", fallback_role.base_url)
+                cfg.setdefault("api_key", fallback_role.api_key)
+        # 所有入口（.env、Redis 动态配置、用户 BYOK、角色档位）在真正创建客户端前走
         # 同一套地址规范化。否则历史 DeepSeek ``/v1`` 配置会在断路器、日志
         # 与实际请求之间产生不一致，也不利于定位连接问题。
         selected_base_url = normalize_provider_base_url(base_url or cfg.get("base_url") or "")
@@ -130,7 +182,7 @@ class LLMClient:
             timeout=selected_timeout,
             reasoning_effort=effort,
             llm_config=cfg,
-        ), selected_model, selected_base_url
+        ), selected_model, selected_base_url, role_info
 
     @staticmethod
     def _message_text(reply: BaseMessage) -> str:
@@ -146,7 +198,21 @@ class LLMClient:
         usage = getattr(reply, "usage_metadata", None) or {}
         return usage.get("input_tokens") or usage.get("prompt_tokens"), usage.get("output_tokens") or usage.get("completion_tokens")
 
-    async def _record(self, reply: BaseMessage, *, messages: list[dict], user_id: str | None, category: str | None, model: str, text: str) -> None:
+    async def _record(
+        self,
+        reply: BaseMessage,
+        *,
+        messages: list[dict],
+        user_id: str | None,
+        category: str | None,
+        model: str,
+        text: str,
+        role: str | None = None,
+        role_info: Any = None,
+        fallback_used: bool = False,
+        duration_ms: int = 0,
+        structured_ok: bool | None = None,
+    ) -> None:
         prompt_tokens, completion_tokens = self._usage(reply)
         await record_usage(
             user_id,
@@ -154,6 +220,12 @@ class LLMClient:
             model,
             prompt_tokens if prompt_tokens is not None else sum(estimate_tokens(str(m.get("content") or "")) for m in messages),
             completion_tokens if completion_tokens is not None else estimate_tokens(text),
+            model_role=str(role or "") or None,
+            model_profile=str(getattr(role_info, "profile", "") or "") or None,
+            config_source=str(getattr(role_info, "source", "") or "") or None,
+            fallback_used=bool(fallback_used),
+            duration_ms=int(duration_ms or 0),
+            structured_ok=structured_ok,
         )
 
     async def chat(
@@ -161,6 +233,7 @@ class LLMClient:
         messages: list[dict],
         *,
         scene: str | None = None,
+        role: str | None = None,
         model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
@@ -172,35 +245,75 @@ class LLMClient:
         usage_category: str | None = None,
         **kwargs: Any,
     ) -> str:
-        """LangChain 非流式对话；保留动态配置、BYOK 与备用供应商策略。"""
+        """LangChain 非流式对话；保留动态配置、BYOK、角色档位与备用供应商策略。"""
         temperature, max_tokens = kwargs.pop("temperature", None), kwargs.pop("max_tokens", None)
         if kwargs:
             logger.debug("忽略 ChatModel 不支持的 legacy 参数: {}", sorted(kwargs))
 
         async def invoke(call_base_url: str | None, call_api_key: str | None, call_model: str | None):
-            chat_model, used_model, used_base_url = await self._model(
+            chat_model, used_model, used_base_url, role_info = await self._model(
                 scene=scene, user_id=usage_user_id, api_key=call_api_key, model=call_model, base_url=call_base_url,
                 timeout=timeout, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort,
                 disable_reasoning_effort=disable_reasoning_effort, messages=messages,
-                llm_config=llm_config,
+                llm_config=llm_config, role=role,
             )
             breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
             reply = await breaker.call(lambda: chat_model.ainvoke(convert_to_messages(messages)))
             text = self._message_text(reply)
             if not text.strip():
                 raise RuntimeError("模型返回空内容")
-            return reply, text, used_model
+            return reply, text, used_model, role_info
 
         try:
-            reply, text, used_model = await invoke(base_url, api_key, model)
+            reply, text, used_model, role_info = await invoke(base_url, api_key, model)
         except Exception as exc:
+            # 角色回退策略（app/core/model_roles.ROLE_FALLBACK）：低成本中间角色失败时
+            # 按角色决定"换 main 重试"还是"直接失败交给确定性兜底"。
+            upgraded = await self._role_fallback_target(role, exc, scene=scene, user_id=usage_user_id)
+            if upgraded is not None:
+                logger.warning(
+                    "[model-role] {} 调用失败，按回退策略切换 {} 重试: {}",
+                    role, upgraded["model"], str(exc)[:120],
+                )
+                reply, text, used_model, role_info = await invoke(
+                    upgraded.get("base_url"), upgraded.get("api_key"), upgraded.get("model")
+                )
+                await self._record(
+                    reply, messages=messages, user_id=usage_user_id, category=usage_category,
+                    model=used_model, text=text, role=role, fallback_used=True,
+                )
+                return text
             fallback = self._fallback_cfg()
-            if scene == "office" or llm_config or not (fallback and self._is_retryable_error(exc)):
+            if scene == "office" or llm_config or role or not (fallback and self._is_retryable_error(exc)):
                 raise
             logger.warning("LLM 主供应商调用失败，切换 {} 重试: {}", fallback["model"], str(exc)[:120])
-            reply, text, used_model = await invoke(fallback["base_url"], fallback["api_key"], fallback["model"])
-        await self._record(reply, messages=messages, user_id=usage_user_id, category=usage_category, model=used_model, text=text)
+            reply, text, used_model, role_info = await invoke(fallback["base_url"], fallback["api_key"], fallback["model"])
+        await self._record(
+            reply, messages=messages, user_id=usage_user_id, category=usage_category,
+            model=used_model, text=text, role=role, role_info=role_info,
+        )
         return text
+
+    async def _role_fallback_target(
+        self,
+        role: str | None,
+        exc: Exception,
+        *,
+        scene: str | None,
+        user_id: str | None,
+    ) -> dict[str, Any] | None:
+        """角色回退目标（``main`` 策略才升级；只对可重试错误生效）。"""
+        name = str(role or "").strip()
+        if not name or not self._is_retryable_error(exc):
+            return None
+        from app.core import model_roles
+
+        if model_roles.role_fallback_policy(name) != "main":
+            return None
+        resolved = await model_roles.resolve_role(
+            model_roles.ROLE_DIRECT_ANSWER, scene=scene, user_id=user_id
+        )
+        return resolved.api_dict()
 
     async def chat_with_tools(
         self,
@@ -208,6 +321,7 @@ class LLMClient:
         tools: list[dict],
         *,
         scene: str | None = None,
+        role: str | None = None,
         model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
@@ -218,16 +332,21 @@ class LLMClient:
         llm_config: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> tuple[str, list[dict]]:
-        """LangChain 工具绑定，返回原有 OpenAI tool-call 字典形状。"""
+        """LangChain 工具绑定，返回原有 OpenAI tool-call 字典形状。
+
+        ``role`` 决定用哪个档位；工具能力由档位声明保证（``require_tools=True``：
+        声明不支持工具的低成本档位会按角色回退策略升级到 main，而不是静默降级成
+        "没有工具的模型"）。
+        """
         if kwargs:
             logger.debug("忽略 ChatModel 工具调用的 legacy 参数: {}", sorted(kwargs))
 
         async def invoke(call_base_url: str | None, call_api_key: str | None, call_model: str | None):
-            chat_model, used_model, used_base_url = await self._model(
+            chat_model, used_model, used_base_url, role_info = await self._model(
                 scene=scene, user_id=usage_user_id, api_key=call_api_key, model=call_model, base_url=call_base_url,
                 timeout=timeout, temperature=None, max_tokens=None, reasoning_effort=reasoning_effort,
                 disable_reasoning_effort=False, messages=messages,
-                llm_config=llm_config,
+                llm_config=llm_config, role=role, require_tools=role is not None,
             )
             breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
             try:
@@ -257,17 +376,36 @@ class LLMClient:
             if reasoning is not None:
                 for item in normalized_calls:
                     item["reasoning_content"] = reasoning
-            return reply, normalized_text, normalized_calls, used_model
+            return reply, normalized_text, normalized_calls, used_model, role_info
 
         try:
-            reply, content, tool_calls, used_model = await invoke(base_url, api_key, model)
+            reply, content, tool_calls, used_model, role_info = await invoke(base_url, api_key, model)
         except Exception as exc:
+            upgraded = await self._role_fallback_target(role, exc, scene=scene, user_id=usage_user_id)
+            if upgraded is not None:
+                logger.warning(
+                    "[model-role] {} 工具调用失败，按回退策略切换 {} 重试: {}",
+                    role, upgraded["model"], str(exc)[:120],
+                )
+                reply, content, tool_calls, used_model, role_info = await invoke(
+                    upgraded.get("base_url"), upgraded.get("api_key"), upgraded.get("model")
+                )
+                await self._record(
+                    reply, messages=messages, user_id=usage_user_id, category=usage_category,
+                    model=used_model, text=content, role=role, role_info=role_info, fallback_used=True,
+                )
+                return content, tool_calls
             fallback = self._fallback_cfg()
-            if scene == "office" or llm_config or not (fallback and self._is_retryable_error(exc)):
+            if scene == "office" or llm_config or role or not (fallback and self._is_retryable_error(exc)):
                 raise
             logger.warning("LLM 工具调用主供应商失败，切换 {} 重试: {}", fallback["model"], str(exc)[:120])
-            reply, content, tool_calls, used_model = await invoke(fallback["base_url"], fallback["api_key"], fallback["model"])
-        await self._record(reply, messages=messages, user_id=usage_user_id, category=usage_category, model=used_model, text=content)
+            reply, content, tool_calls, used_model, role_info = await invoke(
+                fallback["base_url"], fallback["api_key"], fallback["model"]
+            )
+        await self._record(
+            reply, messages=messages, user_id=usage_user_id, category=usage_category,
+            model=used_model, text=content, role=role, role_info=role_info,
+        )
         return content, tool_calls
 
     async def chat_with_tools_with_usage(
@@ -276,6 +414,7 @@ class LLMClient:
         tools: list[dict],
         *,
         scene: str | None = None,
+        role: str | None = None,
         model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
@@ -298,11 +437,11 @@ class LLMClient:
             logger.debug("忽略 ChatModel 工具调用的 legacy 参数: {}", sorted(kwargs))
 
         async def invoke(call_base_url: str | None, call_api_key: str | None, call_model: str | None):
-            chat_model, used_model, used_base_url = await self._model(
+            chat_model, used_model, used_base_url, role_info = await self._model(
                 scene=scene, user_id=usage_user_id, api_key=call_api_key, model=call_model, base_url=call_base_url,
                 timeout=timeout, temperature=None, max_tokens=None, reasoning_effort=reasoning_effort,
                 disable_reasoning_effort=False, messages=messages,
-                llm_config=llm_config,
+                llm_config=llm_config, role=role, require_tools=role is not None,
             )
             breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
             try:
@@ -319,16 +458,18 @@ class LLMClient:
                 reply = await breaker.call(lambda: chat_model.ainvoke(self._tool_fallback_messages(messages, tools)))
                 calls = []
             normalized_text, normalized_calls, _warnings = normalize_tool_response(self._message_text(reply), calls)
-            return reply, normalized_text, normalized_calls, used_model
+            return reply, normalized_text, normalized_calls, used_model, role_info
 
         try:
-            reply, content, tool_calls, used_model = await invoke(base_url, api_key, model)
+            reply, content, tool_calls, used_model, role_info = await invoke(base_url, api_key, model)
         except Exception as exc:
             fallback = self._fallback_cfg()
             if scene == "office" or llm_config or not (fallback and self._is_retryable_error(exc)):
                 raise
             logger.warning("LLM 工具调用主供应商失败，切换 {} 重试: {}", fallback["model"], str(exc)[:120])
-            reply, content, tool_calls, used_model = await invoke(fallback["base_url"], fallback["api_key"], fallback["model"])
+            reply, content, tool_calls, used_model, role_info = await invoke(
+                fallback["base_url"], fallback["api_key"], fallback["model"]
+            )
 
         prompt_tokens, completion_tokens = self._usage(reply)
         prompt_source = "provider" if prompt_tokens is not None else "estimated"
@@ -344,6 +485,9 @@ class LLMClient:
                 used_model,
                 prompt_tokens,
                 completion_tokens,
+                model_role=str(role or "") or None,
+                model_profile=str(getattr(role_info, "profile", "") or "") or None,
+                config_source=str(getattr(role_info, "source", "") or "") or None,
             )
         return content, tool_calls, {
             "model": used_model,
@@ -387,6 +531,7 @@ class LLMClient:
         messages: list[dict],
         *,
         scene: str | None = None,
+        role: str | None = None,
         model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
@@ -400,22 +545,28 @@ class LLMClient:
         llm_config: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[str]:
-        """LangChain ``astream``；首个输出前失败才允许切备用供应商。"""
+        """LangChain ``astream``；首个输出前失败才允许切备用供应商。
+
+        角色档位同样只在**首 token 之前**参与切换：一旦已经吐出内容，就不再换模型
+        （换成不同模型会让同一段回答前后风格/能力不一致，且工具状态无法迁移）。
+        """
         if kwargs:
             logger.debug("忽略 ChatModel 流式调用的 legacy 参数: {}", sorted(kwargs))
 
         usage: tuple[int | None, int | None] = (None, None)
+        role_state: dict[str, Any] = {"info": None}
         started_at = time.perf_counter()
         first_token_at: float | None = None
 
         async def stream_once(call_base_url: str | None, call_api_key: str | None, call_model: str | None):
             nonlocal usage
-            chat_model, used_model, used_base_url = await self._model(
+            chat_model, used_model, used_base_url, role_info = await self._model(
                 scene=scene, user_id=usage_user_id, api_key=call_api_key, model=call_model, base_url=call_base_url,
                 timeout=timeout, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort,
                 disable_reasoning_effort=disable_reasoning_effort, messages=messages,
-                llm_config=llm_config,
+                llm_config=llm_config, role=role,
             )
+            role_state["info"] = role_info
             breaker = get_breaker(f"llm:{used_base_url}:{used_model}")
             await breaker.before_call()
             try:
@@ -434,6 +585,7 @@ class LLMClient:
 
         runtime_cfg = dict(llm_config or await get_llm_config(scene, self.provider, user_id=usage_user_id))
         text, used_model, emitted = "", model or runtime_cfg.get("model") or settings.DEEPSEEK_MODEL, False
+        fallback_used = False
         try:
             async for delta in stream_once(base_url, api_key, model):
                 emitted = True
@@ -448,20 +600,44 @@ class LLMClient:
                     )
                 yield delta
         except Exception as exc:
-            fallback = self._fallback_cfg()
-            if scene == "office" or llm_config or emitted or not (fallback and self._is_retryable_error(exc)):
-                raise
-            logger.warning("LLM 流式主供应商失败，切换 {} 重试: {}", fallback["model"], str(exc)[:120])
-            used_model = fallback["model"]
-            async for delta in stream_once(fallback["base_url"], fallback["api_key"], fallback["model"]):
-                text += delta
-                yield delta
+            # 首 token 之前才允许换模型：角色回退（main 策略）优先，再退备用供应商。
+            upgraded = None if emitted else await self._role_fallback_target(
+                role, exc, scene=scene, user_id=usage_user_id
+            )
+            if upgraded is not None:
+                logger.warning(
+                    "[model-role] {} 流式调用失败（首 token 前），按回退策略切换 {}: {}",
+                    role, upgraded.get("model"), str(exc)[:120],
+                )
+                fallback_used = True
+                used_model = str(upgraded.get("model") or used_model)
+                async for delta in stream_once(
+                    upgraded.get("base_url"), upgraded.get("api_key"), upgraded.get("model")
+                ):
+                    emitted = True
+                    text += delta
+                    yield delta
+            else:
+                fallback = self._fallback_cfg()
+                if scene == "office" or llm_config or role or emitted or not (fallback and self._is_retryable_error(exc)):
+                    raise
+                logger.warning("LLM 流式主供应商失败，切换 {} 重试: {}", fallback["model"], str(exc)[:120])
+                fallback_used = True
+                used_model = fallback["model"]
+                async for delta in stream_once(fallback["base_url"], fallback["api_key"], fallback["model"]):
+                    text += delta
+                    yield delta
         await record_usage(
             usage_user_id,
             usage_category or "chat",
             used_model or settings.DEEPSEEK_MODEL,
             usage[0] if usage[0] is not None else sum(estimate_tokens(str(message.get("content") or "")) for message in messages),
             usage[1] if usage[1] is not None else estimate_tokens(text),
+            model_role=str(role or "") or None,
+            model_profile=str(getattr(role_state.get("info"), "profile", "") or "") or None,
+            config_source=str(getattr(role_state.get("info"), "source", "") or "") or None,
+            fallback_used=fallback_used,
+            duration_ms=int((time.perf_counter() - started_at) * 1000),
         )
         logger.info(
             "LLM 流完成: scene={} model={} duration_ms={} output_chars={}",

@@ -7,6 +7,7 @@ from app.api.v1 import (
     admin_mcp,
     admin_system,
     agents,
+    artifacts,
     auth,
     call,
     capabilities,
@@ -86,6 +87,8 @@ api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledg
 # 长期记忆调试（superadmin）
 api_router.include_router(memories.router, prefix="/admin/memories", tags=["admin"])
 api_router.include_router(office_docs.router, prefix="/office/docs", tags=["office"])
+# 产物（artifact_created 事件对应的受权限保护下载入口）
+api_router.include_router(artifacts.router, prefix="/artifacts", tags=["artifacts"])
 
 # 角色提示词
 api_router.include_router(prompts.router, prefix="/prompts", tags=["prompts"])

@@ -146,6 +146,90 @@ class Settings(BaseSettings):
     # 多数兼容网关会拒绝未知字段；默认留空，格式为逗号分隔的模型 ID。
     LLM_REASONING_EFFORT_MODELS: str = ""
 
+    # ── 模型档位（Model Profile）：按能力分级配置，业务只认"角色" ──
+    # 每个档位四元组 provider/base_url/api_key/model；留空表示按档位语义继承：
+    #   main      → 旧全局 .env（LLM_PROVIDER / DEEPSEEK_MODEL / QWEN_MODEL）
+    #   cheap     → DS_FLASH_MODEL / QWEN_TURBO_MODEL（低成本中间任务）
+    #   reasoning → CHAT_THINK_MODEL（复杂规划/代码/动态 Agent）
+    #   vision    → VL_MODEL（图片/扫描件/PPT 视觉理解）
+    # 也可以只在后台改 cheap，一处生效所有 cheap 角色（Redis 覆盖优先于 .env）。
+    LLM_MAIN_PROVIDER: str = ""
+    LLM_MAIN_BASE_URL: str = ""
+    LLM_MAIN_API_KEY: str = ""
+    LLM_MAIN_MODEL: str = ""
+    LLM_MAIN_REASONING_EFFORT: str = ""
+
+    LLM_CHEAP_PROVIDER: str = ""
+    LLM_CHEAP_BASE_URL: str = ""
+    LLM_CHEAP_API_KEY: str = ""
+    LLM_CHEAP_MODEL: str = ""
+    LLM_CHEAP_REASONING_EFFORT: str = ""
+
+    LLM_REASONING_PROVIDER: str = ""
+    LLM_REASONING_BASE_URL: str = ""
+    LLM_REASONING_API_KEY: str = ""
+    LLM_REASONING_MODEL: str = ""
+    LLM_REASONING_REASONING_EFFORT: str = ""
+
+    LLM_VISION_PROVIDER: str = ""
+    LLM_VISION_BASE_URL: str = ""
+    LLM_VISION_API_KEY: str = ""
+    LLM_VISION_MODEL: str = ""
+    LLM_VISION_REASONING_EFFORT: str = ""
+
+    # 档位能力覆盖（None = 用 model_roles 里的默认声明）
+    LLM_MAIN_SUPPORTS_TOOLS: bool | None = None
+    LLM_MAIN_SUPPORTS_JSON: bool | None = None
+    LLM_MAIN_SUPPORTS_VISION: bool | None = None
+    LLM_MAIN_SUPPORTS_REASONING: bool | None = None
+    LLM_MAIN_MAX_TOKENS: int = 0
+    LLM_MAIN_MAX_CONTEXT: int = 0
+    LLM_MAIN_TIMEOUT: float = 0.0
+
+    LLM_CHEAP_SUPPORTS_TOOLS: bool | None = None
+    LLM_CHEAP_SUPPORTS_JSON: bool | None = None
+    LLM_CHEAP_SUPPORTS_VISION: bool | None = None
+    LLM_CHEAP_SUPPORTS_REASONING: bool | None = None
+    LLM_CHEAP_MAX_TOKENS: int = 0
+    LLM_CHEAP_MAX_CONTEXT: int = 0
+    LLM_CHEAP_TIMEOUT: float = 0.0
+
+    LLM_REASONING_SUPPORTS_TOOLS: bool | None = None
+    LLM_REASONING_SUPPORTS_JSON: bool | None = None
+    LLM_REASONING_SUPPORTS_VISION: bool | None = None
+    LLM_REASONING_SUPPORTS_REASONING: bool | None = None
+    LLM_REASONING_MAX_TOKENS: int = 0
+    LLM_REASONING_MAX_CONTEXT: int = 0
+    LLM_REASONING_TIMEOUT: float = 0.0
+
+    LLM_VISION_SUPPORTS_TOOLS: bool | None = None
+    LLM_VISION_SUPPORTS_JSON: bool | None = None
+    LLM_VISION_SUPPORTS_VISION: bool | None = None
+    LLM_VISION_SUPPORTS_REASONING: bool | None = None
+    LLM_VISION_MAX_TOKENS: int = 0
+    LLM_VISION_MAX_CONTEXT: int = 0
+    LLM_VISION_TIMEOUT: float = 0.0
+
+    # ── 职责 → 档位（Model Role）：留空用 app/core/model_roles.py 的默认表 ──
+    # 例：LLM_ROLE_TITLE=cheap、LLM_ROLE_CODE_WRITER=main、LLM_ROLE_VISION=vision
+    LLM_ROLE_TITLE: str = ""
+    LLM_ROLE_SUMMARY: str = ""
+    LLM_ROLE_INTENT_ASSESSOR: str = ""
+    LLM_ROLE_QUERY_REWRITER: str = ""
+    LLM_ROLE_MEMORY_EXTRACT: str = ""
+    LLM_ROLE_MEMORY_MERGE: str = ""
+    LLM_ROLE_PRIVACY_CANDIDATE: str = ""
+    LLM_ROLE_PLANNER_SIMPLE: str = ""
+    LLM_ROLE_PLANNER_COMPLEX: str = ""
+    LLM_ROLE_TOOL_READ: str = ""
+    LLM_ROLE_TOOL_WRITE: str = ""
+    LLM_ROLE_TOOL_EXECUTE: str = ""
+    LLM_ROLE_DIRECT_ANSWER: str = ""
+    LLM_ROLE_FINAL_SUMMARY: str = ""
+    LLM_ROLE_CODE_WRITER: str = ""
+    LLM_ROLE_CODE_REVIEWER: str = ""
+    LLM_ROLE_VISION: str = ""
+
     # ── 嵌入模型（本地推理，sentence-transformers）──
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
     EMBEDDING_DIMENSION: int = 1024  # bge-m3=1024（已从 bge-small-zh 迁移）
@@ -440,6 +524,12 @@ class Settings(BaseSettings):
     ]
     # 渐进开放写工具：False 时向 LLM 隐藏写操作技能（只读先行，发消息/改文件/装依赖等）
     AGENT_TOOL_WRITE_ENABLED: bool = True
+    # SSE 事件投影协议（方案第一阶段过渡开关）：
+    #   legacy    —— 扁平帧 + version/seq（前端当前消费的形状，默认，逐字节不变）；
+    #   canonical —— 统一信封（event_id/version/seq/type/trace_id/conversation_id/
+    #                job_id/occurred_at/payload）。
+    # 两种投影来自同一份内部标准事件；前端接入 StreamConsumer 后再切 canonical。
+    STREAM_EVENT_PROTOCOL: str = "legacy"
     # 混合架构：客户端技能通过 MCP 调用（可插拔）。配置：
     # [{"name": "lumi_client", "transport": "streamable-http", "url": "http://127.0.0.1:8765/mcp"}]
     MCP_SERVERS: list[dict] = []

@@ -226,16 +226,25 @@ async def assess_task_profile(
     llm_config: dict | None = None,
     use_llm: bool = True,
 ) -> tuple[TaskProfile, str]:
-    """返回 (profile, source)；source ∈ {"llm","heuristic"}，异常全部兜底。"""
+    """返回 (profile, source)；source ∈ {"llm","heuristic"}，异常全部兜底。
+
+    模型档位：**role=intent_assessor**（默认 cheap）。安全边界不变——
+    低成本模型只负责"理解意图"：是否存在副作用、是否需要审批、是否越权仍由
+    确定性规则判定（``lumi_orch.execution_router`` + Capability/Approval 链）。
+    结构化输出不合法或模型不可用时，回退顺序是
+    ``cheap → main（一次） → 确定性启发式画像``。
+    """
     if use_llm:
         try:
             from app.agents.langchain.planning import invoke_json_object
+            from app.core.model_roles import ROLE_INTENT_ASSESSOR
 
             payload = await invoke_json_object(
                 assessor_prompt(context),
                 user_id=user_id,
                 api_key=llm_api_key,
                 llm_config=llm_config,
+                role=ROLE_INTENT_ASSESSOR,
             )
             profile = TaskProfile.model_validate(_sanitize_profile_payload(payload))
             return apply_confidence_policy(profile), "llm"

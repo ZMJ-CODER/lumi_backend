@@ -15,6 +15,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.llm import LLMClient
+from app.core.model_roles import ROLE_QUERY_REWRITER
 from app.services.usage import CATEGORY_REWRITE, record_usage
 
 REWRITE_SYSTEM_PROMPT = (
@@ -41,18 +42,23 @@ def should_expand_query(text: str, *, scene: str | None, thinking_mode: str = "f
 
 
 async def _rewrite(
-    base_url: str, api_key: str | None, model: str, text: str, user_id: str | None = None
+    base_url: str | None, api_key: str | None, model: str | None, text: str, user_id: str | None = None
 ) -> str | None:
-    """调用 OpenAI 兼容端点改写查询；失败返回 None（由调用方回退原文）."""
+    """调用改写查询；失败返回 None（由调用方回退原文）。
+
+    模型/端点留空时走 **role=query_rewriter**（默认 cheap 档位）：查询改写属于
+    典型低成本场景，失败必须静默回退原查询。
+    """
     try:
         rewritten = await LLMClient().chat(
             [
                 {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
                 {"role": "user", "content": f"用户提问：{text}"},
             ],
-            base_url=base_url,
+            role=ROLE_QUERY_REWRITER,
+            base_url=base_url or None,
             api_key=api_key,
-            model=model,
+            model=model or None,
             timeout=settings.RAG_QUERY_REWRITE_TIMEOUT_SECONDS,
             temperature=0.2,
             max_tokens=256,
@@ -67,7 +73,7 @@ async def _rewrite(
 
 
 async def rewrite_query(text: str, user_id: str | None = None) -> str | None:
-    """服务端改写：默认云端 qwen-turbo；本地小模型插槽配置后走本地."""
+    """服务端改写：默认走 query_rewriter 角色（cheap 档位）；本地插槽配置后走本地."""
     if not settings.RAG_QUERY_REWRITE_ENABLED:
         return None
     if (
@@ -75,9 +81,7 @@ async def rewrite_query(text: str, user_id: str | None = None) -> str | None:
         and settings.RAG_QUERY_REWRITE_MODEL.strip()
     ):
         return await _rewrite_local(text, user_id)
-    return await _rewrite(
-        settings.QWEN_BASE_URL, settings.QWEN_API_KEY, settings.QWEN_TURBO_MODEL, text, user_id
-    )
+    return await _rewrite(None, None, None, text, user_id)
 
 
 async def _rewrite_local(text: str, user_id: str | None = None) -> str | None:

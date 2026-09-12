@@ -598,10 +598,26 @@ class LLMUsage(Base, UUIDMixin):
     model: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # ── 模型角色遥测（方案 §九.5；全部可空，老库未迁移时写入自动降级为只记旧字段）──
+    model_role: Mapped[str | None] = mapped_column(
+        String(40), nullable=True, comment="逻辑角色：title/summary/intent_assessor/planner_* …"
+    )
+    model_profile: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, comment="模型档位：main/cheap/reasoning/vision"
+    )
+    config_source: Mapped[str | None] = mapped_column(
+        String(40), nullable=True, comment="配置来源：default/env/admin/byok"
+    )
+    fallback_used: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否发生角色/供应商回退")
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0, comment="本次调用耗时")
+    structured_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True, comment="结构化输出是否通过校验")
+    tool_calls: Mapped[int] = mapped_column(Integer, default=0, comment="本次调用返回的工具调用数")
+    complexity: Mapped[str | None] = mapped_column(String(20), nullable=True, comment="任务复杂度 M0-M3/ATOMIC…")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         Index("idx_llm_usage_user_cat_created", "user_id", "category", "created_at"),
+        Index("idx_llm_usage_role_created", "model_role", "created_at"),
     )
 
 

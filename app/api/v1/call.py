@@ -206,7 +206,7 @@ async def call_stream(req: CallTurnRequest, payload: dict = Depends(require_auth
                         audio = await synthesize_speech(seg)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("流式 TTS 单段失败: {}", exc)
-                    yield encoder.encode(
+                    for _line in encoder.encode_all(
                         {
                             "type": "segment",
                             "index": segment_idx,
@@ -214,7 +214,8 @@ async def call_stream(req: CallTurnRequest, payload: dict = Depends(require_auth
                             "audio_base64": base64.b64encode(audio).decode("ascii") if audio else "",
                             "mime": detect_audio_meta(audio)[1] if audio else "audio/mpeg",
                         }
-                    )
+                    ):
+                        yield _line
                     segment_idx += 1
             # 收尾剩余缓冲
             if buffer.strip():
@@ -223,7 +224,7 @@ async def call_stream(req: CallTurnRequest, payload: dict = Depends(require_auth
                     audio = await synthesize_speech(buffer.strip())
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("流式 TTS 收尾失败: {}", exc)
-                yield encoder.encode(
+                for _line in encoder.encode_all(
                     {
                         "type": "segment",
                         "index": segment_idx,
@@ -231,7 +232,8 @@ async def call_stream(req: CallTurnRequest, payload: dict = Depends(require_auth
                         "audio_base64": base64.b64encode(audio).decode("ascii") if audio else "",
                         "mime": detect_audio_meta(audio)[1] if audio else "audio/mpeg",
                     }
-                )
+                ):
+                    yield _line
             # 上下文延续（与聊天同一 Redis 上下文，计入一次交互）
             now = datetime.now(timezone.utc).isoformat()
             await orchestrator.append_context(
@@ -246,10 +248,12 @@ async def call_stream(req: CallTurnRequest, payload: dict = Depends(require_auth
                 },
             )
             await orchestrator._maybe_summarize_context(conversation_id, user_id, "chat")
-            yield encoder.encode({"type": "done", "content": full_text, "conversation_id": conversation_id})
+            for _line in encoder.encode_all({"type": "done", "content": full_text, "conversation_id": conversation_id}):
+                yield _line
         except Exception as exc:  # noqa: BLE001
             logger.warning("流式语音通话失败: {}", exc)
-            yield encoder.encode({"type": "error", "message": f"语音通话失败: {exc}"})
+            for _line in encoder.encode_all({"type": "error", "message": f"语音通话失败: {exc}"}):
+                yield _line
 
     return StreamingResponse(
         event_gen(),

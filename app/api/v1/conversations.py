@@ -765,7 +765,8 @@ async def conversation_stream(
                 if event.get("user_id") != str(uid):
                     continue
                 event_type = str(event.get("type") or "message")
-                yield f"event: {event_type}\n{encoder.encode(event)}"
+                for _line in encoder.encode_all(event):
+                    yield f"event: {event_type}\n{_line}"
         finally:
             await pubsub.unsubscribe(CONV_EVENTS_CHANNEL)
             await pubsub.aclose()

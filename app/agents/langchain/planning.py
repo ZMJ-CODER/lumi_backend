@@ -7,10 +7,30 @@ import re
 from typing import Any
 
 from langchain_core.messages import HumanMessage
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.agents.langchain.models import get_chat_model
 from app.core.config import settings
+from app.services.usage import CATEGORY_PLAN
+
+
+def _parse_json_object_text(text: str) -> dict[str, Any]:
+    """从模型文本里取出**单个 JSON 对象**（拒绝自由文本）。"""
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        if start < 0:
+            raise ValueError("模型未返回 JSON 对象") from None
+        value, _ = json.JSONDecoder().raw_decode(raw[start:])
+    if not isinstance(value, dict):
+        raise ValueError("模型返回的 JSON 不是对象")
+    return value or None
 
 
 class PlannerOutput(BaseModel):
@@ -86,29 +106,55 @@ async def invoke_json_object(
     api_key: str | None = None,
     llm_config: dict[str, Any] | None = None,
     max_tokens: int = 2000,
+    role: str | None = None,
 ) -> dict[str, Any] | None:
-    """无固定 Schema 的 JSON 对象，走兼容的普通聊天调用。"""
-    model = await get_chat_model(
-        scene="office",
-        user_id=user_id,
-        api_key=api_key,
-        temperature=0.1,
-        max_tokens=max_tokens,
-        timeout=settings.AGENT_PLANNER_TIMEOUT_SECONDS,
-        llm_config=llm_config,
-    )
-    reply = await model.ainvoke([HumanMessage(content=prompt)])
-    raw = _message_text(reply).strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
-        raw = re.sub(r"\s*```$", "", raw).strip()
+    """无固定 Schema 的 JSON 对象，走兼容的普通聊天调用。
+
+    ``role`` 让调用方指定模型档位（例如意图评估 → ``intent_assessor``）。
+    结构化结果不合法时由调用方决定回退（意图评估会换主档位重试一次，仍失败则用
+    确定性启发式画像）——**低成本模型只负责"理解意图"，不负责安全放行**。
+    """
+    from app.core import model_roles
+    from app.core.llm import LLMClient
+
+    role_name = str(role or "").strip()
+    client = LLMClient()
+
+    async def _ask(ask_role: str | None) -> dict[str, Any]:
+        if ask_role:
+            # 角色档位走统一 LLMClient（含能力校验、遥测与角色回退）。
+            text = await client.chat(
+                [{"role": "user", "content": prompt}],
+                scene="office",
+                role=ask_role,
+                api_key=api_key,
+                timeout=settings.AGENT_PLANNER_TIMEOUT_SECONDS,
+                llm_config=llm_config,
+                usage_user_id=user_id,
+                usage_category=CATEGORY_PLAN,
+                temperature=0.1,
+                max_tokens=max_tokens,
+            )
+            return _parse_json_object_text(text)
+        model = await get_chat_model(
+            scene="office",
+            user_id=user_id,
+            api_key=api_key,
+            temperature=0.1,
+            max_tokens=max_tokens,
+            timeout=settings.AGENT_PLANNER_TIMEOUT_SECONDS,
+            llm_config=llm_config,
+        )
+        reply = await model.ainvoke([HumanMessage(content=prompt)])
+        return _parse_json_object_text(_message_text(reply))
+
     try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        if start < 0:
-            raise ValueError("模型未返回 JSON 对象") from None
-        value, _ = json.JSONDecoder().raw_decode(raw[start:])
-    if not isinstance(value, dict):
-        raise ValueError("模型返回的 JSON 不是对象")
-    return value or None
+        return await _ask(role_name or None)
+    except Exception as exc:  # noqa: BLE001
+        # 低成本角色失败/结构化输出不合法 → 按角色回退策略换 main 重试一次。
+        if not role_name or model_roles.role_fallback_policy(role_name) != "main":
+            raise
+        logger.warning(
+            "[model-role] {} 结构化输出失败（{}），按回退策略换 main 重试", role_name, str(exc)[:120]
+        )
+        return await _ask(model_roles.ROLE_DIRECT_ANSWER)

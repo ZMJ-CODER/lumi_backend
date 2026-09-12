@@ -1,0 +1,287 @@
+{
+  "scenario": "artifact_task",
+  "description": "产物任务：step_started → artifact_created → step_completed → done",
+  "input_events": [
+    {
+      "type": "step_started",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "step_id": "s3",
+      "title": "生成报告",
+      "tool_name": "export_report"
+    },
+    {
+      "type": "artifact_created",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "artifact": {
+        "artifact_id": "art-1",
+        "type": "markdown",
+        "filename": "report.md",
+        "mime_type": "text/markdown",
+        "size_bytes": 2048,
+        "expires_at": "2026-01-01T00:00:00+00:00"
+      }
+    },
+    {
+      "type": "step_completed",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "step_id": "s3",
+      "status": "completed",
+      "title": "生成报告",
+      "result_summary": "报告已生成"
+    },
+    {
+      "type": "done",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "status": "completed"
+    }
+  ],
+  "legacy_frames": [
+    {
+      "type": "step_started",
+      "version": 1,
+      "seq": 1,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "step_id": "s3",
+      "title": "生成报告",
+      "tool_name": "export_report",
+      "entry_id": "seq:job-1:1",
+      "kind": "tool",
+      "summary": "",
+      "status": "running",
+      "sequence": 1,
+      "occurred_at": "2026-01-01T00:00:01.000Z",
+      "event_id": "evt_artifact_task-legacy-1"
+    },
+    {
+      "type": "artifact_created",
+      "version": 1,
+      "seq": 2,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "artifact": {
+        "artifact_id": "art-1",
+        "type": "markdown",
+        "filename": "report.md",
+        "mime_type": "text/markdown",
+        "size_bytes": 2048,
+        "expires_at": "2026-01-01T00:00:00+00:00"
+      },
+      "event_id": "evt_artifact_task-legacy-2",
+      "occurred_at": "2026-01-01T00:00:02.000Z"
+    },
+    {
+      "type": "step_completed",
+      "version": 1,
+      "seq": 3,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "step_id": "s3",
+      "status": "completed",
+      "title": "生成报告",
+      "result_summary": "报告已生成",
+      "entry_id": "seq:job-1:3",
+      "kind": "thinking",
+      "summary": "报告已生成",
+      "sequence": 3,
+      "occurred_at": "2026-01-01T00:00:03.000Z",
+      "event_id": "evt_artifact_task-legacy-3"
+    },
+    {
+      "type": "done",
+      "version": 1,
+      "seq": 4,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "status": "completed",
+      "event_id": "evt_artifact_task-legacy-4",
+      "occurred_at": "2026-01-01T00:00:04.000Z"
+    }
+  ],
+  "canonical_frames": [
+    {
+      "event_id": "evt_artifact_task-canonical-1",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 1,
+      "type": "step_started",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:01.000Z",
+      "payload": {
+        "step_id": "s3",
+        "step_type": "",
+        "name": "生成报告",
+        "display_summary": "正在执行：生成报告",
+        "tool_name": "export_report"
+      }
+    },
+    {
+      "event_id": "evt_artifact_task-canonical-2",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 2,
+      "type": "artifact_created",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:02.000Z",
+      "payload": {
+        "artifact_id": "art-1",
+        "type": "markdown",
+        "filename": "report.md",
+        "mime_type": "text/markdown",
+        "size_bytes": 2048,
+        "expires_at": "2026-01-01T00:00:00+00:00"
+      }
+    },
+    {
+      "event_id": "evt_artifact_task-canonical-3",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 3,
+      "type": "step_completed",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:03.000Z",
+      "payload": {
+        "step_id": "s3",
+        "status": "completed",
+        "duration_ms": 0,
+        "output_summary": "报告已生成",
+        "error_code": "",
+        "result_ref": {},
+        "artifact_refs": []
+      }
+    },
+    {
+      "event_id": "evt_artifact_task-canonical-4",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 4,
+      "type": "control",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:04.000Z",
+      "payload": {
+        "state": "completed",
+        "error_code": "",
+        "reason_code": "",
+        "reason": "",
+        "next_action": "",
+        "safe_next_action": ""
+      }
+    },
+    {
+      "event_id": "evt_artifact_task-canonical-5",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 5,
+      "type": "done",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:05.000Z",
+      "payload": {
+        "state": "completed",
+        "error_code": "",
+        "reason_code": "",
+        "reason": "",
+        "next_action": "",
+        "safe_next_action": ""
+      }
+    }
+  ],
+  "expect": {
+    "canonical_types": [
+      "step_started",
+      "artifact_created",
+      "step_completed",
+      "control",
+      "done"
+    ],
+    "legacy_types": [
+      "step_started",
+      "artifact_created",
+      "step_completed",
+      "done"
+    ],
+    "terminal_state": "completed",
+    "artifacts": 1,
+    "artifact_id": "art-1",
+    "artifact_forbidden_keys": [
+      "url",
+      "download_url",
+      "token",
+      "path"
+    ],
+    "dropped_after_terminal": 0
+  }
+}

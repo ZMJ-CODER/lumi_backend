@@ -29,8 +29,15 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from lumi_contracts.events.errors import translate_error
+from lumi_contracts.events.lifecycle import TERMINAL_STATES
+
 # 标准信封版本：破坏性改名才升版本；新增可选字段不升版本。
-EVENT_ENVELOPE_VERSION = 2
+#
+# **必须与前端 `streamConsumer.STREAM_EVENT_VERSION`（当前 1）对齐**：前端对
+# ``version > 支持的版本`` 的帧会走 `UNSUPPORTED_VERSION` 降级并**丢弃**，
+# 因此这里不能凭空大于前端的支持版本（canonical 协议从 1 开始）。
+EVENT_ENVELOPE_VERSION = 1
 
 # 载荷文本长度上限（事件是"过程/展示"，不是正文通道）。
 # 注意：``text_delta.content`` **不做展示级截断**——它就是正文本身，截断即丢字。
@@ -59,6 +66,43 @@ class CanonicalEventType(StrEnum):
 
 CANONICAL_EVENT_TYPES: frozenset[str] = frozenset(item.value for item in CanonicalEventType)
 
+#: 载荷结构版本（Schema 注册表的注册维度之一，见 ``events/registry.py``）。
+#:
+#: 规则：同一 ``type`` 内**只允许加字段**（additive），因此只加字段不升版本；
+#: 破坏性改结构要**新建 type**，所以这里每个 type 只有 v1。
+PAYLOAD_SCHEMA_VERSIONS: dict[str, int] = {
+    event_type: 1 for event_type in sorted(CANONICAL_EVENT_TYPES)
+}
+
+#: 视图数据上限（方案 §2.3）：超出即不再通过事件搬运正文，改为 ``data_ref``。
+#: 注意与 ``plugins.view_contribution.VIEW_DATA_MAX_BYTES``（400KB，插件契约上限）
+#: 的区别：**事件通道**更严（64KB），因为事件是实时通道而不是数据搬运通道。
+VIEW_EVENT_DATA_MAX_BYTES = 65_536
+VIEW_EVENT_DATA_MAX_DEPTH = 10
+VIEW_EVENT_DATA_MAX_ITEMS = 1_000
+
+#: ``control`` 出现这些状态即为**任务定局**（终态封印的判据）。
+#: ``waiting_clarification`` / ``waiting_approval`` 是"等外部输入"，不是定局。
+TERMINAL_CONTROL_STATES: frozenset[str] = frozenset(
+    {state.value for state in TERMINAL_STATES} | {"blocked", "cancelled"}
+)
+
+
+def is_terminal_state(state: Any) -> bool:
+    """``control.state`` 是否定局（终态）。"""
+    return str(state or "").strip().casefold() in TERMINAL_CONTROL_STATES
+
+
+def is_terminal_envelope(event_type: Any, payload: Any = None) -> bool:
+    """事件是否为**终态帧**（``done`` 或 ``control`` 的终态）——封印判据唯一实现。"""
+    name = str(event_type or "").strip()
+    if name == CanonicalEventType.DONE.value:
+        return True
+    if name != CanonicalEventType.CONTROL.value:
+        return False
+    values = payload if isinstance(payload, dict) else {}
+    return is_terminal_state(values.get("state"))
+
 #: 旧事件类型 → 标准事件类型（唯一登记处；适配器只查这张表，不再各自 if/else）。
 #:
 #: ``step`` 是**双态**旧类型（同一步骤先 running 后 completed），因此它不在这张
@@ -84,6 +128,9 @@ LEGACY_EVENT_ALIASES: dict[str, str] = {
     "task_completed": CanonicalEventType.CONTROL.value,
     # ``task_failed`` → ``control(state=failed)``；旧版错误帧由旧投影继续输出。
     "task_failed": CanonicalEventType.CONTROL.value,
+    # 取消：``control(state=cancelled)`` + 兼容 ``done``（旧前端收到即停止流式）。
+    "cancelled": CanonicalEventType.CONTROL.value,
+    "job_cancelled": CanonicalEventType.CONTROL.value,
     "error": CanonicalEventType.ERROR.value,
 }
 
@@ -94,6 +141,8 @@ _TERMINAL_CONTROL_STATE: dict[str, str] = {
     "done": "completed",
     "task_completed": "completed",
     "task_failed": "failed",
+    "cancelled": "cancelled",
+    "job_cancelled": "cancelled",
 }
 
 #: 这些旧类型必须**先查别名表**（即使名字本身也是标准类型）：
@@ -105,6 +154,9 @@ COMPAT_COMPANION_TYPES: dict[str, str] = {
     "done": "done",
     "task_completed": "done",
     "task_failed": "error",
+    # 取消的兼容伴随帧是 ``done``：旧前端以 ``done`` 作为"流结束"信号。
+    "cancelled": "done",
+    "job_cancelled": "done",
 }
 
 #: ``step`` 双态旧类型的状态判定。
@@ -139,12 +191,26 @@ def is_canonical_event_type(event_type: str) -> bool:
 # ── 安全载荷策略：原始思维链/参数/结果永远进不了信封 ──────────────
 
 #: 永远不允许出现在标准事件载荷里的键（大小写不敏感、按后缀匹配）。
-FORBIDDEN_PAYLOAD_KEYS: frozenset[str] = frozenset({
-    "arguments", "args", "parameters", "params", "raw", "raw_result", "raw_output",
-    "result", "response", "tool_result", "output", "prompt", "prompts", "messages",
+#: **任何**公开投影都不允许出现的键（标准投影与旧投影共用这道边界）：
+#: 原始思维链、工具参数、提示词、凭据、堆栈、供应商原文。
+SECRET_PAYLOAD_KEYS: frozenset[str] = frozenset({
+    "arguments", "args", "parameters", "params", "prompt", "prompts", "messages",
     "reasoning", "reasoning_content", "thinking", "chain_of_thought", "cot",
-    "thought", "thoughts", "thought_delta", "content_raw", "system_prompt",
+    "thought", "thoughts", "thought_delta", "system_prompt",
     "api_key", "token", "access_token", "refresh_token", "password", "secret",
+    "raw", "raw_result", "raw_output", "tool_result", "content_raw",
+    "stack", "stack_trace", "traceback", "error_stack", "exception_text",
+    "raw_request", "raw_response", "provider_response", "request_body", "response_body",
+    "authorization", "cookie", "cookies", "credential", "credentials",
+    "private_key", "secret_key", "session_token",
+})
+
+#: 永远不允许出现在标准事件载荷里的键 = 上面的机密集 + "原始结果/正文"家族。
+#: 说明：``output`` / ``result`` / ``response`` 这些**正文类**键在标准投影里由
+#: 载荷白名单统一裁掉（只留 ``output_summary``）；旧投影为了兼容既有前端仍会
+#: 原样保留它们（例如 process 帧的 ``step.output``），但机密集在所有投影都被删。
+FORBIDDEN_PAYLOAD_KEYS: frozenset[str] = SECRET_PAYLOAD_KEYS | frozenset({
+    "result", "response", "output",
 })
 
 #: 允许出现在载荷里的键（白名单；未登记的键在构造时被丢弃）。
@@ -172,6 +238,11 @@ ALLOWED_PAYLOAD_KEYS: frozenset[str] = frozenset({
     # 控制/错误
     "state", "reason_code", "reason", "next_action", "code", "message",
     "retryable", "suggested_action", "approved", "resolved_by", "decided_at",
+    # 统一错误模型（UnifiedError）：前端只展示 safe_message；detail_ref 是受权限
+    # 保护的产物引用；category/retryable 决定前端默认动作。
+    "category", "safe_message", "detail_ref", "safe_next_action",
+    # 未知事件降级标记（前端据此记录"客户端不支持该事件"而不是白屏）
+    "unsupported",
     # 路由审计（枚举值，非自由文本）
     "route_mode", "complexity", "safety_action",
     # 路由元数据事件（`task_router`）与任务快照展示字段：审计/恢复所需，
@@ -200,16 +271,16 @@ OPAQUE_PAYLOAD_KEYS: frozenset[str] = frozenset({
 OPAQUE_VALUE_MAX_BYTES = 400_000
 
 
-def _scrub_forbidden(value: Any) -> Any:
+def _scrub_forbidden(value: Any, keys: frozenset[str] = FORBIDDEN_PAYLOAD_KEYS) -> Any:
     """递归删除危险键，但**保留**其余键名（用于不透明容器）。"""
     if isinstance(value, dict):
         return {
-            str(key): _scrub_forbidden(item)
+            str(key): _scrub_forbidden(item, keys)
             for key, item in value.items()
-            if str(key).strip().casefold() not in FORBIDDEN_PAYLOAD_KEYS
+            if str(key).strip().casefold() not in keys
         }
     if isinstance(value, (list, tuple)):
-        return [_scrub_forbidden(item) for item in value]
+        return [_scrub_forbidden(item, keys) for item in value]
     return value
 
 
@@ -224,6 +295,16 @@ def _opaque_value(value: Any) -> Any:
     return scrubbed
 
 
+def scrub_forbidden_keys(value: Any) -> Any:
+    """递归删除机密集危险键但**保留其余键名**（旧投影的无损脱敏）。
+
+    旧版 SSE 帧是"无损透传"的（前端当前按扁平字段消费），不能套载荷白名单；
+    但原始思维链/工具参数/提示词/凭据/堆栈/供应商原文在**任何**公开投影里都不允许
+    出现，因此旧投影在出口处过 :data:`SECRET_PAYLOAD_KEYS` 这一道。
+    """
+    return _scrub_forbidden(value, SECRET_PAYLOAD_KEYS)
+
+
 def bounded_opaque_value(value: Any) -> Any:
     """不透明容器的安全收敛：递归清危险键 + 体积上限，但保留容器自己的键名。
 
@@ -231,6 +312,67 @@ def bounded_opaque_value(value: Any) -> Any:
     **形状由各自契约定义**的字段——它们的键名不该被事件层白名单裁掉。
     """
     return _opaque_value(value)
+
+
+def _view_data_depth(value: Any, current: int = 1) -> int:
+    if isinstance(value, dict):
+        children = list(value.values())
+    elif isinstance(value, (list, tuple)):
+        children = list(value)
+    else:
+        return current
+    if not children:
+        return current
+    return max(_view_data_depth(item, current + 1) for item in children)
+
+
+def _view_data_items(value: Any) -> int:
+    if isinstance(value, dict):
+        return len(value) + sum(_view_data_items(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return len(value) + sum(_view_data_items(item) for item in value)
+    return 0
+
+
+def view_data_within_bounds(data: Any) -> bool:
+    """视图 ``data`` 是否在体积/嵌套/元素上限内（超出 → 走 ``data_ref``）。"""
+    try:
+        size = len(json.dumps(data, ensure_ascii=False, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return False
+    if size > VIEW_EVENT_DATA_MAX_BYTES:
+        return False
+    if _view_data_depth(data) > VIEW_EVENT_DATA_MAX_DEPTH:
+        return False
+    return _view_data_items(data) <= VIEW_EVENT_DATA_MAX_ITEMS
+
+
+def _bound_view_mapping(mapping: dict[str, Any], view_id: Any) -> dict[str, Any]:
+    data = mapping.get("data")
+    if isinstance(data, dict) and data and not view_data_within_bounds(data):
+        updated = dict(mapping)
+        updated["data"] = {}
+        updated["data_ref"] = str(mapping.get("data_ref") or f"view:{view_id or 'current'}")
+        updated["truncated"] = True
+        return updated
+    return mapping
+
+
+def bound_view_frame(values: Any) -> dict[str, Any]:
+    """视图帧的通道级上限（**两种投影共用**）：超限只留 ``data_ref`` + ``truncated``。
+
+    兼容两种形状：标准投影 ``data`` 在顶层，旧投影把整个视图放在 ``view`` 下。
+    实现在契约层，保证"旧投影也不会把 100KB 视图数据塞进事件流"。
+    """
+    if not isinstance(values, dict):
+        return {}
+    out = dict(values)
+    nested = out.get("view")
+    if isinstance(nested, dict):
+        out["view"] = _bound_view_mapping(nested, nested.get("view_id"))
+    if "view_id" in out or "view_type" in out:
+        out = _bound_view_mapping(out, out.get("view_id"))
+    return out
 
 
 def strip_unsafe_payload(payload: Any, *, allowed: frozenset[str] | None = None) -> dict[str, Any]:
@@ -379,6 +521,11 @@ class ViewUpdatedPayload(EventPayload):
 
     ``view_type`` 复用既有 ``ViewContribution`` 白名单词表（table/chart/diff/
     timeline/file_preview/form）；未知类型一律置空，前端显示"暂不支持此展示类型"。
+
+    体积/嵌套上限（方案 §2.3，防 JSON 炸弹）：``data`` 超过
+    :data:`VIEW_EVENT_DATA_MAX_BYTES` 字节、嵌套超过 :data:`VIEW_EVENT_DATA_MAX_DEPTH`
+    层或元素超过 :data:`VIEW_EVENT_DATA_MAX_ITEMS` 个时，**不再通过事件搬运正文**，
+    改为只发 ``data_ref``（前端按需拉取）。
     """
 
     view_id: str = ""
@@ -390,8 +537,9 @@ class ViewUpdatedPayload(EventPayload):
     title: str = ""
     data: dict[str, Any] = Field(default_factory=dict)
     data_ref: str = ""
+    truncated: bool = False
 
-    def model_post_init(self, __context: Any) -> None:  # noqa: D105 - 白名单收敛
+    def model_post_init(self, __context: Any) -> None:  # noqa: D105 - 白名单收敛 + 体积上限
         from lumi_contracts.plugins.view_contribution import VIEW_TYPES
 
         if str(self.view_type or "").strip().casefold() not in VIEW_TYPES:
@@ -399,6 +547,12 @@ class ViewUpdatedPayload(EventPayload):
             # 类型都被拒了，数据就不该跟着出门；前端显示"暂不支持此展示类型"）。
             object.__setattr__(self, "view_type", "")
             object.__setattr__(self, "data", {})
+            return
+        if self.data and not view_data_within_bounds(self.data):
+            object.__setattr__(self, "data", {})
+            if not self.data_ref:
+                object.__setattr__(self, "data_ref", f"view:{self.view_id or 'current'}")
+            object.__setattr__(self, "truncated", True)
 
 
 class ApprovalRequiredPayload(EventPayload):
@@ -429,20 +583,72 @@ class ApprovalResolvedPayload(EventPayload):
 
 
 class ControlPayload(EventPayload):
-    """任务级控制信号（完成/失败/取消/暂停），取代各调用点自造错误结构。"""
+    """任务级控制信号（完成/失败/取消/暂停），取代各调用点自造错误结构。
+
+    ``error_code`` 来自统一错误模型（失败/阻断时）；``safe_next_action`` 是给前端
+    展示的"下一步动作"文案（``next_action`` 保留为兼容字段）。
+    """
 
     state: str = "running"
+    error_code: str = ""
     reason_code: str = ""
     reason: str = ""
     next_action: str = ""
+    safe_next_action: str = ""
+
+    def model_post_init(self, __context: Any) -> None:  # noqa: D105 - 错误码收敛
+        if self.error_code:
+            from lumi_contracts.events.errors import spec_for
+
+            spec = spec_for(self.error_code)
+            object.__setattr__(self, "error_code", spec.code)
+            if not self.safe_next_action:
+                object.__setattr__(self, "safe_next_action", spec.next_action)
+
+    @property
+    def terminal(self) -> bool:
+        return is_terminal_state(self.state)
 
 
 class ErrorPayload(EventPayload):
-    code: str = ""
-    message: str = ""
-    retryable: bool = False
+    """统一错误载荷（``UnifiedError`` 的事件形态，方案 §3）。
+
+    **只有** ``safe_message`` 会到前端：原始异常文本、供应商响应、堆栈、工具参数
+    都不在白名单里，构造时即被丢弃（``detail_ref`` 指向受权限保护的完整细节）。
+    """
+
+    code: str = "system.internal"
+    category: str = ""
+    retryable: bool | None = None
+    safe_message: str = ""
+    detail_ref: str = ""
     step_id: str = ""
     suggested_action: str = ""
+    #: 前端（`streamErrors.normalizeUnifiedError`）读的是 ``safe_next_action``；
+    #: ``suggested_action`` 是既有错误信封字段，两者同值，避免前端做字段猜测。
+    safe_next_action: str = ""
+
+    def model_post_init(self, __context: Any) -> None:  # noqa: D105 - 错误码收敛
+        from lumi_contracts.events.errors import spec_for
+
+        spec = spec_for(self.code)
+        object.__setattr__(self, "code", spec.code)
+        if self.retryable is None:
+            object.__setattr__(self, "retryable", bool(spec.retryable))
+        if not self.safe_message:
+            object.__setattr__(self, "safe_message", spec.safe_message)
+        if not self.category:
+            object.__setattr__(self, "category", spec.category.value)
+        if not self.suggested_action:
+            object.__setattr__(self, "suggested_action", spec.next_action)
+        if not self.safe_next_action:
+            object.__setattr__(self, "safe_next_action", self.suggested_action)
+
+    @classmethod
+    def from_error(cls, error: Any, *, step_id: str = "", detail_ref: str = "") -> "ErrorPayload":
+        """由任意错误来源构造（唯一入口：``translate_error``）。"""
+        unified = translate_error(error, step_id=step_id, detail_ref=detail_ref)
+        return cls(**unified.to_payload())
 
 
 PAYLOAD_MODELS: dict[str, type[EventPayload]] = {
@@ -484,6 +690,8 @@ class EventEnvelope(BaseModel):
 
     event_id: str = ""
     version: int = EVENT_ENVELOPE_VERSION
+    #: 载荷结构版本（Schema 注册表的注册维度；只加字段不升版本）。
+    schema_version: int = 1
     seq: int = 0
     type: str = CanonicalEventType.ERROR.value
     trace_id: str = ""
@@ -491,6 +699,11 @@ class EventEnvelope(BaseModel):
     job_id: str = ""
     occurred_at: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def terminal(self) -> bool:
+        """是否终态帧（``done`` 或 ``control`` 的终态）——终态封印判据。"""
+        return is_terminal_envelope(self.type, self.payload)
 
     @property
     def dedup_key(self) -> str:
@@ -516,6 +729,7 @@ class EventEnvelope(BaseModel):
         return {
             "event_id": self.event_id,
             "version": int(self.version),
+            "schema_version": int(self.schema_version),
             "seq": int(self.seq),
             "type": str(self.type),
             "trace_id": self.trace_id,
@@ -560,6 +774,7 @@ def build_envelope(
     return EventEnvelope(
         event_id=resolved_id,
         version=EVENT_ENVELOPE_VERSION,
+        schema_version=int(PAYLOAD_SCHEMA_VERSIONS.get(canonical, 1)),
         seq=int(seq or 0),
         type=canonical,
         trace_id=str(trace_id or ""),
@@ -613,6 +828,7 @@ def canonical_events_for(
             EventEnvelope(
                 event_id=make_event_id(job_id, companion, stable) if stable else "",
                 version=EVENT_ENVELOPE_VERSION,
+                schema_version=int(PAYLOAD_SCHEMA_VERSIONS.get(companion, 1)),
                 seq=0,
                 type=companion,
                 trace_id=str(trace_id or ""),
@@ -649,8 +865,13 @@ __all__ = [
     "OPAQUE_PAYLOAD_KEYS",
     "OPAQUE_VALUE_MAX_BYTES",
     "PAYLOAD_MODELS",
+    "PAYLOAD_SCHEMA_VERSIONS",
+    "SECRET_PAYLOAD_KEYS",
+    "TERMINAL_CONTROL_STATES",
     "TEXT_DELTA_RUNAWAY_GUARD",
-    "ApprovalRequiredPayload",
+    "VIEW_EVENT_DATA_MAX_BYTES",
+    "VIEW_EVENT_DATA_MAX_DEPTH",
+    "VIEW_EVENT_DATA_MAX_ITEMS",    "ApprovalRequiredPayload",
     "ApprovalResolvedPayload",
     "ArtifactCreatedPayload",
     "ControlPayload",
@@ -665,11 +886,16 @@ __all__ = [
     "build_envelope",
     "build_payload",
     "bounded_opaque_value",
+    "bound_view_frame",
     "canonical_event_type",
     "canonical_events_for",
     "dedupe_envelopes",
     "is_canonical_event_type",
+    "is_terminal_envelope",
+    "is_terminal_state",
     "make_event_id",
     "payload_model",
+    "scrub_forbidden_keys",
     "strip_unsafe_payload",
+    "view_data_within_bounds",
 ]

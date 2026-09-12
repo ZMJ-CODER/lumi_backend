@@ -22,7 +22,7 @@
 ```json
 {
   "event_id": "evt_6f8b93bff0c3fbe6",
-  "version": 2,
+  "version": 1,
   "seq": 7,
   "type": "step_completed",
   "trace_id": "",
@@ -188,7 +188,7 @@ SSE 只负责实时展示，不是唯一事实来源。`JobRunView`（`lumi.job_
 |---|---|
 | 触发方式 | 断线重连 / 页面刷新后，发现 `run_view.last_seq` 大于本地 `lastSeq` |
 | 接口 | `GET /api/v1/agents/jobs/{job_id}/events?after_seq=<本地 lastSeq>&limit=500` |
-| 返回体 | `{job_id, protocol:"canonical", version:2, after_seq, last_seq, count, truncated, events:[标准信封…]}` |
+| 返回体 | `{job_id, protocol:"canonical"|"legacy"（如实回报）, version:1, after_seq, last_seq, count, truncated, events:[标准信封…]}` |
 | 一致性 | 日志里存的就是**实时流同一份帧**（同 `event_id` / `seq` / `type` / `payload`），因此可按 `event_id` 去重后直接累加 |
 | 推荐恢复顺序 | ① `GET /agents/jobs/{id}` 取 `run_view`（`process_log` / `final_answer` / `artifact_refs` / `views` / `last_seq`）→ ② 若 `last_seq > 本地 lastSeq` 调 events 增量补拉 → ③ 用补拉结果覆盖/补齐状态机 |
 | 前端断言位置 | `StreamConsumer`：`seq` 单调、`event_id` 去重、`truncated=true` 时继续补拉直到追平 |
@@ -210,3 +210,143 @@ SSE 只负责实时展示，不是唯一事实来源。`JobRunView`（`lumi.job_
 
 > 结果类事件（产物/视图）现在走 `node.result → ExecutionResult → UI Projection → Stream Event`；
 > 步骤状态帧仍来自步骤快照（它表达"步骤进度"，不是"结果"），两条都在同一套信封里。
+
+## 10. 方案 2 整合版落地（统一错误 / 终态封印 / Schema 注册 / Fixture）
+
+本节是「事件协议与前后端联调方案（整合版）」的后端交付记录。方案条目 ↔ 实现位置：
+
+| 方案条目 | 后端实现 | 回归测试 |
+|---|---|---|
+| §1.3 Schema Registry + 未知事件策略 | `packages/contracts/.../events/registry.py`、`event_adapter._unknown_event_payload` | `tests/test_event_schema_registry.py` |
+| §2.3 View 体积/嵌套上限（64KB / 10 层 / 1000 元素 → `data_ref`） | `envelope.ViewUpdatedPayload`、`envelope.bound_view_frame`（两种投影共用） | `tests/test_unified_error_model.py` |
+| §3 统一错误模型 + 冻结码表 + ErrorTranslator | `packages/contracts/.../events/errors.py`、`envelope.ErrorPayload` / `ControlPayload` | `tests/test_unified_error_model.py` |
+| §5.1 Artifact 短时下载 URL | `app/services/artifacts.py`、`app/api/v1/artifacts.py` | `tests/test_artifact_download_url.py` |
+| §6.2 终态封印（后端闸门） | `app/services/job_event_seal.py`、接入 `chat.py` / `agents.py` / `job_event_log.record_frames` / `orchestrator.cancel_job` | `tests/test_event_terminal_seal.py` |
+| §7.2–7.3 前端状态模型参考实现 | `app/contracts/stream_view_model.py` | `tests/test_stream_contract_fixtures.py` |
+| §8 阶段 2/6/7 Fixture + 双协议一致 + 安全验收 | `docs/fixtures/stream-events/*.json` | `tests/test_stream_contract_fixtures.py` |
+
+### 10.1 统一错误模型（`error` / `control` 载荷）
+
+* 载荷字段只有：`code` / `category`(`transient|fatal|business|needs_human`) /
+  `retryable` / `safe_message` / `detail_ref` / `step_id` / `suggested_action`；
+  **原始异常文本、供应商响应、堆栈、工具参数不进载荷**（`message`/`error`/`stack`
+  等键在构造时被结构性删除，公共实现 `SECRET_PAYLOAD_KEYS`）。
+* 冻结错误码 12 个（方案 §3.2）：`TARGET_REQUIRED`、`DEPENDENCY_MISSING_WORKSPACE`、
+  `CAPABILITY_UNAVAILABLE`、`PROVIDER_UNHEALTHY`、`PERMISSION_DENIED`、
+  `TOOL_NOT_REGISTERED`、`APPROVAL_REQUIRED`、`SECURITY_BLOCKED`、
+  `PLUGIN_RESOURCE_EXCEEDED`、`PLUGIN_UNINSTALLED`、`RESULT_REF_EXPIRED`、
+  `SYSTEM_CANCELLED`；其余走域内码（`model.timeout` / `tool.failed` /
+  `validation.schema_mismatch` / `plugin.crashed` / `resource.quota_exceeded` /
+  `system.internal` …）。
+* 仓库内既有错误码（`MCP_UNAVAILABLE` / `TIMEOUT` / `INVALID_ARGS` / `CLIENT_OFFLINE` …）
+  通过 **唯一映射表** `LEGACY_CODE_ALIASES` 收敛：同一类失败从任何路径返回同一个
+  `code` + `safe_message`（验收清单 #1）。未登记但"看起来像错误码"的值保留原码
+  （排障），文案落回通用安全文案。
+* 失败/取消的 `control` 帧同样带 `error_code`（同一个码）与 `safe_next_action`。
+* **前端文案表**：只展示 `safe_message`；`trace_id` / `event_id` / `seq` / `error_code`
+  只进日志。收到未知 `code` 时回落到 `safe_message`，不要自己拼文案。
+
+### 10.2 终态封印（取消后不回跳）
+
+* 后端闸门一（流内）：`StreamSeal`——同一条流出现终态帧后，**内容类**帧
+  （`text_delta/process/step_*/tool_*/artifact_created/view_updated/approval_required/
+  capability_*/operation_*`）不再外发。
+* 后端闸门二（任务级，Redis `job_seal:{job_id}`，TTL 1h）：`POST /jobs/{id}/cancel`
+  受理即封印；`record_frames` 不再收录迟到内容帧，因此**补拉接口**
+  （`GET /agents/jobs/{id}/events?after_seq=`）也拿不到它们；任务定局（任何终态帧落盘）
+  会自动封印；`resume` 会解除封印。
+* 取消的标准形态：`control(state=cancelled)` + 兼容 `done`（旧前端以 `done` 结束流式）。
+* 前端闸门：见 10.4 第 2 条。
+
+### 10.3 视图与产物
+
+* `view_updated.data` 超过 64KB / 嵌套 10 层 / 1000 个元素时：`data` 置空、
+  `data_ref = "view:{view_id}"`（或调用方给的值）、`truncated=true`。**两种投影都执行**，
+  旧投影不会把大 JSON 塞进事件流。
+* `artifact_created` 只给引用与元数据。下载分两步（方案 §5.1）：
+  1. `GET /api/v1/artifacts/{artifact_id}/download-url` → `{url, expires_at, expires_in}`
+     （默认 300s，`ARTIFACT_DOWNLOAD_URL_TTL_SECONDS`，相对路径，需登录）；
+  2. `GET {url}`（带 `token` 查询参数）实际下载。
+* 令牌绑定"产物 + 用户"，因此**泄露的 URL 换个人也打不开**（403）；过期 → 401 且
+  `data.error_code = RESULT_REF_EXPIRED`；篡改/缺参 → 401；越权/不存在 → 404。
+  过期是常态路径：前端自动重发一次 `download-url` 再下载，仍失败才提示。
+
+### 10.4 前端改造清单（联调验收）
+
+1. **唯一归一化入口**：`chat.js` 只解析 SSE 行，**不得**再直接读 `evt.content` /
+   `evt.job_id`；一律交给 `normalizeStreamEvent`（`streamConsumer.js`），组件只读
+   ViewModel。参考实现与字段清单见 `app/contracts/stream_view_model.py`。
+2. **终态丢弃（与方案 §6.2 的一处修正）**：终态后只丢**内容类**事件，不要丢"一切非终态
+   事件"——否则 `task_failed` 的兼容伴随帧 `error` 会被自己的 `control(failed)` 吃掉，
+   错误文案就丢了。元数据帧（`title` / `summary` / `audio_ready` / `usage`）同理照常生效。
+3. **错误展示**：`payload.safe_message` +（可选）`suggested_action`；`code` 只进日志。
+   12 个冻结码建议各配一句前端兜底文案（后端已给默认文案，前端不必自己拼）。
+4. **View 上限**：`truncated=true` 或 `data` 为空但有 `data_ref` → 从
+   `GET /agents/jobs/{id}` 的 `run_view.views[view_id]` 取值，不要重试事件。
+5. **下载两步走**：点击卡片 → `download-url` → 下载；401/403 → 重新签发一次 → 仍失败提示
+   "无权访问或产物已过期"。
+6. **未知事件降级**：`payload.unsupported === true` 或未知 `type` → 记一条
+   "当前客户端版本不支持该事件"+ `trace_id`，不渲染、不白屏（验收清单 #5）。
+7. **乱序/重复**：按 `seq` 排序、按 `event_id`（缺省 `job_id+seq`）去重（验收清单 #3）。
+8. **双协议切换**：先用 `docs/fixtures/stream-events/*.json` 打通 canonical，
+   再切 `STREAM_EVENT_PROTOCOL=canonical`；切换前后 ViewModel 必须逐字段一致。
+9. **`schema_version`**：canonical 帧新增了 `schema_version`（载荷结构版本，当前都是 1）。
+   它是加法字段，前端可以忽略，但**不要**把它当成协议版本（协议版本是 `version`）。
+10. **`approval_required.target`**：这是审批对象（方案 §2.3 明确要求），不是内部组件标识，
+    可以展示；`source` 才是内部字段，已被禁止。
+
+### 10.5 联调 Fixture（`docs/fixtures/stream-events/`）
+
+9 个场景，每个文件含 `input_events`（内部事件）、`legacy_frames`、`canonical_frames`、
+`expect`（期望的终态/计数/被吞帧数）。由 `tests/test_stream_contract_fixtures.py`
+生成与校验，因此不会与实现漂移；前端可直接喂给 `StreamConsumer`。
+
+| 文件 | 场景 |
+|---|---|
+| `chat_simple.json` | 普通聊天：`text_delta × N → done` |
+| `tool_task.json` | 工具：`step_started → process → step_completed → text_delta → done` |
+| `approval_task.json` | 审批：`approval_required → control(waiting_approval) → approval_resolved → …` |
+| `artifact_task.json` | 产物：`artifact_created`（只给引用）+ 两步下载 |
+| `view_task.json` | 视图：小数据直发 / 超限数据只给 `data_ref` |
+| `failure_task.json` | 失败：`control(failed)` + `error`（统一错误码） |
+| `cancel_task.json` | 取消：终态封印吞掉迟到内容帧 |
+| `out_of_order_duplicate.json` | 乱序 + 重复：排序、去重 |
+| `unknown_event.json` | 未知事件：`unsupported` 标记 / 大对象只留哈希引用 |
+
+### 10.6 与前端仓库的对齐核查（`E:\javaidea\lumi`，只读比对）
+
+前端已按同一份方案实现了消费侧（`src/services/streamConsumer.js`、
+`streamErrors.js`、`artifacts.js`、`electron/stream-fixtures.cases.cjs`）。
+逐项比对结论：
+
+**已一致（无需改动）**
+
+| 契约点 | 前端 | 后端 |
+|---|---|---|
+| 公开字段白名单 | `['event_id','version','seq','type','trace_id','conversation_id','job_id','occurred_at','payload','schema_version']` | 同（§2 + `schema_version`） |
+| 终态封印判据 | 内容类集合 + `capability_`/`operation_` 前缀，且注释写明"与后端 `job_event_seal.py` 同一份" | 同 |
+| 12 个冻结错误码 | `UNIFIED_ERROR_LABELS` 12 个键 | `FROZEN_ERROR_CODES` 同集合 |
+| 视图上限 | 65 536 / 10 / 1 000，`overflow: data_ref`，**由后端执行** | 同 |
+| 错误载荷字段 | 读 `safe_message` / `category` / `retryable` / `detail_ref` / `safe_next_action` | 全部下发 |
+| `approval_required.target` | 允许展示 | 允许（§10.4 第 10 条） |
+| 补拉接口 | `GET /agents/jobs/{id}/events?after_seq=&limit=`，读 `last_seq`/`truncated`/`events[]` | 同路径同字段 |
+| 协议版本门禁 | `version > 1` → `UNSUPPORTED_VERSION` 丢弃 | 见下（已修正为 1） |
+
+**本轮发现并修正的三处后端不一致**
+
+1. **协议版本**：后端 canonical 帧原本是 `version: 2`，而前端 `STREAM_EVENT_VERSION = 1`
+   且对 `version > 1` 的帧**整帧丢弃**——一旦切 `canonical`，前端会拿到空回答。
+   已把 `EVENT_ENVELOPE_VERSION` 改为 1（canonical 协议从 1 起算）。
+2. **产物签发字段名**：前端冻结 `download_url / expires_at / expires_in`
+   （`artifacts.js` 明确"只认 `download_url`，不猜别名"），后端原来只给 `url`
+   → 每次下载都会 `ARTIFACT_SIGN_FAILED`。已改为 `download_url`（并保留同值 `url` 别名）。
+3. **补拉响应元数据**：原来写死 `protocol:"canonical"`、`version:2`；
+   现已按实际帧形状如实回报（双协议期可能是 legacy 帧），版本取自协议常量。
+
+以上三点都有后端回归测试钉住（`tests/test_stream_contract_fixtures.py` 的
+"前端冻结契约对齐"四例 + `tests/test_artifact_download_url.py` 的响应形状断言）。
+
+> 结论：**前端不需要为这三处改代码**；切 `canonical` 之前请确认后端版本为 1
+> （`EVENT_ENVELOPE_VERSION`）并跑一遍 `docs/fixtures/stream-events/` 的 fixture。
+
+

@@ -377,7 +377,7 @@ async def resume_agent_job(
 
 def _run_next_sse_response(job_id: str, *, expected_step_id: str, plan_revision: int | None, idempotency_key: str):
     """构造 run_next 的 SSE 响应（事件流见 orchestrator.stream_run_next）。"""
-    from app.contracts.events import SseEventEncoder
+    from app.contracts.events import SseEventEncoder, encode_sse
     from app.services.job_event_log import FrameRecorder
 
     async def event_gen():
@@ -385,6 +385,10 @@ def _run_next_sse_response(job_id: str, *, expected_step_id: str, plan_revision:
         encoder = SseEventEncoder(job_id=job_id)
         # 断线续传：帧同时写进任务事件日志（GET /agents/jobs/{id}/events?after_seq=）。
         recorder = FrameRecorder()
+        # 终态封印：本流出现终态帧后，迟到的内容类帧一律吞掉（方案 §6.2）。
+        from app.services.job_event_seal import StreamSeal
+
+        seal = StreamSeal()
         try:
             async for evt in orchestrator.stream_run_next(
                 job_id=job_id,
@@ -392,21 +396,26 @@ def _run_next_sse_response(job_id: str, *, expected_step_id: str, plan_revision:
                 plan_revision=plan_revision,
                 idempotency_key=idempotency_key,
             ):
-                for _frame, _line in encoder.encode_frames(evt):
+                kept, _dropped = seal.filter(frame for frame, _line in encoder.encode_frames(evt))
+                for _frame in kept:
                     if recorder.add(_frame):
                         await recorder.flush()
-                    yield _line
+                    yield encode_sse(_frame)
         except Exception as exc:  # noqa: BLE001
             logger.warning("run_next SSE 中断 job={} err={}", str(job_id)[:12], str(exc)[:200])
-            for _frame, _line in encoder.encode_frames({
-                "type": "error",
-                "message": "单步执行流中断，请刷新任务状态后重试",
-                "status": 500,
-                "code": "RUN_NEXT_STREAM_INTERRUPTED",
-            }):
+            kept, _dropped = seal.filter(
+                frame
+                for frame, _line in encoder.encode_frames({
+                    "type": "error",
+                    "message": "单步执行流中断，请刷新任务状态后重试",
+                    "status": 500,
+                    "code": "RUN_NEXT_STREAM_INTERRUPTED",
+                })
+            )
+            for _frame in kept:
                 if recorder.add(_frame):
                     await recorder.flush()
-                yield _line
+                yield encode_sse(_frame)
         finally:
             try:
                 await recorder.flush()
@@ -439,15 +448,26 @@ async def replay_agent_job_events(
       此时应以 ``GET /agents/jobs/{job_id}`` 的 ``JobRunView`` 快照恢复为准。
     """
     await _get_owned_job(job_id, payload["sub"])
+    from app.contracts.events import STREAM_EVENT_VERSION, SseEventEncoder
     from app.services import job_event_log
 
     frames = await job_event_log.read_frames(job_id, after_seq=after_seq, limit=limit)
+    # 协议与版本必须**如实回报**（补拉里存的就是实时流同一份帧）：
+    # 双协议期后端可能仍是 legacy 帧，不能一律写 canonical；版本也不能写死
+    # （前端对 version > 支持版本 的帧会走 UNSUPPORTED_VERSION 降级）。
+    from lumi_contracts import EVENT_ENVELOPE_VERSION
+
+    if frames:
+        protocol = "canonical" if any(isinstance(item.get("payload"), dict) for item in frames) else "legacy"
+    else:
+        protocol = SseEventEncoder().protocol
+    version = EVENT_ENVELOPE_VERSION if protocol == "canonical" else STREAM_EVENT_VERSION
     return {
         "code": 0,
         "data": {
             "job_id": job_id,
-            "protocol": "canonical",
-            "version": 2,
+            "protocol": protocol,
+            "version": int(version),
             "after_seq": int(after_seq),
             "last_seq": job_event_log.last_seq_of(frames),
             "count": len(frames),

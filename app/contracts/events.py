@@ -30,6 +30,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from lumi_contracts import EventSequencer, ProcessLogEntry, StreamEvent
+from lumi_contracts.events.envelope import bound_view_frame, scrub_forbidden_keys
 
 # 事件契约版本：新增字段不升版本，破坏性改名才升（前端按版本解析）。
 STREAM_EVENT_VERSION = 1
@@ -225,11 +226,18 @@ class SseEventEncoder:
         ``summary`` / ``detail`` / ``status`` / ``step_id`` / ``call_id`` /
         ``sequence`` / ``occurred_at``）：前端只渲染，不再按工具名猜"读取/编辑/Pwsh"，
         也不需要第二套过程解析入口。原始参数/响应/推理文本一律不取。
+
+        **无损 ≠ 无脱敏**：扁平字段一个不少，但方案 §1.2 的禁入字段（原始思维链、
+        工具参数、原始结果、凭据、堆栈）在出口处被结构性删除——旧投影与标准投影
+        在同一道安全边界内。
         """
         payload = dict(event or {})
         seq = self._sequencer.next_seq()
         self._last_seq = seq
         event_type = str(payload.get("type") or "error")
+        if event_type in {"view_updated", "view"}:
+            # 视图通道级上限（方案 §2.3）：旧投影同样不能把超限 data 塞进事件流。
+            payload = bound_view_frame(payload)
         if event_type in _PROCESS_EVENT_TYPES:
             # 能力状态帧先补兜底展示文案（能力名/Provider/错误码），再交给统一条目，
             # 避免发射方漏给 title/summary 时前端出现空行。
@@ -264,7 +272,7 @@ class SseEventEncoder:
             conversation_id=str(payload.get("conversation_id") or self._conversation_id or ""),
             call_id=str(payload.get("call_id") or ""),
             step_id=str(payload.get("step_id") or ""),
-            data=payload,
+            data=scrub_forbidden_keys(payload),
         ).to_sse()
 
     def canonical_frames(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:

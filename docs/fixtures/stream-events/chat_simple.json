@@ -1,0 +1,248 @@
+{
+  "scenario": "chat_simple",
+  "description": "普通聊天：text_delta × N → done",
+  "input_events": [
+    {
+      "type": "delta",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "content": "## 总体概况\n",
+      "message_id": "m1"
+    },
+    {
+      "type": "delta",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "content": "第一段",
+      "message_id": "m1"
+    },
+    {
+      "type": "delta",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "content": "，第二段。",
+      "message_id": "m1"
+    },
+    {
+      "type": "done",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "message_id": "m1",
+      "status": "completed"
+    }
+  ],
+  "legacy_frames": [
+    {
+      "type": "delta",
+      "version": 1,
+      "seq": 1,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "content": "## 总体概况\n",
+      "message_id": "m1",
+      "event_id": "evt_chat_simple-legacy-1",
+      "occurred_at": "2026-01-01T00:00:01.000Z"
+    },
+    {
+      "type": "delta",
+      "version": 1,
+      "seq": 2,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "content": "第一段",
+      "message_id": "m1",
+      "event_id": "evt_chat_simple-legacy-2",
+      "occurred_at": "2026-01-01T00:00:02.000Z"
+    },
+    {
+      "type": "delta",
+      "version": 1,
+      "seq": 3,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "content": "，第二段。",
+      "message_id": "m1",
+      "event_id": "evt_chat_simple-legacy-3",
+      "occurred_at": "2026-01-01T00:00:03.000Z"
+    },
+    {
+      "type": "done",
+      "version": 1,
+      "seq": 4,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "message_id": "m1",
+      "status": "completed",
+      "event_id": "evt_chat_simple-legacy-4",
+      "occurred_at": "2026-01-01T00:00:04.000Z"
+    }
+  ],
+  "canonical_frames": [
+    {
+      "event_id": "evt_chat_simple-canonical-1",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 1,
+      "type": "text_delta",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:01.000Z",
+      "payload": {
+        "content": "## 总体概况\n",
+        "format": "markdown",
+        "message_id": "m1"
+      }
+    },
+    {
+      "event_id": "evt_chat_simple-canonical-2",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 2,
+      "type": "text_delta",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:02.000Z",
+      "payload": {
+        "content": "第一段",
+        "format": "markdown",
+        "message_id": "m1"
+      }
+    },
+    {
+      "event_id": "evt_chat_simple-canonical-3",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 3,
+      "type": "text_delta",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:03.000Z",
+      "payload": {
+        "content": "，第二段。",
+        "format": "markdown",
+        "message_id": "m1"
+      }
+    },
+    {
+      "event_id": "evt_chat_simple-canonical-4",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 4,
+      "type": "control",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:04.000Z",
+      "payload": {
+        "state": "completed",
+        "error_code": "",
+        "reason_code": "",
+        "reason": "",
+        "next_action": "",
+        "safe_next_action": ""
+      }
+    },
+    {
+      "event_id": "evt_chat_simple-canonical-5",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 5,
+      "type": "done",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:05.000Z",
+      "payload": {
+        "state": "completed",
+        "error_code": "",
+        "reason_code": "",
+        "reason": "",
+        "next_action": "",
+        "safe_next_action": ""
+      }
+    }
+  ],
+  "expect": {
+    "canonical_types": [
+      "text_delta",
+      "text_delta",
+      "text_delta",
+      "control",
+      "done"
+    ],
+    "legacy_types": [
+      "delta",
+      "delta",
+      "delta",
+      "done"
+    ],
+    "terminal_state": "completed",
+    "answer_text": "## 总体概况\n第一段，第二段。",
+    "dropped_after_terminal": 0,
+    "artifacts": 0,
+    "approvals": 0
+  }
+}

@@ -1,0 +1,174 @@
+{
+  "scenario": "out_of_order_duplicate",
+  "description": "乱序 + 重复：按 seq 排序、按 event_id 去重，日志不重复",
+  "input_events": [
+    {
+      "event_id": "e3",
+      "seq": 3,
+      "type": "done",
+      "job_id": "job-1",
+      "payload": {
+        "state": "completed"
+      }
+    },
+    {
+      "event_id": "e1",
+      "seq": 1,
+      "type": "text_delta",
+      "job_id": "job-1",
+      "payload": {
+        "content": "你好"
+      }
+    },
+    {
+      "event_id": "e1",
+      "seq": 1,
+      "type": "text_delta",
+      "job_id": "job-1",
+      "payload": {
+        "content": "你好"
+      }
+    },
+    {
+      "event_id": "e2",
+      "seq": 2,
+      "type": "process",
+      "job_id": "job-1",
+      "payload": {
+        "entry_id": "p9",
+        "kind": "read",
+        "title": "读取",
+        "summary": "正在读取"
+      }
+    },
+    {
+      "event_id": "e2",
+      "seq": 2,
+      "type": "process",
+      "job_id": "job-1",
+      "payload": {
+        "entry_id": "p9",
+        "kind": "read",
+        "title": "读取",
+        "summary": "正在读取"
+      }
+    }
+  ],
+  "legacy_frames": [
+    {
+      "event_id": "e3",
+      "seq": 3,
+      "type": "done",
+      "job_id": "job-1",
+      "payload": {
+        "state": "completed"
+      }
+    },
+    {
+      "event_id": "e1",
+      "seq": 1,
+      "type": "text_delta",
+      "job_id": "job-1",
+      "payload": {
+        "content": "你好"
+      }
+    },
+    {
+      "event_id": "e1",
+      "seq": 1,
+      "type": "text_delta",
+      "job_id": "job-1",
+      "payload": {
+        "content": "你好"
+      }
+    },
+    {
+      "event_id": "e2",
+      "seq": 2,
+      "type": "process",
+      "job_id": "job-1",
+      "payload": {
+        "entry_id": "p9",
+        "kind": "read",
+        "title": "读取",
+        "summary": "正在读取"
+      }
+    },
+    {
+      "event_id": "e2",
+      "seq": 2,
+      "type": "process",
+      "job_id": "job-1",
+      "payload": {
+        "entry_id": "p9",
+        "kind": "read",
+        "title": "读取",
+        "summary": "正在读取"
+      }
+    }
+  ],
+  "canonical_frames": [
+    {
+      "event_id": "e3",
+      "seq": 3,
+      "type": "done",
+      "job_id": "job-1",
+      "payload": {
+        "state": "completed"
+      }
+    },
+    {
+      "event_id": "e1",
+      "seq": 1,
+      "type": "text_delta",
+      "job_id": "job-1",
+      "payload": {
+        "content": "你好"
+      }
+    },
+    {
+      "event_id": "e1",
+      "seq": 1,
+      "type": "text_delta",
+      "job_id": "job-1",
+      "payload": {
+        "content": "你好"
+      }
+    },
+    {
+      "event_id": "e2",
+      "seq": 2,
+      "type": "process",
+      "job_id": "job-1",
+      "payload": {
+        "entry_id": "p9",
+        "kind": "read",
+        "title": "读取",
+        "summary": "正在读取"
+      }
+    },
+    {
+      "event_id": "e2",
+      "seq": 2,
+      "type": "process",
+      "job_id": "job-1",
+      "payload": {
+        "entry_id": "p9",
+        "kind": "read",
+        "title": "读取",
+        "summary": "正在读取"
+      }
+    }
+  ],
+  "expect": {
+    "normalized_types": [
+      "text_delta",
+      "process",
+      "done"
+    ],
+    "terminal_state": "completed",
+    "answer_text": "你好",
+    "process_entries": 1,
+    "dropped_after_terminal": 0
+  }
+}

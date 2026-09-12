@@ -97,13 +97,17 @@ async def chat_stream(
         )
 
     async def event_gen():
-        from app.contracts.events import SseEventEncoder
+        from app.contracts.events import SseEventEncoder, encode_sse
         from app.services.job_event_log import FrameRecorder
+        from app.services.job_event_seal import StreamSeal
 
         # 每条流一个编码器：所有帧都带契约版本与单调递增 seq（前端可发现丢帧）。
         encoder = SseEventEncoder(conversation_id=conversation_id)
         # 任务事件日志（断线续传）：只记带 job_id 的帧，普通闲聊帧自动跳过。
         recorder = FrameRecorder()
+        # 终态封印（方案 §6.2）：本流出现 done/control 终态后，迟到的内容类帧一律吞掉，
+        # 避免"取消已返回、step_completed 还在路上"导致前端状态回跳。
+        seal = StreamSeal()
         result = None
         lock = None
         started = False
@@ -178,10 +182,12 @@ async def chat_stream(
                         elapsed_ms=int((time.perf_counter() - acceptance_started_at) * 1000),
                         event=evt,
                     )
-                for _frame, _line in encoder.encode_frames(evt):
+                for _frame in seal.filter(
+                    frame for frame, _line in encoder.encode_frames(evt)
+                )[0]:
                     if recorder.add(_frame):
                         await recorder.flush()
-                    yield _line
+                    yield encode_sse(_frame)
                 if evt["type"] == "done":
                     # Anything after a terminal SSE event is best-effort
                     # persistence/notification work.  It must never append an

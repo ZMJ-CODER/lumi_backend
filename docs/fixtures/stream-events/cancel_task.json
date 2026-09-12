@@ -1,0 +1,251 @@
+{
+  "scenario": "cancel_task",
+  "description": "取消任务：终态封印——cancel 后迟到的 text_delta/step_completed 不改变状态",
+  "input_events": [
+    {
+      "type": "step_started",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "step_id": "s6",
+      "title": "长任务",
+      "tool_name": "long_task",
+      "summary": "正在执行：长任务"
+    },
+    {
+      "type": "delta",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "content": "正在处理…"
+    },
+    {
+      "type": "cancelled",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "status": "cancelled",
+      "reason_code": "USER_CANCELLED"
+    },
+    {
+      "type": "delta",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "content": "迟到正文不应出现"
+    },
+    {
+      "type": "step_completed",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "step_id": "s6",
+      "status": "completed",
+      "result_summary": "迟到完成"
+    }
+  ],
+  "legacy_frames": [
+    {
+      "type": "step_started",
+      "version": 1,
+      "seq": 1,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "step_id": "s6",
+      "title": "长任务",
+      "tool_name": "long_task",
+      "summary": "正在执行：长任务",
+      "entry_id": "seq:job-1:1",
+      "kind": "tool",
+      "status": "running",
+      "sequence": 1,
+      "occurred_at": "2026-01-01T00:00:01.000Z",
+      "event_id": "evt_cancel_task-legacy-1"
+    },
+    {
+      "type": "delta",
+      "version": 1,
+      "seq": 2,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "content": "正在处理…",
+      "event_id": "evt_cancel_task-legacy-2",
+      "occurred_at": "2026-01-01T00:00:02.000Z"
+    },
+    {
+      "type": "cancelled",
+      "version": 1,
+      "seq": 3,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "status": "cancelled",
+      "reason_code": "USER_CANCELLED",
+      "event_id": "evt_cancel_task-legacy-3",
+      "occurred_at": "2026-01-01T00:00:03.000Z"
+    }
+  ],
+  "canonical_frames": [
+    {
+      "event_id": "evt_cancel_task-canonical-1",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 1,
+      "type": "step_started",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:01.000Z",
+      "payload": {
+        "step_id": "s6",
+        "step_type": "",
+        "name": "长任务",
+        "display_summary": "正在执行：长任务",
+        "tool_name": "long_task"
+      }
+    },
+    {
+      "event_id": "evt_cancel_task-canonical-2",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 2,
+      "type": "text_delta",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:02.000Z",
+      "payload": {
+        "content": "正在处理…",
+        "format": "markdown",
+        "message_id": ""
+      }
+    },
+    {
+      "event_id": "evt_cancel_task-canonical-3",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 3,
+      "type": "control",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:03.000Z",
+      "payload": {
+        "state": "cancelled",
+        "error_code": "SYSTEM_CANCELLED",
+        "reason_code": "",
+        "reason": "",
+        "next_action": "",
+        "safe_next_action": "重新发起"
+      }
+    },
+    {
+      "event_id": "evt_cancel_task-canonical-4",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 4,
+      "type": "done",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:04.000Z",
+      "payload": {
+        "state": "cancelled",
+        "error_code": "SYSTEM_CANCELLED",
+        "reason_code": "",
+        "reason": "",
+        "next_action": "",
+        "safe_next_action": "重新发起"
+      }
+    }
+  ],
+  "expect": {
+    "canonical_types": [
+      "step_started",
+      "text_delta",
+      "control",
+      "done"
+    ],
+    "legacy_types": [
+      "step_started",
+      "delta",
+      "cancelled"
+    ],
+    "terminal_state": "cancelled",
+    "answer_text": "正在处理…",
+    "dropped_after_terminal": 2,
+    "absent_text": [
+      "迟到正文不应出现",
+      "迟到完成"
+    ]
+  }
+}

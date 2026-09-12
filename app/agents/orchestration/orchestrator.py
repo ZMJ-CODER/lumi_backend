@@ -761,7 +761,14 @@ class AgentOrchestrator:
     # ── 控制：终止 / 暂停 / 恢复 ─────────────────────────────
 
     async def cancel_job(self, job_id: str, keep_completed: bool = True) -> Job | None:
-        return await self._operations.cancel(job_id, keep_completed)
+        job = await self._operations.cancel(job_id, keep_completed)
+        if job is not None:
+            # 终态封印（方案 §6.2）：取消受理即定局——此后该任务迟到的
+            # step_* / text_delta 一律吞掉（两端各一道闸门），前端状态不回跳。
+            from app.services.job_event_seal import seal_job
+
+            await seal_job(job_id, "cancelled", reason_code="SYSTEM_CANCELLED")
+        return job
 
     async def approve_job(self, job_id: str, node_id: str, approved: bool = True) -> None:
         await self._operations.approve(job_id, node_id, approved)
@@ -770,7 +777,13 @@ class AgentOrchestrator:
         return await self._operations.pause(job_id)
 
     async def resume_job(self, job_id: str) -> Job | None:
-        return await self._operations.resume(job_id)
+        job = await self._operations.resume(job_id)
+        if job is not None:
+            # 恢复/重跑要解除封印，否则新产生的内容帧会被当成"迟到帧"吞掉。
+            from app.services.job_event_seal import unseal_job
+
+            await unseal_job(job_id)
+        return job
 
     async def _finalize_step_failed(self, job: Job) -> None:
         """单步执行失败：先按升级决策树记录建议，再做终态清理。"""

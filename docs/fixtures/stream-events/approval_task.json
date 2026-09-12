@@ -1,0 +1,407 @@
+{
+  "scenario": "approval_task",
+  "description": "审批任务：step_started → approval_required → control(waiting) → approval_resolved → step_completed → done",
+  "input_events": [
+    {
+      "type": "step_started",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "step_id": "s2",
+      "title": "覆盖文件",
+      "tool_name": "workspace_write"
+    },
+    {
+      "type": "approval_required",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "step_id": "s2",
+      "node_id": "n2",
+      "request_id": "req-2",
+      "capability": "workspace_write",
+      "action": "workspace_write",
+      "target": "src/app.py",
+      "risk_level": "high"
+    },
+    {
+      "type": "control",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "state": "waiting_approval",
+      "step_id": "s2"
+    },
+    {
+      "type": "approval_resolved",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "step_id": "s2",
+      "node_id": "n2",
+      "request_id": "req-2",
+      "approved": true
+    },
+    {
+      "type": "step_completed",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "step_id": "s2",
+      "status": "completed",
+      "title": "覆盖文件",
+      "result_summary": "已写入"
+    },
+    {
+      "type": "done",
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "reasoning_content": "SECRET-COT-不要外发",
+      "chain_of_thought": "SECRET-COT-2",
+      "thought_delta": "SECRET-COT-3",
+      "arguments": {
+        "path": "D:\\\\Users\\\\me\\\\secret\\\\config.py"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "SECRET-PROMPT"
+        }
+      ],
+      "api_key": "sk-live-SECRET",
+      "raw_result": "SECRET-RAW-RESULT",
+      "stack": "Traceback (most recent call last): boom",
+      "status": "completed"
+    }
+  ],
+  "legacy_frames": [
+    {
+      "type": "step_started",
+      "version": 1,
+      "seq": 1,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "step_id": "s2",
+      "title": "覆盖文件",
+      "tool_name": "workspace_write",
+      "entry_id": "seq:job-1:1",
+      "kind": "edit",
+      "summary": "",
+      "status": "running",
+      "sequence": 1,
+      "occurred_at": "2026-01-01T00:00:01.000Z",
+      "event_id": "evt_approval_task-legacy-1"
+    },
+    {
+      "type": "approval_required",
+      "version": 1,
+      "seq": 2,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "step_id": "s2",
+      "node_id": "n2",
+      "request_id": "req-2",
+      "capability": "workspace_write",
+      "action": "workspace_write",
+      "target": "src/app.py",
+      "risk_level": "high",
+      "title": "等待确认",
+      "summary": "workspace_write 需要你确认后继续",
+      "tool_name": "workspace_write",
+      "entry_id": "seq:job-1:2",
+      "kind": "edit",
+      "status": "running",
+      "sequence": 2,
+      "occurred_at": "2026-01-01T00:00:02.000Z",
+      "event_id": "evt_approval_task-legacy-2"
+    },
+    {
+      "type": "control",
+      "version": 1,
+      "seq": 3,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "step_id": "s2",
+      "state": "waiting_approval",
+      "event_id": "evt_approval_task-legacy-3",
+      "occurred_at": "2026-01-01T00:00:03.000Z"
+    },
+    {
+      "type": "approval_resolved",
+      "version": 1,
+      "seq": 4,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "step_id": "s2",
+      "node_id": "n2",
+      "request_id": "req-2",
+      "approved": true,
+      "entry_id": "seq:job-1:4",
+      "kind": "thinking",
+      "title": "",
+      "summary": "",
+      "status": "running",
+      "sequence": 4,
+      "occurred_at": "2026-01-01T00:00:04.000Z",
+      "event_id": "evt_approval_task-legacy-4"
+    },
+    {
+      "type": "step_completed",
+      "version": 1,
+      "seq": 5,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "step_id": "s2",
+      "status": "completed",
+      "title": "覆盖文件",
+      "result_summary": "已写入",
+      "entry_id": "seq:job-1:5",
+      "kind": "thinking",
+      "summary": "已写入",
+      "sequence": 5,
+      "occurred_at": "2026-01-01T00:00:05.000Z",
+      "event_id": "evt_approval_task-legacy-5"
+    },
+    {
+      "type": "done",
+      "version": 1,
+      "seq": 6,
+      "job_id": "job-1",
+      "conversation_id": "conv-1",
+      "status": "completed",
+      "event_id": "evt_approval_task-legacy-6",
+      "occurred_at": "2026-01-01T00:00:06.000Z"
+    }
+  ],
+  "canonical_frames": [
+    {
+      "event_id": "evt_approval_task-canonical-1",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 1,
+      "type": "step_started",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:01.000Z",
+      "payload": {
+        "step_id": "s2",
+        "step_type": "",
+        "name": "覆盖文件",
+        "display_summary": "正在执行：覆盖文件",
+        "tool_name": "workspace_write"
+      }
+    },
+    {
+      "event_id": "evt_approval_task-canonical-2",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 2,
+      "type": "approval_required",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:02.000Z",
+      "payload": {
+        "request_id": "req-2",
+        "node_id": "n2",
+        "step_id": "s2",
+        "capability": "workspace_write",
+        "action": "workspace_write",
+        "target": "src/app.py",
+        "risk_level": "high",
+        "preview_ref": "",
+        "expires_at": ""
+      }
+    },
+    {
+      "event_id": "evt_approval_task-canonical-3",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 3,
+      "type": "control",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:03.000Z",
+      "payload": {
+        "state": "waiting_approval",
+        "error_code": "",
+        "reason_code": "",
+        "reason": "",
+        "next_action": "",
+        "safe_next_action": ""
+      }
+    },
+    {
+      "event_id": "evt_approval_task-canonical-4",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 4,
+      "type": "approval_resolved",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:04.000Z",
+      "payload": {
+        "request_id": "req-2",
+        "step_id": "s2",
+        "approved": true,
+        "resolved_by": "",
+        "reason": "",
+        "decided_at": ""
+      }
+    },
+    {
+      "event_id": "evt_approval_task-canonical-5",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 5,
+      "type": "step_completed",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:05.000Z",
+      "payload": {
+        "step_id": "s2",
+        "status": "completed",
+        "duration_ms": 0,
+        "output_summary": "已写入",
+        "error_code": "",
+        "result_ref": {},
+        "artifact_refs": []
+      }
+    },
+    {
+      "event_id": "evt_approval_task-canonical-6",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 6,
+      "type": "control",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:06.000Z",
+      "payload": {
+        "state": "completed",
+        "error_code": "",
+        "reason_code": "",
+        "reason": "",
+        "next_action": "",
+        "safe_next_action": ""
+      }
+    },
+    {
+      "event_id": "evt_approval_task-canonical-7",
+      "version": 1,
+      "schema_version": 1,
+      "seq": 7,
+      "type": "done",
+      "trace_id": "",
+      "conversation_id": "conv-1",
+      "job_id": "job-1",
+      "occurred_at": "2026-01-01T00:00:07.000Z",
+      "payload": {
+        "state": "completed",
+        "error_code": "",
+        "reason_code": "",
+        "reason": "",
+        "next_action": "",
+        "safe_next_action": ""
+      }
+    }
+  ],
+  "expect": {
+    "canonical_types": [
+      "step_started",
+      "approval_required",
+      "control",
+      "approval_resolved",
+      "step_completed",
+      "control",
+      "done"
+    ],
+    "legacy_types": [
+      "step_started",
+      "approval_required",
+      "control",
+      "approval_resolved",
+      "step_completed",
+      "done"
+    ],
+    "terminal_state": "completed",
+    "approvals": 1,
+    "approval_approved": true,
+    "dropped_after_terminal": 0
+  }
+}

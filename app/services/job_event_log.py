@@ -37,11 +37,29 @@ def _key(job_id: str) -> str:
 
 
 async def record_frames(frames: list[dict[str, Any]]) -> int:
-    """把若干标准帧写入任务事件日志（按 ``job_id`` 分组、有界、带 TTL）。"""
+    """把若干标准帧写入任务事件日志（按 ``job_id`` 分组、有界、带 TTL）。
+
+    写之前先过**终态封印**（:mod:`app.services.job_event_seal`）：任务已定局时，
+    迟到的内容类帧不再收录——否则补拉接口会把"取消后又冒出来的 step/text"再放给前端，
+    前端状态就会回跳。本批出现终态帧时顺手把任务封上（之后不再需要查状态）。
+    """
+    from app.services.job_event_seal import (
+        filter_frames_for_job,
+        is_terminal_frame,
+        seal_job,
+        frame_state,
+    )
+
+    cleaned = [dict(frame) for frame in frames or [] if isinstance(frame, dict)]
+    if not cleaned:
+        return 0
+    cleaned, _dropped = await filter_frames_for_job(cleaned)
+    if not cleaned:
+        return 0
+
     grouped: dict[str, list[str]] = {}
-    for frame in frames or []:
-        if not isinstance(frame, dict):
-            continue
+    terminal_states: dict[str, str] = {}
+    for frame in cleaned:
         event_type = str(frame.get("type") or "")
         if event_type in SKIP_EVENT_TYPES:
             continue
@@ -54,6 +72,8 @@ async def record_frames(frames: list[dict[str, Any]]) -> int:
         except (TypeError, ValueError):
             continue
         grouped.setdefault(job_id, []).append(encoded)
+        if is_terminal_frame(frame):
+            terminal_states[job_id] = frame_state(frame) or "completed"
     if not grouped:
         return 0
     written = 0
@@ -70,6 +90,9 @@ async def record_frames(frames: list[dict[str, Any]]) -> int:
     except Exception as exc:  # noqa: BLE001 - 日志不可用不能影响实时流
         logger.debug("[job-event-log] 写入失败（降级，不影响实时流）: {}", str(exc)[:120])
         return 0
+    # 落盘之后再封印：终态帧本身必须已经写进去。
+    for job_id, state in terminal_states.items():
+        await seal_job(job_id, state)
     return written
 
 

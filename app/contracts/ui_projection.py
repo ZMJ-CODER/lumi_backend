@@ -28,8 +28,8 @@ from lumi_contracts import (
 )
 from lumi_contracts.events.envelope import (
     EVENT_ENVELOPE_VERSION,
+    PAYLOAD_SCHEMA_VERSIONS,
     ControlPayload,
-    ErrorPayload,
     StepCompletedPayload,
 )
 from lumi_contracts.events.process import SUMMARY_MAX_CHARS, sanitize_process_text
@@ -126,6 +126,13 @@ def execution_result_events(
     summary = sanitize_process_text(
         view.get("summary") or getattr(result, "output", ""), limit=SUMMARY_MAX_CHARS
     )
+    # 失败结果的"用户可以看"的文案：工具自己给的错误说明**先过净化**（去路径/凭据），
+    # 再作为 ``safe_message`` 与步骤摘要——原始异常文本永远不会原样外发。
+    safe_message = sanitize_process_text(
+        getattr(error, "message", "") or summary, limit=SUMMARY_MAX_CHARS
+    )
+    if not summary:
+        summary = safe_message
     refs = artifact_refs_of(result)
 
     base = {
@@ -188,20 +195,26 @@ def execution_result_events(
             )
         )
     elif state == "failed":
+        from lumi_contracts.events.errors import UnifiedError
+
+        # 统一错误模型（方案 §3）：只有 code/category/retryable/safe_message/detail_ref
+        # 出门；原始异常文本与堆栈只进日志。``safe_message`` 已经过净化（去路径/凭据）。
+        unified = UnifiedError.from_code(
+            str(getattr(error, "code", "") or ""),
+            safe_message=safe_message,
+            retryable=bool(getattr(result, "retryable", False)),
+            step_id=raw_step,
+            suggested_action=str(getattr(error, "suggested_action", "") or ""),
+        )
         events.append(
             EventEnvelope(
                 version=EVENT_ENVELOPE_VERSION,
                 seq=0,
+                schema_version=PAYLOAD_SCHEMA_VERSIONS.get("error", 1),
                 type="error",
                 job_id=base["job_id"],
                 trace_id=base["trace_id"],
-                payload=build_payload("error", ErrorPayload(
-                    code=str(getattr(error, "code", "") or ""),
-                    message=str(getattr(error, "message", "") or summary),
-                    retryable=bool(getattr(result, "retryable", False)),
-                    step_id=raw_step,
-                    suggested_action=str(getattr(error, "suggested_action", "") or ""),
-                ).model_dump(mode="json", exclude_none=True)),
+                payload=build_payload("error", unified.to_payload()),
             )
         )
     return events

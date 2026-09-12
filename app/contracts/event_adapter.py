@@ -20,6 +20,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from lumi_contracts import (
+    CANONICAL_EVENT_TYPES,
+    KNOWN_EVENT_TYPES,
     EventEnvelope,
     ProcessLogEntry,
     ProcessPayload,
@@ -60,6 +62,59 @@ PASSTHROUGH_EVENT_TYPES: frozenset[str] = frozenset({
 #: 终态帧上的 ``status`` / ``job_status`` 优先于类型推断：失败/取消的任务不能
 #: 因为帧类型是 ``done`` 就被渲染成 completed。
 CONTROL_STATES: frozenset[str] = frozenset(item.value for item in RunState)
+
+#: "结构可解释"的事件类型：收敛表 + 既有已知集合 + 过程类 + 透传类 + 终态别名。
+#: 不在这张表里的类型，其载荷结构**不解析**（方案 §1.3 未知事件策略）。
+KNOWN_STRUCTURED_EVENT_TYPES: frozenset[str] = frozenset(
+    set(CANONICAL_EVENT_TYPES)
+    | set(KNOWN_EVENT_TYPES)
+    | set(PROCESS_LIKE_EVENT_TYPES)
+    | set(PASSTHROUGH_EVENT_TYPES)
+    | {
+        "text_delta", "capability_completed", "capability_failed",
+        "done", "task_completed", "task_failed", "cancelled", "job_cancelled",
+        "warning", "view", "view_updated", "artifact", "artifact_created",
+    }
+)
+
+
+def _is_unknown_structure(event_type: str, event: Mapping[str, Any]) -> bool:
+    """类型未登记 **且** 载荷键超出安全白名单 → 结构不可解释（走未知事件策略）。"""
+    if str(event_type or "").strip() in KNOWN_STRUCTURED_EVENT_TYPES:
+        return False
+    from lumi_contracts.events.envelope import ALLOWED_PAYLOAD_KEYS
+
+    return not set(map(str, event.keys())) <= set(ALLOWED_PAYLOAD_KEYS)
+
+
+#: 纯路由元数据键：判断"这帧还有没有可解释的载荷"时忽略它们
+#: （只有 ``type`` / ``job_id`` 这类信封级字段不算内容）。
+_FRAME_METADATA_KEYS: frozenset[str] = frozenset({
+    "type", "version", "seq", "job_id", "conversation_id", "trace_id",
+    "occurred_at", "call_id", "step_id",
+})
+
+
+def _unknown_event_payload(event_type: str, event: Mapping[str, Any]) -> dict[str, Any]:
+    """未知事件：可解释的安全字段仍透传，但打 ``unsupported`` 标记。
+
+    方案 §1.3 的"不解析正文"落在这里：白名单之外的结构一个都不读；如果连一个已登记
+    的安全字段都没有（结构完全不可解释），小数据降级为空载荷、大对象只留哈希引用。
+    """
+    safe = strip_unsafe_payload(dict(event))
+    content = {key: value for key, value in safe.items() if key not in _FRAME_METADATA_KEYS}
+    if content:
+        # 前端容忍未知类型（不得白屏）：保留安全展示字段，同时明确标记"本客户端
+        # 不支持该事件"，避免被当成已知事件渲染。
+        return {**safe, "unsupported": True, "schema_version": 0}
+    from lumi_contracts.events.registry import decide_unknown_event
+
+    decision = decide_unknown_event(
+        event_type, dict(event), known_types=KNOWN_STRUCTURED_EVENT_TYPES
+    )
+    if decision.action == "pass":
+        return safe
+    return decision.payload
 
 
 def _text(value: Any) -> str:
@@ -178,16 +233,35 @@ def _view_payload(event: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _error_payload(event: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "code": _text(event.get("error_code") or event.get("code"))[:80],
-        "message": sanitize_process_text(
-            event.get("message") or event.get("error") or event.get("content"),
-            limit=SUMMARY_MAX_CHARS,
-        ),
-        "retryable": bool(event.get("retryable")),
-        "step_id": _text(event.get("step_id") or event.get("node_id"))[:120],
-        "suggested_action": sanitize_process_text(event.get("suggested_action"), limit=SUMMARY_MAX_CHARS),
-    }
+    """错误帧 → 统一错误载荷（``UnifiedError`` 的事件形态，方案 §3）。
+
+    只有 ``safe_message`` 会到前端：原始异常文本/供应商响应/堆栈一律不进载荷，
+    完整信息进 ``detail_ref`` 指向的产物。同一类失败从任何路径得到同一个
+    ``code`` + ``safe_message``（映射表只有 :mod:`lumi_contracts.events.errors` 一份）。
+    """
+    from lumi_contracts.events.errors import translate_error
+
+    raw_code = _text(event.get("error_code") or event.get("code") or event.get("reason_code"))
+    if not raw_code:
+        # 取消类帧没有"错误码"是正常的：收敛为冻结码 ``SYSTEM_CANCELLED``，
+        # 而不是掉进 system.internal（前端文案完全不同）。
+        frame_type = _text(event.get("type"))
+        if frame_type in {"cancelled", "job_cancelled", "system_cancelled"}:
+            raw_code = "SYSTEM_CANCELLED"
+    unified = translate_error(
+        {
+            "code": raw_code,
+            "retryable": event.get("retryable") if isinstance(event.get("retryable"), bool) else None,
+            "step_id": _text(event.get("step_id") or event.get("node_id")),
+            "detail_ref": _text(event.get("detail_ref")),
+            "suggested_action": _text(event.get("suggested_action")),
+        }
+    )
+    payload = unified.to_payload()
+    # ``control`` 载荷用 ``error_code`` 承载同一个码（失败/取消的终态帧）。
+    payload["error_code"] = unified.code
+    payload.setdefault("safe_next_action", unified.suggested_action)
+    return payload
 
 
 def canonical_payload(event_type: str, event: Mapping[str, Any], *, status: str = "") -> dict[str, Any]:
@@ -222,7 +296,7 @@ def canonical_payload(event_type: str, event: Mapping[str, Any], *, status: str 
                 "risk_level", "preview_ref", "expires_at",
             )
         }
-    if text_type in {"error", "task_failed", "cancelled"}:
+    if text_type in {"error", "task_failed", "failed", "cancelled", "job_cancelled"}:
         return _error_payload(event)
     if text_type in {"done", "task_completed"}:
         # 终态帧上的状态优先：失败/取消/中断的任务不能因为类型是 done 就报 completed。
@@ -231,16 +305,25 @@ def canonical_payload(event_type: str, event: Mapping[str, Any], *, status: str 
         ).casefold()
         if state not in CONTROL_STATES:
             state = "completed"
-        return {
+        payload: dict[str, Any] = {
             "state": state,
             "reason_code": _text(event.get("reason_code") or event.get("error_code"))[:80],
             "next_action": _text(event.get("next_action"))[:80],
         }
+        if state in {"failed", "cancelled", "interrupted"}:
+            # 失败/取消的终态帧必须带**统一错误码**与"下一步"文案，前端据此分派。
+            payload.update(_error_payload(event))
+            payload["state"] = state
+        return payload
     # 过程类/能力类/操作类：统一走过程安全字段，再叠加本帧自己的展示字段。
     payload: dict[str, Any] = {}
     if text_type in PROCESS_LIKE_EVENT_TYPES:
         entry = ProcessLogEntry.from_event(dict(event))
         payload = ProcessPayload.from_entry(entry).model_dump(mode="json", exclude_none=True)
+    elif _is_unknown_structure(text_type, event):
+        # 未注册类型 + 看不懂的载荷结构（方案 §1.3）：小数据不解析、大对象只留哈希引用，
+        # 绝不把看不懂的正文塞进公开事件。
+        return _unknown_event_payload(text_type, event)
     payload.update(strip_unsafe_payload(dict(event)))
     if status:
         payload.setdefault("status", status[:40])

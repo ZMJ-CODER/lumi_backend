@@ -247,6 +247,10 @@ class Settings(BaseSettings):
     # ── 文件上传 ──
     UPLOAD_DIR: str = "data/uploads"
     UPLOAD_TOKEN_TTL_SECONDS: int = 3600  # 附件签名 URL 有效期（秒）
+    # 产物下载短链有效期（秒）：``artifact_created`` 只给引用，前端点击时再换短时 URL。
+    # 过期属**正常路径**（前端会重新申请一次），因此保持分钟级；上限 3600 由
+    # ``app/services/artifacts.py`` 强制夹取，配置写错也不会变成长期凭据。
+    ARTIFACT_DOWNLOAD_URL_TTL_SECONDS: int = 300
 
     # ── 办公文档临时会话（聊天框上传链路，短期保留） ──
     # TTL（小时）：会话被读取/分析/编辑时刷新；过期后由清理任务删除。

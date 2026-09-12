@@ -4,28 +4,23 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="优化sse流处理">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="新增单独切换模型功能">
       <change beforePath="$PROJECT_DIR$/.env.example" beforeDir="false" afterPath="$PROJECT_DIR$/.env.example" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/langchain/planning.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/langchain/planning.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/job_submission_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/job_submission_service.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/router.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/router.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/admin.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/call.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/call.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/agents.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/agents.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/artifacts.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/artifacts.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/api/v1/chat.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/chat.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/conversations.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/conversations.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/contracts/event_adapter.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/contracts/event_adapter.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/contracts/events.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/contracts/events.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/contracts/ui_projection.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/contracts/ui_projection.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/core/llm.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/llm.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/admin.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/admin.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/models/db_models.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/models/db_models.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/conversation_memory.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/conversation_memory.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/rag/query_rewriter.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/rag/query_rewriter.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/task_assessor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/task_assessor.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/usage.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/usage.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/artifacts.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/artifacts.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/job_event_log.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/job_event_log.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/STREAM_EVENT_PROTOCOL.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/STREAM_EVENT_PROTOCOL.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/__init__.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/events/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/events/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/persistence/run_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/persistence/run_view.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/events/envelope.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/events/envelope.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -113,14 +108,6 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1785559147484</updated>
-    </task>
-    <task id="LOCAL-00014" summary="新增语音合成和语音转文字，新增docker容器部署">
-      <option name="closed" value="true" />
-      <created>1786361069196</created>
-      <option name="number" value="00014" />
-      <option name="presentableId" value="LOCAL-00014" />
-      <option name="project" value="LOCAL" />
-      <updated>1786361069196</updated>
     </task>
     <task id="LOCAL-00015" summary="新增流式聊天，新增自动联网搜索工具，新增可插拔提示词模版">
       <option name="closed" value="true" />
@@ -506,7 +493,15 @@
       <option name="project" value="LOCAL" />
       <updated>1789190467343</updated>
     </task>
-    <option name="localTasksCounter" value="63" />
+    <task id="LOCAL-00063" summary="新增单独切换模型功能">
+      <option name="closed" value="true" />
+      <created>1789192662262</created>
+      <option name="number" value="00063" />
+      <option name="presentableId" value="LOCAL-00063" />
+      <option name="project" value="LOCAL" />
+      <updated>1789192662262</updated>
+    </task>
+    <option name="localTasksCounter" value="64" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -533,7 +528,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="迁移到langchain生态，优化dag流程与算法，优化mcp服务器" />
     <MESSAGE value="继续优化dag架构，优化记忆系统，优化rag处理，添加消息队列" />
     <MESSAGE value="拆分高耦合dag引擎，优化dag链路，优化mcp设计，加入reranker模型" />
     <MESSAGE value="优化提交" />
@@ -558,6 +552,7 @@
     <MESSAGE value="新增前端执行日志输出" />
     <MESSAGE value="新增分布式插件动态添加" />
     <MESSAGE value="优化sse流处理" />
-    <option name="LAST_COMMIT_MESSAGE" value="优化sse流处理" />
+    <MESSAGE value="新增单独切换模型功能" />
+    <option name="LAST_COMMIT_MESSAGE" value="新增单独切换模型功能" />
   </component>
 </project>

@@ -128,6 +128,12 @@ def execution_result_from_node(
             name=item["filename"],
             media_type=item["mime_type"],
             size=item.get("size_bytes"),
+            # 保留策略随引用一起走（契约字段；前端据此显示到期提示）。
+            retention_class=str(item.get("retention_class") or ""),
+            requested_expires_at=str(item.get("requested_expires_at") or ""),
+            effective_expires_at=str(item.get("effective_expires_at") or ""),
+            retention_policy_source=str(item.get("retention_policy_source") or ""),
+            retention_clamp_reason=str(item.get("retention_clamp_reason") or ""),
         )
         for item in artifacts
     ]

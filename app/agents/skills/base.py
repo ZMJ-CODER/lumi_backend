@@ -80,6 +80,13 @@ class SkillContext:
     # never by a model tool argument.  Workspace workflows use this value to
     # bind every Electron MCP call to one local project.
     workspace_id: str = ""
+    # 阶段 4 收口：本次执行属于哪个**插件**（由服务端注入，绝不来自 LLM 参数/文档
+    # 内容）。空 = 内置执行：系统默认上限，不按插件配额治理。
+    # 带 plugin_id 时，执行必须经 ``PluginManager.worker_for`` 拿到配额边界；
+    # 拿不到就按稳定码阻断（``PLUGIN_WORKER_UNAVAILABLE`` 等），不回退进程内执行。
+    plugin_id: str = ""
+    # 可选的服务端注入 Manifest（缺省时由 PluginManager 从注册表取，唯一权威仍是注册表）。
+    plugin_manifest: Any = None
 
 
 class Tool(ABC):

@@ -8,6 +8,14 @@
 from __future__ import annotations
 
 from lumi_contracts.routing.execution_request import ExecutionRequest
+from lumi_contracts.routing.model_capability import (
+    DegradationAction,
+    DegradationDecision,
+    ModelCapabilityProfile,
+    ModalityRequest,
+    decide_degradation,
+    from_role_capabilities,
+)
 from lumi_contracts.routing.route_decision import RouteDecision, RouteMode
 from lumi_contracts.routing.task_profile import (
     Complexity,
@@ -18,10 +26,16 @@ from lumi_contracts.routing.task_profile import (
 
 __all__ = [
     "Complexity",
+    "DegradationAction",
+    "DegradationDecision",
     "ExecutionRequest",
     "ExecutionTarget",
     "InfoSource",
+    "ModelCapabilityProfile",
+    "ModalityRequest",
     "RouteDecision",
     "RouteMode",
     "TaskProfile",
+    "decide_degradation",
+    "from_role_capabilities",
 ]

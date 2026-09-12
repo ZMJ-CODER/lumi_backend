@@ -19,8 +19,46 @@ from lumi_contracts.events.process import ProcessLogEntry
 # 过程日志在快照里的条数上限（滚动窗口，避免状态库无界增长）。
 PROCESS_LOG_MAX_ENTRIES = 200
 
+# 快照里**单条**过程日志/步骤展示文本的字节上限（超出的更早内容走归档引用）。
+PROCESS_LOG_ENTRY_MAX_BYTES = 2_048
+
+# 单个 Job 快照的字节上限：超过即告警 + 强制收缩（方案 §5.3 三条硬规则之一）。
+SNAPSHOT_MAX_BYTES = 256 * 1024
+
 # 最终答复在快照里的长度上限（可展示即可，正文另有引用）。
 FINAL_ANSWER_MAX_CHARS = 20000
+
+
+def clip_utf8(text: object, max_bytes: int = PROCESS_LOG_ENTRY_MAX_BYTES) -> str:
+    """按 **UTF-8 字节**截断文本（不切坏多字节字符；超限补省略号）。"""
+    raw = str(text or "")
+    if not raw:
+        return ""
+    encoded = raw.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return raw
+    budget = max(0, max_bytes - len("…".encode("utf-8")))
+    return encoded[:budget].decode("utf-8", errors="ignore").rstrip() + "…"
+
+
+def _dump_size(payload: Any) -> int:
+    import json
+
+    try:
+        return len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bound_entry(entry: Any) -> ProcessLogEntry:
+    """硬规则②：单条过程日志的 ``summary`` / ``detail`` 按字节截断（正文走引用）。"""
+    if not isinstance(entry, ProcessLogEntry):
+        entry = ProcessLogEntry.model_validate(entry)
+    summary = clip_utf8(entry.summary)
+    detail = clip_utf8(entry.detail)
+    if summary == entry.summary and detail == entry.detail:
+        return entry
+    return entry.model_copy(update={"summary": summary, "detail": detail})
 
 
 class StepView(BaseModel):
@@ -72,6 +110,11 @@ class JobRunView(BaseModel):
     error_code: str | None = None
     updated_at: float = 0.0
     version: int = 1
+    # 过程日志归档（更早的日志转存为 Artifact，快照只留引用 + 条数）。
+    log_archive_ref: str = ""
+    log_archive_count: int = 0
+    # 快照是否被强制收缩过（超过 SNAPSHOT_MAX_BYTES 时置位）。
+    truncated: bool = False
 
     @field_validator("final_answer")
     @classmethod
@@ -86,11 +129,51 @@ class JobRunView(BaseModel):
         }
 
     def with_process_log(self, entries: list[Any] | None) -> "JobRunView":
-        """按去重键合并过程日志（SSE / 轮询 / 刷新叠加都不重复），并做滚动窗口。"""
+        """按去重键合并过程日志（SSE / 轮询 / 刷新叠加都不重复），并做滚动窗口。
+
+        同时执行硬规则②：单条 ``summary`` / ``detail`` 超过
+        :data:`PROCESS_LOG_ENTRY_MAX_BYTES` 时按 UTF-8 安全截断——快照里永远不留长正文。
+        """
         from lumi_contracts.events.process import merge_process_log
 
         merged = merge_process_log(self.process_log, entries, limit=PROCESS_LOG_MAX_ENTRIES)
-        return self.model_copy(update={"process_log": merged})
+        bounded = [_bound_entry(entry) for entry in merged]
+        return self.model_copy(update={"process_log": bounded})
+
+    def roll_process_log(
+        self, entries: list[Any] | None, *, keep: int = PROCESS_LOG_MAX_ENTRIES
+    ) -> tuple["JobRunView", list[Any]]:
+        """合并日志并**把窗口外的更早日志交还给调用方归档**。
+
+        硬规则①：快照最多留最近 ``keep`` 条，更早的由调用方转存为
+        ``process_log_archive`` Artifact，再用 :meth:`with_log_archive` 记引用与条数。
+        返回 ``(新视图, 需要归档的更早条目)``。
+        """
+        from lumi_contracts.events.process import merge_process_log
+
+        # limit=0 → 不截断（先拿到全量，再自己切"保留窗口 / 归档"两段）。
+        merged = merge_process_log(self.process_log, entries, limit=0)
+        if len(merged) <= keep:
+            return self.model_copy(update={"process_log": [_bound_entry(item) for item in merged]}), []
+        archived = merged[: len(merged) - keep]
+        kept = [_bound_entry(item) for item in merged[len(merged) - keep :]]
+        previous = int(self.log_archive_count or 0)
+        return (
+            self.model_copy(
+                update={
+                    "process_log": kept,
+                    "log_archive_count": previous + len(archived),
+                }
+            ),
+            archived,
+        )
+
+    def with_log_archive(self, ref: str, *, count: int | None = None) -> "JobRunView":
+        """记录归档引用（``process_log_archive`` 的 Artifact 引用 + 归档条数）。"""
+        update: dict[str, Any] = {"log_archive_ref": str(ref or "")}
+        if count is not None:
+            update["log_archive_count"] = max(int(self.log_archive_count or 0), int(count))
+        return self.model_copy(update=update)
 
     def note_seq(self, seq: int) -> "JobRunView":
         """推进事件水位（只增不减；乱序/重复的快照不得把水位拉回去）。"""
@@ -123,7 +206,87 @@ class JobRunView(BaseModel):
         return self.model_copy(update={"artifact_refs": rows[-limit:] if limit else rows})
 
     def to_snapshot(self) -> dict[str, Any]:
+        """可写库的快照：**已经过体积收缩**（超限自动收缩并告警）。"""
+        return self.bounded_snapshot()
+
+    # ── 快照膨胀硬规则（方案 §5.3）────────────────────────
+
+    def snapshot_size_bytes(self) -> int:
+        """当前快照（序列化后）的字节数。"""
+        return _dump_size(self.to_snapshot_unbounded())
+
+    def to_snapshot_unbounded(self) -> dict[str, Any]:
+        """不做收缩的原始快照（仅供体积度量/排障，不要直接写库）。"""
         return self.model_dump(mode="json", exclude_none=True)
 
+    def shrink(self) -> "JobRunView":
+        """硬规则③：体积超限时的**强制收缩**（老步骤只留 status/error_code/result_ref）。
 
-__all__ = ["FINAL_ANSWER_MAX_CHARS", "PROCESS_LOG_MAX_ENTRIES", "JobRunView", "StepView"]
+        策略（从"最不伤恢复"到"最伤"，逐级做，直到回到阈值内）：
+        1. 丢掉较早步骤的 ``output`` / ``title``（保留 status/error_code/result_ref/depends_on）；
+        2. 过程日志只留最近 50 条，其余计入 ``log_archive_count``（由调用方归档）；
+        3. 仍然超限则丢掉过程日志的 ``detail``。
+        """
+        view = self
+        if view.snapshot_size_bytes() <= SNAPSHOT_MAX_BYTES:
+            return view
+        steps = [
+            (
+                step.model_copy(update={"output": "", "title": ""})
+                if index < max(0, len(view.steps) - 10)
+                else step
+            )
+            for index, step in enumerate(view.steps)
+        ]
+        view = view.model_copy(update={"steps": steps, "truncated": True})
+        if view.snapshot_size_bytes() <= SNAPSHOT_MAX_BYTES:
+            return view
+        from lumi_contracts.events.process import merge_process_log
+
+        merged = merge_process_log(view.process_log, [], limit=0)
+        if len(merged) > 50:
+            view = view.model_copy(
+                update={
+                    "process_log": merged[-50:],
+                    "log_archive_count": int(view.log_archive_count or 0) + (len(merged) - 50),
+                    "truncated": True,
+                }
+            )
+        if view.snapshot_size_bytes() <= SNAPSHOT_MAX_BYTES:
+            return view
+        thinned = [entry.model_copy(update={"detail": ""}) for entry in view.process_log]
+        return view.model_copy(update={"process_log": thinned, "truncated": True})
+
+    def bounded_snapshot(self, *, warn: bool = True) -> dict[str, Any]:
+        """**写入路径唯一入口**：先量体积，超限则收缩 + 告警，再返回可写库的快照。"""
+        raw = self.to_snapshot_unbounded()
+        size = _dump_size(raw)
+        if size <= SNAPSHOT_MAX_BYTES:
+            return raw
+        shrunk = self.shrink()
+        bounded = shrunk.to_snapshot_unbounded()
+        new_size = _dump_size(bounded)
+        if warn:
+            try:
+                from loguru import logger
+
+                logger.warning(
+                    "[job-run-view] 快照超限已收缩 job={} {}B → {}B（老日志请按 log_archive_ref 加载）",
+                    str(self.job_id)[:12],
+                    size,
+                    new_size,
+                )
+            except Exception:  # noqa: BLE001 - 告警失败不影响写入
+                pass
+        return bounded
+
+
+__all__ = [
+    "FINAL_ANSWER_MAX_CHARS",
+    "PROCESS_LOG_ENTRY_MAX_BYTES",
+    "PROCESS_LOG_MAX_ENTRIES",
+    "SNAPSHOT_MAX_BYTES",
+    "JobRunView",
+    "StepView",
+    "clip_utf8",
+]

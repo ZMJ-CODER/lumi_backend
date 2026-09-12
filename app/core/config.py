@@ -596,6 +596,17 @@ class Settings(BaseSettings):
     # 无需 DevTools 抓包或手工提供 token/会话 ID。默认关闭。
     ACCEPTANCE_SSE_LOG: bool = False
 
+    # ── 《事件协议整合版》接入灰度开关（默认全关：先影子运行、比对差异，再切主链路）──
+    # 打开只改"新行为是否生效"，不改契约；关掉必须回到改造前的旧路径。
+    CAPABILITY_PREFLIGHT_V2: bool = False     # 统一 CapabilityPreflightService 接管预检
+    MODEL_CAPABILITY_ROUTER_V2: bool = False  # 能力降级决策表参与模型选择
+    EFFECT_JOURNAL_RECOVERY_V2: bool = False  # 恢复判断按 Effect Journal（只自动恢复幂等步骤）
+    TASK_PROFILE_CANONICAL: bool = False      # 统一 TaskProfile（contracts 为权威）
+    PLUGIN_QUOTA_ENFORCEMENT: bool = False    # Worker 真执行插件配额
+    ARCHIVE_CONTENT_V2: bool = False          # 归档读取走 /artifacts/{ref}/content
+    #: 影子运行：只记录"新逻辑会做什么"的差异，不改变实际返回。
+    INTEGRATION_SHADOW_MODE: bool = False
+
     # ── 文档类别与按类别半衰期（不同知识时效性不同）──
     RAG_DEFAULT_CATEGORY: str = "general"   # 默认类别
     RAG_CATEGORY_HALF_LIFE_DAYS: dict[str, int] = {
@@ -631,6 +642,28 @@ class Settings(BaseSettings):
     # ── 后端生成文件清理 ──
     GENERATED_FILES_TTL_DAYS: int = 7    # 通用脚本产物（office_outputs）保留天数，到期定时删除
     SANDBOX_TEMP_TTL_HOURS: int = 6      # 沙箱残留临时目录（lumi_sandbox_*）兜底清理时长
+
+    # ── 运行视图快照写入（不是开关）──
+    # FLAG DOES NOT CONTROL SNAPSHOT WRITES：Job 运行视图快照是任务恢复/前端刷新的
+    # 基础设施，**任何灰度开关都不得关闭或跳过它的写入**（唯一写路径见
+    # app/services/job_snapshot_store.py::SnapshotWriter → JobRunView.to_snapshot()）。
+    # 开关只允许影响"视图里放什么"（例如 ARCHIVE_CONTENT_V2 决定是否产出过程日志归档
+    # 引用），不允许影响"快照是否落库"。快照 TTL 见 AGENT_JOBS_TTL_SECONDS。
+
+    # ── 过程日志归档保留策略（阶段 3，ARCHIVE_CONTENT_V2）──
+    # 归档类别不同、保留期不同，全部走配置（代码里不得写死 TTL）：
+    #   1) active_task_log     运行中任务的过程日志归档（短期，任务还在写）
+    #      → 保留类别 EPHEMERAL_ARCHIVE，由归档清理器删除；
+    #   2) completed_job_archive 已完成任务的过程归档（供复盘/审计）
+    #      → 保留类别 AUDIT_ARCHIVE，由归档清理器删除；
+    #   3) user_saved_artifact 用户另存为产物的归档（长期）
+    #      → 保留类别 USER_ARTIFACT，归工作区策略（GENERATED_FILES_TTL_DAYS）清理。
+    # 读取仍走冻结的 GET /api/v1/artifacts/{ref}/content：归档类别的读取天花板是该接口
+    # 的产物 TTL；请求值超过天花板时按 min 生效，并把原因写进 retention_clamp_reason
+    # （绝不静默夹取）。类别→设置/清理器的唯一映射见 app/services/artifact_retention.py。
+    LOG_ARCHIVE_RETENTION_ACTIVE_TASK_SECONDS: int = 86400       # 24h
+    LOG_ARCHIVE_RETENTION_COMPLETED_JOB_SECONDS: int = 604800   # 7d（与产物 TTL 对齐）
+    LOG_ARCHIVE_RETENTION_USER_ARTIFACT_SECONDS: int = 2592000  # 30d
 
     # ── 语音（ASR + TTS）──
     WHISPER_MODEL: str = "base"        # openai-whisper：tiny/base/small/medium/large

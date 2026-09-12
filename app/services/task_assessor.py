@@ -17,7 +17,20 @@ from typing import Any
 
 from loguru import logger
 
+from lumi_contracts.routing.task_profile import (
+    ActionIntent as CanonicalActionIntent,
+    Complexity as CanonicalComplexity,
+    ConfidenceSource as CanonicalConfidenceSource,
+    ExecutionTarget as CanonicalExecutionTarget,
+    InfoSource as CanonicalInfoSource,
+    IntentType as CanonicalIntentType,
+    TargetScope as CanonicalTargetScope,
+    TaskProfile as CanonicalTaskProfile,
+)
 from lumi_orch.task_assessment import TaskProfile, apply_confidence_policy
+
+#: canonical 生产开关（默认关；关掉时本模块输出逐字不变，见 ``canonical_profile``）。
+CANONICAL_FLAG = "TASK_PROFILE_CANONICAL"
 
 _SIDE_EFFECT_WORDS = re.compile(
     r"(?iu)(?:保存|写入|修改|编辑|删除|移除|发送|邮件|提交|发布|部署|运行|执行|跑一下|安装|"
@@ -57,6 +70,48 @@ _CAPABILITY_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?iu)(?:运行|执行|脚本|测试|run|execute|test)"), "CODE_EXECUTION"),
     (re.compile(r"(?iu)(?:工作区|项目|仓库|文件|workspace|project|file)"), "WORKSPACE_MANIPULATION"),
 )
+
+# ── 旧严格画像 → canonical TaskProfile 的**唯一**映射表 ─────────────────
+# 只映射旧画像确实算得出、且语义一一对应的信号；算不出的字段留空并在 debug 留痕
+# （见 ``to_canonical_profile``），绝不按字面猜。
+#: 旧 ``side_effects`` → canonical 动作意图。``WRITE`` 无法区分新建/修改（旧画像
+#: 不产出该区分），统一映射为 ``MODIFY``（其工具窗口是 ``workspace_write`` 的超集）。
+_LEGACY_EFFECT_TO_ACTION: dict[str, CanonicalActionIntent] = {
+    "WRITE": CanonicalActionIntent.MODIFY,
+    "DELETE": CanonicalActionIntent.DELETE,
+    "SEND": CanonicalActionIntent.SEND,
+    "PUBLISH": CanonicalActionIntent.PUBLISH,
+    "EXECUTE": CanonicalActionIntent.EXECUTE,
+}
+#: 旧复杂度档位 → canonical 复杂度（有损：M0/M1 都是 ATOMIC）。
+_LEGACY_COMPLEXITY_TO_CANONICAL: dict[str, CanonicalComplexity] = {
+    "M0": CanonicalComplexity.ATOMIC,
+    "M1": CanonicalComplexity.ATOMIC,
+    "M2": CanonicalComplexity.SEQUENTIAL,
+    "M3": CanonicalComplexity.DYNAMIC,
+}
+#: 旧信息源名 → canonical（旧表的 ``EXTERNAL_WEB`` 在 canonical 里叫 ``PUBLIC_WEB``）。
+_LEGACY_SOURCE_TO_CANONICAL: dict[str, CanonicalInfoSource] = {
+    "USER_PROVIDED": CanonicalInfoSource.USER_PROVIDED,
+    "CONVERSATION_MEMORY": CanonicalInfoSource.CONVERSATION_MEMORY,
+    "INTERNAL_KNOWLEDGE": CanonicalInfoSource.INTERNAL_KNOWLEDGE,
+    "WORKSPACE": CanonicalInfoSource.WORKSPACE,
+    "EXTERNAL_WEB": CanonicalInfoSource.PUBLIC_WEB,
+    "PRIVATE_SERVICE": CanonicalInfoSource.PRIVATE_SERVICE,
+}
+#: 旧执行位置 → canonical（有损：``BACKEND``/``EXTERNAL_SERVICE`` 都归 ``SERVER``）。
+_LEGACY_EXECUTION_TARGET_TO_CANONICAL: dict[str, CanonicalExecutionTarget] = {
+    "NONE": CanonicalExecutionTarget.NONE,
+    "BACKEND": CanonicalExecutionTarget.SERVER,
+    "DESKTOP": CanonicalExecutionTarget.DESKTOP,
+    "SANDBOX": CanonicalExecutionTarget.SANDBOX,
+    "EXTERNAL_SERVICE": CanonicalExecutionTarget.SERVER,
+}
+#: canonical 评估来源（``assess_task_profile`` 的 source）→ 置信度来源枚举。
+_SOURCE_TO_CONFIDENCE: dict[str, CanonicalConfidenceSource] = {
+    "llm": CanonicalConfidenceSource.LLM,
+    "heuristic": CanonicalConfidenceSource.HEURISTIC,
+}
 
 
 @dataclass(slots=True)
@@ -163,6 +218,215 @@ def heuristic_profile(context: AssessmentContext) -> TaskProfile:
     )
 
 
+def _canonical_target_scope(
+    sources: list[CanonicalInfoSource],
+    context: AssessmentContext | None,
+) -> CanonicalTargetScope:
+    """目标范围：只用"信息源 / 附件"这两个入口事实，不从用户文本猜目标。"""
+    if CanonicalInfoSource.WORKSPACE in sources:
+        return CanonicalTargetScope.WORKSPACE
+    if context is not None and (context.has_attachments or context.has_office_docs):
+        return CanonicalTargetScope.ATTACHMENT
+    if {CanonicalInfoSource.PUBLIC_WEB, CanonicalInfoSource.PRIVATE_SERVICE} & set(sources):
+        return CanonicalTargetScope.EXTERNAL_SERVICE
+    return CanonicalTargetScope.USER_INPUT
+
+
+def to_canonical_profile(
+    profile: TaskProfile,
+    *,
+    source: str = "heuristic",
+    context: AssessmentContext | None = None,
+) -> CanonicalTaskProfile:
+    """旧严格画像 → canonical ``TaskProfile``（契约唯一权威定义，方案 §3.1）。
+
+    只映射旧画像**确实算得出**的信号：
+
+    * ``action_intents`` ← ``side_effects``（唯一映射表）+ ``WORKSPACE`` 信息源 → ``READ``
+      （assessor prompt 明确"WORKSPACE = 需要读取本地项目/文件才可获得"）；
+    * ``target_scope`` ← 信息源/附件；``required_capabilities`` ← 抽象能力原样保留；
+    * ``has_runtime_decision`` ← ``complexity == "M3"``（旧画像里"需探索/自行判断/排查
+      修复"是 M3 的**唯一**来源，见 heuristic_profile 与 assessor_prompt 规则 3）；
+    * ``approval_required`` ← ``risk_level == "HIGH_RISK"``（明确的高风险信号）。
+
+    算不出的字段**留空**而不是猜，并在 ``debug["unavailable"]`` 留痕：
+
+    * ``target_clarity``：旧画像没有"目标是否已给出"的信号。唯一相关的
+      ``path_determinism`` 被 ``apply_confidence_policy`` 对"低置信度 + 有副作用"的
+      任务统一改写成 ``UNKNOWN``（策略标签，不是事实），据此判定会把每个写任务
+      变成"目标未知"。目标澄清仍由入口 ``task_preflight`` 负责。
+    * ``has_dependency``：启发式算了 ``dependency`` 但**没有写进画像**，M2 档位又被
+      上述策略升级污染，无法还原。
+    """
+    canonical_sources: list[CanonicalInfoSource] = []
+    unmapped_sources: list[str] = []
+    for item in profile.info_sources or []:
+        mapped = _LEGACY_SOURCE_TO_CANONICAL.get(str(item))
+        if mapped is None:
+            unmapped_sources.append(str(item))
+        elif mapped not in canonical_sources:
+            canonical_sources.append(mapped)
+    if not canonical_sources:
+        canonical_sources = [CanonicalInfoSource.USER_PROVIDED]
+
+    intents: list[CanonicalActionIntent] = []
+    unmapped_effects: list[str] = []
+    for effect in profile.side_effects or []:
+        action = _LEGACY_EFFECT_TO_ACTION.get(str(effect))
+        if action is None:
+            unmapped_effects.append(str(effect))
+        elif action not in intents:
+            intents.append(action)
+    if CanonicalInfoSource.WORKSPACE in canonical_sources and CanonicalActionIntent.READ not in intents:
+        intents.append(CanonicalActionIntent.READ)
+
+    legacy_intent = str(profile.intent_type or "")
+    # 动作意图非空 ⇒ 必须是 EXECUTE_ACTION（§3.2 硬约束：不许再落到只读直答）。
+    intent_type = (
+        CanonicalIntentType.EXECUTE_ACTION
+        if intents or legacy_intent == "EXECUTE_ACTION"
+        else CanonicalIntentType.GENERATE_ONLY
+    )
+
+    legacy_complexity = str(profile.complexity or "")
+    complexity = _LEGACY_COMPLEXITY_TO_CANONICAL.get(legacy_complexity)
+    runtime_decision = legacy_complexity == "M3"
+    high_risk = str(profile.risk_level or "") == "HIGH_RISK"
+    capabilities: list[str] = []
+    for item in profile.required_capabilities or []:
+        text = str(item or "").strip()
+        if text and text not in capabilities:
+            capabilities.append(text)
+
+    if runtime_decision:
+        reason_code = "assessor.runtime_decision"
+    elif intents:
+        reason_code = "assessor.side_effects"
+    else:
+        reason_code = "assessor.generate_only"
+
+    debug: dict[str, Any] = {
+        # 审计：只放枚举/原因码，绝不放用户原文。
+        "canonical_from": "lumi_orch.task_assessment.TaskProfile",
+        "assessor_source": str(source),
+        "legacy_complexity": legacy_complexity,
+        "legacy_intent_type": legacy_intent,
+        "legacy_side_effects": [str(item) for item in (profile.side_effects or [])],
+        "legacy_risk_level": str(profile.risk_level or ""),
+        "has_runtime_decision_from": "complexity==M3",
+        "approval_required_from": "risk_level==HIGH_RISK",
+        # 没有信号、因此留空的字段（留痕，供影子比对与排障）。
+        "unavailable": {
+            "target_clarity": "旧画像无目标是否给出的信号；path_determinism 是低置信度策略标签",
+            "has_dependency": "启发式的 dependency 未写入画像，M2 档位被策略升级污染",
+        },
+        "lossy": {
+            "complexity": f"{legacy_complexity or '?'} → {str(complexity or 'ATOMIC')}",
+            "execution_target": (
+                f"{str(profile.execution_target or '')} → "
+                f"{str(_LEGACY_EXECUTION_TARGET_TO_CANONICAL.get(str(profile.execution_target), CanonicalExecutionTarget.NONE))}"
+            ),
+            "side_effect_WRITE": "WRITE 无法区分新建/修改 → MODIFY",
+        },
+    }
+    if unmapped_sources:
+        debug["unmapped_info_sources"] = unmapped_sources
+    if unmapped_effects:
+        debug["unmapped_side_effects"] = unmapped_effects
+    if complexity is None:
+        debug["unknown_complexity"] = legacy_complexity
+        complexity = CanonicalComplexity.ATOMIC
+
+    return CanonicalTaskProfile(
+        goal="",
+        complexity=complexity,
+        side_effects=bool(profile.side_effects),
+        info_sources=canonical_sources,
+        output_target=str(profile.output_target or ""),
+        execution_target=_LEGACY_EXECUTION_TARGET_TO_CANONICAL.get(
+            str(profile.execution_target), CanonicalExecutionTarget.NONE
+        ),
+        required_capabilities=capabilities,
+        risk_level=str(profile.risk_level or "low"),
+        confidence=float(profile.confidence or 0.0),
+        debug=debug,
+        intent_type=intent_type,
+        action_intents=intents,
+        target_scope=_canonical_target_scope(canonical_sources, context),
+        has_runtime_decision=runtime_decision,
+        approval_required=high_risk,
+        confidence_source=_SOURCE_TO_CONFIDENCE.get(str(source), CanonicalConfidenceSource.HEURISTIC),
+        decision_reason_code=reason_code,
+    )
+
+
+def _log_canonical_shadow_diff(old: CanonicalTaskProfile, new: CanonicalTaskProfile) -> None:
+    """影子模式：一行记录 old→new 的差异（只有枚举/原因码，不含用户原文）。"""
+    old_fp, new_fp = old.fingerprint(), new.fingerprint()
+    changed = {
+        key: [old_fp.get(key), new_fp.get(key)]
+        for key in sorted(set(old_fp) | set(new_fp))
+        if old_fp.get(key) != new_fp.get(key)
+    }
+    logger.info(
+        "TaskProfile canonical shadow diff: {}",
+        json.dumps(changed, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def canonical_profile(
+    context: AssessmentContext,
+    *,
+    source: str = "heuristic",
+    legacy: Any = None,
+) -> CanonicalTaskProfile:
+    """canonical 画像的唯一生产入口（灰度 ``TASK_PROFILE_CANONICAL``）。
+
+    * **开关关（默认）**：只做别名归一（``from_mapping``），旧视图，语义不新增；
+    * **开 + 影子（``INTEGRATION_SHADOW_MODE``）**：记录 old/new ``fingerprint()``
+      差异后**继续返回旧视图**（实际行为不变）；
+    * **开**：返回按 §3.1 映射出的 canonical 画像。
+
+    ``legacy`` 由调用方给出（例如 LLM 评估结果）；缺省用确定性启发式画像，
+    保证预检等"计划前"的调用点**不额外发起模型调用**。
+    """
+    from app.core.feature_flags import feature_enabled, shadow_mode
+
+    if legacy is None:
+        legacy = apply_confidence_policy(heuristic_profile(context))
+    old_view = CanonicalTaskProfile.from_mapping(legacy)
+    if not feature_enabled(CANONICAL_FLAG):
+        return old_view
+    mapped = to_canonical_profile(legacy, source=source, context=context)
+    if shadow_mode():
+        _log_canonical_shadow_diff(old_view, mapped)
+        return old_view
+    return mapped
+
+
+async def assess_canonical_task_profile(
+    context: AssessmentContext,
+    *,
+    user_id: str = "",
+    llm_api_key: str | None = None,
+    llm_config: dict | None = None,
+    use_llm: bool = True,
+) -> tuple[CanonicalTaskProfile, str]:
+    """canonical 生产者（LLM 优先，确定性兜底）：返回 ``(canonical画像, source)``。
+
+    与 :func:`assess_task_profile` 共用同一评估结果与降级链，只在出口换成 canonical
+    契约；开关关上时返回旧视图（等价于今天"只做别名归一"的 canonical 读法）。
+    """
+    legacy, source = await assess_task_profile(
+        context,
+        user_id=user_id,
+        llm_api_key=llm_api_key,
+        llm_config=llm_config,
+        use_llm=use_llm,
+    )
+    return canonical_profile(context, source=source, legacy=legacy), source
+
+
 def assessor_prompt(context: AssessmentContext) -> str:
     """Assessor Prompt：严格 schema + 关键区分（USER_PROVIDED vs WORKSPACE）。"""
     return (
@@ -259,9 +523,13 @@ def assessor_profile_json(context: AssessmentContext) -> str:
 
 
 __all__ = [
+    "CANONICAL_FLAG",
     "AssessmentContext",
+    "assess_canonical_task_profile",
     "assess_task_profile",
     "assessor_prompt",
     "assessor_profile_json",
+    "canonical_profile",
     "heuristic_profile",
+    "to_canonical_profile",
 ]

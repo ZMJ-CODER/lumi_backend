@@ -15,6 +15,7 @@ Broker **不做**：规划、模型路由、审批判定（审批由审批服务
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -63,6 +64,29 @@ DEFAULT_DEADLINE_SECONDS = 10.0
 #: 幂等结果缓存条数（进程内；跨 worker 需要 Redis，届时只换实现）。
 IDEMPOTENCY_CACHE_SIZE = 256
 
+#: Broker 只报**事实**的词汇表：底层预检原因（能力/租约/健康/权限/参数）。
+#: 原因 → 对外冻结状态（``DEPENDENCY_MISSING`` 等）的唯一映射在
+#: :data:`app.agents.orchestration.capability_preflight_service.LOW_LEVEL_TO_STATUS`；
+#: Broker 不决定用户可见结论。
+PREFLIGHT_FACTS: frozenset[str] = frozenset({
+    "capability_unavailable",
+    "provider_unhealthy",
+    "permission_denied",
+    "tool_not_registered",
+    "workspace_missing",
+    "approval_required",
+    # 输入参数事实：不在对外映射表内（不构成预检阻断，由调用方按原错误码处理）。
+    "invalid_arguments",
+})
+
+
+def _preflight_v2_enabled() -> bool:
+    """``CAPABILITY_PREFLIGHT_V2`` 是否打开（默认关闭）。"""
+    from app.agents.orchestration.capability_preflight_service import FLAG
+    from app.core.feature_flags import feature_enabled
+
+    return feature_enabled(FLAG)
+
 
 class BrokerError(RuntimeError):
     """Broker 内部错误（不用于能力失败——失败一律走 ``CapabilityResult``）。"""
@@ -108,6 +132,18 @@ class CapabilitySelection:
 class _IdempotentEntry:
     result: CapabilityResult
     stored_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class _PreflightProblem:
+    """一次执行前失败的**底层事实**（Broker 不决定用户可见结论）。"""
+
+    code: str
+    message: str
+    fact: str
+    suggested_action: str = ""
+    with_provider: bool = False
+    details: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 class CapabilityBroker:
@@ -353,6 +389,88 @@ class CapabilityBroker:
 
     # ── 内部：前置校验 ────────────────────────────────────
 
+    def _preflight_problem(
+        self,
+        invocation: CapabilityInvocation,
+        selection: CapabilitySelection,
+        *,
+        context: AgentExecutionContext | None = None,
+    ) -> "_PreflightProblem | None":
+        """执行前失败**事实**：绑定不符/缺能力/版本不符/参数非法。
+
+        只回答"哪里不满足"，不回答"给用户看什么"：``fact`` 是 Broker 的底层
+        原因词（:data:`PREFLIGHT_FACTS`），对外状态由 CapabilityPreflightService
+        映射；``message``/``suggested_action`` 只用于开关关闭时的兼容路径。
+        """
+        if context is not None:
+            mismatch = binding_mismatch(invocation, context)
+            if mismatch:
+                # 调用方不得用自己声明的绑定替换服务端注入的会话/工作区/设备。
+                return _PreflightProblem(
+                    code=CapabilityErrorCode.SCOPE_DENIED.value,
+                    message="能力调用的会话绑定与服务端上下文不一致：" + "；".join(mismatch),
+                    fact="permission_denied",
+                    details={"mismatch": mismatch},
+                )
+        if selection.descriptor is None:
+            return _PreflightProblem(
+                code=CapabilityErrorCode.CAPABILITY_MISSING.value,
+                message=f"未声明的能力 {invocation.qualified_capability}",
+                fact="capability_unavailable",
+                suggested_action="请安装或启用提供该能力的 Provider",
+            )
+        if not selection.provider_id:
+            if selection.reason.startswith("契约版本不一致"):
+                # 能力存在但版本不符：提示升级 Provider，而不是笼统的"缺能力"。
+                return _PreflightProblem(
+                    code=CapabilityErrorCode.CONTRACT_VERSION_MISMATCH.value,
+                    message=f"{invocation.qualified_capability} 的契约版本不受支持（{selection.reason}）",
+                    fact="capability_unavailable",
+                    suggested_action="请升级或重新注册提供该能力的 Provider",
+                    details={"reason": selection.reason},
+                )
+            return _PreflightProblem(
+                code=CapabilityErrorCode.CAPABILITY_MISSING.value,
+                message=f"没有可用 Provider 提供 {invocation.qualified_capability}",
+                fact="provider_unhealthy",
+                suggested_action="请确认客户端 Provider 已连接并完成能力注册",
+                details={"reason": selection.reason},
+            )
+        problems = validate_arguments(selection.descriptor, invocation.arguments)
+        if problems:
+            return _PreflightProblem(
+                code=CapabilityErrorCode.INVALID_ARGUMENTS.value,
+                message="能力参数不合法：" + "；".join(problems[:4]),
+                fact="invalid_arguments",
+                with_provider=True,
+                details={"problems": problems},
+            )
+        return None
+
+    def preflight_facts(
+        self,
+        capabilities: Any,
+        *,
+        binding: Any = None,
+    ) -> dict[str, str]:
+        """**只报事实**的预检探测（``BrokerProbe`` 形状）。
+
+        返回 ``{capability: 底层原因}``；没有问题的能力不出现在结果里。原因词取自
+        :data:`PREFLIGHT_FACTS`，不含任何用户可见文案——判定与文案由
+        CapabilityPreflightService 负责。
+        """
+        facts: dict[str, str] = {}
+        for item in capabilities or ():
+            capability = str(item or "").strip()
+            if not capability:
+                continue
+            selection = self.select(capability, binding=binding)
+            if selection.descriptor is None:
+                facts[capability] = "capability_unavailable"
+            elif not selection.provider_id:
+                facts[capability] = "provider_unhealthy"
+        return facts
+
     def _preflight_failure(
         self,
         invocation: CapabilityInvocation,
@@ -360,51 +478,38 @@ class CapabilityBroker:
         *,
         context: AgentExecutionContext | None = None,
     ) -> CapabilityResult | None:
-        """执行前失败：绑定不符/缺能力/版本不符/参数非法（都不拖到中途才报）。"""
-        if context is not None:
-            mismatch = binding_mismatch(invocation, context)
-            if mismatch:
-                # 调用方不得用自己声明的绑定替换服务端注入的会话/工作区/设备。
-                return capability_failure(
-                    CapabilityErrorCode.SCOPE_DENIED,
-                    "能力调用的会话绑定与服务端上下文不一致：" + "；".join(mismatch),
-                    capability=invocation.qualified_capability,
-                    details={"mismatch": mismatch},
+        """执行前失败：绑定不符/缺能力/版本不符/参数非法（都不拖到中途才报）。
+
+        开关关闭（默认）：返回历史结果（含用户可见文案），契约不变。
+        开关打开：只返回底层事实（``fact`` + ``details.reason``），用户可见结论由
+        CapabilityPreflightService / Orchestrator 给出。
+        """
+        problem = self._preflight_problem(invocation, selection, context=context)
+        if problem is None:
+            return None
+        result = capability_failure(
+            problem.code,
+            problem.message,
+            capability=invocation.qualified_capability,
+            provider_id=selection.provider_id if problem.with_provider else "",
+            suggested_action=problem.suggested_action,
+            details=problem.details,
+        )
+        if not _preflight_v2_enabled():
+            return result
+        if result.error is None:  # pragma: no cover - capability_failure 恒带 error
+            return result
+        return result.model_copy(
+            update={
+                "error": result.error.model_copy(
+                    update={
+                        "message": problem.fact,
+                        "suggested_action": "",
+                        "details": {"reason": problem.fact},
+                    }
                 )
-        if selection.descriptor is None:
-            return capability_failure(
-                CapabilityErrorCode.CAPABILITY_MISSING,
-                f"未声明的能力 {invocation.qualified_capability}",
-                capability=invocation.qualified_capability,
-                suggested_action="请安装或启用提供该能力的 Provider",
-            )
-        if not selection.provider_id:
-            if selection.reason.startswith("契约版本不一致"):
-                # 能力存在但版本不符：提示升级 Provider，而不是笼统的"缺能力"。
-                return capability_failure(
-                    CapabilityErrorCode.CONTRACT_VERSION_MISMATCH,
-                    f"{invocation.qualified_capability} 的契约版本不受支持（{selection.reason}）",
-                    capability=invocation.qualified_capability,
-                    suggested_action="请升级或重新注册提供该能力的 Provider",
-                    details={"reason": selection.reason},
-                )
-            return capability_failure(
-                CapabilityErrorCode.CAPABILITY_MISSING,
-                f"没有可用 Provider 提供 {invocation.qualified_capability}",
-                capability=invocation.qualified_capability,
-                suggested_action="请确认客户端 Provider 已连接并完成能力注册",
-                details={"reason": selection.reason},
-            )
-        problems = validate_arguments(selection.descriptor, invocation.arguments)
-        if problems:
-            return capability_failure(
-                CapabilityErrorCode.INVALID_ARGUMENTS,
-                "能力参数不合法：" + "；".join(problems[:4]),
-                capability=invocation.qualified_capability,
-                provider_id=selection.provider_id,
-                details={"problems": problems},
-            )
-        return None
+            }
+        )
 
     def _registration_for(self, selection: CapabilitySelection) -> ProviderRegistration | None:
         for registration in self._registry.providers():

@@ -102,6 +102,12 @@ def artifact_refs_of(result: ExecutionResult[Any]) -> list[dict[str, Any]]:
             "filename": str(data.get("name") or ""),
             "mime_type": str(data.get("media_type") or ""),
             "size_bytes": data.get("size"),
+            # 保留策略字段随引用下发（契约字段，缺失时为空串）。
+            "retention_class": str(data.get("retention_class") or ""),
+            "requested_expires_at": str(data.get("requested_expires_at") or ""),
+            "effective_expires_at": str(data.get("effective_expires_at") or ""),
+            "retention_policy_source": str(data.get("retention_policy_source") or ""),
+            "retention_clamp_reason": str(data.get("retention_clamp_reason") or ""),
         })
     return out
 

@@ -13,6 +13,9 @@ import os
 import subprocess
 import time
 from pathlib import Path, PurePosixPath
+from typing import Any
+
+from loguru import logger
 
 from app.agents.sandbox.base import Sandbox, SandboxResult
 from app.core.config import settings
@@ -198,6 +201,8 @@ class DockerSandbox(Sandbox):
         timeout: int = 30,
         env_extra: dict[str, str] | None = None,
         mounts: list[dict[str, str]] | None = None,
+        quota_spec: Any = None,
+        owner: str = "",
     ) -> SandboxResult:
         if language != "python":
             return SandboxResult(status="rejected", error="Docker 沙箱仅支持 Python", resource_usage={"sandbox": self.name})
@@ -276,9 +281,10 @@ class DockerSandbox(Sandbox):
                 duration_ms=int((time.monotonic() - started) * 1000),
                 resource_usage={"sandbox": self.name, "exit_code": status, "truncated": len(stdout) > max_chars or len(stderr) > max_chars},
             )
-            return outcome
+            return await self._apply_plugin_quota(outcome, quota_spec, started, owner)
         except asyncio.TimeoutError:
-            return SandboxResult(status="timeout", error=f"代码执行超时（>{timeout}s）", duration_ms=int((time.monotonic() - started) * 1000), resource_usage={"sandbox": self.name})
+            timed_out = SandboxResult(status="timeout", error=f"代码执行超时（>{timeout}s）", duration_ms=int((time.monotonic() - started) * 1000), resource_usage={"sandbox": self.name})
+            return await self._apply_plugin_quota(timed_out, quota_spec, started, owner)
         except Exception as exc:  # noqa: BLE001
             return SandboxResult(status="error", error=f"启动 Docker 沙箱失败：{type(exc).__name__}", duration_ms=int((time.monotonic() - started) * 1000), resource_usage={"sandbox": self.name})
         finally:
@@ -298,6 +304,28 @@ class DockerSandbox(Sandbox):
                     await self._run_cli("rm", "-f", container_id, timeout=10)
                 except Exception:  # noqa: BLE001
                     pass
+
+    @staticmethod
+    async def _apply_plugin_quota(
+        result: SandboxResult, quota_spec: Any, started: float, owner: str
+    ) -> SandboxResult:
+        """阶段 4（灰度）：容器路径的配额后处理（超限转产物引用 + 超时错误码）。
+
+        容器里的进程无法由本进程 ``kill()``（清理由 ``docker rm`` 负责），因此判定与
+        产物化统一收在 ``app.services.plugins.quota``，与子进程路径**同一套规则**。
+        """
+        if quota_spec is None:
+            return result
+        try:
+            from app.services.plugins.quota import apply_quota_to_sandbox_result
+
+            return await apply_quota_to_sandbox_result(
+                result, spec=quota_spec, run_started=started, owner=owner,
+                container="plugin-sandbox",
+            )
+        except Exception as exc:  # noqa: BLE001 - 配额层故障不得把成功误报为失败
+            logger.warning("[plugin] 容器沙箱配额后处理失败（按原结果返回）: {}", str(exc)[:160])
+            return result
 
     async def run_command(self, cmd: list[str], timeout: int = 30) -> SandboxResult:
         return SandboxResult(status="rejected", error="Docker 沙箱不开放任意命令执行", resource_usage={"sandbox": self.name})

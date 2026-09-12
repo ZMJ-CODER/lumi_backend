@@ -12,7 +12,9 @@
 * ``artifact_id`` 是**签名的不透明标识**（HMAC + base64url），内容是
   ``{container_id, name, issued_at}``：不需要新的数据库/Redis 表，且无法被伪造
   成任意路径；真正的授权仍由"当前登录用户 + 该用户的产物目录"决定；
-* 过期时间由签发时间 + TTL 决定，不需要额外状态；
+* 过期时间由签发时间 + TTL 决定，不需要额外状态；**TTL 按保留类别取值**（见
+  ``app/services/artifact_retention.py``）：归档与用户产物不再共用一条 7 天规则，
+  ``requested`` 与 ``effective`` 同时下发，被夹取时带原因（绝不静默夹取）；
 * 引用里的 ``internal_locator`` 永不外发（契约已要求，这里同样不参与投影）；
 * **下载地址也不随事件下发**：前端点击时调 ``download-url``，服务端**重新校验归属**
   后用同一把密钥签一个短时（默认 5 分钟）令牌，令牌绑定 ``artifact_id`` + ``user_id``，
@@ -25,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,7 +35,12 @@ from typing import Any
 
 from loguru import logger
 
+from lumi_contracts import DEFAULT_RETENTION_CLASS, RetentionDecision, retention_class_of
+
+from app.services import artifact_retention
+
 #: 产物在服务端的保留期（与回收站 7 天一致；过期后下载返回 404 + 提示重新生成）。
+#: 这仍是**归档类别**的读取天花板（冻结接口的产物 TTL），用户产物按工作区存储策略。
 ARTIFACT_TTL_DAYS = 7
 ARTIFACT_TTL_SECONDS = ARTIFACT_TTL_DAYS * 24 * 3600
 
@@ -105,13 +113,31 @@ def media_type_for(name: str) -> str:
     return _MIME_BY_SUFFIX.get(Path(str(name or "")).suffix.lower(), "application/octet-stream")
 
 
-def make_artifact_id(container_id: str, name: str, *, issued_at: float | None = None) -> str:
-    """生成签名产物标识（同一产物在同一秒内是稳定的，便于去重）。"""
-    payload = {
+def make_artifact_id(
+    container_id: str,
+    name: str,
+    *,
+    issued_at: float | None = None,
+    retention_class: str | None = None,
+    retention_seconds: int | None = None,
+) -> str:
+    """生成签名产物标识（同一产物在同一秒内是稳定的，便于去重）。
+
+    ``retention_class`` / ``retention_seconds`` 会被**签进**引用（可选字段 ``r`` / ``s``）：
+    产物元数据接口只有 ``artifact_id`` 可用，把"请求保留期"签进去才能在不新增状态的前提下
+    回答"这条产物请求活多久、被什么夹到多久"。旧引用（无这两个字段）签名不变、解析后按
+    文件名兜底分类。
+    """
+    payload: dict[str, Any] = {
         "c": str(container_id or "")[:120],
         "n": Path(str(name or "")).name[:200],
         "t": int(issued_at if issued_at is not None else time.time()),
     }
+    normalized_class = retention_class_of(retention_class, default="")
+    if normalized_class:
+        payload["r"] = normalized_class
+        if retention_seconds is not None:
+            payload["s"] = max(1, int(retention_seconds))
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     signature = hmac.new(_signing_key(), raw, hashlib.sha256).hexdigest()[:_SIG_CHARS]
     return f"{_PREFIX}{_b64encode(raw)}.{signature}"
@@ -138,10 +164,16 @@ def parse_artifact_id(artifact_id: str) -> dict[str, Any] | None:
         return None
     if not isinstance(payload, dict) or not payload.get("c") or not payload.get("n"):
         return None
+    try:
+        requested_seconds = int(payload.get("s") or 0)
+    except (TypeError, ValueError):
+        requested_seconds = 0
     return {
         "container_id": str(payload.get("c") or ""),
         "name": Path(str(payload.get("n") or "")).name,
         "issued_at": int(payload.get("t") or 0),
+        "retention_class": retention_class_of(payload.get("r"), default=""),
+        "requested_seconds": max(0, requested_seconds),
     }
 
 
@@ -150,8 +182,77 @@ def _iso_utc(epoch: float) -> str:
     return datetime.fromtimestamp(max(0.0, float(epoch)), tz=timezone.utc).isoformat()
 
 
-def expires_at_for(issued_at: float) -> str:
-    return _iso_utc(max(0.0, float(issued_at)) + ARTIFACT_TTL_SECONDS)
+def retention_decision_for(
+    parsed: dict[str, Any],
+    *,
+    name: str = "",
+    issued_at: float | None = None,
+) -> RetentionDecision:
+    """已解析引用 → 保留决策（类别缺失时按文件名兜底分类）。"""
+    filename = str(name or parsed.get("name") or "")
+    retention_class = retention_class_of(parsed.get("retention_class"), default="") or artifact_retention.classify_filename(filename)
+    requested = int(parsed.get("requested_seconds") or 0) or None
+    moment = float(parsed.get("issued_at") or 0) if issued_at is None else float(issued_at)
+    return artifact_retention.decision_for(
+        retention_class,
+        issued_at=moment,
+        requested_seconds=requested,
+    )
+
+
+def expires_at_for(
+    issued_at: float,
+    *,
+    retention_class: str | None = None,
+    requested_seconds: int | None = None,
+) -> str:
+    """生效到期时间（UTC ISO-8601）：按保留类别取策略，不再一律 7 天。"""
+    decision = artifact_retention.decision_for(
+        retention_class or DEFAULT_RETENTION_CLASS,
+        issued_at=issued_at,
+        requested_seconds=requested_seconds,
+    )
+    return decision.effective_expires_at
+
+
+def days_until_expiry(expires_at: str, *, now: float | None = None) -> int:
+    """距到期还有几天（向上取整，最小 0）；解析失败返回 0。"""
+    moment = float(time.time() if now is None else now)
+    try:
+        target = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0
+    remaining = target - moment
+    if remaining <= 0:
+        return 0
+    return int(math.ceil(remaining / 86400))
+
+
+def retention_notice(decision: RetentionDecision, *, now: float | None = None) -> str:
+    """前端可直接展示的到期提示（夹取时必须说明"受当前存储策略限制"）。"""
+    days = days_until_expiry(decision.effective_expires_at, now=now)
+    if decision.clamped:
+        return f"该产物受当前存储策略限制，将于 {days} 天后过期"
+    return f"该产物将于 {days} 天后过期"
+
+
+def retention_fields(decision: RetentionDecision, *, now: float | None = None) -> dict[str, Any]:
+    """产物引用的保留字段（契约要求的五个 + 前端展示用天数/提示）。"""
+    return {
+        **decision.as_metadata(),
+        "days_until_expiry": days_until_expiry(decision.effective_expires_at, now=now),
+        "retention_notice": retention_notice(decision, now=now),
+    }
+
+
+def is_expired(parsed: dict[str, Any], *, name: str = "", now: float | None = None) -> bool:
+    """按**生效**保留期判定过期（缺失签发时间视为已过期，fail-closed）。"""
+    issued_at = float(parsed.get("issued_at") or 0)
+    if issued_at <= 0:
+        return True
+    decision = retention_decision_for(parsed, name=name, issued_at=issued_at)
+    moment = float(time.time() if now is None else now)
+    return moment > issued_at + decision.effective_seconds
 
 
 # ── 短时下载 URL 令牌（方案 §5.1：事件只给引用，点击时再签发）──────
@@ -260,9 +361,8 @@ def artifact_path(user_id: str, artifact_id: str) -> Path | None:
     parsed = parse_artifact_id(artifact_id)
     if parsed is None:
         return None
-    issued_at = int(parsed.get("issued_at") or 0)
     # 缺失签发时间视为已过期（fail-closed）：否则伪造/截断的时间戳能让产物永不过期。
-    if issued_at <= 0 or time.time() > issued_at + ARTIFACT_TTL_SECONDS:
+    if is_expired(parsed):
         return None
     from app.services.office_docs import resolve_generic_output
 
@@ -271,7 +371,7 @@ def artifact_path(user_id: str, artifact_id: str) -> Path | None:
 
 
 def artifact_record(user_id: str, artifact_id: str) -> dict[str, Any] | None:
-    """产物元数据（不含字节、不含服务端路径）。"""
+    """产物元数据（不含字节、不含服务端路径）：含保留类别与"请求/生效"到期时间。"""
     parsed = parse_artifact_id(artifact_id)
     path = artifact_path(user_id, artifact_id)
     if parsed is None or path is None:
@@ -280,29 +380,49 @@ def artifact_record(user_id: str, artifact_id: str) -> dict[str, Any] | None:
         size = path.stat().st_size
     except OSError:
         return None
+    decision = retention_decision_for(parsed, name=path.name)
     return {
         "artifact_id": artifact_id,
         "filename": path.name,
         "mime_type": media_type_for(path.name),
         "size_bytes": size,
         "type": path.suffix.lstrip(".").lower(),
-        "expires_at": expires_at_for(parsed["issued_at"]),
+        # ``expires_at`` 保留原名（前端既有字段），语义 = 生效到期时间。
+        "expires_at": decision.effective_expires_at,
+        **retention_fields(decision),
     }
 
 
-def artifact_from_output(container_id: str, item: dict[str, Any]) -> dict[str, Any] | None:
-    """任务产物条目（``{"name", "size"}``）→ 事件用产物引用（安全字段）。"""
+def artifact_from_output(
+    container_id: str,
+    item: dict[str, Any],
+    *,
+    retention_class: str | None = None,
+) -> dict[str, Any] | None:
+    """任务产物条目（``{"name", "size"}``）→ 事件用产物引用（安全字段）。
+
+    默认按用户产物生命周期（工作区存储策略）签发；归档等其它类别由调用方显式指定。
+    """
     name = Path(str(item.get("name") or "")).name
     if not name:
         return None
+    cls = retention_class_of(retention_class or DEFAULT_RETENTION_CLASS, default=DEFAULT_RETENTION_CLASS)
     issued_at = time.time()
+    decision = artifact_retention.decision_for(cls, issued_at=issued_at)
     return {
-        "artifact_id": make_artifact_id(container_id, name, issued_at=issued_at),
+        "artifact_id": make_artifact_id(
+            container_id,
+            name,
+            issued_at=issued_at,
+            retention_class=cls,
+            retention_seconds=decision.requested_seconds,
+        ),
         "filename": name[:200],
         "mime_type": media_type_for(name),
         "size_bytes": int(item.get("size") or 0),
         "type": Path(name).suffix.lstrip(".").lower()[:20],
-        "expires_at": expires_at_for(issued_at),
+        "expires_at": decision.effective_expires_at,
+        **retention_fields(decision),
     }
 
 
@@ -364,13 +484,18 @@ __all__ = [
     "artifact_path",
     "artifact_record",
     "artifacts_for_job",
+    "days_until_expiry",
     "download_url_ttl_seconds",
     "expires_at_for",
+    "is_expired",
     "make_artifact_id",
     "make_download_token",
     "media_type_for",
     "parse_artifact_id",
     "parse_download_token",
+    "retention_decision_for",
+    "retention_fields",
+    "retention_notice",
     "validate_artifacts",
     "verify_download_token",
 ]

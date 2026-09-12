@@ -68,6 +68,7 @@ _policy_stream_duration = None
 _planner_invoked = None
 _agent_invoked = None
 _workspace_read_duration = None
+_job_snapshot_writes = None
 
 
 def _ensure_metrics():
@@ -78,7 +79,7 @@ def _ensure_metrics():
     global _celery_queue_ready, _document_pipeline_state, _document_pipeline_oldest_age
     global _read_view_cache, _read_view_stage_duration
     global _policy_routes, _policy_route_duration, _policy_first_delta, _policy_stream_duration
-    global _planner_invoked, _agent_invoked, _workspace_read_duration
+    global _planner_invoked, _agent_invoked, _workspace_read_duration, _job_snapshot_writes
     if _prometheus is not None:
         return True
     if not settings.METRICS_ENABLED:
@@ -194,6 +195,13 @@ def _ensure_metrics():
             "ATOMIC 只读快路径的工作区受控读取耗时",
             [],
             buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 40, 60),
+        )
+        # Job 运行视图快照写入（FLAG DOES NOT CONTROL SNAPSHOT WRITES：
+        # 写入恒发生，这里只记录"哪一版写入口、写了多少次"）。
+        _job_snapshot_writes = Counter(
+            "lumi_job_snapshot_writes_total",
+            "Job 运行视图快照写入次数（写入口版本维度）",
+            ["status", "version"],
         )
         _prometheus = True
         return True
@@ -334,6 +342,12 @@ def observe_workspace_read_duration(seconds: float) -> None:
     """ATOMIC 只读快路径：工作区受控读取耗时（workspace_read_duration_ms）。"""
     if _ensure_metrics():
         _workspace_read_duration.observe(max(0.0, seconds))
+
+
+def inc_job_snapshot_write(*, status: str = "written", version: int = 0) -> None:
+    """记录一次 Job 运行视图快照写入（TTL 见日志行；这里按写入口版本计数）。"""
+    if _ensure_metrics():
+        _job_snapshot_writes.labels(status=(status or "unknown")[:40], version=str(int(version))).inc()
 
 
 async def refresh_async_dispatch_metrics() -> None:

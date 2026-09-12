@@ -175,6 +175,11 @@ class PluginRegistry:
 
     # ── 读 ────────────────────────────────────────────────
 
+    @property
+    def state_store(self) -> PluginStateStore:
+        """安装状态存储（``PluginManager`` 复用同一实例写生命周期留痕，不建第二套）。"""
+        return self._store
+
     def all(self) -> list[PluginInstallation]:
         return sorted(self._installations.values(), key=lambda item: item.plugin_id)
 

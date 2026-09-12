@@ -174,6 +174,11 @@ async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     from app.contracts.process_log import merge_job_process_log, process_log_payload
 
     view["process_log"] = process_log_payload(merge_job_process_log(job))
+    # 过程日志归档（阶段 3，ARCHIVE_CONTENT_V2，默认关闭）：快照里给出**真实可读**的
+    # 归档引用（更早日志已转存为产物，读取走 GET /api/v1/artifacts/{ref}/content）。
+    from app.services.process_log_archive import archive_view_fields
+
+    view.update(archive_view_fields(job))
     # 产物与声明式视图（刷新恢复 Artifact 卡片 / View 容器）：只放引用与元数据，
     # 下载仍走受权限保护的 /api/v1/artifacts/{artifact_id}/download。
     try:
@@ -315,6 +320,9 @@ async def cancel_agent_job(
     from app.contracts.process_log import merge_job_process_log, process_log_payload
 
     view["process_log"] = process_log_payload(merge_job_process_log(job))
+    from app.services.process_log_archive import archive_view_fields
+
+    view.update(archive_view_fields(job))
     data["run_view"] = view
     data["cancel_reason"] = req.reason
     data["keep_completed_steps"] = bool(effective_keep)

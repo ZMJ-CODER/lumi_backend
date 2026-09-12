@@ -22,6 +22,36 @@ from app.agents.orchestration.admission import job_admission
 from app.repositories.job_repository import JobRepository
 from app.core.error_mapping import map_task_error
 
+#: 附件 kind → 需要视觉能力（模型路由的能力需求；与文档解析器的 kind 词表一致）。
+_IMAGE_DOC_KINDS: frozenset[str] = frozenset(
+    {"image", "img", "picture", "photo", "screenshot", "vision"}
+)
+
+
+def _capability_requirements(*, scene: str, request: str, office_docs: list[dict] | None):
+    """任务 → 模型能力需求（**只在** ``MODEL_CAPABILITY_ROUTER_V2`` 打开时调用）。
+
+    只使用服务端已有的事实来源：入口副作用判定（``capability_preflight_facts``）回答
+    "这次任务是否真的会用到工具"，附件 kind 回答"是否需要视觉"；判定失败时按保守
+    方式（office 场景视为需要工具）处理，绝不因为探测故障放过能力缺口。
+    """
+    from app.core.model_capability_router import CapabilityRequirements
+
+    try:
+        from app.agents.orchestration.task_preflight import capability_preflight_facts
+
+        facts = capability_preflight_facts(request, office_docs=office_docs)
+        needs_tools = bool((facts.get("profile") or {}).get("action_intents"))
+    except Exception as exc:  # noqa: BLE001 - 事实缺失按保守处理
+        logger.debug("能力需求判定降级（按场景保守取值）: {}", str(exc)[:120])
+        needs_tools = scene == "office"
+    kinds = {str((item or {}).get("kind") or "").casefold() for item in (office_docs or [])}
+    return CapabilityRequirements(
+        needs_tools=needs_tools,
+        needs_vision=bool(kinds & _IMAGE_DOC_KINDS),
+        needs_streaming=scene in {"office", "chat"},
+    )
+
 
 class JobSubmissionService:
     """Execute an already-admitted submission without depending on the facade."""
@@ -72,6 +102,67 @@ class JobSubmissionService:
     def _discard_pending(self, job_id: str) -> None:
         self._plan_contexts.pop(job_id, None)
 
+    async def _blocked_by_model_capability(
+        self,
+        *,
+        user_id: str,
+        user_role: str,
+        request: str,
+        scene: str,
+        conversation_id: str | None,
+        submission_key: str,
+        admission_token: str,
+        routing: dict,
+        model_routing: dict,
+    ) -> Job:
+        """能力不足的**硬阻断**：不调用任何模型，直接物化一个可解释终态 Job。
+
+        路径与能力预检阻断一致（澄清型终态、不派发）；结构化结论与 process 载荷
+        一并写进 ``routing``，前端据此说明"为什么没执行"。
+        """
+        from app.agents.orchestration.planning.contracts import TaskTree
+
+        from app.core.model_capability_router import attach_model_routing
+
+        message = str(model_routing.get("safe_message") or "").strip() or (
+            "当前没有满足任务能力要求的模型，无法继续执行该任务。"
+        )
+        blocked_routing = attach_model_routing(
+            {
+                **routing,
+                "planner_invoked": False,
+                "tca_invoked": False,
+                "fallback_action": "model_capability_blocked",
+            },
+            model_routing,
+        )
+        tree = TaskTree(nodes=[], clarification=message, plan_text="模型能力不足")
+        materialized = await self._materialization.materialize(
+            user_id=user_id,
+            user_role=user_role,
+            request=request,
+            scene=scene,
+            conversation_id=conversation_id,
+            submission_key=submission_key,
+            tree=tree,
+            routing=blocked_routing,
+        )
+        job = materialized.job
+        if not materialized.terminal:
+            # 必须终态：能力不足的任务绝不派发执行（否则就是用错模型在跑）。
+            job.status = JobStatus.FAILED
+            job.error = message
+            job.result = {
+                "type": "model_capability_blocked",
+                "error_code": str(model_routing.get("error_code") or "CAPABILITY_UNAVAILABLE"),
+                "message": message,
+                "retryable": False,
+            }
+        await self._store.create_job(job)
+        await job_admission.release(token=admission_token)
+        self._discard_pending(job.job_id)
+        return job
+
     async def submit(
         self,
         *,
@@ -115,17 +206,46 @@ class JobSubmissionService:
         # 任务创建时解析一次"角色 → 档位 → 模型"，之后计划/执行/重试/恢复都用这份
         # 计划，避免管理员中途改配置导致同一任务前后用不同模型。Job 快照里只放
         # 公开部分（角色/档位/模型/来源），**不含任何 API Key**。
+        #
+        # 灰度 ``MODEL_CAPABILITY_ROUTER_V2``：打开时按任务能力需求过滤候选/换档，
+        # 结论冻结进计划；关闭时 build_model_plan 的调用参数与行为逐字不变。
+        from app.core.feature_flags import feature_enabled
+
+        model_router_enabled = feature_enabled("MODEL_CAPABILITY_ROUTER_V2")
+        model_routing: dict | None = None
         try:
             from app.core.model_plan import build_model_plan
 
+            plan_kwargs: dict = {}
+            if model_router_enabled:
+                plan_kwargs["requirements"] = _capability_requirements(
+                    scene=scene, request=request, office_docs=office_docs
+                )
             model_plan = await build_model_plan(
                 scene=scene,
                 user_id=user_id,
                 byok_key=str(llm_api_key or "") if effective_llm.byok else None,
+                **plan_kwargs,
             )
             routing["model_plan"] = model_plan.public_dict()
+            if model_router_enabled:
+                model_routing = dict(getattr(model_plan, "model_routing", {}) or {}) or None
         except Exception as exc:  # noqa: BLE001 - 计划冻结失败不能阻断任务提交
             logger.warning("[model-plan] 冻结失败（继续用现有配置链）: {}", str(exc)[:160])
+
+        # 能力阻断（工具/模态缺失）：**不调用任何模型**，直接给出可解释终态。
+        if model_routing is not None and model_routing.get("blocked"):
+            return await self._blocked_by_model_capability(
+                user_id=user_id,
+                user_role=user_role,
+                request=request,
+                scene=scene,
+                conversation_id=conversation_id,
+                submission_key=submission_key,
+                admission_token=admission_token,
+                routing=routing,
+                model_routing=model_routing,
+            )
 
         if scene == "office":
             selection = await self._office_plan_selection.select(
@@ -144,6 +264,16 @@ class JobSubmissionService:
             routing = selection.routing
         else:
             tree = await self._plan_with_context(planning_context)
+
+        # 模型路由结论进快照（开关关闭时为 None，routing 逐字不变）。
+        # 注意：office 场景的 routing 由计划选择器重建，因此必须在这里（重建之后）
+        # 写入；结论只描述"选了哪个档位/为什么"，不改动既有路由字段。
+        if model_routing is not None:
+            from app.core.model_capability_router import attach_model_routing
+
+            routing = attach_model_routing(routing, model_routing)
+            if scene == "office":
+                routing.setdefault("model_plan", model_plan.public_dict())
 
         self._plan_compilation.normalize_for_submission(
             tree.nodes,

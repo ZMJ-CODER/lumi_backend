@@ -18,9 +18,82 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Any
 
 from app.agents.sandbox.base import Sandbox, SandboxResult
 from app.core.config import settings
+
+
+def _plugin_quota_enforced(quota_spec: Any) -> bool:
+    """该执行是否按插件配额真执行（灰度开关 + 有配额声明）。"""
+    if quota_spec is None:
+        return False
+    try:
+        from app.core.feature_flags import feature_enabled
+        from app.services.plugins.quota import FLAG
+
+        return bool(feature_enabled(FLAG))
+    except Exception:  # noqa: BLE001 - 开关不可读时按关闭处理（保守）
+        return False
+
+
+async def _run_with_plugin_quota(
+    cmd: list[str],
+    *,
+    workdir: str,
+    env: dict[str, str],
+    quota_spec: Any,
+    owner: str,
+    timeout: float | None = None,
+) -> SandboxResult:
+    """走 PluginWorker：配额由 Manifest 声明，执行由 Worker 真约束。"""
+    from app.services.plugins.quota import PluginWorker
+
+    worker = PluginWorker(spec=quota_spec, owner=owner, container="plugin-sandbox")
+    outcome = await worker.run_process(list(cmd), cwd=workdir, env=env, timeout=timeout)
+    usage: dict[str, Any] = {
+        "sandbox": "local",
+        "op": "run_script",
+        "plugin_id": outcome.plugin_id,
+        "plugin_version": outcome.plugin_version,
+        "output_bytes": outcome.output_bytes,
+        "killed": outcome.killed,
+        "truncated": outcome.truncated,
+        "quota": dict(outcome.decision),
+    }
+    if outcome.result_ref:
+        usage["result_ref"] = dict(outcome.result_ref)
+    if outcome.error_code:
+        usage["error_code"] = outcome.error_code
+    if outcome.action != "NONE":
+        usage["quota_action"] = outcome.action
+    if outcome.blocked:
+        return SandboxResult(
+            status="timeout",
+            stdout=outcome.content,
+            stderr="",
+            error=f"插件 {outcome.plugin_id} 超过资源上限：{', '.join(outcome.exceeded)}",
+            duration_ms=int(outcome.elapsed_seconds * 1000),
+            resource_usage=usage,
+        )
+    if outcome.action == "ARTIFACT_REF":
+        # 输出超限：正文进产物，事件只带引用（不是失败），因此状态保持 success。
+        return SandboxResult(
+            status="success" if outcome.ok else "error",
+            stdout=outcome.content,
+            stderr="",
+            error=None if outcome.ok else f"退出码 {outcome.returncode}",
+            duration_ms=int(outcome.elapsed_seconds * 1000),
+            resource_usage=usage,
+        )
+    return SandboxResult(
+        status="success" if outcome.ok else "error",
+        stdout=outcome.content,
+        stderr="",
+        error=None if outcome.ok else f"退出码 {outcome.returncode}",
+        duration_ms=int(outcome.elapsed_seconds * 1000),
+        resource_usage=usage,
+    )
 
 
 def _limit_resources() -> None:
@@ -46,6 +119,8 @@ class LocalSandbox(Sandbox):
         timeout: int = 30,
         env_extra: dict | None = None,
         mounts: list[dict[str, str]] | None = None,
+        quota_spec: Any = None,
+        owner: str = "",
     ) -> SandboxResult:
         if language != "python":
             return SandboxResult(
@@ -75,6 +150,21 @@ class LocalSandbox(Sandbox):
         # 本地子进程并非严格隔离（可读文件系统），超时/输出截断仍然生效；
         # 生产如需严格隔离可注册 docker 沙箱实现。
         cmd = [sys.executable, "-c", code]
+        # 阶段 4（灰度）：声明了插件配额时，子进程执行交给 PluginWorker —— 超时真 kill、
+        # 输出按真实字节计量（超限转产物引用）、并发真限流、POSIX 下 RLIMIT_CPU/AS。
+        # 开关关闭时 PluginWorker 只透传，但为保持"逐字节一致"这里仍然走旧路径。
+        if quota_spec is not None and _plugin_quota_enforced(quota_spec):
+            try:
+                return await _run_with_plugin_quota(
+                    cmd,
+                    workdir=workdir,
+                    env=env,
+                    quota_spec=quota_spec,
+                    owner=owner,
+                    timeout=timeout,
+                )
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
         # Windows 非 Proactor 事件循环（如 Temporal Activity 线程）不支持 asyncio 子进程，
         # 改用线程同步执行（subprocess.run），功能一致。
         if os.name == "nt" and not isinstance(

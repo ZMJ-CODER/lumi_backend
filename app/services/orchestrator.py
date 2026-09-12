@@ -2231,6 +2231,24 @@ class Orchestrator:
             "conversation_id": conversation_id,
             "created_at": job.created_at,
         }
+        # 能力预检失败的 process 事件（canonical 画像接入后才有事实）。只**新增**这一帧：
+        # 既有 job/step/delta/done 帧的形状与顺序不变；刷新恢复由
+        # app/contracts/process_log.py 从同一条 routing 载荷投影出同一 entry_id。
+        from app.agents.orchestration.office_plan_selection_service import preflight_process_frame
+
+        preflight_frame = preflight_process_frame(getattr(job, "routing", None))
+        if preflight_frame is not None:
+            preflight_frame["job_id"] = job.job_id
+            yield preflight_frame
+        # 模型路由/降级的 process 事件（``MODEL_CAPABILITY_ROUTER_V2`` 打开且真的换档/
+        # 降级/阻断时才有载荷）。同样只**新增**这一帧；刷新恢复由
+        # app/contracts/process_log.py 从同一条 routing 载荷投影出同一 entry_id。
+        from app.core.model_capability_router import model_routing_process_frame
+
+        routing_frame = model_routing_process_frame(getattr(job, "routing", None))
+        if routing_frame is not None:
+            routing_frame["job_id"] = job.job_id
+            yield routing_frame
         last: dict[str, tuple] = {}
         last_plan_revision = 0
         terminal = {

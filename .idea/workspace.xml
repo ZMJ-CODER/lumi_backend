@@ -4,23 +4,48 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="新增单独切换模型功能">
+    <list default="true" id="385e2374-dd99-489e-8306-372d3668f926" name="更改" comment="统一事件协议">
       <change beforePath="$PROJECT_DIR$/.env.example" beforeDir="false" afterPath="$PROJECT_DIR$/.env.example" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/orchestrator.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/capabilities/broker.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/capabilities/broker.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/failed_job_recovery_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/failed_job_recovery_service.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/office_plan_selection_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/office_plan_selection_service.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/state.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/state.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/step_run_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/step_run_service.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/orchestration/task_preflight.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/orchestration/task_preflight.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/sandbox/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/sandbox/base.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/sandbox/docker.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/sandbox/docker.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/sandbox/local.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/sandbox/local.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/agents/skills/base.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/agents/skills/base.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/api/v1/agents.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/agents.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/api/v1/artifacts.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/artifacts.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/api/v1/chat.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/chat.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/contracts/event_adapter.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/contracts/event_adapter.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/contracts/events.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/contracts/events.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/v1/plugins.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/v1/plugins.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/contracts/node_result.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/contracts/node_result.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/contracts/process_log.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/contracts/process_log.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/contracts/ui_projection.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/contracts/ui_projection.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/observability.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/observability.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/services/artifacts.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/artifacts.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/job_event_log.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/job_event_log.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/STREAM_EVENT_PROTOCOL.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/STREAM_EVENT_PROTOCOL.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/office_docs.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/office_docs.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/orchestrator.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/orchestrator.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/plugins/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/plugins/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/plugins/registry.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/plugins/registry.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/task_assessor.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/task_assessor.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/celery_app/tasks.py" beforeDir="false" afterPath="$PROJECT_DIR$/celery_app/tasks.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/fixtures/stream-events/artifact_task.json" beforeDir="false" afterPath="$PROJECT_DIR$/docs/fixtures/stream-events/artifact_task.json" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/__init__.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/events/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/events/__init__.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/events/envelope.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/events/envelope.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/events/errors.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/events/errors.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/execution/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/execution/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/execution/artifacts.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/execution/artifacts.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/persistence/run_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/persistence/run_view.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/plugins/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/plugins/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/routing/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/routing/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/routing/task_profile.py" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/src/lumi_contracts/routing/task_profile.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/packages/contracts/ts/lumi-contracts.d.ts" beforeDir="false" afterPath="$PROJECT_DIR$/packages/contracts/ts/lumi-contracts.d.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plugins/tools/shell/python_exec.py" beforeDir="false" afterPath="$PROJECT_DIR$/plugins/tools/shell/python_exec.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -108,14 +133,6 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1785559147484</updated>
-    </task>
-    <task id="LOCAL-00015" summary="新增流式聊天，新增自动联网搜索工具，新增可插拔提示词模版">
-      <option name="closed" value="true" />
-      <created>1786417855389</created>
-      <option name="number" value="00015" />
-      <option name="presentableId" value="LOCAL-00015" />
-      <option name="project" value="LOCAL" />
-      <updated>1786417855389</updated>
     </task>
     <task id="LOCAL-00016" summary="继续优化聊天模块，新增各种包括安全性，体验感，后台管理的优化">
       <option name="closed" value="true" />
@@ -501,7 +518,15 @@
       <option name="project" value="LOCAL" />
       <updated>1789192662262</updated>
     </task>
-    <option name="localTasksCounter" value="64" />
+    <task id="LOCAL-00064" summary="统一事件协议">
+      <option name="closed" value="true" />
+      <created>1789207685613</created>
+      <option name="number" value="00064" />
+      <option name="presentableId" value="LOCAL-00064" />
+      <option name="project" value="LOCAL" />
+      <updated>1789207685614</updated>
+    </task>
+    <option name="localTasksCounter" value="65" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -528,7 +553,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="继续优化dag架构，优化记忆系统，优化rag处理，添加消息队列" />
     <MESSAGE value="拆分高耦合dag引擎，优化dag链路，优化mcp设计，加入reranker模型" />
     <MESSAGE value="优化提交" />
     <MESSAGE value="切分dag工作流引擎为静态内核和策略" />
@@ -553,6 +577,7 @@
     <MESSAGE value="新增分布式插件动态添加" />
     <MESSAGE value="优化sse流处理" />
     <MESSAGE value="新增单独切换模型功能" />
-    <option name="LAST_COMMIT_MESSAGE" value="新增单独切换模型功能" />
+    <MESSAGE value="统一事件协议" />
+    <option name="LAST_COMMIT_MESSAGE" value="统一事件协议" />
   </component>
 </project>

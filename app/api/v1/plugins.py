@@ -20,10 +20,12 @@ from pydantic import BaseModel, Field
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.services.plugins import (
+    PluginManager,
     PluginRegistry,
     PluginRejected,
     PluginStateStore,
     extension_handlers,
+    set_plugin_manager,
 )
 from lumi_contracts.plugins import IsolationLevel
 
@@ -31,6 +33,11 @@ router = APIRouter()
 
 #: 进程内插件登记服务（状态落 ``PLUGIN_STATE_DIR``；不依赖数据库）。
 plugin_registry = PluginRegistry(store=PluginStateStore())
+
+#: 生命周期唯一入口（阶段 4）。开关 ``PLUGIN_QUOTA_ENFORCEMENT`` 关闭时它是注册表的
+#: 纯委派——行为、返回值与落盘记录与改造前逐字节一致。
+plugin_manager = PluginManager(registry=plugin_registry)
+set_plugin_manager(plugin_manager)
 
 
 class PluginInstallRequest(BaseModel):
@@ -75,11 +82,21 @@ def _reject(exc: PluginRejected) -> Exception:
 
 @router.get("")
 async def list_plugins(payload: dict = Depends(require_auth)):
-    """已安装插件 + 可用能力/策略 + 扩展类型（"已安装/可用能力"面板的数据源）。"""
+    """已安装插件 + 可用能力/策略 + 扩展类型（"已安装/可用能力"面板的数据源）。
+
+    每个插件额外带 ``quota_status``：declared / observed / wired / enforced 四级，
+    诚实反映"配额到底执行到哪一步"（协作式不算 enforced）。
+    """
+    statuses = {item["plugin_id"]: item for item in plugin_manager.quota_statuses()}
+    plugins: list[dict[str, Any]] = []
+    for item in plugin_manager.all():
+        payload_item = item.to_api()
+        payload_item["quota_status"] = statuses.get(item.plugin_id, {})
+        plugins.append(payload_item)
     return {
         "code": 0,
         "data": {
-            "plugins": [item.to_api() for item in plugin_registry.all()],
+            "plugins": plugins,
             "developer_mode": _developer_mode(),
             "extension_kinds": extension_handlers.to_snapshot(),
             "known_kinds": [
@@ -98,11 +115,11 @@ async def install_plugin(req: PluginInstallRequest, payload: dict = Depends(requ
     """安装（或升级）插件：Manifest → 验签 → 依赖 → 位置/隔离 → 健康 → 激活。"""
     try:
         manifest = PluginRegistry.parse_manifest(req.manifest)
-        existing = plugin_registry.get(manifest.id)
+        existing = plugin_manager.get(manifest.id)
         if req.upgrade and existing is not None:
-            installation = plugin_registry.upgrade(manifest)
+            installation = await plugin_manager.upgrade(manifest)
         else:
-            installation = plugin_registry.install(manifest, activate=req.activate)
+            installation = await plugin_manager.install(manifest, activate=req.activate)
     except PluginRejected as exc:
         raise _reject(exc) from exc
     return {"code": 0, "data": installation.to_api(), "message": "插件已安装"}
@@ -110,16 +127,30 @@ async def install_plugin(req: PluginInstallRequest, payload: dict = Depends(requ
 
 @router.get("/{plugin_id}")
 async def get_plugin(plugin_id: str, payload: dict = Depends(require_auth)):
-    installation = plugin_registry.get(plugin_id)
+    installation = plugin_manager.get(plugin_id)
     if installation is None:
         raise NotFoundException("插件未安装", error_code="PLUGIN_NOT_INSTALLED")
-    return {"code": 0, "data": installation.to_api()}
+    data = installation.to_api()
+    data["quota_status"] = plugin_manager.quota_status(plugin_id)
+    return {"code": 0, "data": data}
+
+
+@router.get("/{plugin_id}/quota")
+async def plugin_quota_status(plugin_id: str, payload: dict = Depends(require_auth)):
+    """该插件的配额**诚实**状态（结构化四级：declared / observed / wired / enforced）。
+
+    ``enforced`` 只在"开关打开 + 硬约束 + 真走过可强杀进程"时为真；
+    只走过进程内协作取消会给出 ``cooperative_only=true`` 与 ``not_enforced_because``。
+    """
+    if plugin_manager.get(plugin_id) is None:
+        raise NotFoundException("插件未安装", error_code="PLUGIN_NOT_INSTALLED")
+    return {"code": 0, "data": plugin_manager.quota_status(plugin_id)}
 
 
 @router.post("/{plugin_id}/enable")
 async def enable_plugin(plugin_id: str, payload: dict = Depends(require_auth)):
     try:
-        installation = plugin_registry.enable(plugin_id)
+        installation = await plugin_manager.enable(plugin_id)
     except PluginRejected as exc:
         if exc.code == "PLUGIN_NOT_INSTALLED":
             raise NotFoundException(exc.message, error_code=exc.code) from exc
@@ -134,7 +165,7 @@ async def disable_plugin(
     payload: dict = Depends(require_auth),
 ):
     try:
-        installation = plugin_registry.disable(plugin_id, reason=(req.reason if req else ""))
+        installation = await plugin_manager.disable(plugin_id, reason=(req.reason if req else ""))
     except PluginRejected as exc:
         if exc.code == "PLUGIN_NOT_INSTALLED":
             raise NotFoundException(exc.message, error_code=exc.code) from exc
@@ -150,7 +181,7 @@ async def rollback_plugin(
 ):
     """回滚到上一版本；回滚后插件处于**停用**状态，需要重新启用（重新过门禁）。"""
     try:
-        installation = plugin_registry.rollback(plugin_id, version=(req.version if req else ""))
+        installation = plugin_manager.rollback(plugin_id, version=(req.version if req else ""))
     except PluginRejected as exc:
         if exc.code == "PLUGIN_NOT_INSTALLED":
             raise NotFoundException(exc.message, error_code=exc.code) from exc
@@ -161,7 +192,7 @@ async def rollback_plugin(
 @router.get("/{plugin_id}/health")
 async def plugin_health(plugin_id: str, payload: dict = Depends(require_auth)):
     try:
-        return {"code": 0, "data": plugin_registry.health(plugin_id)}
+        return {"code": 0, "data": plugin_manager.health(plugin_id)}
     except PluginRejected as exc:
         raise NotFoundException(exc.message, error_code=exc.code) from exc
 
@@ -169,7 +200,7 @@ async def plugin_health(plugin_id: str, payload: dict = Depends(require_auth)):
 @router.delete("/{plugin_id}")
 async def uninstall_plugin(plugin_id: str, payload: dict = Depends(require_auth)):
     try:
-        plugin_registry.uninstall(plugin_id)
+        await plugin_manager.uninstall(plugin_id)
     except PluginRejected as exc:
         if exc.code == "PLUGIN_NOT_INSTALLED":
             raise NotFoundException(exc.message, error_code=exc.code) from exc
@@ -217,6 +248,7 @@ async def register_extension_handler(
 
 
 __all__ = [
+    "plugin_manager",
     "plugin_registry",
     "router",
 ]

@@ -405,6 +405,11 @@ class StepRunService:
         from app.contracts.process_log import persist_process_log
 
         persist_process_log(job)
+        # 阶段 3（ARCHIVE_CONTENT_V2，默认关闭）：窗口外的更早日志落成真实归档产物，
+        # 并把可读的 log_archive_ref 记进 routing。关闭时是空操作（不写文件、不加字段）。
+        from app.services.process_log_archive import archive_process_log_overflow
+
+        archive_process_log_overflow(job)
         await self._store.save_job(job)
 
     async def acquire_capacity(self, state: StepRunState) -> bool:

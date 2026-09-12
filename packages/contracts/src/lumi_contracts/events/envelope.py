@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from lumi_contracts.events.errors import translate_error
 from lumi_contracts.events.lifecycle import TERMINAL_STATES
+from lumi_contracts.execution.artifacts import ARTIFACT_RETENTION_FIELDS
 
 # 标准信封版本：破坏性改名才升版本；新增可选字段不升版本。
 #
@@ -230,6 +231,10 @@ ALLOWED_PAYLOAD_KEYS: frozenset[str] = frozenset({
     "step", "display",
     # 产物
     "artifact_id", "type", "filename", "mime_type", "size_bytes", "expires_at",
+    # 产物保留策略（与契约 ``ARTIFACT_RETENTION_FIELDS`` 同源；前端据此提示
+    # "该产物受当前存储策略限制，将于 N 天后过期"）
+    *ARTIFACT_RETENTION_FIELDS,
+    "retention_clamped", "days_until_expiry", "retention_notice",
     # 视图
     "view_id", "view_type", "plugin_id", "plugin_version", "action", "schema_version",
     "data", "data_ref",
@@ -506,7 +511,11 @@ class StepCompletedPayload(EventPayload):
 
 
 class ArtifactCreatedPayload(EventPayload):
-    """产物创建：只给引用与元数据，下载地址/令牌在受权限保护的下载接口。"""
+    """产物创建：只给引用与元数据，下载地址/令牌在受权限保护的下载接口。
+
+    保留策略字段与 ``ARTIFACT_RETENTION_FIELDS`` 同名：``expires_at`` 是**生效**到期
+    时间，另给请求值与夹取原因，前端不必再猜"为什么我的产物 7 天就没了"。
+    """
 
     artifact_id: str = ""
     type: str = ""
@@ -514,6 +523,14 @@ class ArtifactCreatedPayload(EventPayload):
     mime_type: str = ""
     size_bytes: int | None = None
     expires_at: str = ""
+    retention_class: str = ""
+    requested_expires_at: str = ""
+    effective_expires_at: str = ""
+    retention_policy_source: str = ""
+    retention_clamp_reason: str = ""
+    retention_clamped: bool = False
+    days_until_expiry: int = 0
+    retention_notice: str = ""
 
 
 class ViewUpdatedPayload(EventPayload):

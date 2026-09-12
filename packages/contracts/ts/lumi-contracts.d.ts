@@ -7,6 +7,8 @@
  */
 
 
+export type ActionIntent = "READ" | "SEARCH" | "CREATE" | "MODIFY" | "DELETE" | "EXECUTE" | "SEND" | "PUBLISH";
+
 export type ApprovalDecision = "pending" | "approved" | "rejected" | "expired";
 
 export type ApprovalScope = "call" | "task" | "workspace";
@@ -38,6 +40,11 @@ export interface ArtifactRef {
   size?: number | null;
   schema_name?: string;
   internal_locator?: string;
+  retention_class?: string;
+  requested_expires_at?: string;
+  effective_expires_at?: string;
+  retention_policy_source?: string;
+  retention_clamp_reason?: string;
 }
 
 /** 一个能力最终绑定到谁（按会话/工作区/设备维度）。 */
@@ -135,6 +142,8 @@ export interface CapabilityUsage {
 
 export type Complexity = "ATOMIC" | "SEQUENTIAL" | "DYNAMIC";
 
+export type ConfidenceSource = "llm" | "heuristic" | "rule_corrected";
+
 export type DataLocality = "local_only" | "cloud" | "hybrid";
 
 export type Deployment = "server" | "client" | "worker" | "local_dev";
@@ -206,6 +215,8 @@ export interface ExecutionTiming {
 
 export type InfoSource = "USER_PROVIDED" | "CONVERSATION_MEMORY" | "INTERNAL_KNOWLEDGE" | "WORKSPACE" | "ATTACHED_FILE" | "PUBLIC_WEB" | "PRIVATE_SERVICE" | "SYSTEM_STATE";
 
+export type IntentType = "GENERATE_ONLY" | "EXECUTE_ACTION";
+
 export type IsolationLevel = "in_process" | "restricted_worker" | "sandboxed" | "client_device";
 
 /** 一次运行的持久化快照。 */
@@ -228,6 +239,9 @@ export interface JobRunView {
   error_code?: string | null;
   updated_at?: number;
   version?: number;
+  log_archive_ref?: string;
+  log_archive_count?: number;
+  truncated?: boolean;
 }
 
 /** 入口声明：按插件类型给出可执行入口（服务端/Worker 侧才是代码入口）。 */
@@ -536,7 +550,11 @@ export interface StreamEvent {
   data?: Record<string, unknown>;
 }
 
-/** 任务画像：只描述"事实"，不含工具名与执行细节。 */
+export type TargetClarity = "KNOWN" | "UNKNOWN";
+
+export type TargetScope = "WORKSPACE" | "ATTACHMENT" | "USER_INPUT" | "EXTERNAL_SERVICE" | "SYSTEM_STATE" | "NONE";
+
+/** 任务画像：**唯一权威定义**（方案 §3.1；contracts 之外只保留适配器）。 */
 
 export interface TaskProfile {
   goal?: string;
@@ -549,6 +567,15 @@ export interface TaskProfile {
   risk_level?: string;
   confidence?: number;
   debug?: Record<string, unknown>;
+  intent_type?: IntentType;
+  action_intents?: ActionIntent[];
+  target_scope?: TargetScope;
+  target_clarity?: TargetClarity;
+  has_dependency?: boolean;
+  has_runtime_decision?: boolean;
+  approval_required?: boolean;
+  confidence_source?: ConfidenceSource;
+  decision_reason_code?: string;
 }
 
 /** 工具调用命令：参数与身份分离，身份只来自服务端上下文。 */

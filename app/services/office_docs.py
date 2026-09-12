@@ -13,7 +13,6 @@ import csv
 import json
 import hashlib
 import shutil
-import time
 import uuid
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -95,14 +94,16 @@ def generic_outputs_dir(user_id: str, conv_id: str) -> Path:
 
 
 def list_generic_outputs(user_id: str, conv_id: str) -> list[dict]:
-    """列出某任务/会话的通用产物."""
+    """列出某任务/会话的通用产物（不含保留清单之类的内部元数据文件）."""
+    from app.services.artifact_retention import MANIFEST_FILENAME
+
     d = generic_outputs_dir(user_id, conv_id)
     if not d.exists():
         return []
     return [
         {"name": f.name, "size": f.stat().st_size}
         for f in sorted(d.iterdir())
-        if f.is_file()
+        if f.is_file() and f.name != MANIFEST_FILENAME
     ]
 
 
@@ -203,25 +204,16 @@ def preview_generated_output(path: Path) -> dict:
 
 
 def cleanup_generic_outputs(ttl_days: int = 7) -> int:
-    """定时清理超过 TTL 的通用脚本产物目录（按用户 × 任务隔离）."""
-    base = Path(settings.UPLOAD_DIR) / "office_outputs"
-    if not base.exists():
-        return 0
-    cutoff = time.time() - max(int(ttl_days or 7), 1) * 86400
-    removed = 0
-    for user_dir in base.iterdir():
-        if not user_dir.is_dir():
-            continue
-        for conv_dir in user_dir.iterdir():
-            if not conv_dir.is_dir():
-                continue
-            try:
-                if conv_dir.stat().st_mtime < cutoff:
-                    shutil.rmtree(conv_dir, ignore_errors=True)
-                    removed += 1
-            except OSError:
-                continue
-    return removed
+    """定时清理超过 TTL 的**用户产物**（按用户 × 任务隔离），返回删除的文件数。
+
+    只处理 ``USER_ARTIFACT``（工作区存储策略 = ``ttl_days`` 天）：过程日志归档属于
+    ``EPHEMERAL_ARCHIVE`` / ``AUDIT_ARCHIVE``，由
+    ``artifact_retention.cleanup_archive_outputs`` 按归档类别单独清理——归档不再被
+    这条兜底规则连带删除（此前 ref 写 30 天、文件 7 天就没了）。
+    """
+    from app.services.artifact_retention import cleanup_user_artifacts
+
+    return cleanup_user_artifacts(ttl_days).removed_files
 TEXT_EXTS = {".md", ".txt", ".json", ".csv", ".yaml", ".yml", ".toml", ".ini", ".log", ".xml"}
 STRUCTURED_EXTS = {".docx", ".xlsx", ".pptx", ".docm", ".xlsm", ".pptm"}
 # 老版 Office / 富文本：走本机 Office COM 提取（Windows + 已安装 Word/Excel/PowerPoint）

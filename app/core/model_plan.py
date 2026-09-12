@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from loguru import logger
@@ -44,6 +44,10 @@ class ModelPlan:
     scene: str = ""
     #: role → {"profile", "provider", "model", "source", "byok", "timeout", "capabilities"}
     roles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Model Capability Router 的结构化结论（**开关关闭时恒为空字典**；
+    #: 形状见 app/core/model_capability_router.py::MODEL_ROUTING_KEYS）。
+    #: 只在**冻结时**写一次：任务执行期间这份计划不再变。
+    model_routing: dict[str, Any] = field(default_factory=dict)
 
     def resolve(self, role: str) -> dict[str, Any]:
         """取某角色的冻结配置（缺失时回退该角色的默认档位解析结果）。"""
@@ -91,8 +95,15 @@ async def build_model_plan(
     byok_key: str | None = None,
     roles: tuple[str, ...] | None = None,
     plan_id: str = "",
+    requirements: Any = None,
 ) -> ModelPlan:
-    """解析并冻结一份模型计划（创建任务时调用一次）。"""
+    """解析并冻结一份模型计划（创建任务时调用一次）。
+
+    ``requirements``（``CapabilityRequirements``，可选）只在
+    ``MODEL_CAPABILITY_ROUTER_V2`` 打开时生效：Model Capability Router 会按能力需求
+    过滤候选、必要时换档，并把**结构化结论**写进计划（``plan.model_routing``）。
+    关闭开关时本参数被完全忽略，行为与改造前逐字一致。
+    """
     wanted = roles or model_roles.ALL_ROLES
     resolved: dict[str, dict[str, Any]] = {}
     byok = False
@@ -118,8 +129,46 @@ async def build_model_plan(
         scene=str(scene or ""),
         roles=resolved,
     )
+    plan = await _refine_with_capability_router(
+        plan, requirements=requirements, scene=scene, user_id=user_id
+    )
     await _remember_runtime(plan, user_id=user_id, byok_key=byok_key)
     return plan
+
+
+async def _refine_with_capability_router(
+    plan: ModelPlan,
+    *,
+    requirements: Any,
+    scene: str,
+    user_id: str | None,
+) -> ModelPlan:
+    """开关打开时，用 Model Capability Router 的结论冻结"角色 → 实际档位/模型"。
+
+    * 开关关闭 / 没有需求 → 原计划**原样返回**（逐字等价于改造前）；
+    * 阻断结论也一并冻结（结论里的 ``blocked=True`` 由调用方负责不派发）；
+    * 只改"无工具/审批依赖"的角色（见 ``refine_roles``），工具类角色不动。
+    """
+    if requirements is None:
+        return plan
+    from app.core.model_capability_router import model_capability_router
+
+    if not model_capability_router.enabled():
+        return plan
+    try:
+        conclusion = await model_capability_router.route(
+            plan=plan, requirements=requirements, scene=scene, user_id=user_id
+        )
+    except Exception as exc:  # noqa: BLE001 - 路由故障不能阻断任务提交
+        logger.warning("[model-plan] 能力路由降级（沿用解析结果）: {}", str(exc)[:160])
+        return plan
+    if not conclusion.switched:
+        return replace(plan, model_routing=conclusion.to_routing())
+    return replace(
+        plan,
+        roles=model_capability_router.refine_roles(plan, conclusion),
+        model_routing=conclusion.to_routing(),
+    )
 
 
 async def _remember_runtime(plan: ModelPlan, *, user_id: str | None, byok_key: str | None) -> None:
@@ -140,6 +189,9 @@ async def _remember_runtime(plan: ModelPlan, *, user_id: str | None, byok_key: s
             "user_id": str(user_id or ""),
             "byok_key_present": bool(byok_key),
         }
+        if plan.model_routing:
+            # 能力路由结论随计划一起冻结（开关关闭时该键不存在 → 运行态载荷逐字不变）。
+            payload["model_routing"] = dict(plan.model_routing)
         await get_redis().set(
             _runtime_key(plan.plan_id), json.dumps(payload, ensure_ascii=False), ex=PLAN_TTL_SECONDS
         )
@@ -184,6 +236,7 @@ async def load_model_plan(plan_id: str) -> ModelPlan | None:
         byok=bool(public.get("byok")),
         scene=str(public.get("scene") or ""),
         roles=roles,
+        model_routing=dict(payload.get("model_routing") or {}),
     )
 
 
@@ -230,16 +283,25 @@ def plan_from_routing(routing: dict | None) -> dict[str, Any]:
     return plan if isinstance(plan, dict) else {}
 
 
-def role_label(role: str) -> str:
-    """面向普通用户的三档显示（不暴露内部细节与密钥）。"""
-    profile = model_roles.role_profile(role)
-    if profile == model_roles.PROFILE_CHEAP:
+def profile_user_label(profile: str) -> str:
+    """档位 → 面向普通用户的三档显示（不暴露内部命名与模型名）。
+
+    前端 ``PROFILE_USER_LABELS`` 的同义词表（服务端唯一的"人话"映射），
+    Model Capability Router 的 process 文案也用它，避免两处措辞漂移。
+    """
+    name = model_roles.normalize_profile(profile)
+    if name == model_roles.PROFILE_CHEAP:
         return "快速模型"
-    if profile == model_roles.PROFILE_REASONING:
+    if name == model_roles.PROFILE_REASONING:
         return "深度模型"
-    if profile == model_roles.PROFILE_VISION:
+    if name == model_roles.PROFILE_VISION:
         return "视觉模型"
     return "标准模型"
+
+
+def role_label(role: str) -> str:
+    """面向普通用户的三档显示（不暴露内部细节与密钥）。"""
+    return profile_user_label(model_roles.role_profile(role))
 
 
 def default_plan_roles() -> tuple[str, ...]:
@@ -257,5 +319,6 @@ __all__ = [
     "load_model_plan",
     "model_plan_llm_config",
     "plan_from_routing",
+    "profile_user_label",
     "role_label",
 ]

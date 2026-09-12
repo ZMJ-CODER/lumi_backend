@@ -338,17 +338,20 @@ def cleanup_conversations(self):
 
 @celery_app.task(bind=True)
 def cleanup_generated_files(self):
-    """定时清理后端生成的临时/产物文件：
+    """定时清理后端生成的临时/产物文件（**按保留类别分开清**）：
     - 过期办公文档会话（data/office）
-    - 通用脚本产物目录（data/uploads/office_outputs，超过 TTL 删除）
+    - 用户产物（data/uploads/office_outputs，工作区策略 TTL = GENERATED_FILES_TTL_DAYS）
+    - 归档产物（EPHEMERAL_ARCHIVE 短期 / AUDIT_ARCHIVE 中期；不碰用户产物）
     - 沙箱残留临时目录（系统 temp 下的 lumi_sandbox_*，崩溃遗留兜底）
     """
 
     async def _run() -> None:
+        from app.services.artifact_retention import cleanup_archive_outputs
         from app.services.office_docs import cleanup_expired_sessions, cleanup_generic_outputs
 
         expired_sessions = await cleanup_expired_sessions()
         removed_outputs = cleanup_generic_outputs(settings.GENERATED_FILES_TTL_DAYS)
+        archives = cleanup_archive_outputs()
 
         # 沙箱残留临时目录（正常路径即时清理，这里兜底崩溃遗留）
         import shutil
@@ -367,9 +370,11 @@ def cleanup_generated_files(self):
             except OSError:
                 continue
         logger.info(
-            "[Task] cleanup_generated_files: 过期会话={} 产物目录={} 沙箱临时={}",
+            "[Task] cleanup_generated_files: 过期会话={} 用户产物文件={} 归档文件={}(按类 {}) 沙箱临时={}",
             expired_sessions,
             removed_outputs,
+            archives.removed_files,
+            archives.by_class,
             removed_sandbox,
         )
 

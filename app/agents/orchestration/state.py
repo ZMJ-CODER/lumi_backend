@@ -2,11 +2,17 @@
 
 多 agent 任务的中断/恢复/保留已完成任务都以这里的持久化状态为前提。
 Redis 部署已开启 appendonly，容器重启后任务状态仍在。
+
+运行视图快照的写入契约：``FLAG DOES NOT CONTROL SNAPSHOT WRITES``——只要保存任务状态，
+快照就必须写入（经 ``job_snapshot_store.SnapshotWriter`` 这一条路径，见
+``app/services/job_snapshot_store.py``）；特性开关只能改变快照**内容**，不能改变
+"是否写入"。快照写失败只记日志，绝不影响任务状态写入。
 """
 
 from abc import ABC, abstractmethod
 import asyncio
 import json
+from typing import TYPE_CHECKING
 
 from loguru import logger
 from redis.exceptions import WatchError
@@ -14,6 +20,11 @@ from redis.exceptions import WatchError
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus
 from app.core.config import settings
 from app.core.redis import get_redis
+
+if TYPE_CHECKING:  # pragma: no cover - 仅用于类型标注
+    from lumi_contracts import JobRunView
+
+    from app.services.job_snapshot_store import SnapshotWriter
 
 
 def _key(job_id: str) -> str:
@@ -137,6 +148,8 @@ class RedisStateStore(StateStore):
     def __init__(self, ttl_seconds: int | None = None):
         self._ttl = ttl_seconds or settings.AGENT_JOBS_TTL_SECONDS
         self._save_locks: dict[str, asyncio.Lock] = {}
+        #: 运行视图快照的**唯一写入器**（延迟构造：避免模块级循环导入）。
+        self._snapshot_writer: "SnapshotWriter | None" = None
 
     async def create_job(self, job: Job) -> None:
         r = get_redis()
@@ -158,6 +171,7 @@ class RedisStateStore(StateStore):
         await r.lpush(all_key, job.job_id)
         await r.ltrim(all_key, 0, 4999)
         await r.expire(all_key, self._ttl)
+        await self._refresh_run_view_snapshot(job)
 
     async def get_job(self, job_id: str) -> Job | None:
         r = get_redis()
@@ -175,6 +189,7 @@ class RedisStateStore(StateStore):
             # Pydantic 读取 depends_on/resource_claims 失败，SSE 因而无法收敛。
             # 本进程锁覆盖正常 worker/API 写入；跨进程冲突通过 revision 检测后重试。
             candidate = job
+            saved = False
             for _ in range(3):
                 # WATCH/MULTI 在不经过 Lua cjson 的前提下保持跨进程 CAS。
                 async with r.pipeline(transaction=True) as pipe:
@@ -192,13 +207,50 @@ class RedisStateStore(StateStore):
                         pipe.set(key, candidate.model_dump_json(), ex=self._ttl)
                         await pipe.execute()
                         _update_job_in_place(job, candidate)
-                        return
+                        saved = True
+                        break
                     except WatchError:
                         # 其他进程刚好写入，重读后按 revision 合并再试。
                         continue
                     finally:
                         await pipe.reset()
-            raise StateConflictError(f"任务状态版本冲突: {job.job_id}")
+            if not saved:
+                raise StateConflictError(f"任务状态版本冲突: {job.job_id}")
+        # 阶段 3：运行视图快照**必须**经 to_snapshot() 落库（见 job_snapshot_store）。
+        # 放在事务之外，避免在 WATCH/MULTI 连接上写第二个键；失败只记日志。
+        await self._refresh_run_view_snapshot(job)
+
+    # ── 运行视图快照（阶段 3：Redis 写入的唯一入口）──────────
+
+    def snapshot_writer(self) -> "SnapshotWriter":
+        """本 store 的**单例**快照写入器（``FLAG DOES NOT CONTROL SNAPSHOT WRITES``）。"""
+        if self._snapshot_writer is None:
+            from app.services.job_snapshot_store import SnapshotWriter
+
+            self._snapshot_writer = SnapshotWriter(ttl_seconds=self._ttl)
+        return self._snapshot_writer
+
+    async def save_run_view(self, view: "JobRunView") -> None:
+        """生产 Redis 写入的唯一入口：快照形状只由 ``to_snapshot()`` 决定。
+
+        写入不受任何特性开关控制（快照是恢复基础设施）；TTL/版本/体积由
+        ``SnapshotWriter`` 记录进日志与指标。
+        """
+        await self.snapshot_writer().write(view)
+
+    async def get_run_view(self, job_id: str) -> "JobRunView | None":
+        from app.services.job_snapshot_store import read_snapshot
+
+        return await read_snapshot(job_id)
+
+    async def _refresh_run_view_snapshot(self, job: Job) -> None:
+        """刷新运行视图快照；快照失败绝不影响任务状态写入（只记日志）。"""
+        try:
+            from app.services.job_snapshot_store import view_from_job
+
+            await self.save_run_view(view_from_job(job))
+        except Exception as exc:  # noqa: BLE001 - 快照是恢复辅助，不能反向影响状态库
+            logger.debug("[job-snapshot] 运行视图快照写入失败（不影响任务状态）: {}", str(exc)[:120])
 
     async def list_jobs(self, user_id: str, limit: int = 20) -> list[Job]:
         ids = await self.list_job_ids(user_id, limit)

@@ -7,6 +7,7 @@
 """
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -35,8 +36,15 @@ class Sandbox(ABC):
         timeout: int = 30,
         env_extra: dict[str, str] | None = None,
         mounts: list[dict[str, str]] | None = None,
+        quota_spec: Any = None,
+        owner: str = "",
     ) -> SandboxResult:
-        """在隔离环境执行一段脚本."""
+        """在隔离环境执行一段脚本.
+
+        ``quota_spec`` 给定时（阶段 4，灰度 ``PLUGIN_QUOTA_ENFORCEMENT``）本次执行按
+        插件 Manifest 声明的配额**真执行**：超时杀进程、输出超限转产物引用、并发限流。
+        缺省 ``None`` = 既有行为（逐字节不变）。
+        """
         ...
 
     def is_available(self) -> tuple[bool, str]:

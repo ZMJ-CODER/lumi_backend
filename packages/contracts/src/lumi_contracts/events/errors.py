@@ -122,6 +122,18 @@ DOMAIN_ERROR_SPECS: dict[str, ErrorSpec] = {
     "validation.schema_mismatch": ErrorSpec("validation.schema_mismatch", ErrorCategory.BUSINESS, False, "请求结构与预期不一致，需要澄清后重试。", "补充说明"),
     "validation.target_required": ErrorSpec("validation.target_required", ErrorCategory.BUSINESS, False, "请先说明要操作的目标（文件、目录或对象）。", "补充目标后重试"),
     "plugin.crashed": ErrorSpec("plugin.crashed", ErrorCategory.TRANSIENT, True, "插件异常退出，已中止该步骤。", "重试"),
+    # 阶段 4 收口：**插件执行边界**的两个阻断码（声明了配额却没法真执行时用）。
+    # 它们是域内码（不扩冻结 12 码表）：跨端形状不变，只是多两个已登记口径。
+    "PLUGIN_WORKER_UNAVAILABLE": ErrorSpec(
+        "PLUGIN_WORKER_UNAVAILABLE", ErrorCategory.BUSINESS, False,
+        "插件执行边界不可用（没有可用的 Worker），已拒绝执行该步骤。",
+        "检查插件是否已启用或联系管理员",
+    ),
+    "PLUGIN_QUOTA_NOT_ENFORCED": ErrorSpec(
+        "PLUGIN_QUOTA_NOT_ENFORCED", ErrorCategory.BUSINESS, False,
+        "该插件声明了资源配额，但当前无法真正执行（缺少可强杀的执行边界），已拒绝执行。",
+        "联系管理员开启插件配额执行",
+    ),
     "resource.quota_exceeded": ErrorSpec("resource.quota_exceeded", ErrorCategory.BUSINESS, False, "已超出配额限制。", "调整用量"),
     "resource.result_ref_expired": ErrorSpec("resource.result_ref_expired", ErrorCategory.BUSINESS, False, "产物引用已过期，请重新生成或重新打开。", "重新生成"),
     "system.cancelled": ErrorSpec("system.cancelled", ErrorCategory.BUSINESS, False, "任务已取消。", "重新发起"),
@@ -190,6 +202,13 @@ LEGACY_CODE_ALIASES: dict[str, str] = {
     "PLUGIN_RESOURCE_EXCEEDED": "PLUGIN_RESOURCE_EXCEEDED",
     "PLUGIN_UNINSTALLED": "PLUGIN_UNINSTALLED",
     "DOCUMENT_RENDER_FAILED": "plugin.crashed",
+    # 插件执行边界（阶段 4 收口）：旧拼写/近似码一律收敛到登记码，不二次发明。
+    "PLUGIN_WORKER_MISSING": "PLUGIN_WORKER_UNAVAILABLE",
+    "PLUGIN_NO_WORKER": "PLUGIN_WORKER_UNAVAILABLE",
+    "PLUGIN_WORKER_UNAVAILABLE": "PLUGIN_WORKER_UNAVAILABLE",
+    "PLUGIN_QUOTA_UNENFORCED": "PLUGIN_QUOTA_NOT_ENFORCED",
+    "PLUGIN_QUOTA_DISABLED": "PLUGIN_QUOTA_NOT_ENFORCED",
+    "PLUGIN_QUOTA_NOT_ENFORCED": "PLUGIN_QUOTA_NOT_ENFORCED",
     # ── 取消 / 兜底 ──
     "CANCELLED": "SYSTEM_CANCELLED",
     "CANCELED": "SYSTEM_CANCELLED",

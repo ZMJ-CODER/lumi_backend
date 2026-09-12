@@ -186,6 +186,49 @@ def _step_summary(node: Any, step: dict, result: Any, status: ProcessStatus) -> 
     return intent_text(node)
 
 
+def _preflight_entry(job_id: str, routing: dict, occurred_at: str) -> ProcessLogEntry | None:
+    """预检失败的 process 事件 → 过程条目（routing 里没有该载荷时返回 None）。
+
+    载荷由 ``CapabilityPreflightService`` 的 ``preflight_process_notice`` 产出（canonical
+    画像接入后才有事实）；``entry_id`` 与 SSE 发射点一致，刷新后与实时帧合并成同一行。
+    """
+    from app.agents.orchestration.capability_preflight_service import (
+        PREFLIGHT_NOTICE_ENTRY_ID,
+        PREFLIGHT_NOTICE_KEY,
+    )
+
+    notice = routing.get(PREFLIGHT_NOTICE_KEY)
+    if not isinstance(notice, dict) or not notice:
+        return None
+    return ProcessLogEntry.from_event(
+        {"entry_id": PREFLIGHT_NOTICE_ENTRY_ID, **notice},
+        job_id=job_id,
+        occurred_at=occurred_at,
+    )
+
+
+def _model_routing_entry(job_id: str, routing: dict, occurred_at: str) -> ProcessLogEntry | None:
+    """模型路由/降级的 process 事件 → 过程条目（routing 里没有该载荷时返回 None）。
+
+    载荷由 ``app.core.model_capability_router`` 产出（``MODEL_CAPABILITY_ROUTER_V2``
+    打开且真的换档/降级/阻断时才有）；``entry_id`` 与 SSE 发射点一致，
+    刷新后与实时帧合并成同一行。
+    """
+    from app.core.model_capability_router import (
+        MODEL_ROUTING_NOTICE_ENTRY_ID,
+        MODEL_ROUTING_NOTICE_KEY,
+    )
+
+    notice = routing.get(MODEL_ROUTING_NOTICE_KEY)
+    if not isinstance(notice, dict) or not notice:
+        return None
+    return ProcessLogEntry.from_event(
+        {"entry_id": MODEL_ROUTING_NOTICE_ENTRY_ID, **notice},
+        job_id=job_id,
+        occurred_at=occurred_at,
+    )
+
+
 def _route_detail(routing: dict) -> str:
     """路由/策略的**只读**审计摘要（枚举值，非自由文本，不含用户原文）。
 
@@ -305,6 +348,16 @@ def process_log_from_job(job: Any) -> list[ProcessLogEntry]:
                 occurred_at=_iso_time(_attr(job, "created_at", None)),
             )
         )
+    preflight = _preflight_entry(
+        job_id, routing, _iso_time(_attr(job, "created_at", None))
+    )
+    if preflight is not None:
+        entries.append(preflight)
+    model_routing = _model_routing_entry(
+        job_id, routing, _iso_time(_attr(job, "created_at", None))
+    )
+    if model_routing is not None:
+        entries.append(model_routing)
     for index, raw in enumerate(routing.get("steps") or []):
         if not isinstance(raw, dict):
             continue

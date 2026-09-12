@@ -102,12 +102,15 @@ async def lifespan(app: FastAPI):
         from app.agents.orchestration.temporal.runtime import start_inprocess_worker
 
         await start_inprocess_worker()
-    # 启动时兜底清理一次后端生成的临时/产物文件（定时任务由 Celery beat 负责）
+    # 启动时兜底清理一次后端生成的临时/产物文件（定时任务由 Celery beat 负责）：
+    # 用户产物与归档按各自的保留类别清理，互不越界。
     try:
+        from app.services.artifact_retention import cleanup_archive_outputs
         from app.services.office_docs import cleanup_expired_sessions, cleanup_generic_outputs
 
         await cleanup_expired_sessions()
         cleanup_generic_outputs(settings.GENERATED_FILES_TTL_DAYS)
+        cleanup_archive_outputs()
     except Exception as exc:  # noqa: BLE001 - 清理失败不阻塞启动
         logger.warning("启动清理生成文件失败（忽略）: {}", exc)
     logger.info("基础设施初始化完成")

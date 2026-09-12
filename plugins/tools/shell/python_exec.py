@@ -3,11 +3,15 @@
 import csv
 import io
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 from app.agents.sandbox.registry import get_sandbox
 from app.agents.skills.base import Tool, SkillContext, ToolOutput
 from app.core.config import settings
 from loguru import logger
+
+if TYPE_CHECKING:  # 只用于注解：插件子系统在真实执行时才 import（避免加载期副作用）
+    from app.services.plugins.boundary import ExecutionPlan
 
 
 def _generic_output_dir(user_id: str, conv_id: str) -> Path:
@@ -90,6 +94,42 @@ def _validate_output_contract(contract: dict, output_paths: dict[str, list[Path]
             except csv.Error:
                 return f"产物 {name} 的分隔文本格式无效"
     return None
+
+
+def _sanitize_container_part(value: object, fallback: str) -> str:
+    text = "".join(ch for ch in str(value or "") if ch.isalnum() or ch in "-_")[:64]
+    return text or fallback
+
+
+async def _plugin_execution_plan(
+    sandbox: object, context: SkillContext | None
+) -> "ExecutionPlan":
+    """给这次执行归类并取执行边界（**每一次**执行都归类）。
+
+    只有**服务端注入**的 ``context.plugin_id`` 才算插件归属（绝不读 LLM 参数）；
+    没有插件身份 → 显式 ``builtin``（系统默认上限，不按插件配额治理），
+    行为与既有路径逐字节一致（不会因此去构造插件管理器）。
+    """
+    plugin_id = str(getattr(context, "plugin_id", "") or "").strip()
+    from app.services.plugins.boundary import resolve_execution
+
+    manager = None
+    if plugin_id:
+        from app.services.plugins.manager import active_plugin_manager
+
+        manager = active_plugin_manager()
+    # 本地/容器沙箱都起**可强杀**的独立进程；其它执行面不宣称有强杀能力。
+    forced_available = str(getattr(sandbox, "name", "")) in {"local", "docker"}
+    return await resolve_execution(
+        manager=manager,
+        plugin_id=plugin_id,
+        manifest=getattr(context, "plugin_manifest", None),
+        forced_available=forced_available,
+        owner=str(getattr(context, "user_id", "") or ""),
+        container=_sanitize_container_part(
+            getattr(context, "conversation_id", ""), "plugin-sandbox"
+        ),
+    )
 
 
 class PythonExecSkill(Tool):
@@ -226,12 +266,25 @@ class PythonExecSkill(Tool):
                         "LUMI_DOC_OUTPUT_DIRS": _json.dumps(doc_out_dirs, ensure_ascii=False),
                     }
                 )
+        # 阶段 4 收口：每次执行都先归类。插件执行必须经 PluginManager.worker_for
+        # 拿到配额边界；拿不到就按稳定码失败（绝不回退到无配额的进程内执行再报成功）。
+        plan = await _plugin_execution_plan(sandbox, context)
+        if plan.refused:
+            return ToolOutput(
+                success=False,
+                error=str(plan.safe_message or plan.detail or "插件执行被拒绝"),
+                error_code=str(plan.error_code or "PLUGIN_QUOTA_NOT_ENFORCED"),
+                retryable=False,
+                metadata={"quota": plan.as_dict()},
+            )
         result = await sandbox.run_script(
             code,
             language="python",
             timeout=timeout,
             env_extra=env_extra or None,
             mounts=mounts or None,
+            quota_spec=plan.quota_spec,
+            owner=str(context.user_id) if context and context.user_id else "",
         )
         # 收集产物（文档输出 + 通用新建文件）
         produced: list[dict] = []

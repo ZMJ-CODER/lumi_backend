@@ -41,6 +41,59 @@ _OPTIONAL_TOOLS = frozenset({
     "mcp__lumi_client__workspace_rollback",
 })
 
+#: 统一资源能力声明（方案《资源能力层》Phase 4）：上面那 14 个底层名字只是**兼容层**，
+#: 真正表达意图的是"对 workspace 做这几件事"。底层工具名由 Provider Adapter 解析，
+#: 因此客户端换实现/新增 Provider 时不必回来改这个文件。
+_CAPABILITIES = (
+    "resource.read",
+    "resource.write",
+    "resource.edit",
+    "resource.move",
+    "resource.delete",
+    "code.execute",
+)
+_RESOURCE_TYPES = ("workspace",)
+_PROVIDERS = ("workspace_provider",)
+
+
+def _select_capabilities(capabilities):
+    """选本轮可用的工作区工具：**能力声明优先，旧名字白名单兜底**（Phase 4）。
+
+    开关关闭时逐字走旧的名字白名单（``item.name in _TOOLS``），行为与改造前一致。
+    """
+    try:
+        from app.agents.capabilities.resource_workflow import (
+            select_capabilities,
+            workflow_enabled,
+        )
+
+        if workflow_enabled():
+            selected = select_capabilities(
+                capabilities,
+                capabilities=_CAPABILITIES,
+                resource_types=_RESOURCE_TYPES,
+                legacy_names=_TOOLS,
+            )
+            # 桌面端广告的名字与后端统一层绑定不一致时（新客户端/新 Provider），
+            # 名字白名单仍然兜底——迁移期只补不替。
+            return selected or [item for item in capabilities if item.name in _TOOLS]
+    except Exception:  # noqa: BLE001 - 选择失败不能影响工作流可用性
+        pass
+    return [item for item in capabilities if item.name in _TOOLS]
+
+
+def _surface(capabilities):
+    """收敛后的工具面：``([(capability, 对外名)], {对外名: 实现名})``（Phase 5）。
+
+    关闭开关时对外名 = 实现名、映射为空，逐字等于改造前。
+    """
+    try:
+        from app.agents.capabilities.resource_surface import collapse_with_names
+
+        return collapse_with_names(capabilities)
+    except Exception:  # noqa: BLE001 - 收敛失败用原名
+        return [(item, str(getattr(item, "name", "") or "")) for item in capabilities], {}
+
 
 def _tool_defs(capabilities):
     definitions = []
@@ -84,6 +137,10 @@ class WorkspaceCodeChangeSkill(WorkflowSkill):
     fallback_policy = "clarify"
     approval_policy = "before_submit"
     allowed_tools = list(_TOOLS)
+    # 能力声明（Phase 4）：迁移期与 allowed_tools **并存**（依赖检查只补不替）。
+    required_capabilities = list(_CAPABILITIES)
+    resource_types = list(_RESOURCE_TYPES)
+    providers = list(_PROVIDERS)
     dependencies = {
         "providers": ["desktop_mcp"],
         "tools": [{
@@ -113,13 +170,12 @@ class WorkspaceCodeChangeSkill(WorkflowSkill):
         from app.agents.skills.executor import get_desktop_mcp_capabilities
 
         capabilities = await get_desktop_mcp_capabilities(context.user_id, context.scene, "user")
-        selected = [item for item in capabilities if item.name in _TOOLS]
+        selected = _select_capabilities(capabilities)
         if not selected:
             return ToolOutput(success=False, error="当前桌面客户端未提供工作区工具", error_code="CLIENT_OFFLINE", retryable=True)
 
-        system = (
-            (context.skill_prompt or "你是一个谨慎的代码工作区执行 Agent。")
-            + "\n你负责根据目标滚动执行，不要一次性假设完整计划。每轮最多调用一个工具。"
+        system = (context.skill_prompt or "你是一个谨慎的代码工作区执行 Agent。") + (
+            "\n你负责根据目标滚动执行，不要一次性假设完整计划。每轮最多调用一个工具。"
             "先探索并读取，再修改；修改已有文件前必须先读取。"
             "改动优先用原子工具落地：新建/整体覆盖用 workspace_write，定点替换用 workspace_edit，"
             "改名/移动用 workspace_move，删除用 workspace_delete；覆盖或替换已有文件必须带本轮读取得到的 "
@@ -134,6 +190,14 @@ class WorkspaceCodeChangeSkill(WorkflowSkill):
             "commit 不带 approved 或 approved=false 时表示等待用户审批。不要执行删除、提交或回滚之外的隐藏动作。"
             "workspace_id 由系统注入，不要要求用户提供。结束时说清楚每个文件是已生效还是仍在暂存区待提交。"
         )
+        # SOP 里的工具名做**运行期翻译**（收敛关闭时逐字不变）：业务文本仍由
+        # `plugins/workflows/prompts/*.md` 维护，架构迁移不改它的内容。
+        try:
+            from app.agents.capabilities.resource_surface import translate_prompt_names
+
+            system = translate_prompt_names(system)
+        except Exception:  # noqa: BLE001 - 翻译失败用原文
+            pass
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": instruction},
@@ -143,9 +207,15 @@ class WorkspaceCodeChangeSkill(WorkflowSkill):
         tested = False
         diff_seen = False
         max_rounds = 16
+        # 统一资源能力层（Phase 5）：模型可见面收敛（关闭时对外名 = 实现名、映射为空）。
+        surface_pairs, surface_alias = _surface(selected)
+        visible = [
+            capability if display == capability.name else capability.model_copy(update={"name": display})
+            for capability, display in surface_pairs
+        ]
         try:
             for _ in range(max_rounds):
-                definitions = _tool_defs(selected)
+                definitions = _tool_defs(visible)
                 content, calls = await llm.chat_with_tools(
                     messages,
                     definitions,
@@ -163,13 +233,15 @@ class WorkspaceCodeChangeSkill(WorkflowSkill):
                 args = function.get("arguments") or {}
                 if isinstance(args, str):
                     args = json.loads(args or "{}")
-                if name.endswith("workspace_commit") and not (tested and diff_seen):
+                # 前置判断按**实现名**：模型叫 `Run` 时它对应的实现是 `sandbox_run`。
+                resolved = surface_alias.get(name, name)
+                if resolved.endswith("workspace_commit") and not (tested and diff_seen):
                     return ToolOutput(success=False, error="提交前必须先成功运行沙箱测试并查看工作区差异", error_code="COMMIT_GUARD_FAILED")
                 result = await invoke_tool(name, args if isinstance(args, dict) else {})
                 records.append({"tool": name, "status": result.status, "error_code": result.error_code})
-                if name.endswith("sandbox_run") and result.success:
+                if resolved.endswith("sandbox_run") and result.success:
                     tested = True
-                if name.endswith("workspace_diff") and result.success:
+                if resolved.endswith("workspace_diff") and result.success:
                     diff_seen = True
                 assistant_message = {"role": "assistant", "content": content or None, "tool_calls": [call]}
                 if call.get("reasoning_content") is not None:

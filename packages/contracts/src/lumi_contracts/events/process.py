@@ -139,6 +139,24 @@ def sanitize_process_text(value: Any, *, limit: int) -> str:
     return text[:limit]
 
 
+#: 结构化标签允许的形状：闭集词汇（能力名 ``resource.read``、资源类型 ``workspace``、
+#: Provider id ``lumi.local.workspace``、工具名 ``workspace_write`` / ``Read``）。
+#: **刻意不留空格、斜杠、引号**——那样参数片段、路径或用户输入就不可能伪装成标签。
+_LABEL_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,80}$")
+
+
+def label_value(value: Any) -> str | None:
+    """结构化标签的形状闸门：不符合闭集词汇形状的一律丢弃（返回 ``None``）。
+
+    这是"过程条目里的新字段绝不携带用户数据"的**机器保证**：不是靠调用方自觉，
+    而是形状不对就进不来。
+    """
+    text = str(value or "").strip()
+    if not text or not _LABEL_RE.match(text):
+        return None
+    return text
+
+
 def derive_kind(*, event_type: str = "", tool_name: str = "", explicit: str = "") -> ProcessKind:
     """按事件类型/工具名判定 ``kind``（显式声明优先）。"""
     for source in (explicit,):
@@ -184,6 +202,31 @@ class ProcessLogEntry(BaseModel):
     sequence: int = 0
     occurred_at: str = ""
     job_id: str = ""
+    # ── 统一资源能力层的**结构化标签**（方案《资源能力层》§七；全部可选）──
+    #
+    # 为什么放在过程条目上：前端不该靠"底层工具名"猜这是什么操作。`capability` /
+    # `resource_type` / `provider_id` 来自统一能力目录（**与开关无关的目录事实**），
+    # `display_name` 是模型本轮实际看到的名字（收敛关闭时等于 `tool_name`）。
+    #
+    # 三条硬约束：
+    # 1. **只放闭集词汇**（能力名/资源类型/Provider id/工具名），绝不携带参数、路径或
+    #    任何用户输入——构造时用 ``label_value`` 校验形状，形状不符一律丢弃；
+    # 2. 默认 ``None``：``model_dump(exclude_none=True)`` 下老条目载荷**逐字不变**；
+    # 3. 认不出工具就留空（"不认识"不等于"可以编一个能力"）。
+    capability: str | None = None
+    resource_type: str | None = None
+    provider_id: str | None = None
+    provider_name: str | None = None
+    display_name: str | None = None
+
+    @field_validator(
+        "capability", "resource_type", "provider_id", "provider_name", "display_name",
+        mode="before",
+    )
+    @classmethod
+    def _validate_label(cls, value: Any) -> Any:
+        """结构化标签的形状闸门（**安全不变量**，不是格式偏好）。"""
+        return label_value(value)
 
     @field_validator("status", mode="before")
     @classmethod
@@ -287,6 +330,13 @@ class ProcessLogEntry(BaseModel):
             sequence=int(data.get("sequence") or sequence or 0),
             occurred_at=str(data.get("occurred_at") or occurred_at or ""),
             job_id=str(data.get("job_id") or job_id or ""),
+            # 结构化标签：只从事件**顶层**读（调用方若已填就用，没填由 app 层用能力
+            # 目录补齐——contracts 不认识任何 app 模块）。
+            capability=data.get("capability"),
+            resource_type=data.get("resource_type"),
+            provider_id=data.get("provider_id"),
+            provider_name=data.get("provider_name"),
+            display_name=data.get("display_name"),
         )
 
     def to_sse_fields(self) -> dict[str, Any]:
@@ -313,6 +363,11 @@ class ProcessLogEntry(BaseModel):
             payload["occurred_at"] = self.occurred_at
         if self.job_id:
             payload["job_id"] = self.job_id
+        # 结构化标签（可选）：前端据此显示"正在写入工作区"，不必靠工具名猜。
+        for key in ("capability", "resource_type", "provider_id", "provider_name", "display_name"):
+            value = getattr(self, key)
+            if value:
+                payload[key] = value
         return payload
 
 
@@ -338,6 +393,14 @@ def merge_process_log(
                         "detail": entry.detail or previous.detail,
                         "summary": entry.summary or previous.summary,
                         "title": entry.title or previous.title,
+                        # 标签后到的那条补上（先到的 running 帧可能还没带）。
+                        **{
+                            label: getattr(previous, label) or getattr(entry, label)
+                            for label in (
+                                "capability", "resource_type", "provider_id",
+                                "provider_name", "display_name",
+                            )
+                        },
                     }
                 )
                 continue
@@ -355,6 +418,7 @@ __all__ = [
     "SUMMARY_MAX_CHARS",
     "TITLE_MAX_CHARS",
     "derive_kind",
+    "label_value",
     "merge_process_log",
     "sanitize_process_text",
 ]

@@ -328,7 +328,7 @@ def _step_entry(
     status = _process_status(step.get("status"), _attr(node, "status", ""))
     # ``node.result`` 是节点快照里的结果摘要来源；只取已落地的安全展示字段。
     result = _attr(node, "result", None) or step.get("result")
-    return ProcessLogEntry(
+    entry = ProcessLogEntry(
         id=f"step:{step_id}",
         entry_id=f"step:{step_id}",
         kind=(
@@ -349,7 +349,36 @@ def _step_entry(
         sequence=int(sequence),
         occurred_at=_step_occurred_at(step, node),
         job_id=job_id,
+        **dispatch_labels_for_step(step, tool),
     )
+    return entry
+
+
+def dispatch_labels_for_step(step: dict, tool: str) -> dict[str, str]:
+    """步骤 → 结构化标签（能力/资源/Provider/模型可见名）。
+
+    优先用步骤里**已经落盘的**标签（调用方更清楚"模型当时叫什么"），缺失时按工具名
+    从统一能力目录补。全部是闭集词汇；认不出工具就什么都不填（老工具/本机动作）。
+    """
+    labels: dict[str, str] = {}
+    for key in ("capability", "resource_type", "provider_id", "provider_name", "display_name"):
+        value = str(step.get(key) or "")
+        if value:
+            labels[key] = value
+    if labels.get("capability") and labels.get("resource_type"):
+        return labels
+    if not tool:
+        return labels
+    try:
+        from app.agents.capabilities.resource_dispatch import dispatch_labels
+
+        derived = dispatch_labels(tool)
+    except Exception as exc:  # noqa: BLE001 - 标签补全失败不能影响过程日志
+        logger.debug("[process-log] 结构化标签补全失败 {}: {}", str(tool)[:40], str(exc)[:120])
+        return labels
+    for key, value in derived.items():
+        labels.setdefault(key, value)
+    return labels
 
 
 def process_log_from_job(job: Any) -> list[ProcessLogEntry]:

@@ -164,7 +164,7 @@ def _step_payload(event: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(artifact_refs, list):
         artifact_refs = result.get("artifact_refs") if isinstance(result.get("artifact_refs"), list) else []
     result_ref = event.get("result_ref") or step.get("result_ref")
-    return {
+    payload = {
         "step_id": entry.step_id or entry.entry_id,
         "step_type": _text(event.get("step_type") or event.get("agent"))[:80],
         "name": entry.title[:TITLE_MAX_CHARS],
@@ -181,6 +181,13 @@ def _step_payload(event: Mapping[str, Any]) -> dict[str, Any]:
             bounded_opaque_value(_as_dict(item)) for item in artifact_refs[:20] if isinstance(item, Mapping)
         ],
     }
+    # 统一资源能力层（§七）：步骤帧里给出**结构化标签**，前端不必按工具名猜
+    # "这是在读工作区还是在写办公文档"。只放闭集词汇（`label_value` 形状闸门），
+    # 缺失就不出现——老客户端/未知工具不会因此多出字段。
+    from app.contracts.process_log import dispatch_labels_for_step
+
+    payload.update(dispatch_labels_for_step(step or dict(event), entry.tool_name))
+    return payload
 
 
 def _artifact_payload(event: Mapping[str, Any]) -> dict[str, Any]:

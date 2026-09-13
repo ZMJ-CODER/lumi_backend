@@ -90,6 +90,10 @@ class RoutingDecision:
     lease_id: str = ""
     reason: str = ""
     shadow: bool = False
+    #: 统一资源能力层（Phase 3）：派发目标的结构化字段（排障/前端展示用）。
+    unified_capability: str = ""
+    resource_type: str = ""
+    provider_name: str = ""
     #: shadow 模式下的打点（进过程日志/审计）。
     observation: dict[str, Any] = field(default_factory=dict)
 
@@ -103,6 +107,9 @@ class RoutingDecision:
             "lease_id": self.lease_id,
             "reason": self.reason,
             "shadow": bool(self.shadow),
+            "unified_capability": self.unified_capability,
+            "resource_type": self.resource_type,
+            "provider_name": self.provider_name,
             "observation": dict(self.observation),
         }
 
@@ -128,17 +135,43 @@ async def maybe_route_capability(
     task_id: str | None = None,
     call_id: str | None = None,
     approval_context: dict[str, Any] | None = None,
+    capability: str = "",
+    unified_capability: str = "",
+    resource_type: str = "",
+    provider_name: str = "",
 ) -> RoutingDecision:
     """executor 分支前的统一入口。
 
     * ``off``：直接返回 ``handled=False``（零开销，不查任何东西）；
     * ``shadow``：查询并返回打点，**handled 仍为 False**；
     * ``read_only`` / ``active``：命中的能力交给适配层派发，`handled=True`。
+
+    ``capability`` 给定时**不再从工具名猜能力**（Phase 3）：统一资源能力层已经解析出
+    结构化目标（能力 / 资源类型 / Provider），这里只把"资源类型允许的 Provider"传给
+    适配层收窄候选。留空时保持旧行为（``capability_for_mcp_tool`` 兼容解析）。
     """
     resolved = normalize_mode(mode or routing_mode())
-    capability = capability_for_mcp_tool(tool_name)
+    structured = bool(capability)
+    if not structured:
+        capability = capability_for_mcp_tool(tool_name) or ""
     if resolved == MODE_OFF or not capability:
-        return RoutingDecision(mode=resolved, tool_name=tool_name, capability=capability or "")
+        return RoutingDecision(
+            mode=resolved,
+            tool_name=tool_name,
+            capability=capability or "",
+            unified_capability=unified_capability,
+            resource_type=resource_type,
+            provider_name=provider_name,
+        )
+
+    provider_ids: frozenset[str] | None = None
+    if structured and unified_capability and resource_type:
+        try:
+            from app.agents.capabilities.resource_dispatch import provider_ids_for
+
+            provider_ids = provider_ids_for(unified_capability, resource_type) or None
+        except Exception as exc:  # noqa: BLE001 - 收窄失败按不收窄处理
+            logger.debug("[capability] Provider 收窄集合推导失败: {}", str(exc)[:120])
 
     active = should_route(resolved, capability)
     if adapter is None:
@@ -154,13 +187,28 @@ async def maybe_route_capability(
         task_id=task_id,
         call_id=call_id,
         approval_context=approval_context,
+        provider_ids=provider_ids,
     )
     observation = outcome.to_snapshot()
+    if unified_capability or resource_type:
+        observation = {
+            **observation,
+            "unified_capability": unified_capability,
+            "resource_type": resource_type,
+            "provider_name": provider_name,
+        }
     if not active:
         logger.info(
-            "[capability][shadow] tool={} capability={} 本应路由 provider={} lease={} reason={} handled_would_be={}",
-            tool_name, capability, outcome.provider_id or "-", outcome.lease_id or "-",
-            outcome.reason, outcome.handled,
+            "[capability][shadow] tool={} capability={} unified={} resource={} "
+            "本应路由 provider={} lease={} reason={} handled_would_be={}",
+            tool_name,
+            capability,
+            unified_capability or "-",
+            resource_type or "-",
+            outcome.provider_id or "-",
+            outcome.lease_id or "-",
+            outcome.reason,
+            outcome.handled,
         )
         return RoutingDecision(
             handled=False,
@@ -171,6 +219,9 @@ async def maybe_route_capability(
             lease_id=outcome.lease_id,
             reason=outcome.reason,
             shadow=True,
+            unified_capability=unified_capability,
+            resource_type=resource_type,
+            provider_name=provider_name,
             observation=observation,
         )
     return RoutingDecision(
@@ -182,6 +233,9 @@ async def maybe_route_capability(
         provider_id=outcome.provider_id,
         lease_id=outcome.lease_id,
         reason=outcome.reason,
+        unified_capability=unified_capability,
+        resource_type=resource_type,
+        provider_name=provider_name,
         observation=observation,
     )
 

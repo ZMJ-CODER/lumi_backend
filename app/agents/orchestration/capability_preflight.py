@@ -211,14 +211,20 @@ def tool_window_for_actions(
     action_intents: Iterable[str] | None,
     *,
     registered_tools: Iterable[str] | None = None,
+    profile: Any = None,
+    resource_types: Iterable[str] | None = None,
 ) -> tuple[str, ...]:
     """按动作意图给出工具窗口（画像驱动注入；关键词只作兜底，见 §3.2/§3.4）。
 
     给了 ``registered_tools`` 时只返回已注册的工具（不向模型暴露不存在的工具）。
 
-    **工具窗口的真相源**：``TOOL_REGISTRY_DERIVED`` 打开时由统一工具注册表派生
-    （基于"能力副作用 ⊆ 意图副作用"），``ACTION_TOOL_WINDOW`` 退化为兜底；关闭时
-    （默认）逐字走静态表。两条路径由 ``tool_registry.shadow_compare()`` 对拍。
+    **三层真相源**（越靠后越新，各自带开关与兜底）：
+
+    1. ``ACTION_TOOL_WINDOW``（静态表，默认路径，逐字不变）；
+    2. ``TOOL_REGISTRY_DERIVED``（统一工具注册表派生，基于能力副作用）；
+    3. ``RESOURCE_CAPABILITY_WINDOW``（**统一资源能力层**：动作意图 + 资源类型 →
+       统一能力 → 候选 Provider → 规范工具）。资源层的窗口是前两者的**超集**，
+       因此打开它只会"多出正确工具"，不会让既有工具消失。
     """
     window: list[str] = []
     for intent in action_intents or ():
@@ -231,6 +237,26 @@ def tool_window_for_actions(
             resolved = action_window(key, fallback=static_tools)
         except Exception as exc:  # noqa: BLE001 - 派生失败静默回到静态表
             logger.debug("[preflight] 工具窗口派生失败（回到静态表）: {}", str(exc)[:120])
+        try:
+            # 资源层（Phase 2）：只有开关打开时才参与；关闭时上面的结果原样返回。
+            from app.agents.capabilities.resource_window import (
+                resource_types_for_profile,
+                resource_window,
+                window_enabled,
+            )
+
+            if window_enabled():
+                resolved = resource_window(
+                    [key],
+                    resource_types=(
+                        list(resource_types)
+                        if resource_types is not None
+                        else list(resource_types_for_profile(profile))
+                    ),
+                    fallback=resolved,
+                )
+        except Exception as exc:  # noqa: BLE001 - 资源层失败不能影响既有窗口
+            logger.debug("[preflight] 资源能力窗口派生失败（保留上层结果）: {}", str(exc)[:120])
         for tool in resolved:
             if tool not in window:
                 window.append(tool)
@@ -346,7 +372,7 @@ def preflight_capabilities(
     checks.append(PreflightCheck(name="permission", ok=True))
 
     # ⑤ 工具注册 + 注入窗口非空（禁止"空工具列表 + 纯文本瞎答"）
-    window = tool_window_for_actions(actions, registered_tools=registered_tools)
+    window = tool_window_for_actions(actions, registered_tools=registered_tools, profile=profile)
     if desired_tools:
         missing = [str(tool) for tool in desired_tools if registered_tools is not None and str(tool) not in registered]
         if missing:
@@ -381,7 +407,7 @@ def build_tool_window(
     给了 ``registered_tools`` 时会剔除未注册工具——绝不把不存在的工具交给模型。
     """
     actions = list(action_intents or _profile_field(profile, "action_intents", []) or [])
-    return tool_window_for_actions(actions, registered_tools=registered_tools)
+    return tool_window_for_actions(actions, registered_tools=registered_tools, profile=profile)
 
 
 #: 预检覆盖的能力 vs 画像声明的能力：预检**只看**画像声明的抽象能力，

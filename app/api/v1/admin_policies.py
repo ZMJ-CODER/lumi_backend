@@ -109,6 +109,30 @@ def _validate_number(value: Any, *, name: str, minimum: float, maximum: float) -
     return number
 
 
+def _surface_view(entries: list) -> dict:
+    """模型可见面收敛视图（Phase 5，只读）：
+
+    * ``model_facing_tools``：收敛后模型会看到的名字；
+    * ``hidden_tools``：打开开关后会从可见面消失的具体工具名；
+    * ``entries``：逐工具去向（``hidden`` / ``kept``）——**分类不了的工具有意保留**。
+    """
+    try:
+        from app.agents.capabilities.resource_surface import (
+            hidden_tools,
+            surface_entries,
+            surface_snapshot,
+        )
+
+        return {
+            **surface_snapshot(),
+            "hidden_tools": hidden_tools(entries),
+            "entries": [entry.as_dict() for entry in surface_entries(entries)],
+        }
+    except Exception as exc:  # noqa: BLE001 - 展示失败不能影响注册表视图
+        logger.debug("[admin] 模型可见面视图失败: {}", str(exc)[:120])
+        return {}
+
+
 @router.get("/tools")
 async def tool_registry_view(payload: dict = Depends(require_superadmin)):
     """工具注册表：条目 + **静态/派生影子差异**（切换真相源前的证据）。
@@ -117,8 +141,7 @@ async def tool_registry_view(payload: dict = Depends(require_superadmin)):
     不要急着打开 ``TOOL_REGISTRY_DERIVED``——差异意味着"打开后行为会变"。
     """
     from app.agents.capabilities.tool_registry import (
-        SHADOW_DECLARED_DIMENSION,
-        SHADOW_DECLARED_WINDOW_DIMENSION,
+        SHADOW_DECLARED_DIMENSIONS,
         SHADOW_PARITY_DIMENSIONS,
         build_registry_entries,
         registry_derived_enabled,
@@ -130,6 +153,15 @@ async def tool_registry_view(payload: dict = Depends(require_superadmin)):
     entries = build_registry_entries()
     diffs = shadow_compare()
     totals = shadow_parity_totals(diffs)
+    # 统一资源能力层（Phase 1）：**只读进度**——哪些工具已经有 (统一能力, 资源类型, Provider)
+    # 元数据，哪些还没有。它能回答"迁移到哪一步了"，而不是靠翻代码数。
+    from app.agents.capabilities.resource_catalog import (
+        catalog_snapshot,
+        unbound_tools,
+    )
+
+    bound = [entry for entry in entries if entry.unified_capability]
+    unbound = unbound_tools(entry.name for entry in entries)
     return {
         "code": 0,
         "data": {
@@ -142,7 +174,7 @@ async def tool_registry_view(payload: dict = Depends(require_superadmin)):
             # 披露维度时，硬编码列表会把新维度静默丢掉（本仓库真实发生过一次）。
             "shadow_dimensions": {
                 "parity": list(SHADOW_PARITY_DIMENSIONS),
-                "declared": [SHADOW_DECLARED_DIMENSION, SHADOW_DECLARED_WINDOW_DIMENSION],
+                "declared": list(SHADOW_DECLARED_DIMENSIONS),
                 "missing": list(totals["missing_dimensions"]),
             },
             "shadow_diff_total": totals["parity_total"],
@@ -151,6 +183,12 @@ async def tool_registry_view(payload: dict = Depends(require_superadmin)):
             # 维度没算成 ≠ 一致：缺失维度一律视为不可切换。
             "shadow_missing_dimensions": totals["missing_dimensions"],
             "switch_safe": totals["switch_safe"],
+            # ── 统一资源能力层（Phase 1，只读）──
+            "resource_catalog": catalog_snapshot(),
+            "resource_bound_count": len(bound),
+            "resource_unbound_tools": unbound,
+            # Phase 5：模型可见面收敛的**词表与去向**（打开开关后哪些名字会消失）。
+            "resource_surface": _surface_view(entries),
         },
         "message": (
             "影子差异为空，可安全切换真相源"

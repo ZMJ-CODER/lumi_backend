@@ -370,6 +370,7 @@ def _skill_capability(skill: Tool) -> ToolCapability:
         # 都应该是同一次声明，而不是各自维护一份"新工具清单"。
         risk_tier=str(getattr(skill, "risk_tier", "") or ""),
         approval_policy=str(getattr(skill, "approval_policy", "") or ""),
+        resource_type=str(getattr(skill, "resource_type", "") or ""),
         confirmation_mode="client" if skill.environment == "client" else "server",
         idempotent=bool(skill.idempotent and not _skill_is_write(skill)),
         resource_templates=list(resource_templates),
@@ -1458,6 +1459,64 @@ def _validate_tool_arguments(schema: dict, args: dict) -> tuple[str | None, list
         return None, []
 
 
+def _resolve_model_alias(name: str) -> tuple[str, dict]:
+    """模型可见名 → 真实工具名（方案《资源能力层》Phase 5）。
+
+    收敛后模型只看到 ``Read/Write/Edit/Move/Delete/Run/Search``，而客户端与 Workflow
+    白名单登记的是实现名（``Rename``/``Bash``/``Glob``/``workspace_move`` …）。这里做
+    那层映射：
+
+    * 开关关闭、或名字不是模型可见名 → **原样返回**（逐字不变）；
+    * ``Read/Write/Edit/Delete`` 与客户端原子名同名：池里有就用原名，不做映射；
+    * ``Move/Run/Search`` 需要解析：先客户端历史名（``Rename``/``Bash``/``Glob``/``Grep``），
+      再 Provider Adapter 的规范工具；
+    * **解析不出返回失败标记**：调用方报 ``MODEL_ALIAS_UNAVAILABLE``，
+      绝不静默换一个工具——那等于绕过用户对那次调用的批准。
+    """
+    try:
+        from app.agents.capabilities.resource_surface import (
+            is_model_facing,
+            resolve_alias,
+            surface_enabled,
+        )
+
+        if not surface_enabled() or not is_model_facing(name):
+            return name, {}
+        available = set(_registered_tool_names())
+        if name in available:
+            return name, {"model_tool": name}
+        resolved, capability = resolve_alias(name, available)
+        if not resolved:
+            return name, {"failed": True, "model_tool": name, "capability": capability}
+        logger.info("[surface] 模型可见名解析 {} → {}（能力={}）", name, resolved, capability or "-")
+        return resolved, {"model_tool": name, "capability": capability}
+    except Exception as exc:  # noqa: BLE001 - 映射失败按原名继续（不阻断调用）
+        logger.debug("[surface] 模型可见名解析失败（按原名继续）: {}", str(exc)[:120])
+        return name, {}
+
+
+def _registered_tool_names() -> tuple[str, ...]:
+    """进程内可用的工具名（轻量、离线）：注册表事实 + 影子注册表。
+
+    刻意不查 MCP/租约：这里只回答"这个名字能不能落到一个真实工具上"，
+    可用性判断仍然在能力门禁与租约里，不能被这一步替代。
+    """
+    names: list[str] = []
+    try:
+        from app.agents.orchestration.capability_preflight_service import tool_registration_facts
+
+        names.extend(tool_registration_facts())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.agents.skills.registry import ToolRegistry
+
+        names.extend(str(getattr(tool, "name", "") or "") for tool in ToolRegistry.list())
+    except Exception:  # noqa: BLE001
+        pass
+    return tuple(dict.fromkeys(item for item in names if item))
+
+
 async def execute_tool_call(
     tool_call: dict,
     user_id: str,
@@ -1502,6 +1561,21 @@ async def execute_tool_call(
             error_code="INVALID_ARGS",
             retryable=False,
             metadata={"tool": name},
+        )
+    # 统一资源能力层（Phase 5）：模型可见名（``Move``/``Run``/``Search``）→ 真实工具名。
+    # 必须在 ``allowed_tools`` 校验**之前**：Workflow 的白名单登记的是实现名
+    # （``workspace_move``），而收敛后的模型叫的是对外名（``Move``）。
+    name, alias_meta = _resolve_model_alias(name)
+    if alias_meta.get("failed"):
+        return SkillResult(
+            success=False,
+            error=(
+                f"工具 {alias_meta.get('model_tool')} 当前没有可用实现"
+                "（Provider 未注册或未广告对应能力）"
+            ),
+            error_code="MODEL_ALIAS_UNAVAILABLE",
+            retryable=True,
+            metadata={"tool": str(alias_meta.get("model_tool") or ""), **alias_meta},
         )
     # Reserved policy fields can never originate from a model tool call.
     args.pop("_lumi_execution_policy", None)
@@ -1951,6 +2025,11 @@ async def execute_tool_call(
             audit_scope["workspace_id"] = str(call_workspace_id)
         if call_device_id:
             audit_scope["device_id"] = str(call_device_id)
+        # 模型可见名 → 实现名的映射进审计：排障时能回答"这次到底是哪个工具在跑"。
+        if alias_meta:
+            audit_scope["model_tool"] = str(alias_meta.get("model_tool") or "")
+            if alias_meta.get("capability"):
+                audit_scope["alias_capability"] = str(alias_meta.get("capability"))
         await _record_skill_log(user_id, capability, args, result, scope_meta=audit_scope or None)
         return result
 

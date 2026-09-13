@@ -119,6 +119,10 @@ class Tool(ABC):
     #: 静态表认识的工具不受它影响（表优先）；它存在的意义是让**新工具**不用回来
     #: 改 ``TOOL_CAPABILITY_MAP`` 也能接上路由/审批/动作窗口。
     capability: str = ""
+    #: **资源类型声明**（``workspace`` / ``memory`` …）：空 = 由能力绑定推导。
+    #: 统一能力（``resource.write``）跨多种资源，因此"新资源"必须能自己声明类型——
+    #: Phase 6 的 ``memory_provider`` 验收就是靠它做到"不改任何静态映射"。
+    resource_type: str = ""
     scenes: list[str] = []              # 可用场景白名单，空 = 全场景
     write_op: bool = False              # 是否写操作（发消息/改文件/装依赖等外部副作用；渐进开放时隐藏）
     idempotent: bool = True              # 相同参数重复执行是否安全
@@ -225,6 +229,18 @@ class Tool(ABC):
         if not value or value != value.casefold() or "." not in value:
             return ""
         if not value[0].isalpha() or not all(ch.isalnum() or ch in "._" for ch in value):
+            return ""
+        return value
+
+    def declared_resource_type(self) -> str:
+        """工具声明的资源类型（``workspace`` / ``memory`` …）；非法一律视为未声明。
+
+        与能力声明同一条原则：写错的资源类型必须退回派生，而不是变成一个查不到的"资源"。
+        """
+        value = str(self.resource_type or "").strip().casefold()
+        if not value or not value[0].isalpha():
+            return ""
+        if not all(ch.isalnum() or ch in "_." for ch in value):
             return ""
         return value
 
@@ -362,6 +378,108 @@ class WorkflowSkill:
     availability_policy: str = "fail_if_missing"
     fallback_policy: str = "clarify"
     approval_policy: str = "none"
+    # ── 统一资源能力声明（方案《资源能力层》Phase 4）──
+    # 迁移后的 Skill **只声明能力**，不再逐条列出底层 MCP 名字：
+    # ``workspace_code_change`` 从 14 个 ``mcp__lumi_client__…`` 名收敛成
+    # "对 workspace 做 resource.read / resource.write / resource.edit / code.execute"。
+    # 空列表 = 走旧 ``allowed_tools`` 兼容路径（旧 Skill 与用户自建 Skill 不受影响）。
+    required_capabilities: list[str] = []
+    resource_types: list[str] = []
+    providers: list[str] = []
+
+    def declared_capabilities(self) -> list[str]:
+        """归一化后的**统一能力**声明（别名归一 + 去重 + 拒非法）。
+
+        非法值一律丢掉而不是"就近取一个"：能力名是路由/审批/租约的键，
+        写错的能力声明必须退回旧路径，不能悄悄变成另一个能力。
+        """
+        from app.agents.capabilities.resource_catalog import (
+            is_unified_capability,
+            normalize_unified_capability,
+        )
+
+        out: list[str] = []
+        for item in self.required_capabilities or ():
+            name = normalize_unified_capability(str(item or "").strip())
+            if name and is_unified_capability(name) and name not in out:
+                out.append(name)
+        return out
+
+    def legacy_tool_capabilities(self) -> list[str]:
+        """旧 ``allowed_tools``（MCP 原子名）→ 统一能力（**兼容解析**）。
+
+        这就是"旧 MCP 依赖 → 新能力依赖"的转换：老 Skill 不改一行代码也能被
+        能力层理解，从而在 Phase 5 收敛工具面时不至于被漏掉。
+        """
+        from app.agents.capabilities.resource_catalog import binding_for_tool
+
+        out: list[str] = []
+        for name in self.allowed_tools or ():
+            binding = binding_for_tool(str(name or ""))
+            if binding.known and binding.capability not in out:
+                out.append(binding.capability)
+        return out
+
+    def effective_capabilities(self) -> list[str]:
+        """生效能力集合：**显式声明优先**，未声明时从 ``allowed_tools`` 推导。"""
+        declared = self.declared_capabilities()
+        return declared if declared else self.legacy_tool_capabilities()
+
+    def effective_resource_types(self) -> list[str]:
+        """生效资源类型：显式声明优先，否则从工具绑定推导。
+
+        **歧义不猜**：只声明了 ``resource.write`` 而没有资源类型时，它可能落在
+        workspace / office_document / … 上，这里返回空（由调用方决定要不要澄清），
+        而不是随便挑一个资源。
+        """
+        from app.agents.capabilities.resource_catalog import (
+            RESOURCE_TYPES,
+            binding_for_tool,
+            providers_for,
+        )
+
+        declared = [
+            str(item or "").strip()
+            for item in (self.resource_types or ())
+            if str(item or "").strip()
+        ]
+        if declared:
+            return list(dict.fromkeys(declared))
+        if self.declared_capabilities():
+            types: list[str] = []
+            for capability in self.declared_capabilities():
+                matches = [rtype for rtype in sorted(RESOURCE_TYPES) if providers_for(capability, rtype)]
+                if len(matches) == 1 and matches[0] not in types:
+                    types.append(matches[0])
+            return types
+        types = []
+        for name in self.allowed_tools or ():
+            binding = binding_for_tool(str(name or ""))
+            if binding.known and binding.resource_type not in types:
+                types.append(binding.resource_type)
+        return types
+
+    def effective_providers(self) -> list[str]:
+        """生效 Provider：显式声明 ∪ 由能力推导的候选（去重保序）。"""
+        from app.agents.capabilities.resource_catalog import providers_for
+
+        out = [str(item or "").strip() for item in (self.providers or ()) if str(item or "").strip()]
+        out = list(dict.fromkeys(out))
+        for capability in self.effective_capabilities():
+            for resource_type in self.effective_resource_types():
+                for spec in providers_for(capability, resource_type):
+                    if spec.name not in out:
+                        out.append(spec.name)
+        return out
+
+    def capability_dependencies(self) -> dict[str, Any]:
+        """能力视图（落 Job 快照 / API / 排障用；不含任何参数与正文）。"""
+        return {
+            "capabilities": self.effective_capabilities(),
+            "resource_types": self.effective_resource_types(),
+            "providers": self.effective_providers(),
+            "declared": bool(self.declared_capabilities()),
+        }
 
     def effective_dependencies(self) -> dict[str, Any]:
         manifest = dict(self.dependencies or {})
@@ -371,16 +489,67 @@ class WorkflowSkill:
             if name and name not in declared:
                 tools.append({"name": name, "min_version": "0.0.0", "required": True, "provider": "any"})
         manifest["tools"] = tools
-        manifest.setdefault("providers", [])
+        # Phase 4：能力声明与工具依赖**并存**。旧 ``allowed_tools`` 行原样保留
+        # （一个版本周期的兼容），能力派生的工具行只**补充**、不替换——
+        # 否则"迁移到能力声明"会变成"依赖检查变松"，那是回归。
+        capability_view = self.capability_dependencies()
+        manifest.setdefault("capabilities", capability_view["capabilities"])
+        manifest.setdefault("resource_types", capability_view["resource_types"])
+        for row in self.capability_tool_rows():
+            if row["name"] not in declared:
+                tools.append(row)
+                declared.add(row["name"])
+        providers = list(manifest.get("providers") or [])
+        for item in capability_view["providers"]:
+            if item not in providers:
+                providers.append(item)
+        manifest["providers"] = providers
         manifest.setdefault("sources", [])
         return manifest
+
+    def capability_tool_rows(self) -> list[dict[str, Any]]:
+        """能力声明 → 依赖行（``resolve_dependencies`` 吃的形状）。
+
+        只有**显式声明了能力**才派生：老 Skill 的依赖检查口径保持不变。
+        """
+        if not self.declared_capabilities():
+            return []
+        from app.agents.capabilities.resource_workflow import tools_for_capabilities
+
+        rows: list[dict[str, Any]] = []
+        for name in tools_for_capabilities(
+            self.effective_capabilities(), self.effective_resource_types()
+        ):
+            rows.append(
+                {
+                    "name": name,
+                    "min_version": "0.0.0",
+                    "required": False,
+                    "provider": "any",
+                    "via": "capability",
+                }
+            )
+        return rows
 
     def supports_scene(self, scene: str) -> bool:
         return not self.scenes or scene in self.scenes
 
     def effective_prompt(self) -> str:
-        """Return the declarative prompt body, if one was supplied."""
-        return str(self.prompt_body or "").strip()
+        """Return the declarative prompt body, if one was supplied.
+
+        模型可见面收敛（Phase 5）打开时，把提示词里的**实现层工具名**翻译成对外名，
+        保证"提示词说的名字"与"schema 里的名字"一致；关闭时逐字返回原文。
+        业务文本本身不改——SOP 由提示词负责人维护。
+        """
+        text = str(self.prompt_body or "").strip()
+        if not text:
+            return text
+        try:
+            from app.agents.capabilities.resource_surface import translate_prompt_names
+
+            return translate_prompt_names(text)
+        except Exception:  # noqa: BLE001 - 翻译失败用原文，绝不因为改名丢掉提示词
+            return text
 
     def validate_lifecycle(self) -> None:
         if not self.name:

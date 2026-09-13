@@ -85,6 +85,8 @@ class OfficeReactRunner:
         self.citations: list[dict] = []
         self._results: list[SkillResult] = []
         self._failed_tools: set[str] = set()
+        #: 模型可见名 → 实现名（Phase 5 收敛；每轮按候选池重建，关闭时为空）
+        self._surface_alias: dict[str, str] = {}
         self.toolsets: list[list[str]] = []
         self.selection_traces: list[dict] = []
         self.discovery_session = ToolDiscoverySession()
@@ -124,6 +126,16 @@ class OfficeReactRunner:
     def _call_key(name: str, args: dict) -> str:
         raw = json.dumps({"name": name, "args": args if isinstance(args, dict) else {}}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _impl_name(self, name: str) -> str:
+        """模型可见名 → 实现名（收敛关闭、或不是收敛名时**恒等**）。
+
+        所有基于名字的判断都必须用它的返回值：前置读取护栏、失败方法排除、
+        调用去重键、工具构造。否则模型叫 ``Write`` 就会绕过针对
+        ``workspace_write``/``workspace_edit`` 的安全护栏。
+        """
+        text = str(name or "")
+        return self._surface_alias.get(text, text)
 
     @staticmethod
     def _is_read_tool(name: str) -> bool:
@@ -559,8 +571,27 @@ class OfficeReactRunner:
                 # 绑定了工作区且步骤面向本地内容时，按阶段把工作区能力并入候选窗
                 # （读取→暂存修改→沙箱验证→提交），不再因 write_op 永久隐藏写工具。
                 capabilities = await self._maybe_inject_workspace_stage_window(capabilities, route_text)
+                # 统一资源能力层（Phase 5）：模型可见面收敛（默认关闭 → 逐字不变）。
+                # 收敛只改"模型看到的名字"：这里记下 对外名 → 实现名 的映射，
+                # 后面所有**基于名字的判断**（前置读取护栏、失败方法排除、去重键）
+                # 一律走实现名，因此 `Write` 不会绕过"改前必须先读"。
+                from app.agents.capabilities.resource_surface import collapse_for_surface
+
+                surface_pairs = collapse_for_surface(capabilities)
+                self._surface_alias = {
+                    display: capability.name
+                    for capability, display in surface_pairs
+                    if display != capability.name
+                }
+                visible_capabilities = [
+                    capability
+                    if display == capability.name
+                    else capability.model_copy(update={"name": display})
+                    for capability, display in surface_pairs
+                ]
+                allowed_impl_names = {str(item.name) for item in capabilities}
                 tool_pairs = []
-                for capability in capabilities:
+                for capability, display in surface_pairs:
                     tool = await make_skill_tool(
                         capability.name, user_id=self.user_id, scene="office",
                         conversation_id=self.job_id, user_role=self.user_role,
@@ -570,10 +601,11 @@ class OfficeReactRunner:
                         office_doc_ids=[str(item.get("doc_id")) for item in internal_docs],
                         authorized_workspace_id=self.workspace_id,
                         execution_scope=self.job_id,
-                        allowed_tools={item.name for item in capabilities},
+                        allowed_tools=allowed_impl_names,
+                        display_name=display,
                     )
                     if tool is not None:
-                        tool_pairs.append((capability.name, tool))
+                        tool_pairs.append((display, tool))
                 # 会话开始始终只暴露一个搜索原语；它不绕过场景和权限过滤。
                 from langchain_core.tools import StructuredTool
 
@@ -613,7 +645,7 @@ class OfficeReactRunner:
                 # fields that shaped the candidate pool; it cannot drift from
                 # a separately hand-maintained prompt table.
                 prompt_messages = [
-                    SystemMessage(content=build_tool_selection_contract(capabilities)),
+                    SystemMessage(content=build_tool_selection_contract(visible_capabilities)),
                     *state["messages"],
                 ]
                 if native_tools_supported:
@@ -703,7 +735,9 @@ class OfficeReactRunner:
                 if not record["success"] and result is not None and not result.retryable and record["error_code"] not in {
                     "NEEDS_CONFIRMATION",
                 }:
-                    self._failed_tools.add(name)
+                    # 失败方法按**实现名**排除（候选池按实现名过滤）；事件里的名字保持
+                    # 模型可见名，前端展示不受影响。
+                    self._failed_tools.add(self._impl_name(name))
                 call_id = str(message.tool_call_id or f"react-{len(self.records)}")
                 self._emit({"type": "step", "id": call_id, "title": name,
                             "status": "completed" if record["success"] else "failed",
@@ -746,26 +780,31 @@ class OfficeReactRunner:
                         str(raw_args.get("mode") or "read_only"),
                     )
                     return {"messages": [ToolMessage(content=wrap_untrusted_tool_output(output), tool_call_id=call_id, name=name)]}
-                key = self._call_key(name, args)
+                # 收敛后的模型叫 ``Write``/``Edit``，而护栏、去重键、失败排除都按
+                # **实现名**判断；先解析回实现名，再进入任何名字型逻辑。
+                impl_name = self._impl_name(name)
+                key = self._call_key(impl_name, args)
                 attempts = self._call_attempts.get(key, 0)
                 if attempts >= 2:
                     return {"messages": [ToolMessage(content="相同工具和参数已连续失败两次，已停止重复调用；请先读取更多信息或更换方法。", tool_call_id=call_id, name=name, status="error")]}
                 target_key = self._read_target_key(args)
-                if self._requires_prior_read(name) and (
+                if self._requires_prior_read(impl_name) and (
                     not self._successful_reads
                     or (target_key and target_key not in self._successful_reads)
                 ):
                     return {"messages": [ToolMessage(content="安全护栏：修改或删除文件前必须先读取目标内容；请先调用 Read/office_doc_read。", tool_call_id=call_id, name=name, status="error")]}
                 self._call_attempts[key] = attempts + 1
                 tool = await make_skill_tool(
-                    name, user_id=self.user_id, scene="office", conversation_id=self.job_id,
+                    impl_name, user_id=self.user_id, scene="office", conversation_id=self.job_id,
                     user_role=self.user_role, on_notify=self._emit, on_result=self._on_result,
                     user_message=self.user_request, llm_config=self.llm_config,
                     approval_context_sha256=self.approval_context_sha256,
                     office_doc_ids=[str(item.get("doc_id")) for item in internal_docs],
                     authorized_workspace_id=self.workspace_id,
                     execution_scope=self.job_id,
-                    allowed_tools=set(state.get("allowed_tools") or []),
+                    # 白名单是**实现名**：执行器先解析对外名再校验（解析发生在一处）。
+                    allowed_tools={self._impl_name(item) for item in (state.get("allowed_tools") or [])},
+                    display_name=name if impl_name != name else "",
                 )
                 if tool is None:
                     return {"messages": [ToolMessage(
@@ -774,11 +813,11 @@ class OfficeReactRunner:
                     )]}
                 try:
                     output = await tool.ainvoke(args)
-                    if self._is_read_tool(name):
+                    if self._is_read_tool(impl_name):
                         if target_key:
                             self._successful_reads.add(target_key)
                         else:
-                            self._successful_reads.add(name.casefold())
+                            self._successful_reads.add(impl_name.casefold())
                     content = wrap_untrusted_tool_output(str(output or ""))
                     return {"messages": [ToolMessage(content=content, tool_call_id=call_id, name=name)]}
                 except Exception:

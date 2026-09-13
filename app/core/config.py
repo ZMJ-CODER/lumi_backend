@@ -655,6 +655,22 @@ class Settings(BaseSettings):
     #: 是否在任务提交时打点"静态 vs 派生"的影子差异（只记录，不改行为）。
     TOOL_REGISTRY_SHADOW_LOG: bool = True
 
+    # ── 统一资源能力层（方案《资源能力层》Phase 2）──
+    # 打开后"动作意图 + 资源类型 → 统一能力 → 候选 Provider → 工具窗口"成为真相源，
+    # 旧 `ACTION_TOOL_WINDOW` 降级为 fallback；并启用"变更类工具必须带上同资源读取入口"
+    # 的截断保护。**关闭时旧路径逐字不变**（默认关闭）。
+    RESOURCE_CAPABILITY_WINDOW: bool = False
+    #: 统一资源能力层 Phase 3：派发前解析**结构化目标**（能力/资源类型/Provider），
+    #: 不再从工具名猜能力，并按资源类型收窄 Provider 候选。关闭时旧解析逐字不变。
+    RESOURCE_CAPABILITY_DISPATCH: bool = False
+    #: 统一资源能力层 Phase 4：Workflow Skill 按能力声明（required_capabilities /
+    #: resource_types / providers）选择与校验工具；底层 MCP 名退化为兼容层。
+    #: 关闭时逐字走旧的 allowed_tools 白名单。
+    RESOURCE_CAPABILITY_WORKFLOW: bool = False
+    #: 统一资源能力层 Phase 5：模型可见工具面收敛到 Read/Write/Edit/Move/Delete/Run/Search
+    #: （实现层名字不再直接暴露，执行时经 Provider Adapter 解析）。关闭时注入逐字不变。
+    RESOURCE_CAPABILITY_SURFACE: bool = False
+
     # ── 文档类别与按类别半衰期（不同知识时效性不同）──
     RAG_DEFAULT_CATEGORY: str = "general"   # 默认类别
     RAG_CATEGORY_HALF_LIFE_DAYS: dict[str, int] = {

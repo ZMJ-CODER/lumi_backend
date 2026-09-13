@@ -253,6 +253,14 @@ class ToolRegistryEntry:
     approval_policy: str = "none"
     #: 生效审批档位（``auto``/``routine``/``critical``）；声明优先，遗留工具回落静态词表。
     risk_tier: str = ""
+    #: ── 统一资源能力层元数据（方案《资源能力层》Phase 1，**加法、不参与判定**）──
+    #: 统一能力名（``resource.read`` 这类）：模型与编排只认这一层，底层工具名是 Provider 的事。
+    unified_capability: str = ""
+    #: 资源类型（``workspace`` / ``office_document`` / …）：Broker 按它选 Provider。
+    resource_type: str = ""
+    #: 逻辑 Provider 名（``workspace_provider`` …）与候选 Provider（有序，Broker 用）。
+    resource_provider: str = ""
+    provider_candidates: tuple[str, ...] = ()
     scenes: tuple[str, ...] = ()
     #: 契约版本（来自能力目录；没有能力时为 0）。
     contract_version: int = 0
@@ -279,6 +287,11 @@ class ToolRegistryEntry:
             "execution_env": self.execution_env,
             "approval_policy": self.approval_policy,
             "risk_tier": self.risk_tier,
+            # 统一资源能力层（Phase 1）：模型/编排读这三个字段，而不是猜底层工具名。
+            "unified_capability": self.unified_capability,
+            "resource_type": self.resource_type,
+            "resource_provider": self.resource_provider,
+            "provider_candidates": list(self.provider_candidates),
             "scenes": list(self.scenes),
             "contract_version": self.contract_version,
             "data_locality": self.data_locality,
@@ -419,6 +432,7 @@ def _entry_from_tool_capability(capability: Any, *, meta: dict[str, Any]) -> Too
         # ``requires_confirmation`` 副本：这样"要不要确认"在各调用点只有一个答案。
         approval_policy=policy,
         risk_tier=_effective_tier_of(name, cap_name, capability),
+        **_resource_metadata(name, cap_name, capability),
         scenes=scenes,
         contract_version=int(getattr(descriptor, "contract_version", 0) or 0),
         data_locality=str(getattr(descriptor, "data_locality", "") or ""),
@@ -439,6 +453,39 @@ def _tool_id(capability: Any) -> str:
         return tool_identity(capability)
     except Exception:  # noqa: BLE001
         return str(getattr(capability, "name", "") or "")
+
+
+def _resource_metadata(name: str, cap_name: str, capability: Any = None) -> dict[str, Any]:
+    """统一资源能力层的三个字段（Phase 1：**只加元数据，不参与判定**）。
+
+    刻意不查本注册表（条目构造调它），因此 ``resource_catalog`` 只吃"已经解析好的能力名"。
+    绑定失败不是错误：未接入的工具返回空值，管理端会用 ``unbound_tools()`` 把它们列出来
+    ——**先看得见，再决定怎么办**。
+
+    ``capability`` 给定时一并读取它的资源类型声明（新资源走这条）。
+    """
+    try:
+        from app.agents.capabilities.resource_catalog import binding_for_tool, providers_for
+
+        binding = binding_for_tool(
+            name,
+            legacy_capability=cap_name,
+            resource_type=declared_resource_type_of(name, capability),
+        )
+        if not binding.known:
+            return {}
+        candidates = tuple(
+            spec.name for spec in providers_for(binding.capability, binding.resource_type)
+        )
+        return {
+            "unified_capability": binding.capability,
+            "resource_type": binding.resource_type,
+            "resource_provider": binding.provider,
+            "provider_candidates": candidates,
+        }
+    except Exception as exc:  # noqa: BLE001 - 元数据缺失不能影响条目构造
+        logger.debug("[tool-registry] 资源绑定失败 {}: {}", name, str(exc)[:120])
+        return {}
 
 
 def _static_capability(name: str) -> str:
@@ -482,6 +529,28 @@ def declared_capability_of(tool_name: str, capability: Any = None) -> str:
         tool = ToolRegistry.get(_short_name(tool_name))
         value = _normalize_capability_name(getattr(tool, "capability", "") if tool is not None else "")
         if value:
+            return value
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def declared_resource_type_of(tool_name: str, capability: Any = None) -> str:
+    """工具/Provider **声明的资源类型**（``workspace`` / ``memory`` …）；``""`` = 未声明。
+
+    与能力/档位声明同一口径：只查 ``ToolRegistry`` 与传入的能力对象，**不查**本注册表的
+    条目表（否则条目构造会自递归）。
+    """
+    if capability is not None:
+        value = str(getattr(capability, "resource_type", "") or "").strip().casefold()
+        if value and value[0].isalpha() and all(ch.isalnum() or ch in "_." for ch in value):
+            return value
+    try:
+        from app.agents.skills.registry import ToolRegistry
+
+        tool = ToolRegistry.get(_short_name(tool_name))
+        value = str(getattr(tool, "resource_type", "") or "").strip().casefold()
+        if value and value[0].isalpha() and all(ch.isalnum() or ch in "_." for ch in value):
             return value
     except Exception:  # noqa: BLE001
         return ""
@@ -560,39 +629,13 @@ def _entry_from_static_only(name: str, *, meta: dict[str, Any]) -> ToolRegistryE
         execution_env=ENV_CLIENT if cap_name else ENV_SERVER,
         approval_policy=policy,
         risk_tier=_effective_tier_of(name, cap_name),
+        **_resource_metadata(name, cap_name),
         contract_version=int(getattr(descriptor, "contract_version", 0) or 0),
         data_locality=str(getattr(descriptor, "data_locality", "") or ""),
         requires_confirmation=policy == "confirm",
         # 来源里标出"能力来自声明"：影子对比与排障据此区分"表里本来就有的归属"
         # 与"插件声明带来的新归属"。
         sources=("static", "capability:declared" if declared_cap else "capability:static"),
-    )
-    side_effects = (
-        {str(item) for item in getattr(descriptor, "side_effects", ()) or ()} if descriptor else set()
-    )
-    intents = tuple(
-        sorted(
-            intent
-            for intent, effects in INTENT_SIDE_EFFECTS.items()
-            if effects and (effects & side_effects)
-        )
-    )
-    mcp_target = _static_mcp_target(cap_name)
-    policy = _derive_policy(name, cap_name, check_arguments=False)
-    return ToolRegistryEntry(
-        name=name,
-        capability=cap_name,
-        provider_id=_provider_for_capability(cap_name),
-        mcp_target=mcp_target or name,
-        action_type=_action_type_from_capability(cap_name, effects=side_effects),
-        action_intents=intents,
-        execution_env=ENV_CLIENT if cap_name else ENV_SERVER,
-        approval_policy=policy,
-        risk_tier=_effective_tier_of(name, cap_name),
-        contract_version=int(getattr(descriptor, "contract_version", 0) or 0),
-        data_locality=str(getattr(descriptor, "data_locality", "") or ""),
-        requires_confirmation=policy == "confirm",
-        sources=("static",),
     )
 
 
@@ -1316,6 +1359,21 @@ SHADOW_PARITY_DIMENSIONS: tuple[str, ...] = (
 SHADOW_DECLARED_DIMENSION = "tool→risk_tier(declared)"
 #: 声明带来的动作窗口补位（静态表没有这个能力，属于有意差异）。
 SHADOW_DECLARED_WINDOW_DIMENSION = "intent→tool_window(declared)"
+#: 统一资源能力层的窗口差异（Phase 2）：**只增不减**，同属"有意差异"。
+SHADOW_RESOURCE_WINDOW_DIMENSION = "intent→resource_window(resource layer)"
+#: 模型可见面收敛差异（Phase 5）：**只减**（实现层名字不再直接暴露），同属"有意差异"。
+SHADOW_MODEL_SURFACE_DIMENSION = "tool→model_surface(converged)"
+
+#: 全部**仅披露**维度（有意差异，不参与 ``switch_safe``）。
+#:
+#: 单一事实源：管理端接口、前端与测试都读它。新增一个披露维度只需改这一处——
+#: 之前每加一维都要同时改两个测试里的硬编码集合，那种"漏改就红"的摩擦本身就是缺陷。
+SHADOW_DECLARED_DIMENSIONS: tuple[str, ...] = (
+    SHADOW_DECLARED_DIMENSION,
+    SHADOW_DECLARED_WINDOW_DIMENSION,
+    SHADOW_RESOURCE_WINDOW_DIMENSION,
+    SHADOW_MODEL_SURFACE_DIMENSION,
+)
 
 
 def shadow_parity_totals(
@@ -1329,10 +1387,7 @@ def shadow_parity_totals(
     rows = shadow_compare() if diffs is None else diffs
     missing = [name for name in SHADOW_PARITY_DIMENSIONS if name not in rows]
     parity_total = sum(len(rows.get(name) or []) for name in SHADOW_PARITY_DIMENSIONS)
-    declared_total = sum(
-        len(rows.get(name) or [])
-        for name in (SHADOW_DECLARED_DIMENSION, SHADOW_DECLARED_WINDOW_DIMENSION)
-    )
+    declared_total = sum(len(rows.get(name) or []) for name in SHADOW_DECLARED_DIMENSIONS)
     return {
         "parity_total": parity_total,
         "declared_total": declared_total,
@@ -1395,6 +1450,26 @@ def shadow_compare() -> dict[str, list[list[str]]]:
         diffs["intent→tool_window"] = rows
         if declared_rows:
             diffs[SHADOW_DECLARED_WINDOW_DIMENSION] = declared_rows
+        # 统一资源能力层（Phase 2）：静态窗口 vs 资源层窗口。差异**全是新增**
+        # （资源层从不删工具），因此与"声明维度"同口径披露，不参与 switch_safe。
+        try:
+            from app.agents.capabilities.resource_window import shadow_compare_windows
+
+            resource_rows = shadow_compare_windows(ACTION_TOOL_WINDOW)
+            if resource_rows:
+                diffs[SHADOW_RESOURCE_WINDOW_DIMENSION] = resource_rows
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[tool-registry] 资源层窗口对拍失败: {}", str(exc)[:120])
+        # 统一资源能力层（Phase 5）：模型可见面收敛后的差异（**哪些名字会消失**）。
+        # 这是"唯一会拿走东西"的一步，因此必须先把可见面差异摊开给人看。
+        try:
+            from app.agents.capabilities.resource_surface import surface_diff
+
+            surface_rows = surface_diff(entries_by_name().values())
+            if surface_rows:
+                diffs[SHADOW_MODEL_SURFACE_DIMENSION] = surface_rows
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[tool-registry] 模型可见面对拍失败: {}", str(exc)[:120])
     except Exception as exc:  # noqa: BLE001
         logger.debug("[tool-registry] 影子对比（意图→窗口）失败: {}", str(exc)[:120])
 
@@ -1411,9 +1486,11 @@ def shadow_compare() -> dict[str, list[list[str]]]:
                 # 显式声明的工具单独成列：静态词表**根本无法表达声明**，这种差异是
                 # 有意的（"插件声明一次就生效"），不该被当成回归。它们由
                 # ``tool→risk_tier(declared)`` 单独披露，不参与 switch_safe 判定。
-                declared_rows.append(
-                    [tool, static_tier_of(tool, {})[0], risk_tier_of(tool, {}) or "", declared]
-                )
+                #
+                # 行**必须与其它披露维度同为三格**（``[名字, 静态值, 派生值]``）：
+                # 前端按统一形状渲染（第三格配"声明档位"这个列名）。多塞一格会让
+                # 前端把"生效档位"当成"声明档位"显示——实测就是这样对不上的。
+                declared_rows.append([tool, static_tier_of(tool, {})[0], declared])
                 continue
             derived_tier = risk_tier_of(tool, {})
             if derived_tier is None:
@@ -1498,8 +1575,11 @@ __all__ = [
     "INTENT_SIDE_EFFECTS",
     "READ_INTENT_PREFIXES",
     "SHADOW_DECLARED_DIMENSION",
+    "SHADOW_DECLARED_DIMENSIONS",
     "SHADOW_DECLARED_WINDOW_DIMENSION",
+    "SHADOW_MODEL_SURFACE_DIMENSION",
     "SHADOW_PARITY_DIMENSIONS",
+    "SHADOW_RESOURCE_WINDOW_DIMENSION",
     "SIDE_EFFECT_TIER",
     "SUPPLEMENTAL_CAPABILITIES",
     "TIER_AUTO",
@@ -1514,6 +1594,7 @@ __all__ = [
     "capability_declared_tier",
     "capability_of",
     "declared_capability_of",
+    "declared_resource_type_of",
     "declared_tier_of",
     "entries_by_name",
     "invalidate_cache",

@@ -13,6 +13,12 @@ class TaskMemorySkill(Tool):
     category = "office"
     environment = "server"
     scenes = ["office"]
+    # 统一资源能力层声明（方案《资源能力层》Phase 6）：**声明一次**即可被发现/注入/派发，
+    # 不需要回来改 TOOL_CAPABILITY_MAP / CAPABILITY_TOOL_MAP / ACTION_TOOL_WINDOW。
+    # 该工具用 action 同时承担读（recall）与写（remember），这里按**能改记忆**声明为
+    # resource.write；动作级细分（read 动作走只读档位）留给后续按动作派生能力的改造。
+    capability = "resource.write"
+    resource_type = "memory"
     parameters_schema = {
         "type": "object",
         "properties": {

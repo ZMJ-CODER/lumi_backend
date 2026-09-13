@@ -40,6 +40,19 @@ _TOOLS = (
     "mcp__lumi_client__workspace_rollback",
 )
 
+#: 统一资源能力声明（Phase 4）：与 workspace_code_change 同一套（读/写/编辑/移动/删除 +
+#: 沙箱执行），底层名字只是兼容层。见 ``app/agents/capabilities/resource_workflow.py``。
+_CAPABILITIES = (
+    "resource.read",
+    "resource.write",
+    "resource.edit",
+    "resource.move",
+    "resource.delete",
+    "code.execute",
+)
+_RESOURCE_TYPES = ("workspace",)
+_PROVIDERS = ("workspace_provider",)
+
 # 原子写工具按可选依赖登记：老客户端只广告暂存对时工作流仍可用，
 # 不会因为新增工具把整个 Skill 判成不可用。
 _OPTIONAL_TOOLS = frozenset({
@@ -54,6 +67,37 @@ _OPTIONAL_TOOLS = frozenset({
     "mcp__lumi_client__sandbox_reset",
     "mcp__lumi_client__workspace_rollback",
 })
+
+
+def _select_capabilities(capabilities):
+    """选本轮可用的工作区工具：**能力声明优先，旧名字白名单兜底**（Phase 4）。"""
+    try:
+        from app.agents.capabilities.resource_workflow import (
+            select_capabilities,
+            workflow_enabled,
+        )
+
+        if workflow_enabled():
+            selected = select_capabilities(
+                capabilities,
+                capabilities=_CAPABILITIES,
+                resource_types=_RESOURCE_TYPES,
+                legacy_names=_TOOLS,
+            )
+            return selected or [item for item in capabilities if item.name in _TOOLS]
+    except Exception:  # noqa: BLE001 - 选择失败不能影响工作流可用性
+        pass
+    return [item for item in capabilities if item.name in _TOOLS]
+
+
+def _surface(capabilities):
+    """收敛后的工具面：``([(capability, 对外名)], {对外名: 实现名})``（Phase 5）。"""
+    try:
+        from app.agents.capabilities.resource_surface import collapse_with_names
+
+        return collapse_with_names(capabilities)
+    except Exception:  # noqa: BLE001 - 收敛失败用原名
+        return [(item, str(getattr(item, "name", "") or "")) for item in capabilities], {}
 
 
 def _tool_defs(capabilities):
@@ -90,6 +134,10 @@ class WorkspaceOperationSkill(WorkflowSkill):
     # Skill 只声明策略与工具边界；是否需要确认由 ApprovalPolicyEngine 决定。
     approval_policy = "none"
     allowed_tools = list(_TOOLS)
+    # 能力声明（Phase 4）：与 allowed_tools 并存，依赖检查只补不替。
+    required_capabilities = list(_CAPABILITIES)
+    resource_types = list(_RESOURCE_TYPES)
+    providers = list(_PROVIDERS)
     dependencies = {
         "providers": ["desktop_mcp"],
         "tools": [{
@@ -119,7 +167,7 @@ class WorkspaceOperationSkill(WorkflowSkill):
         from app.agents.skills.executor import get_desktop_mcp_capabilities
 
         capabilities = await get_desktop_mcp_capabilities(context.user_id, context.scene, "user")
-        selected = [item for item in capabilities if item.name in _TOOLS]
+        selected = _select_capabilities(capabilities)
         if not selected:
             return ToolOutput(success=False, error="当前桌面客户端未提供工作区工具", error_code="CLIENT_OFFLINE", retryable=True)
 
@@ -128,6 +176,18 @@ class WorkspaceOperationSkill(WorkflowSkill):
             "修改必须通过暂存工具，任何真实提交前必须查看 workspace_diff，"
             "并由系统授权策略决定是否需要确认。"
         )
+        try:
+            from app.agents.capabilities.resource_surface import translate_prompt_names
+
+            system = translate_prompt_names(system)
+        except Exception:  # noqa: BLE001 - 翻译失败用原文
+            pass
+        # 统一资源能力层（Phase 5）：模型可见面收敛（关闭时对外名 = 实现名、映射为空）。
+        surface_pairs, surface_alias = _surface(selected)
+        visible = [
+            capability if display == capability.name else capability.model_copy(update={"name": display})
+            for capability, display in surface_pairs
+        ]
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": instruction},
@@ -139,7 +199,7 @@ class WorkspaceOperationSkill(WorkflowSkill):
         max_rounds = int(params.get("max_rounds") or 12)
         try:
             for _ in range(max_rounds):
-                definitions = _tool_defs(selected)
+                definitions = _tool_defs(visible)
                 content, calls = await llm.chat_with_tools(
                     messages, definitions, scene=context.scene,
                     api_key=context.llm_api_key, llm_config=context.llm_config,
@@ -156,7 +216,9 @@ class WorkspaceOperationSkill(WorkflowSkill):
                         args = json.loads(args or "{}")
                     except (TypeError, ValueError):
                         args = {}
-                if name.endswith("workspace_commit") and not (diff_seen and not any_failed):
+                # 前置判断按**实现名**（模型叫 `Run` 时实现是 `sandbox_run`）。
+                resolved = surface_alias.get(name, name)
+                if resolved.endswith("workspace_commit") and not (diff_seen and not any_failed):
                     return ToolOutput(
                         success=False, error="提交前必须先查看工作区差异，且本任务不得存在失败工具",
                         error_code="COMMIT_GUARD_FAILED",
@@ -165,7 +227,7 @@ class WorkspaceOperationSkill(WorkflowSkill):
                 records.append({"tool": name, "status": result.status, "error_code": result.error_code})
                 if not result.success:
                     any_failed = True
-                if name.endswith("workspace_diff") and result.success:
+                if resolved.endswith("workspace_diff") and result.success:
                     diff_seen = True
                 if result.status == "pending_approval":
                     return result

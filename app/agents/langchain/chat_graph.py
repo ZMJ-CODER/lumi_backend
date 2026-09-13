@@ -261,8 +261,18 @@ class LangGraphChatRunner:
                         ranked=list(by_name.values()),
                         layer="chat_graph.final",
                     )
+        # 统一资源能力层（Phase 5）：模型可见面收敛（默认关闭 → 逐字等于改造前）。
+        # 收敛只改"模型看到的名字"；实现名仍是执行与审计的真相源，解析在
+        # ``executor._resolve_model_alias`` 一处完成。
+        from app.agents.capabilities.resource_surface import collapse_for_surface
+
+        surface_pairs = collapse_for_surface(capabilities)
+        surface_enabled_now = len(surface_pairs) != len(capabilities) or any(
+            display != str(getattr(item, "name", "") or "") for item, display in surface_pairs
+        )
         # 工具链路诊断：把四层快照落成结构化日志（排障时不必再翻代码找是哪一层丢的）。
         # 只含工具名与状态，不含参数/正文，因此可以安全进日志。
+        # 收敛打开时快照记录**对外名**——它才回答"模型这次拿到了什么"。
         try:
             from app.core.observability import record_tool_window_snapshot
 
@@ -270,7 +280,11 @@ class LangGraphChatRunner:
                 scene=self.scene,
                 catalog=catalog_snapshot,
                 eligible=eligible_snapshot,
-                final=capabilities,
+                final=(
+                    [display for _item, display in surface_pairs]
+                    if surface_enabled_now
+                    else capabilities
+                ),
                 layer="chat_graph",
                 job_id=str(self.conversation_id or ""),
             )
@@ -284,7 +298,7 @@ class LangGraphChatRunner:
             # 候选接近是内部路由信号，不应把实现细节暴露给用户并中止请求。
             # 保留有限的只读候选，交给模型依据工具契约完成最终裁决。
         tools = []
-        for capability in capabilities:
+        for capability, display in surface_pairs:
             tool = await make_skill_tool(
                 capability.name,
                 user_id=self.user_id,
@@ -296,6 +310,7 @@ class LangGraphChatRunner:
                 user_message=current_user_message,
                 llm_config=self.llm_config,
                 allowed_tools={item.name for item in capabilities},
+                display_name=display,
             )
             if tool is not None:
                 tools.append(tool)

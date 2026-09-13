@@ -421,6 +421,11 @@ export interface ProcessLogEntry {
   sequence?: number;
   occurred_at?: string;
   job_id?: string;
+  capability?: string | null;
+  resource_type?: string | null;
+  provider_id?: string | null;
+  provider_name?: string | null;
+  display_name?: string | null;
 }
 
 export type ProcessStatus = "running" | "completed" | "failed" | "pending" | "uncertain" | "cancelled" | "expired";

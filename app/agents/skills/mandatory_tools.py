@@ -327,7 +327,21 @@ def apply_tool_window(
     返回 ``(最终工具列表, 快照)``；调用方可直接用快照打日志或塞进过程事件。
     """
     rows = list(capabilities or ())
-    trim = trim_with_mandatory(rows, limit=limit, extra_mandatory=extra_mandatory)
+    pinned = [*extra_mandatory]
+    # 统一资源能力层（Phase 2）：候选池里有**变更类**工具时，同资源的读取入口必须
+    # 一起留下（"新增 workspace_write 不会让 resource.read 消失"）。
+    # 保护作用在**截断层**而不是窗口生成层——丢工具真正发生在这里。
+    try:
+        from app.agents.capabilities.resource_window import read_guards, window_enabled
+
+        if window_enabled():
+            guards = read_guards(rows)
+            if guards:
+                pinned = [*pinned, *sorted(guards)]
+                mandatory_reason = f"{mandatory_reason}+resource.read"
+    except Exception as exc:  # noqa: BLE001 - 保护规则失败不能影响注入
+        logger.debug("[tool-window] 读取保护规则失败: {}", str(exc)[:120])
+    trim = trim_with_mandatory(rows, limit=limit, extra_mandatory=pinned)
     snapshot = build_snapshot(
         scene=scene,
         limit=int(limit or 0),

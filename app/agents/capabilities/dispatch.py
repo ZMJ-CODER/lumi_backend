@@ -171,10 +171,16 @@ def select_lease(
     capability: str,
     context: AgentExecutionContext,
     require_healthy: bool = True,
+    provider_ids: frozenset[str] | None = None,
 ) -> tuple[ProviderLease | None, str]:
     """在候选租约里选一个（返回 ``(租约, 未命中原因)``）。
 
-    顺序：能力匹配 → 绑定匹配（用户/会话/工作区/设备）→ 未过期 → 健康 → 最近心跳。
+    顺序：能力匹配 → 绑定匹配（用户/会话/工作区/设备）→ **资源类型收窄** →
+    未过期 → 健康 → 最近心跳。
+
+    ``provider_ids`` 来自统一资源能力层（"这个资源类型允许哪些 Provider 承接"）。
+    收窄**只在不倒过来卡死的前提下生效**：收窄后一个候选都不剩时保留原候选——
+    声明不完整（插件没声明资源类型）不该表现成"工具不可用"。
     """
     base = _base(capability)
     bound = [
@@ -182,6 +188,16 @@ def select_lease(
         for lease in leases
         if lease.capability == base and lease.matches(context.binding)
     ]
+    if provider_ids and bound:
+        narrowed = [lease for lease in bound if str(lease.provider_id) in provider_ids]
+        if narrowed:
+            bound = narrowed
+        else:
+            logger.debug(
+                "[capability] 资源类型收窄后没有候选，按收窄前候选继续 capability={} providers={}",
+                base,
+                sorted(provider_ids)[:4],
+            )
     if not bound:
         return None, "没有与该会话绑定匹配的租约"
     alive = [lease for lease in bound if not lease.is_expired()]
@@ -279,12 +295,16 @@ class CapabilityDispatchAdapter:
         task_id: str | None = None,
         call_id: str | None = None,
         approval_context: dict[str, Any] | None = None,
+        provider_ids: frozenset[str] | None = None,
     ) -> DispatchOutcome:
         """尝试按租约派发；``handled=False`` 时调用方走旧路径。
 
         ``approval_context`` 给定时先过**能力审批门禁**（与 Broker 同一套策略与指纹
         校验）：缺审批/指纹不符直接 ``APPROVAL_REQUIRED``，**不会**去调客户端——避免
         "服务端未审批"与"客户端本地拒止"两条链路各说各话。
+
+        ``provider_ids`` 是统一资源能力层给出的"该资源类型允许的 Provider"，
+        只用于收窄候选（Phase 3）；为空表示不收窄。
         """
         base = _base(capability)
         descriptor = self._catalog.get(base)
@@ -316,7 +336,10 @@ class CapabilityDispatchAdapter:
             except Exception as exc:  # noqa: BLE001 - 同步失败沿用本地副本
                 logger.debug("[capability] 租约同步失败（沿用本地副本）: {}", str(exc)[:120])
         lease, reason = select_lease(
-            self._leases.snapshot(), capability=base, context=context
+            self._leases.snapshot(),
+            capability=base,
+            context=context,
+            provider_ids=provider_ids,
         )
         if lease is None:
             # 只读能力可以按调用方显式授权回退旧路径；写/执行一律结构化失败。

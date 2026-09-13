@@ -67,6 +67,10 @@ def skill_result_from_capability(
     保留全部关键语义，便于上游/前端复用既有渲染：
     ``error_code`` 原样（含 ``POLICY_DENIED``/``LEASE_EXPIRED``/``PROVIDER_UNHEALTHY``）、
     ``retryable`` 原样、``served_locally`` 与 ``provider_id``/``lease_id`` 进 metadata。
+
+    Phase 3 追加统一资源能力层字段（``unified_capability`` / ``resource_type`` /
+    ``provider_name``）：前端据此显示"正在写入工作区"这类**能力+资源**文案，
+    而不必依赖 ``workspace_write`` 这类底层名字。
     """
     result = decision.result
     metadata: dict[str, Any] = {
@@ -77,6 +81,14 @@ def skill_result_from_capability(
         "provider_id": decision.provider_id,
         "lease_id": decision.lease_id,
     }
+    if decision.unified_capability or decision.resource_type:
+        metadata.update(
+            {
+                "unified_capability": decision.unified_capability,
+                "resource_type": decision.resource_type,
+                "provider_name": decision.provider_name,
+            }
+        )
     if result is None:
         return _skill_result(
             success=False,
@@ -162,7 +174,29 @@ async def try_capability_route(
             project_ids=authorized_project_ids or (),
             confirmed_tool_calls=approved_tool_calls or (),
         )
-        capability = capability_for_mcp_tool(tool_name)
+        # 统一资源能力层（Phase 3）：先解析**结构化派发目标**（能力 / 资源类型 /
+        # Provider），而不是从工具名"猜"能力。开关关闭或解析不出结构化目标时，
+        # 逐字回落到既有的 ``capability_for_mcp_tool`` 兼容解析。
+        capability = ""
+        unified_capability = ""
+        resource_type = ""
+        provider_name = ""
+        try:
+            from app.agents.capabilities.resource_dispatch import (
+                dispatch_enabled,
+                resolve_dispatch,
+            )
+
+            if dispatch_enabled():
+                target = resolve_dispatch(tool_name)
+                capability = target.capability
+                unified_capability = target.unified_capability
+                resource_type = target.resource_type
+                provider_name = target.provider_name
+        except Exception as exc:  # noqa: BLE001 - 结构化解析失败回到兼容解析
+            logger.debug("[capability] 结构化派发目标解析失败（回到兼容解析）: {}", str(exc)[:120])
+        if not capability:
+            capability = capability_for_mcp_tool(tool_name)
         approval_context = _approval_context_for(
             tool_name=tool_name,
             args=args,
@@ -179,6 +213,10 @@ async def try_capability_route(
             task_id=task_id,
             call_id=call_id,
             approval_context=approval_context,
+            capability=capability or "",
+            unified_capability=unified_capability,
+            resource_type=resource_type,
+            provider_name=provider_name,
         )
     except Exception as exc:  # noqa: BLE001 - 旁路失败必须落回旧路径
         logger.warning(

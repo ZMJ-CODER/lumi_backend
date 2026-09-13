@@ -53,6 +53,9 @@ class ToolCapability(BaseModel):
     #: 就断在第一步。已登记的工具不受影响：静态映射表优先，声明不能改写既有归属
     #: （路由/租约/审批都依赖那张表）。
     capability: str = ""
+    #: **资源类型声明**（``workspace`` / ``memory`` …）：空 = 由能力绑定推导。
+    #: 统一能力跨多种资源，新资源（如任务记忆）靠它声明自己属于哪一类。
+    resource_type: str = ""
 
     def to_tool_definition(self) -> dict:
         flags = []

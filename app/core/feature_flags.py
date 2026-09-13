@@ -41,6 +41,28 @@ FEATURE_FLAGS: tuple[str, ...] = (
     # 执行环境 / 可见场景"都从统一 Tool Registry 派生；**静态表退化为兜底**。
     # 关闭时静态表仍是唯一真相源（行为逐字不变），影子对比仍可随时打点。
     "TOOL_REGISTRY_DERIVED",
+    # ── 统一资源能力层（方案《资源能力层》Phase 2）──
+    # 开启后"动作意图 + 资源类型 → 统一能力 → 候选 Provider → 工具窗口"成为真相源，
+    # 旧的 `ACTION_TOOL_WINDOW` 降级为 fallback；同时启用"变更类工具必须带上同资源
+    # 读取入口"的截断保护（核心读取能力不被 Top-K 挤掉）。
+    # 关闭时旧路径逐字不变（新窗口永远是旧窗口的超集，但它仍然会多出工具）。
+    "RESOURCE_CAPABILITY_WINDOW",
+    # ── 统一资源能力层（方案《资源能力层》Phase 3）──
+    # 开启后派发前先解析**结构化目标**（能力 / 资源类型 / Provider Adapter），
+    # 不再从工具名"猜"能力；Broker 按资源类型收窄 Provider 候选（收窄后无候选时
+    # 按收窄前继续，声明缺失不表现成"工具不可用"）。关闭时旧解析逐字不变。
+    "RESOURCE_CAPABILITY_DISPATCH",
+    # ── 统一资源能力层（方案《资源能力层》Phase 4）──
+    # 开启后 Workflow Skill 按**能力声明**（required_capabilities / resource_types /
+    # providers）选择与校验工具，底层 MCP 名字退化为兼容层（依赖只补不替）。
+    # 关闭时逐字走旧的 allowed_tools 白名单。
+    "RESOURCE_CAPABILITY_WORKFLOW",
+    # ── 统一资源能力层（方案《资源能力层》Phase 5）──
+    # 开启后模型可见工具面收敛到 Read/Write/Edit/Move/Delete/Run/Search：
+    # 实现层名字（workspace_write / mcp__… / office_doc_edit）不再直接暴露，
+    # 执行时按能力+资源类型经 Provider Adapter 解析。**分类不了的工具有意保留原名**。
+    # 关闭时注入路径逐字不变（默认关闭；切换前先看 `tool→model_surface(converged)` 披露栏）。
+    "RESOURCE_CAPABILITY_SURFACE",
 )
 
 #: 影子模式开关（不属于上面六个：它控制"是否只观察"）。

@@ -13,6 +13,7 @@ from typing import Any
 from loguru import logger
 
 from app.agents.orchestration.job_materialization_service import JobMaterializationService
+from app.agents.orchestration.capability_preflight_service import attach_capability_resolution_time
 from app.agents.orchestration.models import Job, JobStatus
 from app.agents.orchestration.office_plan_selection_service import OfficePlanSelectionService
 from app.agents.orchestration.planning.compilation import PlanCompilationService
@@ -51,6 +52,37 @@ def _capability_requirements(*, scene: str, request: str, office_docs: list[dict
         needs_vision=bool(kinds & _IMAGE_DOC_KINDS),
         needs_streaming=scene in {"office", "chat"},
     )
+
+
+def _profile_action_intents(routed: object) -> tuple[str, ...]:
+    """Router v2 决策 → 动作意图（策略层消费画像事实的唯一读法）。
+
+    没有 Router v2 决策时返回空元组：策略层退回旧 reasons 兜底，**不自己解析**原文。
+    """
+    if routed is None:
+        return ()
+    profile = getattr(routed, "profile", None)
+    intents = getattr(profile, "action_intents", None) or ()
+    return tuple(str(getattr(item, "value", item)) for item in intents if str(item))
+
+
+def _profile_complexity_hint(routed: object) -> str:
+    """Router v2 决策 → 复杂度档位（``ATOMIC`` / ``SEQUENTIAL`` / ``DYNAMIC``）。"""
+    if routed is None:
+        return ""
+    profile = getattr(routed, "profile", None)
+    legacy = str(getattr(profile, "complexity", "") or "").upper()
+    return {"M0": "ATOMIC", "M1": "ATOMIC", "M2": "SEQUENTIAL", "M3": "DYNAMIC"}.get(legacy, "")
+
+
+def _legacy_shape_reasons(request: str) -> tuple[str, ...]:
+    """旧词表理由（**只在**没有 Router v2 画像时作为兜底；不作为路由依据）。"""
+    try:
+        from app.agents.orchestration.task_shape import assess_task_shape
+
+        return tuple(assess_task_shape(request).reasons)
+    except Exception:  # noqa: BLE001 - 兜底不可用时留空（策略层按无副作用处理）
+        return ()
 
 
 class JobSubmissionService:
@@ -382,28 +414,11 @@ class JobSubmissionService:
 
             router_v2_enabled = bool(getattr(_policy_settings, "TASK_ROUTER_V2_ENABLED", False))
             policy_v2_enabled = bool(getattr(_policy_settings, "EXECUTION_POLICY_V2_ENABLED", False))
-            # 两个决策各自按其开关生成，互不依赖、互不覆盖。
-            policy_meta = None
-            if policy_v2_enabled:
-                from lumi_orch.execution_policy import (
-                    TaskEntrySignals,
-                    policy_meta_from_signals,
-                )
-                from app.agents.orchestration.task_shape import assess_task_shape
-
-                signals = TaskEntrySignals(
-                    request=request,
-                    scene=scene,
-                    reasons=tuple(assess_task_shape(request).reasons),
-                    has_attachments=False,
-                    has_office_docs=bool(office_docs),
-                    workspace_available=bool(workspace_id),
-                    web_search_enabled=False,
-                    conversation_has_workspace=bool(workspace_id),
-                )
-                policy_meta = policy_meta_from_signals(signals, enabled=True)
-
+            # 先出 Router v2 决策，再让策略层**消费同一份画像**：方案 4 §1.2 要求
+            # 入口只评估一次，策略层不得再用另一套词表解析同一段用户原文
+            # （两处结论打架正是"用户要创建文件、模型只拿到读取工具"的根因）。
             router_meta = None
+            routed = None
             if router_v2_enabled:
                 from app.services.task_assessor import AssessmentContext
                 from app.services.task_router_adapter import plan_and_route
@@ -420,6 +435,31 @@ class JobSubmissionService:
                     use_llm=False,  # 提交阶段已有 Planner，避免二次模型调用
                 )
                 router_meta = routed.meta()
+
+            policy_meta = None
+            if policy_v2_enabled:
+                from lumi_orch.execution_policy import (
+                    TaskEntrySignals,
+                    policy_meta_from_signals,
+                )
+
+                signals = TaskEntrySignals(
+                    request=request,
+                    scene=scene,
+                    reasons=tuple(_legacy_shape_reasons(request)),
+                    has_attachments=False,
+                    has_office_docs=bool(office_docs),
+                    workspace_available=bool(workspace_id),
+                    web_search_enabled=False,
+                    conversation_has_workspace=bool(workspace_id),
+                    # 画像事实优先（有 Router v2 决策时；否则留空走旧 reasons 兜底）。
+                    action_intents=_profile_action_intents(routed),
+                    complexity_hint=_profile_complexity_hint(routed),
+                    needs_runtime_decision=(
+                        bool(getattr(routed.profile, "has_runtime_decision", False)) if routed is not None else None
+                    ),
+                )
+                policy_meta = policy_meta_from_signals(signals, enabled=True)
 
             apply_route_snapshot(
                 routing,
@@ -503,7 +543,19 @@ class JobSubmissionService:
                         workspace_id=str(workspace_id or ""),
                     ),
                 )
-                routing["capability_resolution"] = resolution.as_dict()
+                routing["capability_resolution"] = attach_capability_resolution_time(
+                    resolution.as_dict()
+                )
+                # 提交只是**时点快照**：客户端可能稍后才连上/注册。把"重算这次结论所需的
+                # 输入"一并落库，读取路径才能刷新（见 ``refresh_capability_resolution``），
+                # 否则前端会一直显示"缺少必需能力 / 没有可用的 Provider"，
+                # 而同一份工作区其实读得好好的。
+                routing["capability_resolution_query"] = {
+                    "required": list(required),
+                    "user_id": str(user_id or ""),
+                    "conversation_id": str(conversation_id or ""),
+                    "workspace_id": str(workspace_id or ""),
+                }
         except Exception as exc:  # noqa: BLE001 - 解析失败不能阻断提交
             logger.warning("能力解析降级（忽略）: {}", str(exc)[:160])
         materialized = await self._materialization.materialize(
@@ -555,6 +607,14 @@ class JobSubmissionService:
 
         await job_admission.promote(admission_token, job.job_id, user_id)
         self._start_heartbeat(job.job_id, user_id)
+        # 工具注册表影子对比（P1）：一次任务一次打点，回答"派生有没有跟静态表漂移"。
+        # 只记录、不改行为，且失败绝不影响提交。
+        try:
+            from app.agents.capabilities.tool_registry import log_shadow_differences
+
+            log_shadow_differences(scene=scene, job_id=job.job_id)
+        except Exception:  # noqa: BLE001
+            pass
         # v2 观测：进入 Planner 编排的计数（指标默认关闭时零开销）。
         if scene == "office":
             from app.core.observability import inc_planner_invoked

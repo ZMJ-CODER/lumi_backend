@@ -14,7 +14,6 @@
 import asyncio
 import base64
 import os
-import secrets
 
 from loguru import logger
 from sqlalchemy import select, update

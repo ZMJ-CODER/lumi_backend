@@ -20,12 +20,12 @@ workspace_stage_write / workspace_diff / workspace_commit 等）读写本地文�
 from __future__ import annotations
 
 import json
-import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.config import settings
+from app.services.safe_delete import UnsafeRemoval, remove_tree
 
 ROOT = Path(settings.UPLOAD_DIR).parent / "workspaces"
 
@@ -214,7 +214,8 @@ def delete_workspace(user_id: str, workspace_id: str) -> dict:
     if not marker.is_file():
         raise LookupError("工作区不存在")
     try:
-        shutil.rmtree(root)
-    except OSError as exc:  # pragma: no cover - best effort cleanup
+        # 受控删除：边界 = 该用户的工作区根，越界即拒绝（而不是"尽力删"）。
+        remove_tree(root.parent, root)
+    except (OSError, UnsafeRemoval) as exc:  # pragma: no cover - best effort cleanup
         raise LookupError("工作区清理失败") from exc
     return {"workspace_id": workspace_id, "deleted": True}

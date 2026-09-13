@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 import hashlib
 import json
-import time
 from typing import Any, Annotated, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -17,6 +17,7 @@ from loguru import logger
 from app.agents.langchain.models import get_chat_model, cached_tool_support, remember_tool_support
 from app.agents.langchain.tools import make_skill_tool
 from app.agents.skills.base import SkillResult
+from app.agents.skills.mandatory_tools import apply_tool_window
 from app.agents.skills.prompting import build_tool_selection_contract
 from app.agents.skills.executor import (
     get_office_react_capabilities_with_trace,
@@ -63,7 +64,8 @@ class OfficeReactRunner:
                  initial_mode: str = "read_only",
                  domain_first: bool = False,
                  workspace_id: str = "",
-                 workspace_summary: str = "") -> None:
+                 workspace_summary: str = "",
+                 action_intents: Sequence[str] | None = None) -> None:
         self.user_id = user_id
         self.job_id = job_id
         self.user_role = user_role
@@ -103,6 +105,13 @@ class OfficeReactRunner:
         # workspace and routed to its registered desktop.
         self.workspace_id = str(workspace_id or "").strip()
         self.workspace_summary = str(workspace_summary or "")
+        # 方案 4 §4.1：画像驱动的工具窗口。给了动作意图就以它为准，关键词只作极端兜底
+        # （模型在工具窗口内做出选择，但"窗口里有哪些工具"不再靠猜用户原文）。
+        self.action_intents: tuple[str, ...] = tuple(
+            str(getattr(item, "value", item)).strip().upper()
+            for item in (action_intents or ())
+            if str(getattr(item, "value", item)).strip()
+        )
         self._workspace_read_caps: list[Any] | None = None
         if initial_domain:
             aliases = {"network": "research", "web": "research", "file": "document", "files": "document", "code": "development"}
@@ -172,6 +181,35 @@ class OfficeReactRunner:
             self.user_id, "office", self.user_role, self.workspace_id, group
         )
 
+    #: 会被视为"要动手"的动作意图（其余是只读）。
+    WRITE_ACTIONS = frozenset({"CREATE", "MODIFY", "DELETE", "MOVE", "SEND", "PUBLISH"})
+    #: 会被视为"要执行/验证"的动作意图（沙箱域）。
+    EXECUTE_ACTIONS = frozenset({"EXECUTE"})
+
+    def _intent_scope(self, route_text: str) -> tuple[bool, bool, bool]:
+        """本次要注入哪些工作区域：(要写, 要执行, 要提交)。
+
+        **画像优先**（方案 4 §4.1）：给了 ``action_intents`` 就直接映射，
+        ``route_text`` 关键词只作极端兜底（没有画像时的兼容路径）。
+        """
+        intents = set(self.action_intents)
+        if intents:
+            write = bool(intents & self.WRITE_ACTIONS)
+            execute = bool(intents & self.EXECUTE_ACTIONS)
+            # 提交/回滚不是独立动作意图：只有用户显式要求提交时才注入（关键词兜底）。
+            commit = False
+            return write, execute, commit
+        value = str(route_text or "").casefold()
+        write = any(token in value for token in (
+            "修改", "写入", "创建", "新建", "删除", "移动", "重命名", "复制", "暂存", "覆盖",
+            "write", "create", "delete", "rename", "move", "copy", "stage",
+        ))
+        execute = any(token in value for token in (
+            "测试", "运行", "执行", "构建", "验证", "沙箱", "test", "run", "build", "check",
+        ))
+        commit = any(token in value for token in ("提交", "回滚", "commit", "rollback"))
+        return write, execute, commit
+
     async def _maybe_inject_workspace_stage_window(self, capabilities: list[Any], route_text: str) -> list[Any]:
         """按阶段把工作区能力并入候选窗，不因 write_op 永久隐藏写工具。
 
@@ -183,6 +221,9 @@ class OfficeReactRunner:
         沙箱：出现测试/运行/构建/验证意图时注入；
         提交域：出现提交/回滚意图时注入（实际提交仍由 ApprovalPolicyEngine
         决定是否需要确认，回滚始终确认）。
+
+        **意图来源**：优先用画像的 ``action_intents``（方案 4 §4.1），没有画像时才退回
+        ``route_text`` 关键词——"用户要求创建文件，模型只拿到读取工具"就是靠这条修掉的。
         """
         if not self.workspace_id or not self._uses_workspace_vocab(route_text):
             return capabilities
@@ -194,16 +235,12 @@ class OfficeReactRunner:
             WORKSPACE_STAGE_WRITE_CAPABILITIES,
         )
 
-        value = (route_text or "").casefold()
-        modify_tokens = ("修改", "写入", "创建", "新建", "删除", "移动", "重命名", "复制", "暂存", "覆盖",
-                         "write", "create", "delete", "rename", "move", "copy", "stage")
-        verify_tokens = ("测试", "运行", "执行", "构建", "验证", "沙箱", "test", "run", "build", "check")
-        commit_tokens = ("提交", "回滚", "commit", "rollback")
+        want_write, want_execute, want_commit = self._intent_scope(route_text)
 
         desired: list[Any] = list(
             await self._workspace_caps_for_group(frozenset({WORKSPACE_NAVIGATOR}))
         )
-        if any(token in value for token in modify_tokens):
+        if want_write:
             operations = await self._workspace_caps_for_group(WORKSPACE_OPERATION_CAPABILITIES)
             if operations:
                 desired.extend(operations)
@@ -212,22 +249,38 @@ class OfficeReactRunner:
                 desired.extend(
                     await self._workspace_caps_for_group(WORKSPACE_STAGE_WRITE_CAPABILITIES)
                 )
-        if any(token in value for token in verify_tokens):
+        if want_execute:
             desired.extend(await self._workspace_caps_for_group(WORKSPACE_SANDBOX_CAPABILITIES))
-        if any(token in value for token in commit_tokens):
+        if want_commit:
             desired.extend(await self._workspace_caps_for_group(WORKSPACE_COMMIT_CAPABILITIES))
 
         injected = [item for item in desired if item.name not in {c.name for c in capabilities}]
         if not injected:
             return capabilities
-        keep = [
-            item for item in capabilities
-            if item.name not in {candidate.name for candidate in injected}
-        ][: max(0, 8 - len(injected))]
-        window = [*keep, *injected]
+        # 注入的**阶段工具**（读/写/执行/提交）本轮是"当前阶段明确要求"的工具，
+        # 因此与核心工具一样属于强制项：它们不能把核心工具挤掉，也不该被 8 个名额
+        # 反过来裁掉（旧写法 `keep = [...][: 8 - len(injected)]` 会在注入较多时把
+        # 旧工具清空，包括 workspace_navigator）。
+        injected_names = {str(item.name) for item in injected}
+        keep = [item for item in capabilities if item.name not in injected_names]
+        mandatory_hint = list(injected_names)
+        window, _snapshot = apply_tool_window(
+            [*injected, *keep],
+            # 上限 = 8 个可选位 + 强制项数量（阶段工具 + 核心工具）。
+            limit=8 + len(mandatory_hint),
+            scene="office",
+            catalog=[*capabilities, *injected],
+            eligible=[*capabilities, *injected],
+            extra_mandatory=mandatory_hint,
+            mandatory_reason="stage_window",
+            layer="react.workspace_stage",
+        )
         # 诊断（用户排查"模型这次到底拿到了哪些工具"）：只记工具名，不记参数。
         logger.info(
-            "[react] 工作区工具窗口注入: injected={} window={}",
+            "[react] 工作区工具窗口注入: intents={} write={} execute={} injected={} window={}",
+            list(self.action_intents),
+            want_write,
+            want_execute,
             [item.name for item in injected],
             [item.name for item in window],
         )
@@ -415,7 +468,13 @@ class OfficeReactRunner:
                                 name: item for name, item in by_name.items()
                                 if not item.write_op and not item.requires_confirmation
                             }
-                        capabilities = list(by_name.values())[:8]
+                        capabilities, _ = apply_tool_window(
+                            list(by_name.values()),
+                            limit=8,
+                            scene="office",
+                            extra_mandatory=(),
+                            layer="react.domain_expand",
+                        )
                 if self.autonomous_mode and not (self.domain_first and not self._requested_domains):
                     # Exploration tasks need a small stable bootstrap set. A
                     # pure lexical top-k can otherwise omit Read/Bash because
@@ -427,7 +486,6 @@ class OfficeReactRunner:
                     # approach was ineffective when lexical recall had
                     # already filled all eight available slots.
                     bootstrap: list[Any] = []
-                    existing = {item.name for item in capabilities}
                     for tool_name in bootstrap_names:
                         candidate = next((item for item in capabilities if item.name == tool_name), None)
                         if candidate is None:
@@ -435,7 +493,17 @@ class OfficeReactRunner:
                         if candidate is not None:
                             bootstrap.append(candidate)
                     bootstrap_names_found = {item.name for item in bootstrap}
-                    capabilities = [*bootstrap, *(item for item in capabilities if item.name not in bootstrap_names_found)][:8]
+                    # 探索原语是"当前阶段明确要求"的工具：同样是强制项，
+                    # 不能因为名额被其它候选占满而消失（旧写法靠 [:8] 截断，注释里就写着
+                    # "lexical recall 已经填满八个槽位时 append 无效"）。
+                    capabilities, _ = apply_tool_window(
+                        [*bootstrap, *(item for item in capabilities if item.name not in bootstrap_names_found)],
+                        limit=8 + len(bootstrap_names_found),
+                        scene="office",
+                        extra_mandatory=tuple(bootstrap_names_found),
+                        mandatory_reason="exploration_primitives",
+                        layer="react.bootstrap",
+                    )
                 # L2 会话缓存：已发现工具在后续轮次保持可见，避免重复检索。
                 discovered = list(self.discovery_session.loaded_tools.values())
                 if self._active_domain:
@@ -450,7 +518,12 @@ class OfficeReactRunner:
                             name: item for name, item in by_name.items()
                             if not item.write_op and not item.requires_confirmation
                         }
-                    capabilities = list(by_name.values())[:8]
+                    capabilities, _ = apply_tool_window(
+                        list(by_name.values()),
+                        limit=8,
+                        scene="office",
+                        layer="react.cache_merge",
+                    )
                 if len(internal_docs) >= 2:
                     # Discovery is an operational prerequisite, not merely a
                     # prompt preference. Keep it visible even when lexical
@@ -461,7 +534,15 @@ class OfficeReactRunner:
                         "inspect_document_set", "office", self.user_role, self.user_id
                     )
                     if discovery is not None and discovery.name not in {item.name for item in capabilities}:
-                        capabilities = [discovery, *capabilities[:7]]
+                        # 文档发现是操作前提，与核心工具同级强制：不能被名额裁掉。
+                        capabilities, _ = apply_tool_window(
+                            [discovery, *capabilities],
+                            limit=8 + 1,
+                            scene="office",
+                            extra_mandatory=(str(discovery.name),),
+                            mandatory_reason="document_discovery_prerequisite",
+                            layer="react.document_discovery",
+                        )
                         # Discovery was injected as a mandatory prerequisite;
                         # make that visible in the auditable candidate trace.
                         selection = type(selection)(

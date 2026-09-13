@@ -65,6 +65,20 @@ jobs:
       - name: Ruff 检查
         run: uvx ruff check app tests packages/orchestration/src packages/orchestration/tests
 
+  unsafe-calls:
+    # 硬约束：**阻塞**合并。高危调用（子进程 / 动态执行 / 反序列化 / 删除）只允许出现在
+    # app/agents/sandbox、app/services/plugins/quota.py、app/services/safe_delete.py 等
+    # 受控执行面；其余位置一律走受控入口。用 AST 实现（不是 grep），因此 re.compile /
+    # redis.eval / 字符串里的违规词都不会误报。本地同一入口：
+    #   python scripts/check_unsafe_calls.py
+    name: 高危调用门禁（AST，阻塞）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: 扫描受管目录
+        run: uv run python scripts/check_unsafe_calls.py
+
   docker-build:
     name: 后端镜像构建
     runs-on: ubuntu-latest

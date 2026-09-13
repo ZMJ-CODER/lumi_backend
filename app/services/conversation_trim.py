@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.redis import get_redis
 from app.models.db_models import Attachment, Conversation, ConversationMemoryState, Message
 from app.services.content_codec import normalize_content
+from app.services.safe_delete import UnsafeRemoval, remove_file
 from app.services.usage import estimate_tokens
 
 
@@ -77,8 +78,9 @@ async def _delete_attachment_files(user_id: str, file_urls: list[str]) -> None:
             logger.warning("[ConversationTrim] 附件路径越界，跳过: {}", url)
             continue
         try:
-            target.unlink(missing_ok=True)
-        except OSError as exc:
+            # 受控删除：边界 = 该用户的上传目录（越界即拒绝，不再各自写 unlink）。
+            remove_file(base, target)
+        except (OSError, UnsafeRemoval) as exc:
             logger.warning("[ConversationTrim] 附件删除失败: {} err={}", target, exc)
 
 

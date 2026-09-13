@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path
 import re
-from typing import Iterable
+from typing import Any, Iterable
 import json
 import yaml
 
@@ -94,8 +94,11 @@ class ToolDiscoverySession:
     policy_version: str = ""
 
     def add(self, capabilities: Iterable[ToolCapability]) -> None:
+        # 用**复合主键**（plugin|provider|name@version）而不是裸 name：两个插件提供同名
+        # 工具时，裸 name 会让后加入的静默覆盖前一个（方案 §五 P1）。展示名仍然简洁，
+        # 但缓存/注册/租约/执行都以复合键为准。
         for capability in capabilities:
-            self.loaded_tools[capability.name] = capability
+            self.loaded_tools[_tool_identity(capability)] = capability
 
     async def load(self, user_id: str, conversation_id: str) -> None:
         """从 Redis 恢复会话发现元数据；Redis 不可用时保持空缓存。"""
@@ -108,11 +111,19 @@ class ToolDiscoverySession:
             payload = json.loads(raw) if raw else {}
             if not isinstance(payload, dict):
                 return
+            # 失效条件必须同时认**注册表版本**与域策略版本：只认后者会让
+            # "插件装了新工具/schema 升级"在旧会话里长时间不可见（方案 §五 P1）。
             current = _policy_version()
             if str(payload.get("policy_version") or "") != current:
                 return
+            if str(payload.get("registry_epoch") or "") != _registry_epoch():
+                return
             values = payload.get("tools") or []
-            self.add(ToolCapability.model_validate(item) for item in values if isinstance(item, dict))
+            self.add(
+                ToolCapability.model_validate(item)
+                for item in values
+                if isinstance(item, dict) and not _rejects_registry_epoch(item)
+            )
             self.discovered_domains.update(str(item) for item in payload.get("domains") or [] if str(item))
             self.policy_version = current
         except Exception:
@@ -129,6 +140,7 @@ class ToolDiscoverySession:
             self.policy_version = _policy_version()
             payload = {
                 "policy_version": self.policy_version,
+                "registry_epoch": _registry_epoch(),
                 "domains": sorted(self.discovered_domains),
                 "tools": [item.model_dump(mode="json") for item in self.loaded_tools.values() if item.status == "stable"],
             }
@@ -154,6 +166,28 @@ def _policy_version() -> str:
         return str(payload.get("version") or "unknown") if isinstance(payload, dict) else "unknown"
     except Exception:
         return "unknown"
+
+
+def _registry_epoch() -> str:
+    """工具注册表版本（``ToolSpec`` 影子注册表 + 能力目录摘要）。"""
+    try:
+        from app.agents.skills.mandatory_tools import registry_epoch
+
+        return registry_epoch()
+    except Exception:  # noqa: BLE001 - 摘要不可用时视为"未知"（调用方按需重算）
+        return "unknown"
+
+
+def _tool_identity(capability: Any) -> str:
+    """复合主键（与 ``mandatory_tools.tool_identity`` 同一实现，避免两处漂移）。"""
+    from app.agents.skills.mandatory_tools import tool_identity
+
+    return tool_identity(capability)
+
+
+def _rejects_registry_epoch(_item: Any) -> bool:
+    """占位钩子：单条工具级的额外失效判定（当前无额外规则，保留扩展点）。"""
+    return False
 
 
 def apply_skill_allowlist(

@@ -11,6 +11,7 @@ from loguru import logger
 from app.agents.orchestration.execution.validation import DagValidationError
 from app.agents.orchestration.models import Job, JobStatus
 from app.agents.orchestration.state_machine.errors import classify_error
+from app.core.deadline import DeadlineExceeded
 
 
 class ExecutionLoopService:
@@ -80,6 +81,32 @@ class ExecutionLoopService:
         llm_config = self._llm_configs.get(job_id) or self._context_getter(job_id).get(
             "llm_config"
         )
+        # 任务级预算（方案 §deadline）：后台任务**脱离**请求作用域，装上自己的绝对截止
+        # 时间。两个方向都要修：
+        # * 请求预算不该管后台任务的寿命（SSE 断开后请求预算可能只剩几秒）；
+        # * 后台任务此前完全没有上限（没有请求上下文时剩余预算是 inf），一个卡住的
+        #   Provider 调用能把 worker 永久占住。
+        # 每次 `run` 重新锚定 = "一段执行"的预算，暂停/等审批不消耗它（否则审批慢一点
+        # 就把任务判死）。配置为 0 时仍然 clear（"不限制"必须是明确的）。
+        deadline_token = self._install_job_deadline(job_id)
+        try:
+            await self._run_loop(job_id, llm_api_key=llm_api_key, llm_config=llm_config)
+        finally:
+            if deadline_token is not None:
+                deadline_token.reset()
+
+    @staticmethod
+    def _install_job_deadline(job_id: str):
+        """装上任务预算并返回还原凭证（异常一律不影响执行）。"""
+        try:
+            from app.core.deadline import install_job_deadline
+
+            return install_job_deadline(source="job.execution_loop")
+        except Exception as exc:  # noqa: BLE001 - 预算装配失败不能阻止任务执行
+            logger.debug("任务预算装配失败 {}: {}", job_id, str(exc)[:120])
+            return None
+
+    async def _run_loop(self, job_id: str, *, llm_api_key: str | None, llm_config: dict | None) -> None:
         try:
             job = await self._store.get_job(job_id) or self._live_jobs.get(job_id)
             if job is None:
@@ -137,6 +164,21 @@ class ExecutionLoopService:
         except DagValidationError as exc:
             logger.error("任务 DAG 非法 {}: {}", job_id, exc)
             await self._job_errors.fail(job_id, exc, error_code="DAG_VALIDATION_ERROR")
+        except DeadlineExceeded as exc:
+            # 任务预算耗尽：**稳定错误码 + 可行动文案**。不能只落成泛化的"任务执行超时"，
+            # 否则运维分不清"上游慢"还是"这个任务本来就该被预算停掉"。
+            logger.warning(
+                "任务预算耗尽，已停止 {}: source={} remaining={}",
+                job_id,
+                exc.source or "-",
+                round(float(exc.remaining or 0.0), 3),
+            )
+            await self._job_errors.fail(
+                job_id,
+                "任务执行预算已耗尽，已安全停止。可将任务拆小后重试，"
+                "或由运维调大 JOB_DEADLINE_SECONDS。",
+                error_code="JOB_DEADLINE_EXCEEDED",
+            )
         except asyncio.CancelledError:
             logger.info("任务后台执行被取消: {}", job_id)
             await self._job_errors.interrupt(job_id, "任务后台执行被取消")

@@ -77,7 +77,28 @@ PREFLIGHT_FACTS: frozenset[str] = frozenset({
     "approval_required",
     # 输入参数事实：不在对外映射表内（不构成预检阻断，由调用方按原错误码处理）。
     "invalid_arguments",
+    # 能力已声明、但没有可用 Provider 的三种可执行原因（方案 4 §3.3：环境缺失只阻断，
+    # 但**必须**给出正确的下一步——"没连设备"和"工作区不对"不是同一件事）。
+    "provider_not_connected",
+    "provider_binding_mismatch",
+    "provider_unroutable",
 })
+
+#: 租约状态 → 预检事实（唯一映射；``""`` 与未知状态退回 ``provider_unhealthy``）。
+_FACT_BY_LEASE_STATE: dict[str, str] = {
+    "not_connected": "provider_not_connected",
+    "binding_mismatch": "provider_binding_mismatch",
+    "unroutable": "provider_unroutable",
+    "unhealthy": "provider_unhealthy",
+}
+
+#: 租约状态 → 用户可执行的下一步（执行期失败文案；与预检的 next_action 同源口径）。
+_SUGGESTED_ACTION_BY_LEASE_STATE: dict[str, str] = {
+    "not_connected": "请启动/连接提供该能力的设备（Provider），完成能力注册后重试",
+    "binding_mismatch": "该设备已连接但未绑定当前工作区，请切换到已授权的工作区后重试",
+    "unroutable": "当前部署位置不允许该 Provider 执行，请改用允许的执行位置",
+    "unhealthy": "该能力的租约已过期或心跳中断，请确认设备在线后重试",
+}
 
 
 def _preflight_v2_enabled() -> bool:
@@ -106,6 +127,10 @@ class CapabilitySelection:
     #: 位置切换是否由策略放行（hybrid 才可能出现 True）。
     routed_by_policy: bool = False
     reason: str = ""
+    #: 没选到 Provider 时的**底层事实**（让"设备没连"与"连了但不属于这个工作区"
+    #: 不再都显示成一句"没有可用的 Provider"）：
+    #: ``not_connected`` / ``binding_mismatch`` / ``unhealthy`` / ``version_mismatch`` / ``""``。
+    lease_state: str = ""
 
     @property
     def executor_type(self) -> str:
@@ -124,8 +149,44 @@ class CapabilitySelection:
             "executor_type": self.executor_type,
             "lease_id": self.lease.lease_id if self.lease else "",
             "routed_by_policy": bool(self.routed_by_policy),
+            "lease_state": self.lease_state,
             "reason": self.reason,
         }
+
+
+#: 没选到 Provider 时的底层状态 → 失败原因（稳定文案，前端/预检据此给下一步）。
+_NO_PROVIDER_REASON_BY_STATE: dict[str, str] = {
+    "not_connected": "没有可用的 Provider（该能力尚无设备注册）",
+    "binding_mismatch": "没有可用的 Provider（Provider 已连接但不属于当前工作区/会话）",
+    "unhealthy": "没有可用的 Provider（已达成的租约已过期或心跳中断）",
+    "unroutable": "没有可用的 Provider（当前部署位置不允许该 Provider 执行）",
+}
+
+
+def _no_provider_state(
+    registered: list[ProviderLease],
+    *,
+    binding: Any,
+    policy_allows_switch: bool,
+    descriptor: CapabilityDescriptor,
+) -> str:
+    """为什么没选到 Provider（区分四种可执行的原因，供预检给出正确下一步）。
+
+    优先级：从没注册 > 位置不允许 > 绑定不匹配 > 租约不可用（过期/心跳中断）。
+    "绑定不匹配"要排在"租约不可用"之前：设备在线但工作区不对，用户需要绑对工作区，
+    而不是去重连设备。
+    """
+    if not registered:
+        return "not_connected"
+    placement_ok = [
+        lease for lease in registered
+        if descriptor.allows_deployment(lease.deployment, policy_allows_switch=policy_allows_switch)
+    ]
+    if not placement_ok:
+        return "unroutable"
+    if binding is not None and not any(lease.matches(binding) for lease in placement_ok):
+        return "binding_mismatch"
+    return "unhealthy"
 
 
 @dataclass(slots=True)
@@ -181,6 +242,52 @@ class CapabilityBroker:
     def leases(self) -> CapabilityLeaseService:
         return self._leases
 
+    # ── 租约可见性（唯一读取入口）─────────────────────────
+
+    def _visible_leases(self) -> list[ProviderLease]:
+        """**注册表可见**的活租约（Redis 权威缓存 ∪ 进程内副本）。
+
+        为什么不能只读 ``self._leases.leases_for()``：那只看 ``CapabilityLeaseService``
+        的进程内私有字典。注册端点（``/capabilities/register``）写进去的租约如果落在
+        **另一个** ``CapabilityLeaseService`` 实例上，Broker 就永远看不到任何客户端
+        Provider —— 于是提交期能力解析恒判"没有可用的 Provider"，把本机完全可用的
+        ``workspace.read`` 报成缺能力（真实现象，已修）。
+
+        ``CapabilityLeaseService.snapshot()`` 才是权威读入口：它合并 Redis 缓存（含
+        ``register``/``heartbeat`` 时 seed 的条目与其它 worker 写入的租约）与进程内
+        副本，并对过期租约做惰性清理。测试注入的轻量 stub 只实现 ``snapshot()``，
+        这里统一走快照，不再依赖其它私有方法。
+        """
+        snapshot = getattr(self._leases, "snapshot", None)
+        if not callable(snapshot):
+            return []
+        try:
+            return list(snapshot())
+        except Exception as exc:  # noqa: BLE001 - 租约视图不可用时按"无租约"处理
+            logger.warning("[capability] 租约快照读取失败（按无租约处理）: {}", str(exc)[:160])
+            return []
+
+    def _provider_allowed_by_runtime_policy(self, provider_id: str) -> bool:
+        """运行时策略是否允许这个 **Provider** 继续派发。
+
+        逐个 Provider 判定（调用点在候选构造循环里）：只判断"是否所有 Provider 都被
+        停用"会让部分停用失效。判定只查 ``provider:<id>`` 与 ``default`` 两层——
+        能力（capability）粒度的覆盖不在这里，避免与能力预检的职责重叠。
+
+        默认关闭时（``RUNTIME_POLICY_OVERRIDE=false``）是零开销直通。
+        """
+        try:
+            from app.services.runtime_policy import policy_store, runtime_policy_enabled
+
+            if not runtime_policy_enabled() or not provider_id:
+                return True
+            if not policy_store.enabled(provider_id=str(provider_id)):
+                logger.debug("[capability] Provider 已被运行时策略停用 provider={}", str(provider_id)[:60])
+                return False
+        except Exception as exc:  # noqa: BLE001 - 策略读取失败不能把能力全停掉
+            logger.debug("[capability] 运行时策略读取失败（按放行处理）: {}", str(exc)[:120])
+        return True
+
     # ── 选择 ──────────────────────────────────────────────
 
     def select(
@@ -217,7 +324,22 @@ class CapabilityBroker:
             )
         self._leases.sync_registry()
         candidates: list[ProviderLease] = []
-        for lease in self._leases.leases_for(base, version=descriptor.contract_version):
+        # 诊断用：该能力**注册过**的租约（不看健康/绑定/位置过滤），用于区分
+        # "设备从没连过" vs "连过但绑定/位置/健康不匹配"。只影响失败原因，不影响选择。
+        registered: list[ProviderLease] = []
+        # 运行时策略停用的 Provider：**逐个过滤候选**，而不是"只要不是全部停用就放行"。
+        # 后者是评审指出的 P0：三个 Provider 停掉两个，剩下那个照样被选中——运维以为
+        # 停用生效了，实际流量还在往被停的设备上走。
+        disabled: list[str] = []
+        for lease in self._visible_leases():
+            if lease.capability != base:
+                continue
+            if int(lease.contract_version) != int(descriptor.contract_version):
+                continue
+            registered.append(lease)
+            if not self._provider_allowed_by_runtime_policy(lease.provider_id):
+                disabled.append(str(lease.provider_id))
+                continue
             if not lease.is_usable():
                 continue
             if binding is not None and not lease.matches(binding):
@@ -228,7 +350,25 @@ class CapabilityBroker:
                 continue
             candidates.append(lease)
         if not candidates:
-            return CapabilitySelection(descriptor=descriptor, reason="没有可用的 Provider")
+            if disabled and len(disabled) >= len(registered):
+                # 所有已注册 Provider 都被运行时策略停用：如实报"提供方不可用"（沿用既有
+                # 事实词，前端映射不变），并留下 disabled_providers 便于排障。
+                return CapabilitySelection(
+                    descriptor=descriptor,
+                    reason=_NO_PROVIDER_REASON_BY_STATE["unhealthy"],
+                    lease_state="unhealthy",
+                )
+            state = _no_provider_state(
+                registered,
+                binding=binding,
+                policy_allows_switch=policy_allows_switch,
+                descriptor=descriptor,
+            )
+            return CapabilitySelection(
+                descriptor=descriptor,
+                reason=_NO_PROVIDER_REASON_BY_STATE.get(state, "没有可用的 Provider"),
+                lease_state=state,
+            )
         wanted = str(preferred_deployment or "").strip().casefold()
         if wanted:
             preferred = [item for item in candidates if str(item.deployment) == wanted]
@@ -433,8 +573,13 @@ class CapabilityBroker:
                 code=CapabilityErrorCode.CAPABILITY_MISSING.value,
                 message=f"没有可用 Provider 提供 {invocation.qualified_capability}",
                 fact="provider_unhealthy",
-                suggested_action="请确认客户端 Provider 已连接并完成能力注册",
-                details={"reason": selection.reason},
+                # 下一步必须与**真实原因**一致：设备没连 ≠ 工作区绑错 ≠ 位置不允许。
+                # 错误码/fact 契约不变（前端分派不变），只有指引更准确。
+                suggested_action=_SUGGESTED_ACTION_BY_LEASE_STATE.get(
+                    str(getattr(selection, "lease_state", "") or ""),
+                    "请确认客户端 Provider 已连接并完成能力注册",
+                ),
+                details={"reason": selection.reason, "lease_state": selection.lease_state},
             )
         problems = validate_arguments(selection.descriptor, invocation.arguments)
         if problems:
@@ -468,7 +613,11 @@ class CapabilityBroker:
             if selection.descriptor is None:
                 facts[capability] = "capability_unavailable"
             elif not selection.provider_id:
-                facts[capability] = "provider_unhealthy"
+                # 能力声明了但当下没有可用 Provider：按**底层原因**给事实，
+                # 前端才能给出"连设备 / 绑工作区 / 等心跳恢复"的正确指引。
+                facts[capability] = _FACT_BY_LEASE_STATE.get(
+                    str(getattr(selection, "lease_state", "") or ""), "provider_unhealthy"
+                )
         return facts
 
     def _preflight_failure(
@@ -569,7 +718,15 @@ class CapabilityBroker:
             )
 
     def _timeout_for(self, invocation: CapabilityInvocation) -> float:
-        """调用上界：``deadline``（monotonic 绝对时间）优先，其次 ``timeout_seconds``。"""
+        """本次能力调用的超时（秒）。**所有时间轴都是 monotonic。**
+
+        ``invocation.deadline`` 是 monotonic 绝对时刻（契约如此约定）；调用方没给时
+        才退到"请求级剩余预算"——否则一个显式带 deadline 的调用会被请求预算意外截断，
+        反过来也会出现"请求只剩 3 秒、能力却按 10 秒默认值跑完"的漏洞。
+
+        另外把 ``self._default_deadline`` 作为上限：显式 deadline 比默认上限更宽松时
+        取默认值（避免"忘了填"导致某次调用无限期挂住）。
+        """
         if invocation.deadline and invocation.deadline > 0:
             remaining = float(invocation.deadline) - time.monotonic()
             if remaining <= 0:
@@ -577,7 +734,13 @@ class CapabilityBroker:
             return min(remaining, 3600.0)
         if invocation.timeout_seconds and invocation.timeout_seconds > 0:
             return min(float(invocation.timeout_seconds), 3600.0)
-        return self._default_deadline
+        # 没有显式预算：用请求级剩余预算收紧默认值（min，绝不放宽）。
+        try:
+            from app.core.deadline import request_budget_seconds
+
+            return max(0.001, request_budget_seconds(cap=self._default_deadline))
+        except Exception:  # noqa: BLE001 - 预算不可用时用默认值
+            return self._default_deadline
 
     # ── 内部：幂等 ────────────────────────────────────────
 
@@ -687,7 +850,7 @@ class CapabilityBroker:
         """当前活跃能力绑定（进 Job.run_view 的 ``capability_snapshot``）。"""
         rows: list[dict[str, Any]] = []
         for lease in sorted(
-            self._leases.snapshot(), key=lambda item: (item.capability, item.provider_id)
+            self._visible_leases(), key=lambda item: (item.capability, item.provider_id)
         ):
             descriptor = self._catalog.get(lease.capability, version=lease.contract_version)
             rows.append(
@@ -809,7 +972,22 @@ def _type_problems(name: str, value: Any, schema: dict[str, Any]) -> list[str]:
 
 
 #: 进程内共享 Broker（阶段 2 的调用入口）。
-capability_broker = CapabilityBroker()
+#:
+#: **必须复用注册端点用的那个共享租约服务**：``/capabilities/register``、
+#: ``/heartbeat``、``/unregister`` 与 executor 的能力门禁都注入
+#: ``app.services.capability_lease.capability_lease_service``。如果 Broker 自建一个
+#: ``CapabilityLeaseService``，两者就是两套互不可见的进程内租约表 —— 客户端注册成功、
+#: 注册表里也有 Provider，但 Broker 的 :meth:`CapabilityBroker.select` 永远空，
+#: 于是 ``capability_resolution`` 把本机可用的 ``workspace.read@1`` 报成
+#: "没有可用的 Provider"。``CapabilityLeaseService`` 内部是 (租约, ProviderID) 键的
+#: 字典并按 ``owner_key`` 归一化主体，不存在"拿不到当前用户"的问题。
+def _shared_lease_service() -> CapabilityLeaseService:
+    from app.services.capability_lease import capability_lease_service
+
+    return capability_lease_service
+
+
+capability_broker = CapabilityBroker(leases=_shared_lease_service())
 
 
 __all__ = [

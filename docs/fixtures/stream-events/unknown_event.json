@@ -174,7 +174,12 @@
         "reason_code": "",
         "reason": "",
         "next_action": "",
-        "safe_next_action": ""
+        "safe_next_action": "",
+        "phase": "",
+        "question": "",
+        "options": [],
+        "required_capabilities": [],
+        "tool_window": []
       }
     },
     {
@@ -193,7 +198,12 @@
         "reason_code": "",
         "reason": "",
         "next_action": "",
-        "safe_next_action": ""
+        "safe_next_action": "",
+        "phase": "",
+        "question": "",
+        "options": [],
+        "required_capabilities": [],
+        "tool_window": []
       }
     }
   ],

@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     admin,
     admin_mcp,
+    admin_policies,
     admin_system,
     agents,
     artifacts,
@@ -104,6 +105,8 @@ api_router.include_router(control_logs.router, prefix="/control-logs", tags=["co
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 api_router.include_router(admin_mcp.router, prefix="/admin/mcp", tags=["admin"])
 api_router.include_router(admin_system.router, prefix="/admin/system", tags=["admin"])
+# 运行时策略热更新（方案《降级熔断与运行时干预》§1）：运维面板读写策略，Worker 轮询生效。
+api_router.include_router(admin_policies.router, prefix="/admin/policies", tags=["admin"])
 
 # 公共知识库
 api_router.include_router(public_kb.router, prefix="/public-kb", tags=["public-kb"])

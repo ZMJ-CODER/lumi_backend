@@ -29,6 +29,18 @@ FEATURE_FLAGS: tuple[str, ...] = (
     "STEP_CHECKPOINT_V2",
     # 开启后副作用日志同时记录 effect_type / effect_key，并支持 pending 在途核对。
     "EFFECT_JOURNAL_TYPED_V2",
+    # ── 运行时干预与写侧安全（方案《降级熔断与运行时干预》）──
+    # 开启后 Worker 读取 ``policy:<epoch>`` 运行时策略（超时/并发/启停）并接受运维覆盖；
+    # 关闭时零开销直通（只认代码与 .env）。
+    "RUNTIME_POLICY_OVERRIDE",
+    # 开启后写类操作必须持有**未过期且代际一致**的写租约，Redis 异常或代际不一致
+    # 一律 Fail-Closed（读路径仍然 Fail-Open）。
+    "WRITE_GATE_ENFORCEMENT",
+    # ── 工具注册表（方案《工具发现链路》P1）──
+    # 开启后"工具→能力 / 能力→MCP 目标 / 动作意图→工具窗口 / 审批 / Provider 路由 /
+    # 执行环境 / 可见场景"都从统一 Tool Registry 派生；**静态表退化为兜底**。
+    # 关闭时静态表仍是唯一真相源（行为逐字不变），影子对比仍可随时打点。
+    "TOOL_REGISTRY_DERIVED",
 )
 
 #: 影子模式开关（不属于上面六个：它控制"是否只观察"）。

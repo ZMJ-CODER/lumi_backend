@@ -142,13 +142,20 @@ class WorkspaceCoverageAgent(WorkerAgent):
         notes: list[str] = []
 
         # 1) 发现候选：ALL 模式以目录清单为准；SELECTED 模式先 search 再 list 兜底。
+        # ``discovery`` 记下两次发现的**真实结局**（含 empty 与失败码）：候选为空时
+        # 必须能区分"工作区里确实没有可读文件"与"搜索/枚举根本没成功"——此前
+        # empty 被当成 ok、失败码只留在 notes 且出口分支不返回 notes，
+        # 结果一律显示"没有找到与目标相关的可读文件"，把读取工具不可用说成没有资料。
+        discovery: dict[str, dict] = {}
         if coverage_target != COVERAGE_ALL:
             search = await self._call(ctx, {"action": "search", "query": query, "search_path": directory})
+            discovery["search"] = _discovery_fact(search)
             if search["ok"]:
                 matches = list((search.get("data") or {}).get("matches") or [])
             else:
                 notes.append(f"搜索不可用（{search.get('error_code') or 'SEARCH_FAILED'}），改用目录清单")
         listing = await self._call(ctx, {"action": "list", "path": directory})
+        discovery["list"] = _discovery_fact(listing)
         if listing["ok"]:
             entries = list((listing.get("data") or {}).get("entries") or [])
         elif coverage_target == COVERAGE_ALL:
@@ -175,14 +182,21 @@ class WorkspaceCoverageAgent(WorkerAgent):
                 ][:3]
 
         if not candidates:
+            failure_code = _discovery_failure_code(discovery)
             return {
                 "success": False,
-                "error": "工作区里没有找到与目标相关的可读文件，已停止而不是编造内容。",
-                "error_code": "WORKSPACE_NO_CANDIDATE",
-                "retryable": False,
+                # 文案按**真实原因**分流：读取链路失败（搜索/枚举不可用、未绑定工作区）
+                # 时绝不说成"工作区里没有相关资料"，否则用户会以为读取工具坏了/没资料。
+                "error": _no_candidate_message(failure_code, discovery),
+                "error_code": failure_code or "WORKSPACE_NO_CANDIDATE",
+                "retryable": bool(failure_code),
+                "tool": "workspace_navigator",
+                # 真实结局必须随出口带出（此前 candidates 为空的分支丢掉了 notes）。
+                "notes": list(notes),
+                "discovery": discovery,
                 "tool_metadata": self._metadata(
                     coverage_target, candidates, read_files, failed_files, skipped_files,
-                    matches, notes, coverage=COVERAGE_TARGETED,
+                    matches, notes, coverage=COVERAGE_TARGETED, discovery=discovery,
                 ),
             }
 
@@ -232,7 +246,7 @@ class WorkspaceCoverageAgent(WorkerAgent):
                 "候选文件全部读取失败，未能获得正文", notes,
                 extra=self._metadata(
                     coverage_target, candidates, read_files, failed_files, skipped_files,
-                    matches, notes, coverage=COVERAGE_PARTIAL,
+                    matches, notes, coverage=COVERAGE_PARTIAL, discovery=discovery,
                 ),
             )
 
@@ -243,7 +257,7 @@ class WorkspaceCoverageAgent(WorkerAgent):
         metadata = self._metadata(
             coverage_target, candidates, read_files, failed_files, skipped_files,
             matches, notes, coverage=coverage, truncated_files=truncated_files,
-            read_stats=read_stats,
+            read_stats=read_stats, discovery=discovery,
         )
         header = (
             f"已读取 {len(read_files)} 个工作区文件"
@@ -327,6 +341,7 @@ class WorkspaceCoverageAgent(WorkerAgent):
         coverage: str,
         truncated_files: list[str] | None = None,
         read_stats: dict[str, dict] | None = None,
+        discovery: dict | None = None,
     ) -> dict:
         truncated = list(truncated_files or [])
         return {
@@ -348,6 +363,9 @@ class WorkspaceCoverageAgent(WorkerAgent):
                 "failed_count": len(failed_files),
                 "skipped_count": len(skipped_files),
                 "truncated_count": len(truncated),
+                # 发现阶段的真实结局（search/list 的 status 与失败码）：候选为空时
+                # 下游/审计据此区分"工作区确实没资料"与"读取链路不可用"。
+                "discovery": dict(discovery or {}),
                 "notes": list(notes),
             },
         }
@@ -368,6 +386,66 @@ class WorkspaceCoverageAgent(WorkerAgent):
         if notes:
             payload["notes"] = list(notes)
         return payload
+
+
+def _discovery_fact(result: dict) -> dict:
+    """把一次发现调用的**真实结局**记成可审计事实（成功、空、还是失败）。
+
+    ``error_code`` 只在失败（``status == "error"``）时保留：客户端把"空工作区"正当地
+    报成 ``status=empty``，那不是错误，不能和"读取链路断了"混为一谈。
+    """
+    failed = str(result.get("status") or "") == "error"
+    return {
+        "status": str(result.get("status") or ""),
+        "error_code": str(result.get("error_code") or "") if failed else "",
+        "count": len((result.get("data") or {}).get("matches") or [])
+        or len((result.get("data") or {}).get("entries") or []),
+    }
+
+
+#: 读取链路失败的客户端码 → 既有恢复分类认识的稳定码
+#: （``app.agents.skills.recovery._CAPABILITY`` 含 ``MCP_UNAVAILABLE``/``CLIENT_OFFLINE``）。
+#: 直接沿用原码会让"设备离线 / 未绑定工作区"落进 ``execution`` 兜底：既不给用户下一步，
+#: 也不会升级重规划，与"读取链路断了"这一事实不符。
+_DISCOVERY_RECOVERY_CODES = {
+    "WORKSPACE_NOT_BOUND": "MCP_UNAVAILABLE",
+    "WORKSPACE_NOT_REGISTERED": "CLIENT_OFFLINE",
+    "WORKSPACE_DEVICE_OFFLINE": "CLIENT_OFFLINE",
+    "WORKSPACE_READ_FAILED": "MCP_UNAVAILABLE",
+    "MCP_UNAVAILABLE": "MCP_UNAVAILABLE",
+    "CLIENT_OFFLINE": "CLIENT_OFFLINE",
+    "CLIENT_TIMEOUT": "CLIENT_TIMEOUT",
+}
+
+
+def _discovery_failure_code(discovery: dict) -> str:
+    """候选为空时优先报**读取链路失败**的原因码；都对不上才是真的"没有候选"。"""
+    for fact in discovery.values():
+        if str(fact.get("status") or "") != "error":
+            continue
+        raw = str(fact.get("error_code") or "") or "WORKSPACE_READ_FAILED"
+        return _DISCOVERY_RECOVERY_CODES.get(raw, raw)
+    return ""
+
+
+def _discovery_error_detail(discovery: dict) -> str:
+    """把链路失败的原始码写进文案（恢复码是稳定码，原始码才是诊断依据）。"""
+    for name, fact in discovery.items():
+        if str(fact.get("status") or "") == "error":
+            action = {"search": "搜索", "list": "目录枚举"}.get(str(name), str(name))
+            return f"{action}不可用（{str(fact.get('error_code') or 'WORKSPACE_READ_FAILED')}）"
+    return ""
+
+
+def _no_candidate_message(error_code: str, discovery: dict) -> str:
+    """候选为空时的用户可见文案：链路失败与"确实没资料"必须分开说。"""
+    if error_code:
+        return (
+            f"工作区读取链路不可用：{_discovery_error_detail(discovery)}，"
+            "本次没有拿到任何可读文件，已停止而不是编造内容。"
+            "请确认本机客户端在线且已绑定当前工作区后重试。"
+        )
+    return "工作区里没有找到与目标相关的可读文件，已停止而不是编造内容。"
 
 
 __all__ = [

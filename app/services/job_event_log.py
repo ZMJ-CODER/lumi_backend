@@ -97,10 +97,39 @@ async def record_frames(frames: list[dict[str, Any]]) -> int:
 
 
 async def read_frames(job_id: str, *, after_seq: int = 0, limit: int = 500) -> list[dict[str, Any]]:
-    """按 ``after_seq`` 读取任务事件（``seq`` 严格大于给定值，保持原有顺序）。"""
+    """按 ``after_seq`` 读取任务事件（``seq`` 严格大于给定值，保持原有顺序）。
+
+    **读失败返回空列表**（与"确实没有新事件"无法区分），因此恢复协议不得只看这个
+    返回值：必须配合 :func:`event_log_state` 判断是"读不到"还是"真没有"。
+    """
+    frames, _state = await read_frames_with_state(job_id, after_seq=after_seq, limit=limit)
+    return frames
+
+
+async def read_frames_with_state(
+    job_id: str,
+    *,
+    after_seq: int = 0,
+    limit: int = 500,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """读增量并**如实报告日志状态**。
+
+    返回 ``(frames, state)``，``state`` 字段：
+
+    * ``available``：日志可读（``False`` = Redis 读失败/降级，此时 ``frames`` 必然为空，
+      **不能**解释成"已追平"）；
+    * ``oldest_seq``：日志里**最小**的 ``seq``（被 ``ltrim`` 裁剪后的起点）。客户端水位
+      小于它就意味着中间那段事件已经不存在了，必须如实报缺口；
+    * ``head_seq``：最大 ``seq``；
+    * ``count``：日志总条数。
+
+    为什么必须分开：评审指出的 P0 —— ``read_frames`` 读失败返回 ``[]``，恢复接口于是
+    返回 ``snapshot_only / truncated=false / retry_after_ms=0``，前端以为追平了，
+    实际上日志根本没读到。
+    """
     target = str(job_id or "")
     if not target:
-        return []
+        return [], {"available": False, "oldest_seq": 0, "head_seq": 0, "count": 0}
     try:
         from app.core.redis import get_redis
 
@@ -108,9 +137,14 @@ async def read_frames(job_id: str, *, after_seq: int = 0, limit: int = 500) -> l
         rows = await redis.lrange(_key(target), 0, -1)
     except Exception as exc:  # noqa: BLE001
         logger.debug("[job-event-log] 读取失败（降级）: {}", str(exc)[:120])
-        return []
+        return [], {"available": False, "oldest_seq": 0, "head_seq": 0, "count": 0}
+
     out: list[dict[str, Any]] = []
     floor = max(0, int(after_seq or 0))
+    cap = max(1, int(limit or 500))
+    oldest = 0
+    head = 0
+    total = 0
     for raw in rows or []:
         try:
             frame = json.loads(raw)
@@ -118,16 +152,18 @@ async def read_frames(job_id: str, *, after_seq: int = 0, limit: int = 500) -> l
             continue
         if not isinstance(frame, dict):
             continue
+        total += 1
         try:
             seq = int(frame.get("seq") or 0)
         except (TypeError, ValueError):
             seq = 0
-        if seq <= floor:
+        if seq:
+            oldest = seq if not oldest else min(oldest, seq)
+            head = max(head, seq)
+        if seq <= floor or len(out) >= cap:
             continue
         out.append(frame)
-        if len(out) >= max(1, int(limit or 500)):
-            break
-    return out
+    return out, {"available": True, "oldest_seq": oldest, "head_seq": head, "count": total}
 
 
 def last_seq_of(frames: list[dict[str, Any]]) -> int:
@@ -139,6 +175,42 @@ def last_seq_of(frames: list[dict[str, Any]]) -> int:
         except (TypeError, ValueError):
             continue
     return best
+
+
+async def head_seq(job_id: str) -> int:
+    """事件日志的**当前水位**（末尾帧的 ``seq``）。
+
+    恢复协议需要它回答两个问题："补拉是否已经到底"与"快照水位落后多少"。
+    实现上只读列表末尾若干条而不是全量：日志有上界（``_MAX_EVENTS_PER_JOB``），
+    但恢复路径必须保持 O(尾批) 而不是 O(全量)，否则丢包重连会拖慢整个接口。
+    """
+    target = str(job_id or "")
+    if not target:
+        return 0
+    try:
+        from app.core.redis import get_redis
+
+        redis = get_redis()
+        tail = await redis.lrange(_key(target), -_HEAD_SCAN_LIMIT, -1)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[job-event-log] 水位读取失败（降级）: {}", str(exc)[:120])
+        return 0
+    best = 0
+    for raw in tail or []:
+        try:
+            frame = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(frame, dict):
+            try:
+                best = max(best, int(frame.get("seq") or 0))
+            except (TypeError, ValueError):
+                continue
+    return best
+
+
+#: 读水位时只看末尾这么多条（seq 单调递增，找到最大即可）。
+_HEAD_SCAN_LIMIT = 50
 
 
 class FrameRecorder:
@@ -175,7 +247,9 @@ class FrameRecorder:
 __all__ = [
     "FrameRecorder",
     "SKIP_EVENT_TYPES",
+    "head_seq",
     "last_seq_of",
     "read_frames",
+    "read_frames_with_state",
     "record_frames",
 ]

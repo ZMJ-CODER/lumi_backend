@@ -31,6 +31,80 @@ CATEGORY_TITLE = "title"
 CATEGORY_REWRITE = "rewrite"
 CATEGORY_PRIVACY_CONFIRM = "privacy_confirm"
 
+#: 每百万 token 的估算价格（USD）：``model 子串 → (输入, 输出)``。
+#:
+#: 只用于 **Prometheus 成本速率**（回答"降级后的单任务成本有没有变贵"），不是账单口径：
+#: 有些模型没有公开单价，就按同档位近似；查不到就返回 0（宁可少算，也不编一个数）。
+#: 键是**小写子串**匹配，因此 ``deepseek-v4-flash`` 命中 ``deepseek`` 这一档。
+MODEL_PRICE_USD_PER_MTOK: tuple[tuple[str, tuple[float, float]], ...] = (
+    ("deepseek-reasoner", (0.55, 2.19)),
+    ("deepseek", (0.27, 1.10)),
+    ("qwen-vl", (0.35, 1.05)),
+    ("qwen-turbo", (0.05, 0.20)),
+    ("qwen", (0.30, 0.90)),
+    ("gpt-4o-mini", (0.15, 0.60)),
+    ("gpt-4o", (2.50, 10.00)),
+    ("claude", (3.00, 15.00)),
+)
+
+
+def estimate_cost_usd(*, model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """按内置价目估算一次调用的成本（USD）；未知模型返回 ``0.0``。
+
+    返回 0 的语义是"没算出来"，不是"免费"——所以 Grafana 上的成本曲线只用于**相对对比**
+    （``is_fallback`` 两条线谁更贵），不能当财务数据用。
+    """
+    name = str(model or "").strip().casefold()
+    if not name:
+        return 0.0
+    for keyword, (input_price, output_price) in MODEL_PRICE_USD_PER_MTOK:
+        if keyword in name:
+            return round(
+                (max(0, int(prompt_tokens or 0)) / 1_000_000.0) * float(input_price)
+                + (max(0, int(completion_tokens or 0)) / 1_000_000.0) * float(output_price),
+                8,
+            )
+    return 0.0
+
+
+def record_usage_metrics(
+    *,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    fallback_used: bool = False,
+    fallback_from: str = "",
+    fallback_to: str = "",
+    success: bool = True,
+    cost_usd: float = 0.0,
+    scene: str = "",
+    provider: str = "",
+    result: str = "",
+) -> None:
+    """把一次用量折进 Prometheus（失败静默：指标绝不能影响主流程）。
+
+    label 只透传**低基数**维度（scene/provider/model/fallback_*/result）；调用方不要
+    往里塞 user_id / job_id / prompt——那会让时间序列数随用户数线性增长。
+    """
+    try:
+        from app.core.observability import record_llm_usage_metrics
+
+        record_llm_usage_metrics(
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            fallback_used=fallback_used,
+            fallback_from=fallback_from,
+            fallback_to=fallback_to,
+            success=success,
+            cost_usd=cost_usd,
+            scene=scene,
+            provider=provider,
+            result=result,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("LLM 指标记录失败（不影响主流程）: {}", str(exc)[:120])
+
 
 async def record_usage(
     user_id: str | None,
@@ -60,6 +134,25 @@ async def record_usage(
     """
     prompt_tokens = int(prompt_tokens or 0)
     completion_tokens = int(completion_tokens or 0)
+    # 降级成本监控（方案 §5）：无论数据库写入成功与否，Prometheus 都必须拿到这次用量
+    # ——指标是"率"的计算来源，不能依赖 llm_usage 表（老库缺列时它会被降级跳过）。
+    # label 取值全部来自**低基数**维度（scene=category、provider=config_source）；
+    # user_id 只进数据库，绝不进 label。
+    record_usage_metrics(
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        fallback_used=fallback_used,
+        fallback_from=str(config_source or "") if fallback_used else "",
+        fallback_to=model if fallback_used else "",
+        success=structured_ok is not False,
+        result=("ok" if structured_ok is not False else "structured_error"),
+        scene=str(category or ""),
+        provider=str(config_source or ""),
+        cost_usd=estimate_cost_usd(
+            model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
+        ),
+    )
     if prompt_tokens + completion_tokens <= 0:
         return
     uid = None
@@ -177,3 +270,26 @@ async def aggregate_daily_stats(session: AsyncSession) -> int:
     await session.execute(delete(LLMUsage).where(func.date(LLMUsage.created_at) < today))
     await session.commit()
     return len(rows)
+
+
+__all__ = [
+    "CATEGORY_CHAT",
+    "CATEGORY_CODE",
+    "CATEGORY_MEMORY_EXTRACT",
+    "CATEGORY_MEMORY_MERGE",
+    "CATEGORY_MEMORY_PROFILE",
+    "CATEGORY_PLAN",
+    "CATEGORY_PRIVACY_CONFIRM",
+    "CATEGORY_REVIEW",
+    "CATEGORY_REWRITE",
+    "CATEGORY_SKILL",
+    "CATEGORY_SUMMARY",
+    "CATEGORY_TITLE",
+    "CATEGORY_TOOL_DECISION",
+    "MODEL_PRICE_USD_PER_MTOK",
+    "aggregate_daily_stats",
+    "estimate_cost_usd",
+    "estimate_tokens",
+    "record_usage",
+    "record_usage_metrics",
+]

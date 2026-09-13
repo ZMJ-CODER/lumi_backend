@@ -115,10 +115,27 @@ def tool_spec_from(tool: Any, *, namespace: str = "lumi", internal: bool = False
         (item for item in Sensitivity if item.value == raw_sensitivity.upper()), Sensitivity.INTERNAL
     )
     side_effect = _side_effect(raw_name if is_mcp else name, write_op)
+    # 声明档位（插件/Tool 自己写的 ``risk_tier``）优先于"按副作用猜"：
+    # 副作用只说"会不会改东西"，档位还要表达"改得可不可逆"（回滚/强推/发布）。
+    declared_tier = ""
+    try:
+        declared_tier = str(_value(tool, "risk_tier", default="") or "").strip().casefold()
+    except Exception:  # noqa: BLE001
+        declared_tier = ""
+    if declared_tier not in {"auto", "routine", "critical"}:
+        declared_tier = ""
     # 有副作用 → 至少 MEDIUM；需确认 → HIGH（不再靠调用点各自判断）。
     risk = RiskLevel.LOW
     if side_effect is not SideEffect.NONE:
         risk = RiskLevel.HIGH if requires_confirmation else RiskLevel.MEDIUM
+    if declared_tier == "critical":
+        risk = RiskLevel.CRITICAL
+    elif declared_tier == "auto":
+        risk = RiskLevel.LOW
+    # 声明为 C 档的工具必须同时声明"需要审批"，否则契约自检会认为声明自相矛盾
+    # （高风险写工具却写"无需审批"）。这里按声明补齐，而不是让自检失败。
+    if declared_tier == "critical":
+        requires_confirmation = True
     return ToolSpec(
         name=name,
         # 客户端/MCP 能力与后端工具分命名空间隔离（方案第七节）。

@@ -102,6 +102,7 @@ class PluginInstallation:
 
     def to_api(self) -> dict[str, Any]:
         manifest = self.manifest
+        declared_tier, requires_confirmation = _declared_governance(manifest)
         return {
             "plugin_id": manifest.id,
             "name": manifest.name or manifest.id,
@@ -122,6 +123,10 @@ class PluginInstallation:
             "previous_version": self.previous_version,
             "data_leaves_device": str(manifest.data_locality) != "local_only",
             "needs_local_confirmation": manifest.needs_approval,
+            # 统一档位词表给出的**声明档位**（前端据此展示"这个插件按什么档治理"）。
+            # 空串 = Manifest 没声明副作用，档位由它提供的能力描述符决定。
+            "declared_risk_tier": declared_tier,
+            "requires_confirmation": requires_confirmation,
             "needs_restart": manifest.deployment.value == "client",
             "needs_workspace_binding": any(
                 str(item).startswith("workspace.") for item in manifest.provides.capabilities
@@ -615,6 +620,25 @@ def _policy_ref(installation: PluginInstallation) -> Any:
     from lumi_contracts.plugins import PolicyRef
 
     return PolicyRef(id=installation.plugin_id, version=installation.version, source="plugin")
+
+
+def _declared_governance(manifest: PluginManifest) -> tuple[str, bool]:
+    """Manifest 声明 → ``(档位, 是否需确认)``。
+
+    档位词表只有一份（统一工具注册表），这里只做**读取**：插件面板展示的档位与
+    审批引擎实际使用的档位必须来自同一张表，否则"界面说自动、执行时弹确认"这类
+    不一致会永远修不干净。读不到就退回契约层的保守判定。
+    """
+    try:
+        from app.agents.capabilities.tool_registry import (
+            manifest_requires_local_confirmation,
+            manifest_tier_of,
+        )
+
+        return manifest_tier_of(manifest), manifest_requires_local_confirmation(manifest)
+    except Exception as exc:  # noqa: BLE001 - 展示层降级，不影响安装/启用
+        logger.debug("[plugins] Manifest 档位派生失败（退回契约判定）: {}", str(exc)[:120])
+        return "", bool(getattr(manifest, "needs_approval", False))
 
 
 def _manifest_from_record(row: dict[str, Any]) -> PluginManifest:

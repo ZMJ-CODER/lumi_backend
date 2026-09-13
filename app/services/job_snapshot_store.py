@@ -242,6 +242,33 @@ async def read_snapshot(job_id: str, *, redis: Any = None) -> JobRunView | None:
         return None
 
 
+async def read_snapshot_baseline(job_id: str, *, redis: Any = None) -> tuple[JobRunView | None, int]:
+    """快照 + 它覆盖到的**事件水位**（``last_seq``）。
+
+    断线恢复（``app/services/resume_snapshot.py``）只认这一个入口：快照天然是一次
+    "某个 seq 上的检查点"，恢复路径因此不需要重建视图，也**不需要自己知道快照键**
+    （键只在本模块出现这条契约由 ``tests/test_job_snapshot_write_guard.py`` 守着——
+    多一个模块拼同一个键，就多一条可能绕过体积收缩与写入规范的路径）。
+    """
+    view = await read_snapshot(job_id, redis=redis)
+    if view is None:
+        return None, 0
+    return view, int(getattr(view, "last_seq", 0) or 0)
+
+
+async def read_snapshot_payload(job_id: str, *, redis: Any = None) -> tuple[dict[str, Any] | None, int]:
+    """快照的**已收缩载荷** + 事件水位（给恢复路径用，调用方不需要 ``JobRunView``）。
+
+    为什么单独给一个"返回 dict"的入口：序列化只允许发生在本模块（``snapshot_payload``
+    → ``to_snapshot()``）。恢复路径若自己调 ``view.to_snapshot()``，静态守卫会（正确地）
+    把它认成"第二条序列化路径"——即使当前参数是安全的，也不能靠"这次没写错"来维持边界。
+    """
+    view = await read_snapshot(job_id, redis=redis)
+    if view is None:
+        return None, 0
+    return snapshot_payload(view), int(getattr(view, "last_seq", 0) or 0)
+
+
 async def persist_job_snapshot(job: Any, *, ttl_seconds: int | None = None, redis: Any = None) -> JobRunView:
     """内核 ``Job`` → 运行视图快照 → Redis（调用方无需再自己序列化）。"""
     view = view_from_job(job)
@@ -258,6 +285,8 @@ __all__ = [
     "default_ttl_seconds",
     "persist_job_snapshot",
     "read_snapshot",
+    "read_snapshot_baseline",
+    "read_snapshot_payload",
     "snapshot_json",
     "snapshot_key",
     "snapshot_payload",

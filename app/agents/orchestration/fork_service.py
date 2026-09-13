@@ -8,7 +8,6 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus
-from app.agents.orchestration.runtime_gateway import RuntimeGateway
 from app.agents.orchestration.submission_guard import UserJobLimitError
 from app.agents.orchestration.admission import job_admission
 from app.core.config import settings

@@ -19,6 +19,20 @@ from app.agents.orchestration.temporal.client import load_job_llm_config
 from app.core.config import settings
 
 
+def _install_node_deadline(timeout: float):
+    """给一次节点 Activity 装上任务级预算（返回还原凭证；失败一律不影响执行）。
+
+    ``timeout`` 与 Temporal 的 ``start_to_close_timeout`` 同源（节点超时），因此
+    "内部调用按预算收尾"会**早于**"Temporal 硬掐 Activity"，两者不会互相打架。
+    """
+    try:
+        from app.core.deadline import install_job_deadline
+
+        return install_job_deadline(budget=float(timeout), source="job.temporal_activity")
+    except Exception:  # noqa: BLE001 - 预算装配失败不能阻止节点执行
+        return None
+
+
 def _json_safe(obj):
     """保证 Activity 返回值可被 Temporal JSON 数据转换器序列化."""
     try:
@@ -270,6 +284,10 @@ async def execute_node_activity(payload: dict) -> dict:
             }
 
     timeout = node_timeout_seconds(node, int(cfg.get("node_timeout_seconds") or 300))
+    # 任务级预算，与 Temporal 的 `start_to_close_timeout` **同源**（都来自节点超时）：
+    # Activity 被硬超时掐死之前，内部的 LLM/MCP 调用先一步按预算收尾——否则"被 Temporal
+    # 掐死"会留下半个节点与不一致的副作用状态。装在并发闸门之外：等锁的时间不算预算。
+    deadline_token = _install_node_deadline(timeout)
     try:
         from app.agents.orchestration.channel_limits import channel_limiter
 
@@ -308,6 +326,9 @@ async def execute_node_activity(payload: dict) -> dict:
             except (EffectJournalUnavailable, RuntimeError):
                 pass
         raise
+    finally:
+        if deadline_token is not None:
+            deadline_token.reset()
 
     if effectful and node.idempotency_key:
         if out.get("status") == "completed":

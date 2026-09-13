@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from typing import Any
 
@@ -51,6 +51,9 @@ class WorkerContext:
     authorized_project_ids: tuple[str, ...] = ()
     # Trusted active desktop workspace supplied by the task submission.
     workspace_id: str = ""
+    # 方案 4：任务画像的**只读事实**（由编排器注入；Worker 不得自行解析用户原文判意图）。
+    # 只放枚举级字段：action_intents / target_clarity / intent_type 等。
+    task_profile: dict[str, Any] = field(default_factory=dict)
 
 
 class WorkerAgent(ABC):

@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from app.services.safe_delete import remove_file
+
 
 SUPPORTED_FORMATS = {"docx", "pptx", "xlsx"}
 SUPPORTED_STYLES = {"business", "minimal", "academic", "modern"}
@@ -168,7 +170,8 @@ def render_document(params: dict[str, Any], output_dir: Path) -> Path:
         temporary.replace(target)
         return target
     except Exception:
-        temporary.unlink(missing_ok=True)
+        # 受控删除：边界 = 该临时文件所在目录（渲染失败时的清理路径）。
+        remove_file(temporary.parent, temporary)
         raise
 
 

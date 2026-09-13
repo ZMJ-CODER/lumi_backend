@@ -6,12 +6,12 @@ import asyncpg
 
 async def main():
     log = open("migrate_log.txt", "w", encoding="utf-8")
-    
+
     def log_print(msg):
         print(msg)
         log.write(msg + "\n")
         log.flush()
-    
+
     try:
         log_print("开始迁移 users 表结构...")
         conn = await asyncpg.connect("postgresql://postgres:postgres@localhost:5432/lumi_db")
@@ -75,7 +75,7 @@ async def main():
         await conn.close()
         log_print("")
         log_print("所有迁移已成功完成!")
-        
+
     except Exception as e:
         log_print(f"错误: {e}")
         import traceback

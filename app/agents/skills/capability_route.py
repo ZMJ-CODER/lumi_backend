@@ -105,6 +105,19 @@ def skill_result_from_capability(
     )
 
 
+def _shared_lease_service() -> Any:
+    """共享租约服务（与 ``/capabilities/register`` 同一个实例）。
+
+    调用方忘了注入时**必须**回落到它：交给能力门禁的 ``lease_service`` 一旦是 ``None``，
+    ``CapabilityDispatchAdapter`` 会在 ``self._leases.snapshot()`` 抛 ``AttributeError``，
+    被本模块吞掉后每次工具调用都静默绕开能力路由。宁可让门禁真的跑起来，
+    也不要"看起来在灰度、其实从来没生效"。
+    """
+    from app.services.capability_lease import capability_lease_service
+
+    return capability_lease_service
+
+
 async def try_capability_route(
     *,
     tool_name: str,
@@ -128,6 +141,8 @@ async def try_capability_route(
     命中时把它翻译成能力审批上下文交给 Broker 门禁；未命中则按"未审批"处理——需要审批
     的写/执行能力会返回 ``APPROVAL_REQUIRED``，而不是偷偷执行。
 
+    ``lease_service`` 缺省为共享租约服务（见 :func:`_shared_lease_service`）。
+
     任何内部异常都**降级为 None**（走旧路径并记录），绝不让能力路由把一次工具调用打挂
     ——它是旁路，不是新的单点故障。
     """
@@ -135,6 +150,8 @@ async def try_capability_route(
     if resolved == MODE_OFF:
         # 零开销：连上下文都不构造。
         return None
+    if lease_service is None:
+        lease_service = _shared_lease_service()
     try:
         context = AgentExecutionContext.from_metadata(
             user_id=user_id,

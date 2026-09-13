@@ -611,6 +611,50 @@ class Settings(BaseSettings):
     #: 影子运行：只记录"新逻辑会做什么"的差异，不改变实际返回。
     INTEGRATION_SHADOW_MODE: bool = False
 
+    # ── 运行时策略覆盖（策略热更新：Redis Key + TTL + 本地轮询）──
+    # 打开后 Worker 才会去读 ``policy:<epoch>`` 并接受运行时覆盖；关闭时是零开销直通
+    # （所有调用点拿到的都是代码/``.env`` 默认值）。写操作见 ``/api/v1/admin/policies``。
+    RUNTIME_POLICY_OVERRIDE: bool = False
+    #: 轮询间隔（秒）：最坏情况下策略生效延迟 = 一个间隔。
+    POLICY_POLL_INTERVAL_SECONDS: float = 10.0
+    #: 本地缓存可信上限（秒）：Redis 挂掉后超过它必须退回代码默认值，而不是无限期用旧策略。
+    POLICY_CACHE_MAX_TTL_SECONDS: float = 600.0
+    #: epoch 桶 TTL（秒）：旧桶没人读也要自己过期，避免运维面板把 Redis 写满。
+    POLICY_BUCKET_TTL_SECONDS: int = 86400
+    #: 代码默认值（第三层兜底的终点；``.env`` 改的就是它们）。
+    POLICY_DEFAULT_TIMEOUT_SECONDS: float = 30.0
+    POLICY_DEFAULT_MAX_CONCURRENT: int = 4
+
+    # ── 统一绝对截止时间（contextvars 传播）──
+    # 一次请求/任务的总预算（秒）。入口设一次，深层调用只读剩余预算，不逐层传参。
+    REQUEST_DEADLINE_SECONDS: float = 300.0
+    #: 剩余预算低于该值即拒绝发起新的外部调用（留给收尾与落盘的时间）。
+    REQUEST_DEADLINE_MIN_BUDGET_SECONDS: float = 1.0
+    #: **任务级**预算（秒）：后台 Job 的每一次执行段都自带预算，避免"请求预算已耗尽
+    #: 但后台还在跑"或"后台完全没有上限"。``0`` = 关闭（不限制，也仍然与请求预算解耦）。
+    #: 与请求预算的关系是**替换**而不是取小：后台任务的存活时间不该由 HTTP 请求的剩余
+    #: 预算决定（SSE 断开后请求预算可能只剩几秒）。
+    JOB_DEADLINE_SECONDS: float = 1800.0
+    #: 任务预算耗尽时的收尾余量（秒）：与请求侧共用 min-budget 语义，单独给一个更宽松的
+    #: 默认值，避免把"落盘/发事件"也掐掉。
+    JOB_DEADLINE_MIN_BUDGET_SECONDS: float = 1.0
+
+    # ── 写操作代际校验（Redis Fail-Open 的写侧 Fail-Closed）──
+    # 关闭（默认）时写路径零开销直通；打开后写类操作必须持有未过期且代际一致的租约。
+    WRITE_GATE_ENFORCEMENT: bool = False
+    #: 写租约有效期（秒）：本地缓存里的授权超过它就视为过期 → 阻断。
+    WRITE_GATE_LEASE_TTL_SECONDS: int = 120
+    #: 代际键 TTL（秒）：租约本身在 Redis 的存活时间。
+    WRITE_GATE_REDIS_TTL_SECONDS: int = 600
+
+    # ── 统一工具注册表（方案《工具发现链路》P1）──
+    # 打开后"工具→能力 / 能力→MCP 目标 / 动作意图→工具窗口 / 审批 / Provider 路由 /
+    # 执行环境 / 可见场景"都从 Tool Registry 派生，静态表退化为兜底；关闭时静态表
+    # 仍是唯一真相源（行为逐字不变）。切换真相源前先看影子对比差异。
+    TOOL_REGISTRY_DERIVED: bool = False
+    #: 是否在任务提交时打点"静态 vs 派生"的影子差异（只记录，不改行为）。
+    TOOL_REGISTRY_SHADOW_LOG: bool = True
+
     # ── 文档类别与按类别半衰期（不同知识时效性不同）──
     RAG_DEFAULT_CATEGORY: str = "general"   # 默认类别
     RAG_CATEGORY_HALF_LIFE_DAYS: dict[str, int] = {

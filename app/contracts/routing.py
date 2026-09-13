@@ -29,15 +29,22 @@ from typing import Any
 from loguru import logger
 
 from lumi_contracts import (
+    ActionIntent,
+    CapabilityPreflight,
     Complexity,
+    ConfidenceSource,
     ExecutionRequest,
     ExecutionTarget,
     InfoSource,
+    IntentType,
     RouteDecision,
     RouteMode,
     Sensitivity,
     ServerContext,
+    TargetClarity,
+    TargetScope,
     TaskProfile,
+    normalize_preflight_state,
 )
 
 # ── 旧枚举串 ↔ 契约枚举（唯一登记处）──────────────────────────────
@@ -132,6 +139,9 @@ def task_profile_contract(profile: Any) -> TaskProfile:
     goal = str(getattr(profile, "goal", "") or "")
     if not goal:
         goal = "EXECUTE" if intent_type == "EXECUTE_ACTION" else "GENERATE"
+    # ── 方案 4 §1.1：动作意图等新字段（内核画像已带则原样上抛，缺失则按零副作用留空）──
+    action_intents = [str(_enum_value(item)) for item in (getattr(profile, "action_intents", None) or [])]
+    action_intents = [item for item in action_intents if item]
     return TaskProfile(
         goal=goal,
         complexity=_COMPLEXITY_BY_LEGACY.get(legacy_complexity, Complexity.ATOMIC),
@@ -142,6 +152,16 @@ def task_profile_contract(profile: Any) -> TaskProfile:
         required_capabilities=[str(item) for item in (getattr(profile, "required_capabilities", None) or [])],
         risk_level=_enum_value(getattr(profile, "risk_level", "")) or "low",
         confidence=float(getattr(profile, "confidence", 0.0) or 0.0),
+        intent_type=IntentType.EXECUTE_ACTION if intent_type == "EXECUTE_ACTION" else IntentType.GENERATE_ONLY,
+        action_intents=_action_intents(action_intents),
+        target_scope=_target_scope(getattr(profile, "target_scope", ""), sources),
+        target_clarity=_target_clarity(getattr(profile, "target_clarity", "")),
+        has_dependency=bool(getattr(profile, "has_dependency", False)),
+        has_runtime_decision=bool(getattr(profile, "has_runtime_decision", False))
+        or _enum_value(getattr(profile, "complexity", "")) == "M3",
+        approval_required=bool(getattr(profile, "approval_required", False)),
+        confidence_source=_confidence_source(getattr(profile, "confidence_source", "")),
+        decision_reason_code=str(getattr(profile, "decision_reason_code", "") or ""),
         debug={
             "legacy_complexity": legacy_complexity,
             "legacy_execution_target": target,
@@ -156,31 +176,142 @@ def task_profile_contract(profile: Any) -> TaskProfile:
     )
 
 
-def route_decision_contract(decision: Any, *, profile: Any = None) -> RouteDecision:
-    """路由决策（``lumi_orch``）→ 契约决策。
+def _action_intents(values: list[str]) -> list[ActionIntent]:
+    """动作意图字符串 → 契约枚举（非法值丢弃；不猜、不兜底成 WRITE）。"""
+    out: list[ActionIntent] = []
+    for item in values:
+        try:
+            parsed = ActionIntent(str(item).strip().upper())
+        except ValueError:
+            continue
+        if parsed not in out:
+            out.append(parsed)
+    return out
 
-    ``mode`` 保留为契约枚举；旧字符串放在 ``signals["legacy_mode"]``，
-    需要写快照/事件时用 :func:`legacy_route_mode` 取回，保证输出不变。
+
+def _target_scope(value: Any, sources: list[InfoSource]) -> TargetScope:
+    """目标范围：优先画像显式值，缺失时按信息源推导（只读事实，不解析原文）。"""
+    try:
+        return TargetScope(str(_enum_value(value)).strip().upper())
+    except ValueError:
+        pass
+    if InfoSource.WORKSPACE in sources:
+        return TargetScope.WORKSPACE
+    if InfoSource.ATTACHED_FILE in sources:
+        return TargetScope.ATTACHMENT
+    if {InfoSource.PUBLIC_WEB, InfoSource.PRIVATE_SERVICE} & set(sources):
+        return TargetScope.EXTERNAL_SERVICE
+    if InfoSource.SYSTEM_STATE in sources:
+        return TargetScope.SYSTEM_STATE
+    return TargetScope.USER_INPUT
+
+
+def _target_clarity(value: Any) -> TargetClarity:
+    try:
+        return TargetClarity(str(_enum_value(value)).strip().upper())
+    except ValueError:
+        return TargetClarity.KNOWN
+
+
+def _confidence_source(value: Any) -> ConfidenceSource:
+    try:
+        return ConfidenceSource(str(_enum_value(value)).strip().lower())
+    except ValueError:
+        return ConfidenceSource.HEURISTIC
+
+
+def route_decision_contract(
+    decision: Any,
+    *,
+    profile: Any = None,
+    contract_profile: TaskProfile | None = None,
+    preflight: Any = None,
+) -> RouteDecision:
+    """路由决策（``lumi_orch``）→ 契约决策（方案 4 §2.3 schema v2）。
+
+    ``mode`` 保留为契约枚举（历史视图）；``route_mode`` 是内核同名词表；旧字符串放在
+    ``signals["legacy_mode"]``，需要写快照/事件时用 :func:`legacy_route_mode` 取回，
+    保证既有输出不变。新增字段全部来自画像/决策，**不重新解析用户原文**。
+
+    :param contract_profile: 已经投影好的契约画像（避免重复投影，语义不变）。
+    :param preflight: 预检结论（``CapabilityPreflight`` / dict / 结果对象），可选。
     """
     blocked = bool(getattr(decision, "blocked", False))
     legacy_mode = _enum_value(getattr(getattr(decision, "mode", None), "value", getattr(decision, "mode", "")))
     mode = CONTRACT_MODE_BY_LEGACY.get(legacy_mode)
     if mode is None:
         mode = RouteMode.BLOCKED if blocked else RouteMode.DIRECT_CHAT
-    contract_profile = task_profile_contract(profile) if profile is not None else None
+    resolved_profile = contract_profile or (task_profile_contract(profile) if profile is not None else None)
     reason = str(getattr(decision, "reason", "") or "")
+    reason_code = str(getattr(decision, "reason_code", "") or "")
     return RouteDecision(
         mode=mode,
         reason=reason,
-        profile=contract_profile,
+        profile=resolved_profile,
         signals={
             "legacy_mode": legacy_mode,
-            "reason_code": str(getattr(decision, "reason_code", "") or ""),
+            "reason_code": reason_code,
             "blocked": blocked,
-            "assessor_source": str(getattr(profile, "assessor_source", "") or ""),
+            "approval_required": bool(getattr(decision, "approval_required", False)),
+            "needs_clarification": bool(getattr(decision, "needs_clarification", False)),
         },
-        required_capabilities=list(contract_profile.required_capabilities) if contract_profile else [],
+        required_capabilities=list(resolved_profile.required_capabilities) if resolved_profile else [],
         blocked_reason=reason if blocked else "",
+        # ── schema v2（加法）──
+        route_mode=legacy_mode,
+        intent_type=str(getattr(decision, "intent_type", "") or (str(resolved_profile.intent_type) if resolved_profile else "")),
+        action_intents=[str(item) for item in (getattr(decision, "action_intents", None) or (resolved_profile.action_intents if resolved_profile else ()))],
+        target_scope=str(resolved_profile.target_scope) if resolved_profile else "",
+        target_clarity=str(resolved_profile.target_clarity) if resolved_profile else "",
+        approval_required=bool(getattr(decision, "approval_required", False))
+        or bool(getattr(resolved_profile, "approval_required", False)),
+        needs_clarification=bool(getattr(decision, "needs_clarification", False)),
+        confidence=float(getattr(resolved_profile, "confidence", 0.0) or 0.0),
+        confidence_source=str(getattr(resolved_profile, "confidence_source", "")),
+        decision_reason_code=reason_code
+        or str(getattr(resolved_profile, "decision_reason_code", "") or ""),
+        capability_preflight=_preflight_contract(preflight),
+    )
+
+
+def _preflight_contract(preflight: Any) -> CapabilityPreflight | None:
+    """预检结论 → 契约对象（接受契约对象 / 结果对象 / dict；无法识别返回 ``None``）。"""
+    if preflight is None:
+        return None
+    if isinstance(preflight, CapabilityPreflight):
+        return preflight
+    if hasattr(preflight, "as_dict"):
+        payload = preflight.as_dict()
+        if isinstance(payload, dict):
+            return _preflight_from_mapping(payload)
+        return None
+    if isinstance(preflight, dict):
+        return _preflight_from_mapping(preflight)
+    return None
+
+
+def _preflight_from_mapping(payload: dict[str, Any]) -> CapabilityPreflight | None:
+    """把预检结果字典收敛成契约对象（``status`` 与 ``state`` 两种键名都认）。
+
+    历史状态名（``DEPENDENCY_MISSING``）经契约的别名归一，避免旧快照读不出来。
+    """
+    state = str(payload.get("state") or payload.get("status") or "").strip()
+    if not state:
+        return None
+    normalized = normalize_preflight_state(state)
+    if normalized is None:
+        return None
+    return CapabilityPreflight(
+        state=normalized,
+        error_code=str(payload.get("error_code") or ""),
+        safe_message=str(payload.get("safe_message") or ""),
+        safe_next_action=str(payload.get("safe_next_action") or payload.get("next_action") or ""),
+        question=str(payload.get("question") or ""),
+        options=[str(item) for item in (payload.get("options") or [])],
+        tool_window=[str(item) for item in (payload.get("tool_window") or [])],
+        must_call_model=bool(payload.get("must_call_model", normalized.ok)),
+        checks=[dict(item) for item in (payload.get("checks") or []) if isinstance(item, dict)],
+        required_capabilities=[str(item) for item in (payload.get("required_capabilities") or [])],
     )
 
 

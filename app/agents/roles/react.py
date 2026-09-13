@@ -88,6 +88,10 @@ class ReactStepAgent(WorkerAgent):
             initial_mode=str(node.params.get("mode") or "read_only"),
             domain_first=bool((node.metadata or {}).get("domain_stage")),
             workspace_id=ctx.workspace_id,
+            # 方案 4 §4.1：工具窗口由**画像**驱动（不再靠解析 instruction 关键词猜）。
+            action_intents=tuple(
+                str(item) for item in ((ctx.task_profile or {}).get("action_intents") or [])
+            ),
         ).run(instruction, office_docs=node.params.get("office_docs") or [])
         if not result.success:
             return {"success": False, "error": result.error or "ReAct 任务未完成",

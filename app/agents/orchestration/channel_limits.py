@@ -26,8 +26,20 @@ def _limit(_channel: str) -> int:
 
 
 def _llm_limit() -> int:
-    """LLM 专用并发预算，不随普通 DAG 并发上限线性放大。"""
-    return max(1, int(getattr(settings, "AGENT_LLM_MAX_CONCURRENCY", 5) or 5))
+    """LLM 专用并发预算，不随普通 DAG 并发上限线性放大。
+
+    ``default`` 级运行时策略可以覆盖它（运维要压并发时不必改 .env 重启）；
+    开关关闭时是零开销直通。
+    """
+    base = max(1, int(getattr(settings, "AGENT_LLM_MAX_CONCURRENCY", 5) or 5))
+    try:
+        from app.services.runtime_policy import policy_store, runtime_policy_enabled
+
+        if runtime_policy_enabled():
+            return policy_store.max_concurrent(fallback=base)
+    except Exception:  # noqa: BLE001 - 策略读取失败沿用配置值
+        pass
+    return base
 
 
 class ChannelLimiter(KernelChannelLimiter):

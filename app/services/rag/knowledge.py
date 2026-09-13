@@ -26,6 +26,7 @@ from app.services.rag.embeddings import embed_query, embed_texts
 from app.models.db_models import Document, DocumentChunk, KnowledgeSpace
 from app.services.rag.cleaner import HARD_FAIL_CODES, DocumentQualityError, assess_document, clean_document
 from app.services.rag.document_parser import parse_document_with_metadata
+from app.services.safe_delete import UnsafeRemoval, remove_file
 
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
 
@@ -107,6 +108,11 @@ def _vector_str(vec: list[float]) -> str:
 def _doc_file_path(user_id: str, doc_id: uuid.UUID, filename: str) -> Path:
     ext = Path(filename).suffix.lower()
     return Path(settings.UPLOAD_DIR) / str(user_id) / f"{doc_id}{ext}"
+
+
+def _user_upload_dir(user_id: str) -> Path:
+    """某个用户的上传目录：删除文档文件时的**受控边界**。"""
+    return Path(settings.UPLOAD_DIR) / str(user_id)
 
 
 async def _ensure_space_owned(session: AsyncSession, space_id: str, user_id: str) -> KnowledgeSpace:
@@ -210,8 +216,9 @@ async def delete_space(session: AsyncSession, space_id: str, user_id: str) -> bo
     for doc in docs:
         path = _doc_file_path(str(doc.user_id), doc.id, doc.filename)
         try:
-            path.unlink(missing_ok=True)
-        except OSError as e:
+            # 受控删除：边界 = 该用户的上传目录。
+            remove_file(_user_upload_dir(str(doc.user_id)), path)
+        except (OSError, UnsafeRemoval) as e:
             logger.warning("删除文件失败 {}: {}", path, e)
     return True
 
@@ -332,8 +339,9 @@ async def delete_document(session: AsyncSession, document_id: str, user_id: str)
     await session.flush()
     path = _doc_file_path(str(doc.user_id), doc.id, doc.filename)
     try:
-        path.unlink(missing_ok=True)
-    except OSError as e:
+        # 受控删除：边界 = 该用户的上传目录。
+        remove_file(_user_upload_dir(str(doc.user_id)), path)
+    except (OSError, UnsafeRemoval) as e:
         logger.warning("删除文件失败 {}: {}", path, e)
     return True
 

@@ -366,6 +366,10 @@ def _skill_capability(skill: Tool) -> ToolCapability:
         permission=skill.permission,
         write_op=_skill_is_write(skill),
         requires_confirmation=bool(skill.requires_confirmation),
+        # 工具自己声明的档位/策略必须随能力一起流转：审批引擎、注册表与前端读到的
+        # 都应该是同一次声明，而不是各自维护一份"新工具清单"。
+        risk_tier=str(getattr(skill, "risk_tier", "") or ""),
+        approval_policy=str(getattr(skill, "approval_policy", "") or ""),
         confirmation_mode="client" if skill.environment == "client" else "server",
         idempotent=bool(skill.idempotent and not _skill_is_write(skill)),
         resource_templates=list(resource_templates),
@@ -471,6 +475,10 @@ async def get_desktop_mcp_capabilities(user_id: str, scene: str, user_role: str)
                 permission=permission, write_op=bool(remote.get("write_op")),
                 requires_confirmation=bool(remote.get("requires_confirmation")),
                 confirmation_mode=str(remote.get("confirmation_mode") or "client"),
+                # Provider（桌面端 MCP）可以在工具声明里给出档位/策略：注册表只允许它
+                # **收紧**档位，绝不放宽，所以这里如实透传即可。
+                risk_tier=str(remote.get("risk_tier") or ""),
+                approval_policy=str(remote.get("approval_policy") or ""),
                 idempotent=bool(remote.get("idempotent")),
                 resource_templates=list(remote.get("resource_templates") or []),
                 annotations={
@@ -531,6 +539,8 @@ async def get_workspace_action_capabilities(
             write_op=bool(remote.get("write_op")),
             requires_confirmation=bool(remote.get("requires_confirmation")),
             confirmation_mode=str(remote.get("confirmation_mode") or "client"),
+            risk_tier=str(remote.get("risk_tier") or ""),
+            approval_policy=str(remote.get("approval_policy") or ""),
             idempotent=bool(remote.get("idempotent")),
             resource_templates=list(remote.get("resource_templates") or []),
             annotations={
@@ -872,15 +882,24 @@ async def select_capabilities_with_trace(
                 score -= 35
         ranked.append((score, -index, capability, bootstrap))
     ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    # ── 强制工具脱离 Top-K 竞争（方案 §五 P0-1）──
+    # 读工具被写工具挤出窗口，是"模型识别不到读工具"的真因：它们此前只是普通候选，
+    # 一旦新装的写工具排名更高就被挤掉。这里把核心工具**先占位**，剩余名额才给排序候选
+    # ——上限只约束可选工具，不约束强制工具。
+    from app.agents.skills.mandatory_tools import CORE_TOOLS, apply_tool_window
+
+    pinned_mandatory = [item for item in capabilities if str(item.name or "") in CORE_TOOLS]
+    pinned_names = {item.name for item in pinned_mandatory}
+    optional_budget = max(1, int(limit))
     selected: list[ToolCapability] = []
     selected_names: set[str] = set()
     for capability in capabilities:
         if capability.name in bootstrap_names and capability.name not in selected_names:
             selected.append(capability)
             selected_names.add(capability.name)
-            if len(selected) >= max(1, limit):
+            if len(selected) >= optional_budget:
                 break
-    base_limit = max(1, limit)
+    base_limit = optional_budget
     # Keep one strictly bounded slot for a tied K+1 candidate. Explicit tool
     # intent may use that same slot; it never expands the safety ceiling.
     hard_limit = base_limit + max(0, int(settings.SKILL_CANDIDATE_MAX_OVERFLOW))
@@ -926,6 +945,21 @@ async def select_capabilities_with_trace(
             selected_names.add(capability.name)
             if len(selected) >= hard_limit:
                 break
+    # 可选工具先裁到预算（给强制工具腾位置），再与强制工具合并。
+    # 合并后的顺序 = 强制工具在前 + 可选工具（保持排序结果）；由 ``apply_tool_window``
+    # 统一做上限裁剪并记录四层快照——**所有**截断都走这一个入口，避免各处再写一遍。
+    optional_kept = [item for item in selected if item.name not in pinned_names]
+    selected, _window = apply_tool_window(
+        [*pinned_mandatory, *optional_kept],
+        # 上限 = 可选预算 + 强制工具数：上限只约束**可选**工具，强制工具永远占位
+        # （这正是"读工具被写工具挤掉"的修复点）。
+        limit=base_limit + len(pinned_mandatory),
+        scene=scene,
+        catalog=capabilities,
+        eligible=capabilities,
+        ranked=[capability for _, _, capability, _ in ranked],
+        layer="executor.select_capabilities",
+    )
     # ``ranked`` 已以 score 和原始注册顺序作为稳定 tie-breaker 排序；保留该顺序
     # 才能让优先关系真实影响模型看到的工具排列。
     scores = {capability.name: score for score, _, capability, _ in ranked}
@@ -956,9 +990,16 @@ async def select_capabilities_with_trace(
     else:
         second_score = 0.0
     score_margin = top_score - second_score
-    ambiguous = (
-        len(ordered_scores) > 1
-        and score_margin < float(settings.SKILL_CANDIDATE_MARGIN_THRESHOLD)
+    # 歧义判定必须看**整个合法候选池**，不能只看最终入选的几个：limit=1 时明明有两个
+    # 分数接近的候选（"选哪个都不算错"），却因为只剩一行而判成"不歧义"——这正是
+    # 候选接近时应当升级复核的信号。强制工具占位后入选数可能更少，这个口径不能跟着缩。
+    positive_scores = sorted(
+        (float(score) for score, _, _capability, _ in ranked if float(score) > 0),
+        reverse=True,
+    )
+    pool_second = positive_scores[1] if len(positive_scores) > 1 else 0.0
+    ambiguous = bool(positive_scores) and (
+        (top_score - pool_second) < float(settings.SKILL_CANDIDATE_MARGIN_THRESHOLD)
     )
     return CapabilitySelection(
         capabilities=selected,
@@ -1445,8 +1486,10 @@ async def execute_tool_call(
     ``execution_scope`` 仅由 DAG 节点执行器注入。它将同一 Job 中的同名工具
     调用串行化，而不会影响普通聊天会话或不同工具的节点级并发。
 
-    ``capability_lease_service`` 供测试/定制注入租约服务；缺省时能力路由自建一个。
-    它只在 ``AGENT_CAPABILITY_ROUTING_MODE != off`` 时被使用。
+    ``capability_lease_service`` 供测试/定制注入租约服务；缺省时用进程内共享的
+    ``app.services.capability_lease.capability_lease_service``（与注册端点同一个实例，
+    否则门禁看不到客户端注册的租约）。它只在 ``AGENT_CAPABILITY_ROUTING_MODE != off``
+    时被使用。
     """
     original_fn = tool_call.get("function") or {}
     name = str(original_fn.get("name") or "").strip()
@@ -1594,6 +1637,9 @@ async def execute_tool_call(
 
     # ── 能力路由门禁（灰度旁路；默认 off = 零开销，行为与旧版逐字相同）──
     # 位置：参数校验与资源策略之后、MCP 分支之前——即"授权已确认，但还没决定谁执行"。
+    # ``capability_lease_service`` 缺省为 None 时由 ``try_capability_route`` 回落到共享
+    # 租约服务（与 ``/capabilities/register`` 同一实例）；注入点只保留那一处，避免两边
+    # 各写一份"缺省怎么办"而再次分叉。
     from app.agents.skills.capability_route import try_capability_route
 
     routed = await try_capability_route(
@@ -1739,7 +1785,7 @@ async def execute_tool_call(
         if is_workspace_mcp:
             from app.agents.skills.approval_policy import classify_tool_risk, should_confirm
 
-            tier, _risk, _reason = classify_tool_risk(name, args)
+            tier, _risk, _reason = classify_tool_risk(name, args, capability)
             if tier == "auto":
                 engine_decision = None  # A 档：默认自动，无需加载上下文
             else:
@@ -1768,6 +1814,9 @@ async def execute_tool_call(
                         "expires_at": policy_expires_at,
                     },
                     execution_grant={"approval_mode": approval_mode},
+                    # Provider 可以在能力对象上声明档位/策略，这里必须传下去，
+                    # 否则声明形同装饰（只有工具级声明才会被看见）。
+                    capability=capability,
                 )
                 policy_meta = {
                     "policy_decision": engine_decision.decision,
@@ -1928,6 +1977,27 @@ async def execute_tool_call(
         )
 
     explicit_user_delete = is_explicit_user_delete_request(user_message, name, args)
+    # ── 写闸：Redis Fail-Open 的写侧 Fail-Closed（方案 §4）──
+    # 位置在**审批之后、执行之前**：审批回答"用户是否同意"，写闸回答"本进程此刻是否
+    # 仍被授权写"。两者都不能少——Redis 挂了/代际被撤销时，审批通过也不该继续写。
+    # 开关默认关闭（``WRITE_GATE_ENFORCEMENT``），关闭时这里是零开销直通。
+    if _skill_is_write(skill, args):
+        from app.services.write_gate import WRITE_SCOPE, WriteGateDenied, write_gate
+
+        try:
+            # scope 必须用共享常量：与运维面板的续签入口同一个值，否则会出现
+            # "续签了 default、检查的是 workspace"这类静默不一致。
+            await write_gate.check(scope=WRITE_SCOPE)
+        except WriteGateDenied as exc:
+            result = SkillResult(
+                success=False,
+                error=str(exc.message or exc.reason),
+                error_code=exc.reason,
+                retryable=True,
+                metadata={"skill": name, "write_gate": exc.reason},
+            )
+            await _record_skill_log(user_id, skill, args, result)
+            return result
     # 高危操作：server/sandbox 技能执行前必须确认；用户当前指令明确要求
     # 删除同一目标时由已有窄范围策略放行。client 技能仍由用户端确认。
     # client 技能由用户端弹窗确认（执行体内部处理），不在此拦截

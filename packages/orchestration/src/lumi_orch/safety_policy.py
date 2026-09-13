@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from enum import Enum
 
-from lumi_orch.task_assessment import TaskProfile, has_side_effects
+from lumi_orch.task_assessment import TaskProfile, effective_action_intents, has_side_effects
 
 
 class SafetyAction(str, Enum):
@@ -56,13 +56,35 @@ def combine(action_a: SafetyAction, action_b: SafetyAction) -> SafetyAction:
 
 
 def task_level_action(profile: TaskProfile) -> SafetyAction:
-    """Layer 1：任务级预检（基于 risk_level 与 side_effects）。"""
+    """Layer 1：任务级预检（基于 risk_level、副作用与**动作意图**）。
+
+    方案 4 §2.2 硬约束②：``DELETE`` / ``EXECUTE`` / ``PUBLISH`` 一类动作必须人工审批或
+    安全阻断，**与置信度无关**——分类器很自信不是自动执行高风险操作的依据。旧实现只拦
+    ``SEND`` / ``PUBLISH``，``DELETE`` / ``EXECUTE`` 只在工具级（``tool_level_action``）
+    被拦，于是"任务级预检通过、风险挪到执行期"就成了漏点。
+
+    **沙箱执行是唯一例外**（``execution_target == "SANDBOX"``）：沙箱本身就是"可回滚的
+    执行方式"，工具级会收敛成 ``ALLOW_SANDBOX_ONLY``；若这里也强制审批，安全策略里
+    "在沙箱/回收站等可逆方式下重试"的既有指引就没有落点（审批话术会自相矛盾）。
+    非沙箱的 ``EXECUTE`` 一律要求审批。
+    """
     side_effects = set(profile.side_effects)
+    intents = set(effective_action_intents(profile))
     if profile.risk_level == "HIGH_RISK":
         return SafetyAction.REQUIRE_ADMIN_APPROVAL
     if profile.risk_level == "REQUIRES_APPROVAL":
         return SafetyAction.REQUIRE_USER_APPROVAL
+    sandbox_exec = profile.execution_target == "SANDBOX"
+    # 高风险动作意图（新画像）：DELETE / PUBLISH / SEND 无条件审批；EXECUTE 非沙箱才审批。
+    if intents & {"DELETE", "PUBLISH", "SEND"}:
+        return SafetyAction.REQUIRE_USER_APPROVAL
+    if "EXECUTE" in intents and not sandbox_exec:
+        return SafetyAction.REQUIRE_USER_APPROVAL
     if side_effects & {"SEND", "PUBLISH"}:
+        return SafetyAction.REQUIRE_USER_APPROVAL
+    if side_effects & {"DELETE"} and not sandbox_exec:
+        return SafetyAction.REQUIRE_USER_APPROVAL
+    if bool(profile.approval_required) and not sandbox_exec:
         return SafetyAction.REQUIRE_USER_APPROVAL
     if profile.execution_target == "DESKTOP" and side_effects:
         # 真实文件写入：暂存 → Diff → 前端审批。

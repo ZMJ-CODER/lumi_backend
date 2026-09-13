@@ -53,6 +53,36 @@ ABSTRACT_CAPABILITY_MAP: dict[str, tuple[str, ...]] = {
 NON_BLOCKING_CAPABILITIES: frozenset[str] = frozenset()
 
 
+def normalize_capability_name(value: Any) -> str:
+    """能力名归一化：去掉 ``?`` 可选前缀与 ``@版本`` 后缀（**唯一实现处**）。
+
+    为什么必须有它：目录 / 注册表 / 插件清单里存的是**无版本基名**
+    （``workspace.read``），而画像解析出来的具体能力名带契约版本
+    （``workspace.read@1``，见 :data:`ABSTRACT_CAPABILITY_MAP`）。任何"按名字查集合"
+    的地方（可用性判定、插件启用状态、白名单比对）都必须先过这一步，否则同一个能力
+    会因写法不同被判成两个结果——曾出现"``workspace.read@1`` 被判成没有提供方"，
+    把只读任务误阻断。
+
+    只剥掉真正的数字版本号：``@beta`` 这类非数字后缀原样保留，避免误伤。
+    """
+    text = str(value or "").strip().lstrip("?")
+    if not text:
+        return ""
+    name, _, version = text.partition("@")
+    if version.strip().isdigit():
+        return name.strip()
+    return text
+
+
+#: 能力名的**契约版本**后缀写法（``workspace.read@1``）；``parse_requirement`` 只认
+#: ``>=`` 语义，因此这里单独解析 ``@N``（方向与 :func:`normalize_capability_name` 相反）。
+def split_capability_version(value: str) -> tuple[str, str]:
+    """``workspace.read@1`` → ``("workspace.read", "1")``；无版本返回 ``(name, "")``。"""
+    text = str(value or "").strip().lstrip("?")
+    name, _, version = text.partition("@")
+    return name.strip(), version.strip()
+
+
 def concrete_capabilities(abstract: list[str] | tuple[str, ...] | None) -> list[str]:
     """抽象能力 → 具体能力（去重、保序；未知抽象能力忽略）。"""
     rows: list[str] = []
@@ -190,7 +220,10 @@ class CapabilityResolver:
             text = str(entry).strip()
             # 可选能力用 ``?`` 前缀声明（缺失只降级、不阻断执行）。
             optional = text.startswith("?")
-            name, version_text = parse_requirement(text.lstrip("?"))
+            # 版本解析必须同时认 ``@1``（能力契约写法）与 ``>=``（插件依赖写法）。
+            name, at_version = split_capability_version(text)
+            _, op_version = parse_requirement(text.lstrip("?"))
+            version_text = at_version or op_version
             descriptor = self.catalog.get(
                 name, version=int(version_text) if version_text.isdigit() else None
             )

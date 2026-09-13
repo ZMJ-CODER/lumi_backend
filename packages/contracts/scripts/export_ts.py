@@ -48,6 +48,9 @@ EXPORTED_MODELS: tuple[str, ...] = (
     "StepView",
     "JobRunView",
     "ApprovalState",
+    # 方案 4：预检 ``control`` 帧的载荷（blocked / waiting_clarification / waiting_approval）
+    # 必须与后端逐字一致，前端据此分派"给选项 / 提示修环境 / 走审批卡"。
+    "ControlPayload",
     # ── 结果存储 / 步骤检查点（《结果存储、检查点与恢复》方案）──
     # 前端只消费**引用**（正文按引用另行获取）与检查点摘要，因此这两个类型必须
     # 与后端逐字一致，不能手抄。

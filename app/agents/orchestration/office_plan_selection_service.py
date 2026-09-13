@@ -32,6 +32,9 @@ from app.agents.orchestration import office_plan_strategies as strategies
 #: canonical 画像生产开关（与 ``app.services.task_assessor.CANONICAL_FLAG`` 同名，避免循环导入）。
 CANONICAL_FLAG = "TASK_PROFILE_CANONICAL"
 
+#: 预检 ``control`` 载荷在 routing 里的键（方案 4 §6.1；刷新恢复与实时帧同源）。
+PREFLIGHT_CONTROL_KEY = "preflight_control"
+
 
 @dataclass(slots=True)
 class OfficePlanSelection:
@@ -166,6 +169,21 @@ def preflight_process_frame(routing: Any) -> dict[str, Any] | None:
     return {"type": "process", "content": entry.summary, **entry.to_sse_fields()}
 
 
+def preflight_control_frame_from_routing(routing: Any) -> dict[str, Any] | None:
+    """routing 里的预检 ``control`` 载荷 → SSE ``control`` 帧（没有则返回 None）。
+
+    方案 4 §6.1：``blocked``（硬阻断，按 ``error_code`` 给下一步）与
+    ``waiting_clarification``（目标不明确，给选项）走**既有** ``control`` 事件；
+    ``waiting_approval`` 与既有 ``approval_required`` 事件并存。
+    """
+    payload = routing.get(PREFLIGHT_CONTROL_KEY) if isinstance(routing, Mapping) else None
+    if not isinstance(payload, Mapping) or not payload:
+        return None
+    frame = dict(payload)
+    frame.setdefault("type", "control")
+    return frame
+
+
 class OfficePlanSelectionService:
     """Keep normal-office plan selection separate from Job lifecycle writes."""
 
@@ -291,6 +309,15 @@ class OfficePlanSelectionService:
         notice = preflight_process_notice(result) if feature_enabled(CANONICAL_FLAG) else None
         if notice:
             routing[PREFLIGHT_NOTICE_KEY] = dict(notice)
+            # 方案 4 §6.1：同时落 ``control`` 载荷（blocked / waiting_clarification），
+            # 实时帧与刷新恢复读同一份——前端不猜"为什么被阻断/要补什么"。
+            from app.agents.orchestration.capability_preflight_service import (
+                preflight_control_frame,
+            )
+
+            control = preflight_control_frame(result)
+            if control:
+                routing[PREFLIGHT_CONTROL_KEY] = control
         return OfficePlanSelection(
             tree=TaskTree(nodes=[], clarification=answer, plan_text="能力预检"),
             routing=routing,

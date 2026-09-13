@@ -127,21 +127,23 @@ class CapabilityLeaseService:
 
         Redis 可用时以**权威副本**为准；不可用（未初始化/宕机）时退回进程内字典，
         单 worker 部署与测试因此不受影响。
+
+        **进程内字典永远并入结果**（不是 Redis 为空时才回退）：注册/心跳会先写进程内
+        副本再写 Redis，若某次 Redis 读缓存刚好为空，只有进程内副本的 worker 会把
+        "自己刚注册的租约"读丢 —— Broker 的能力选择因此恒判"没有可用的 Provider"。
+        反之亦然：Redis 读缓存里带着其它 worker 的租约，这是跨 worker 唯一的可见性来源。
         """
-        from_redis = self._redis_registry.snapshot_cached()
-        if from_redis:
-            # 合并进程内副本：本 worker 刚注册、Redis 还没回读时不会漏。
-            merged: dict[tuple[str, str], ProviderLease] = {
-                (lease.qualified_capability, lease.provider_id): lease for lease in from_redis
-            }
-            if purge:
-                self.purge_expired()
-            for key, lease in self._leases.items():
-                merged.setdefault(key, lease)
-            return list(merged.values())
+        merged: dict[tuple[str, str], ProviderLease] = {}
+        try:
+            for lease in self._redis_registry.snapshot_cached():
+                merged[(lease.qualified_capability, lease.provider_id)] = lease
+        except Exception as exc:  # noqa: BLE001 - Redis 读失败不影响进程内副本
+            logger.debug("[capability] Redis 租约缓存读取失败（降级为进程内视图）: {}", str(exc)[:120])
         if purge:
             self.purge_expired()
-        return list(self._leases.values())
+        for key, lease in self._leases.items():
+            merged.setdefault(key, lease)
+        return list(merged.values())
 
     async def refresh_from_redis(self) -> list[ProviderLease]:
         """从 Redis 拉取权威租约（跨 worker 可见性的显式同步点）。"""

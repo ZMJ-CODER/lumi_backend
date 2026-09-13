@@ -27,6 +27,7 @@ from lumi_contracts import (
     ProcessPayload,
     RunState,
     bounded_opaque_value,
+    build_payload,
     canonical_events_for,
     strip_unsafe_payload,
 )
@@ -298,6 +299,37 @@ def canonical_payload(event_type: str, event: Mapping[str, Any], *, status: str 
         }
     if text_type in {"error", "task_failed", "failed", "cancelled", "job_cancelled"}:
         return _error_payload(event)
+    if text_type == "control":
+        # 方案 4 §6.1：预检的 ``blocked`` / ``waiting_clarification`` 也走 ``control``，
+        # 因此这里必须按 ``ControlPayload`` 白名单**显式**收敛，否则追问文本、选项、
+        # 工具窗口会被通用兜底路径丢掉，前端只剩一个没有解释的"被阻断"。
+        values = {
+            "state": _text(event.get("state") or event.get("status") or "running")[:40],
+            "error_code": _text(event.get("error_code") or event.get("code"))[:80],
+            "reason_code": _text(event.get("reason_code"))[:80],
+            "reason": _text(event.get("reason"))[:400],
+            "next_action": _text(event.get("next_action"))[:80],
+            "safe_next_action": _text(event.get("safe_next_action"))[:80],
+            "phase": _text(event.get("phase"))[:40],
+            "question": _text(event.get("question"))[:400],
+            "options": [str(item)[:40] for item in (event.get("options") or []) if str(item)][:10],
+            "required_capabilities": [
+                str(item)[:120] for item in (event.get("required_capabilities") or []) if str(item)
+            ][:20],
+            "tool_window": [str(item)[:120] for item in (event.get("tool_window") or []) if str(item)][:20],
+        }
+        if isinstance(event.get("must_call_model"), bool):
+            values["must_call_model"] = bool(event["must_call_model"])
+        if isinstance(event.get("retryable"), bool):
+            values["retryable"] = bool(event["retryable"])
+        payload = build_payload("control", values)
+        # ``safe_message`` 不在 ControlPayload 里（它在 ``EventPayload`` 层），
+        # 但预检的用户文案必须能到前端：放进 ``reason``（同语义、同白名单）。
+        if not payload.get("reason"):
+            payload["reason"] = _text(event.get("safe_message"))[:400]
+        if not payload.get("safe_next_action"):
+            payload["safe_next_action"] = _text(event.get("suggested_action"))[:80]
+        return payload
     if text_type in {"done", "task_completed"}:
         # 终态帧上的状态优先：失败/取消/中断的任务不能因为类型是 done 就报 completed。
         state = _text(

@@ -1084,6 +1084,56 @@ class Orchestrator:
 
         Yields: {"type": "delta", "content": ...} / {"type": "done", ...}
         """
+        # ── 统一绝对截止时间（方案 §3）：**入口设一次**，深层调用只读剩余预算 ──
+        # 用 contextvars 传播，因此 LLM / MCP / 工具 / 沙箱都不用改函数签名。
+        # 生成器正在执行期间 context 一直有效；退出时必须 reset，否则同一个进程里
+        # 下一个请求会继承上一个请求的预算（流式端点尤其容易踩）。
+        from app.core.deadline import budget_snapshot, set_deadline
+
+        deadline_token = set_deadline(source="orchestrator.stream")
+        try:
+            async for frame in self._handle_message_stream_inner(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                content=content,
+                scene=scene,
+                local_mode=local_mode,
+                retrieval_query=retrieval_query,
+                attachments=attachments,
+                office_docs=office_docs,
+                workspace_id=workspace_id,
+                web_search_enabled=web_search_enabled,
+                llm_api_key=llm_api_key,
+                thinking_mode=thinking_mode,
+                reply_style=reply_style,
+                user_role=user_role,
+                execution_preference=execution_preference,
+            ):
+                yield frame
+        finally:
+            logger.debug("[deadline] 请求结束 budget={}", budget_snapshot())
+            # 两个 ContextVar 一起还原（只 reset deadline 会让来源标签泄漏到下一个请求）。
+            deadline_token.reset()
+
+    async def _handle_message_stream_inner(
+        self,
+        user_id: str,
+        conversation_id: str,
+        content: str,
+        scene: str = "chat",
+        local_mode: bool = False,
+        retrieval_query: str | None = None,
+        attachments: list | None = None,
+        office_docs: list[dict] | None = None,
+        workspace_id: str | None = None,
+        web_search_enabled: bool = False,
+        llm_api_key: str | None = None,
+        thinking_mode: str = "fast",
+        reply_style: str | None = None,
+        user_role: str = "user",
+        execution_preference: str = "use_workspace_policy",
+    ):
+        """``handle_message_stream`` 的主体（截止时间的设置/还原在外层）。"""
         transcript = await self._resolve_transcript(content, attachments)
         content = transcript
 
@@ -2234,12 +2284,20 @@ class Orchestrator:
         # 能力预检失败的 process 事件（canonical 画像接入后才有事实）。只**新增**这一帧：
         # 既有 job/step/delta/done 帧的形状与顺序不变；刷新恢复由
         # app/contracts/process_log.py 从同一条 routing 载荷投影出同一 entry_id。
-        from app.agents.orchestration.office_plan_selection_service import preflight_process_frame
+        from app.agents.orchestration.office_plan_selection_service import (
+            preflight_control_frame_from_routing,
+            preflight_process_frame,
+        )
 
         preflight_frame = preflight_process_frame(getattr(job, "routing", None))
         if preflight_frame is not None:
             preflight_frame["job_id"] = job.job_id
             yield preflight_frame
+        # 方案 4 §6.1：预检阻断/澄清的 ``control`` 帧（走既有事件类型，不新增协议）。
+        control_frame = preflight_control_frame_from_routing(getattr(job, "routing", None))
+        if control_frame is not None:
+            control_frame["job_id"] = job.job_id
+            yield control_frame
         # 模型路由/降级的 process 事件（``MODEL_CAPABILITY_ROUTER_V2`` 打开且真的换档/
         # 降级/阻断时才有载荷）。同样只**新增**这一帧；刷新恢复由
         # app/contracts/process_log.py 从同一条 routing 载荷投影出同一 entry_id。

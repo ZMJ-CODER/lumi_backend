@@ -22,13 +22,15 @@ class JobLifecycleService:
     async def record_metric(self, job: Job) -> None:
         """Count each terminal job once without affecting execution on telemetry failures."""
         try:
-            from app.core.observability import inc_agent_job
-            from app.core.redis import get_redis
+            from app.core.observability import inc_agent_job, mark_job_state
 
-            key = f"obs:job:{job.job_id}"
-            if await get_redis().set(key, "1", ex=86400 * 7, nx=True):
-                status = job.status.value if hasattr(job.status, "value") else job.status
-                inc_agent_job(str(status))
+            status = job.status.value if hasattr(job.status, "value") else job.status
+            # 标记里写**状态字符串**（不只是 "1"）：/metrics 的在途任务 Gauge 靠它区分
+            # "completed" 与"还在跑"，否则只能知道"这个任务计过数"，无法算并发。
+            # 恒覆盖写（不是 NX）：状态会从 running 变成 completed，首写留旧值会让
+            # Gauge 永远把已完成的任务算成在途。
+            await mark_job_state(job.job_id, str(status))
+            inc_agent_job(str(status))
         except Exception:  # noqa: BLE001
             pass
 

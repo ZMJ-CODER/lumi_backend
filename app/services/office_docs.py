@@ -21,6 +21,7 @@ from pathlib import Path
 from loguru import logger
 
 from app.core.config import settings
+from app.services.safe_delete import UnsafeRemoval, remove_file, remove_tree
 
 OFFICE_DIR = Path(settings.UPLOAD_DIR).parent / "office"
 _DOCUMENT_OVERVIEW_CACHE: dict[tuple[str, str, int], dict] = {}
@@ -125,9 +126,9 @@ def delete_generic_output(user_id: str, conv_id: str, name: str) -> bool:
     if target is None:
         return False
     try:
-        target.unlink(missing_ok=True)
-        return True
-    except OSError:
+        # 受控删除：边界 = 该会话的产物目录（越界即拒绝）。
+        return remove_file(generic_outputs_dir(user_id, conv_id), target)
+    except (OSError, UnsafeRemoval):
         return False
 
 
@@ -855,7 +856,8 @@ async def discard_session(user_id: str, doc_id: str) -> None:
         except Exception:  # noqa: BLE001
             pass
     if session.exists():
-        shutil.rmtree(session, ignore_errors=True)
+        # 受控删除：边界 = 该用户的办公文档会话根（越界即拒绝）。
+        remove_tree(session.parent, session)
 
 
 def _content_path(meta: dict) -> Path:

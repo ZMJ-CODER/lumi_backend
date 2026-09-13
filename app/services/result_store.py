@@ -32,6 +32,8 @@ from typing import Any
 
 from loguru import logger
 
+from app.services.safe_delete import UnsafeRemoval, remove_file
+
 from lumi_contracts.persistence.result_store import (
     RESULT_REF_EXPIRED,
     RESULT_REF_FORBIDDEN,
@@ -303,10 +305,11 @@ def _read_bytes(path: Path) -> bytes | None:
 
 
 def _unlink(path: Path) -> None:
+    """受控删除：边界 = Blob 根目录（越界即拒绝并只记日志，不抛给调用方）。"""
     try:
-        path.unlink()
-    except OSError:
-        pass
+        remove_file(default_blob_root(), path)
+    except (OSError, UnsafeRemoval) as exc:
+        logger.debug("[result-store] Blob 删除跳过 path={} err={}", str(path)[:120], str(exc)[:120])
 
 
 def default_blob_root() -> Path:

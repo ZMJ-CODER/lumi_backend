@@ -126,6 +126,17 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001 - 订阅失败不阻断启动
         logger.warning("能力撤销订阅失败（忽略）: {}", str(exc)[:160])
 
+    # 运行时策略轮询（方案 §1）：每 POLICY_POLL_INTERVAL_SECONDS 查一次 policy:epoch，
+    # 变了才全量拉取。开关关闭时 start_polling 直接返回 None（零开销、不起协程）。
+    try:
+        from app.services.runtime_policy import policy_store
+
+        task = await policy_store.start_polling()
+        if task is not None:
+            logger.info("运行时策略轮询已启动（间隔 {}s）", policy_store.snapshot()["poll_interval_seconds"])
+    except Exception as exc:  # noqa: BLE001 - 轮询失败不能阻断启动（沿用代码默认值）
+        logger.warning("运行时策略轮询启动失败（忽略）: {}", str(exc)[:160])
+
     yield
 
     # 清理
@@ -148,6 +159,13 @@ async def lifespan(app: FastAPI):
         from app.services.capability_revoke import stop_revoke_listener
 
         await stop_revoke_listener()
+    except Exception:  # noqa: BLE001
+        pass
+    # 停止运行时策略轮询（同样不留挂起的后台任务）
+    try:
+        from app.services.runtime_policy import policy_store
+
+        await policy_store.aclose()
     except Exception:  # noqa: BLE001
         pass
     await close_redis()

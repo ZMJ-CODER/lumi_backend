@@ -15,6 +15,7 @@ from app.agents.skills.base import Tool, WorkflowSkill
 from app.agents.skills.contract_lint import lint_skill_contracts
 from app.agents.skills.registry import SkillRegistry, ToolRegistry
 from app.core.config import settings
+from app.services.safe_delete import remove_file
 
 # 已加载模块与注册名称（reload 时据此卸载）
 _loaded_modules: list[str] = []
@@ -131,7 +132,8 @@ def _load_module(module_name: str, path: Path, *, expected_kind: str) -> int:
         # 在同一秒内写入，会复用旧 pyc 导致"改了代码不生效"。
         cache_path = Path(importlib.util.cache_from_source(str(path)))
         if cache_path.exists():
-            cache_path.unlink()
+            # 受控删除：边界 = 该插件源码所在目录（pyc 缓存必然与其同级）。
+            remove_file(path.parent, cache_path)
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         old_dont_write = sys.dont_write_bytecode

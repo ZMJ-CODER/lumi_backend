@@ -23,13 +23,14 @@
 from __future__ import annotations
 
 import json
-import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
 from loguru import logger
+
+from app.services.safe_delete import UnsafeRemoval, remove_file, remove_tree
 
 from lumi_contracts import (
     ARCHIVE_RETENTION_CLASSES,
@@ -292,18 +293,22 @@ def cleanup_outputs_by_class(
                 if entry_expires_at(path, entry, class_seconds=class_seconds) > now_ts:
                     continue
                 try:
-                    path.unlink()
-                except OSError:
+                    # 受控删除（AST 门禁要求）：边界 = 制品根目录，绝不删到根之外。
+                    remove_file(base, path)
+                except (OSError, UnsafeRemoval):
                     continue
                 removed_files += 1
                 by_class[cls] = by_class.get(cls, 0) + 1
             if not _has_payload_files(container):
-                shutil.rmtree(container, ignore_errors=True)
+                try:
+                    remove_tree(base, container)
+                except UnsafeRemoval:
+                    continue
                 removed_dirs += 1
         try:
             if not any(user_dir.iterdir()):
-                user_dir.rmdir()
-        except OSError:
+                remove_tree(base, user_dir)
+        except (OSError, UnsafeRemoval):
             continue
     return CleanupReport(removed_files=removed_files, removed_dirs=removed_dirs, by_class=by_class)
 

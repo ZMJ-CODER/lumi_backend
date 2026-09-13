@@ -205,7 +205,12 @@
         "reason_code": "",
         "reason": "",
         "next_action": "",
-        "safe_next_action": "重新发起"
+        "safe_next_action": "重新发起",
+        "phase": "",
+        "question": "",
+        "options": [],
+        "required_capabilities": [],
+        "tool_window": []
       }
     },
     {
@@ -224,7 +229,12 @@
         "reason_code": "",
         "reason": "",
         "next_action": "",
-        "safe_next_action": "重新发起"
+        "safe_next_action": "重新发起",
+        "phase": "",
+        "question": "",
+        "options": [],
+        "required_capabilities": [],
+        "tool_window": []
       }
     }
   ],

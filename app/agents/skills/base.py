@@ -109,6 +109,16 @@ class Tool(ABC):
     environment: str = "server"         # server / sandbox / client
     permission: str = "user"            # user / admin
     requires_confirmation: bool = False  # 高危操作需用户确认（client 通道）
+    # 审批档位 / 审批策略的**声明位**（空 = 交给统一工具注册表派生）。
+    # 插件作者在这里声明一次，审批引擎与注册表读的就是同一份事实；这比"新增一个工具
+    # 就要回来改 approval_policy.py 的私有词表"更不容易漏（实测漏过一次：
+    # workspace_code_scan 掉进了 workspace_ 前缀兜底）。
+    risk_tier: str = ""                 # auto / routine / critical
+    approval_policy: str = ""           # none / confirm
+    #: **能力归属声明**（形如 ``workspace.read``）：空 = 由静态映射表派生。
+    #: 静态表认识的工具不受它影响（表优先）；它存在的意义是让**新工具**不用回来
+    #: 改 ``TOOL_CAPABILITY_MAP`` 也能接上路由/审批/动作窗口。
+    capability: str = ""
     scenes: list[str] = []              # 可用场景白名单，空 = 全场景
     write_op: bool = False              # 是否写操作（发消息/改文件/装依赖等外部副作用；渐进开放时隐藏）
     idempotent: bool = True              # 相同参数重复执行是否安全
@@ -190,6 +200,33 @@ class Tool(ABC):
     def is_write_operation(self, params: dict | None = None) -> bool:
         """Return whether this concrete invocation can change external state."""
         return bool(self.write_op)
+
+    def declared_risk_tier(self) -> str:
+        """工具声明的审批档位（``auto``/``routine``/``critical``）；其余一律视为未声明。
+
+        非法值不能"就近取一个"：档位是安全边界，写错的声明必须退回**派生**路径，
+        而不是悄悄变成某个更容易放行的档位。
+        """
+        value = str(self.risk_tier or "").strip().casefold()
+        return value if value in {"auto", "routine", "critical"} else ""
+
+    def declared_approval_policy(self) -> str:
+        """工具声明的审批策略（``none``/``confirm``）；空或未知 = 未声明。"""
+        value = str(self.approval_policy or "").strip().casefold()
+        return value if value in {"none", "confirm"} else ""
+
+    def declared_capability(self) -> str:
+        """工具声明的能力归属（``workspace.read`` 这类点分名）；非法一律视为未声明。
+
+        只接受点分能力名：能力名是要拿去查目录、定路由、判租约的键，写错的声明必须
+        退回派生，而不是变成一个查不到的"能力"。
+        """
+        value = str(self.capability or "").strip()
+        if not value or value != value.casefold() or "." not in value:
+            return ""
+        if not value[0].isalpha() or not all(ch.isalnum() or ch in "._" for ch in value):
+            return ""
+        return value
 
     def to_tool_definition(self) -> dict:
         """转成 OpenAI/Qwen 兼容的 function calling 工具定义."""

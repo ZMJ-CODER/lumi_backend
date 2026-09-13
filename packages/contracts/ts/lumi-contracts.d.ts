@@ -105,6 +105,21 @@ export interface CapabilityInvocation {
   timeout_seconds?: number;
 }
 
+/** 预检结论（可落 Job 快照、可下发给前端）。 */
+
+export interface CapabilityPreflight {
+  state?: PreflightState;
+  error_code?: string;
+  safe_message?: string;
+  safe_next_action?: string;
+  question?: string;
+  options?: string[];
+  tool_window?: string[];
+  must_call_model?: boolean;
+  checks?: Record<string, unknown>[];
+  required_capabilities?: string[];
+}
+
 /** 一次能力调用的结果（客户端 Provider 与服务端 Provider 返回同一种）。 */
 
 export interface CapabilityResult {
@@ -143,6 +158,23 @@ export interface CapabilityUsage {
 export type Complexity = "ATOMIC" | "SEQUENTIAL" | "DYNAMIC";
 
 export type ConfidenceSource = "llm" | "heuristic" | "rule_corrected";
+
+/** 任务级控制信号（完成/失败/取消/暂停），取代各调用点自造错误结构。 */
+
+export interface ControlPayload {
+  state?: string;
+  error_code?: string;
+  reason_code?: string;
+  reason?: string;
+  next_action?: string;
+  safe_next_action?: string;
+  phase?: string;
+  question?: string;
+  options?: string[];
+  required_capabilities?: string[];
+  tool_window?: string[];
+  must_call_model?: boolean | null;
+}
 
 export type DataLocality = "local_only" | "cloud" | "hybrid";
 
@@ -369,6 +401,8 @@ export interface PolicyRef {
   source?: string;
 }
 
+export type PreflightState = "READY" | "DEPENDENCY_MISSING_WORKSPACE" | "CAPABILITY_UNAVAILABLE" | "PROVIDER_UNHEALTHY" | "PERMISSION_DENIED" | "TOOL_NOT_REGISTERED" | "NEEDS_CLARIFICATION" | "APPROVAL_REQUIRED" | "SECURITY_BLOCKED";
+
 export type ProcessKind = "thinking" | "read" | "edit" | "command" | "tool" | "system";
 
 /** 一条执行过程记录（安全摘要 + 去重键 + 状态）。 */
@@ -462,6 +496,18 @@ export interface RouteDecision {
   signals?: Record<string, unknown>;
   required_capabilities?: string[];
   blocked_reason?: string;
+  schema_version?: number;
+  route_mode?: string;
+  intent_type?: string;
+  action_intents?: string[];
+  target_scope?: string;
+  target_clarity?: string;
+  approval_required?: boolean;
+  needs_clarification?: boolean;
+  confidence?: number;
+  confidence_source?: string;
+  decision_reason_code?: string;
+  capability_preflight?: CapabilityPreflight | null;
 }
 
 export type RouteMode = "direct_chat" | "m1_atomic_read" | "single_action_skill" | "planner_dag" | "react" | "blocked";

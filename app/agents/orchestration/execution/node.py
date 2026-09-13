@@ -225,8 +225,31 @@ class ApplicationTaskNodeExecutor:
             office_doc_ids=self._authorized_office_doc_ids(node),
             authorized_project_ids=self._authorized_project_ids(),
             workspace_id=self._authorized_workspace_id(),
+            # 方案 4 §1.2：Worker 复用**同一份**画像事实（只读），不重新解析用户原文。
+            task_profile=self._task_profile_facts(),
             on_output=on_output,
         )
+
+    def _task_profile_facts(self) -> dict[str, Any]:
+        """任务画像的只读事实（来自路由快照；缺字段时留空，绝不现场猜）。"""
+        routing = self._job.routing if isinstance(self._job.routing, dict) else {}
+        decision = routing.get("route_decision") if isinstance(routing.get("route_decision"), dict) else {}
+        profile = decision.get("task_profile") if isinstance(decision.get("task_profile"), dict) else {}
+        facts: dict[str, Any] = {}
+        for key in (
+            "action_intents",
+            "target_scope",
+            "target_clarity",
+            "intent_type",
+            "required_capabilities",
+            "approval_required",
+            "confidence_source",
+            "decision_reason_code",
+        ):
+            value = profile.get(key, decision.get(key))
+            if value not in (None, "", [], {}):
+                facts[key] = value
+        return facts
 
     def _authorized_project_ids(self) -> tuple[str, ...]:
         """返回提交请求显式授权的项目范围，不信任节点参数。"""

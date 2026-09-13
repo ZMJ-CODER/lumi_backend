@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from loguru import logger
+
 APPROVAL_MODE_AUTO = "auto_routine"
 APPROVAL_MODE_CONFIRM = "manual_commit"
 _DEFAULT_MODE = APPROVAL_MODE_CONFIRM
@@ -50,6 +52,10 @@ _TIER_AUTO_RAW = frozenset({
     # 聚合读取入口：list/search/read 三动作都只读，不触碰真实文件。
     # 敏感内容由 navigator 内部做检测 + 自动脱敏，读取本身不需要确认。
     "workspace_navigator",
+    # 代码骨架扫描：只读（给骨架不给正文），与 workspace_navigator(action=scan) 同源。
+    # 这里此前漏登记，于是它会掉进"workspace_ 前缀 → 例行确认"的兜底，
+    # 与它自己的语义不符（统一注册表的档位对拍暴露了这条漏网）。
+    "workspace_code_scan",
     "workspace_stage_write", "workspace_stage_delete",
     "sandbox_prepare", "sandbox_reset",
     "read", "glob", "grep", "filestat", "openfile", "read_document",
@@ -125,9 +131,16 @@ class PolicyDecision:
     tier: Tier = "routine"
 
 
-def classify_tool_risk(tool_name: str, arguments: dict | None = None) -> tuple[Tier, Risk, str]:
-    """按工具名 + 参数把调用分到 A/B/C 档并给出风险等级。"""
-    raw = _base_name(tool_name)
+def static_tier_of(tool_name: str, arguments: dict | None = None) -> tuple[Tier, Risk, str]:
+    """**纯静态词表**的档位判定（不看注册表）。
+
+    抽出来有两个用处：
+
+    1. ``classify_tool_risk`` 在注册表不负责该工具时回落用到它；
+    2. 影子对比需要"静态 vs 派生"的**真实基线** —— 如果对比时走的是已经混入派生的
+       ``classify_tool_risk``，那对拍就永远显示一致（等于没对拍）。
+    """
+    raw = _base_name(tool_name).casefold()
     args = dict(arguments or {})
     path = _path_value(args)
     command = str(args.get("command") or args.get("script") or "").casefold()
@@ -138,12 +151,10 @@ def classify_tool_risk(tool_name: str, arguments: dict | None = None) -> tuple[T
     if raw == "workspace_stage_delete" and (_is_root_like(path) or (recursive and "*" in str(path or ""))):
         return "critical", "critical", "删除范围疑似工作区根目录或批量通配"
     if raw in {"workspace_read", "read"} and path and any(marker in path.casefold() for marker in _CRITICAL_PATH_MARKERS):
-        # 读敏感文件不算逃逸，但导出/回显前需确认（引擎按 C 处理更安全）。
         return "critical", "high", "目标路径疑似凭据/密钥文件"
     if raw in _TIER_ROUTINE_RAW and command and any(marker in command for marker in _CRITICAL_CMD_MARKERS):
         return "critical", "critical", "命令包含高风险操作（强制重置/清理/提权/强推）"
     if raw in {"sandbox_run", "bash", "shell", "run_in_sandbox"} and command:
-        # 白名单内的测试/检查/构建命令属于 A 档自动执行（不立即破坏真实工作区）。
         if any(marker in command for marker in _SAFE_TEST_CMD_MARKERS):
             return "auto", "low", "白名单内的测试/检查/构建命令"
     if raw in _TIER_AUTO_RAW:
@@ -152,8 +163,52 @@ def classify_tool_risk(tool_name: str, arguments: dict | None = None) -> tuple[T
         return "routine", "medium", "普通工作区写入/提交/脚本运行"
     if raw.startswith(("workspace_", "sandbox_")):
         return "routine", "medium", f"工作区工具 {raw}，按例行策略处理"
-    # 未知/非工作区工具：保守按 C 档。
     return "critical", "high", f"工具 {raw} 不在工作区策略词表内，需人工确认"
+
+
+def classify_tool_risk(
+    tool_name: str,
+    arguments: dict | None = None,
+    capability: Any = None,
+) -> tuple[Tier, Risk, str]:
+    """按工具名 + 参数把调用分到 A/B/C 档并给出风险等级。
+
+    **档位真相源**：``TOOL_REGISTRY_DERIVED`` 打开时先问统一工具注册表（``risk_tier_of``）——
+    这样插件/Provider 只要声明 ``risk_tier``，新工具就自动有了审批档位，不必再回来改这里
+    的三张词表。注册表**明确不派生**的遗留工具（``LEGACY_TIER_TOOLS``）与开关关闭时，
+    一律走 :func:`static_tier_of`（逐字不变）。
+
+    ``capability`` 可选：Provider 把档位声明在**运行期能力对象**上时，只有调用方把它
+    传进来才会被采纳（例如 ``execute_tool_call`` 手里就有这个对象）。传空则只看工具级声明。
+    """
+    args = dict(arguments or {})
+
+    # 注册表派生（仅在开关打开且注册表愿意负责这个工具时生效）。
+    derived_tier: Tier | None = None
+    try:
+        from app.agents.capabilities.tool_registry import (
+            registry_derived_enabled,
+            risk_tier_of,
+        )
+
+        if registry_derived_enabled():
+            # 注册表内部已经包含"高危命令/凭据路径/根目录删除"这些安全网，
+            # 因此它可以整体接管档位判定。
+            value = risk_tier_of(tool_name, args, capability)
+            if value in ("auto", "routine", "critical"):
+                derived_tier = value  # type: ignore[assignment]
+    except Exception as exc:  # noqa: BLE001 - 注册表异常必须回到静态词表，不能默认放行
+        logger.debug("[approval] 注册表档位派生失败（回到静态词表）: {}", str(exc)[:120])
+
+    if derived_tier is not None:
+        risk: Risk = {"auto": "low", "routine": "medium", "critical": "high"}[derived_tier]
+        detail = {
+            "auto": "只读或暂存层操作，不立即破坏真实工作区",
+            "routine": "普通工作区写入/提交/脚本运行",
+            "critical": "高风险操作，需人工确认",
+        }[derived_tier]
+        return derived_tier, risk, f"{detail}（注册表档位）"
+    return static_tier_of(tool_name, arguments)
 
 
 def _is_expired(value: str) -> bool:
@@ -185,6 +240,7 @@ def should_confirm(
     workspace_context: dict[str, Any] | None = None,
     execution_grant: dict[str, Any] | None = None,
     task_context: dict[str, Any] | None = None,
+    capability: Any = None,
 ) -> PolicyDecision:
     """统一审批入口：返回 allow / require_confirmation / deny。
 
@@ -192,6 +248,8 @@ def should_confirm(
     确认（用于 B 档 manual_commit 的“最终写入前确认一次”语义）。
     授权快照（workspace_context/execution_grant 的 expires_at）过期后，自动
     模式降级为逐次确认模式，防止过期快照被继续当作“帮我确认已开启”。
+
+    ``capability`` 为可选的运行期能力对象（Provider 声明的档位/策略挂在它上面）。
     """
     del task_context  # 预留：Temporal/重放时可按任务级授权放行
     raw = _base_name(tool)
@@ -213,7 +271,7 @@ def should_confirm(
             "deny", "high", "工作区不可用，禁止调用工作区工具", scope="workspace", tier="critical"
         )
 
-    tier, risk, reason = classify_tool_risk(tool, arguments)
+    tier, risk, reason = classify_tool_risk(tool, arguments, capability)
     already_approved = bool(grant.get("approved") or workspace.get("approved"))
 
     if tier == "auto":

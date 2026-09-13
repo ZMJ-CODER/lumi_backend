@@ -118,7 +118,12 @@
         "reason_code": "",
         "reason": "",
         "next_action": "",
-        "safe_next_action": "检查能力提供方"
+        "safe_next_action": "检查能力提供方",
+        "phase": "",
+        "question": "",
+        "options": [],
+        "required_capabilities": [],
+        "tool_window": []
       }
     },
     {

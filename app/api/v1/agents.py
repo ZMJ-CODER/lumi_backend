@@ -185,6 +185,18 @@ async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     from lumi_orch.run_view import run_view
 
     data = job.model_dump()
+    # 能力解析快照的时效性：``capability_resolution`` 是**提交期**结论，而客户端
+    # Provider 是异步注册/心跳的。刷新后再返回，避免"界面报缺少 workspace.read@1，
+    # 而同一次任务的读取步骤已经成功"这种自相矛盾的展示（刷新失败保留旧快照）。
+    try:
+        from app.agents.orchestration.capability_preflight_service import (
+            refresh_capability_resolution,
+        )
+
+        await refresh_capability_resolution(job.routing)
+        data["routing"] = job.routing
+    except Exception as exc:  # noqa: BLE001 - 刷新失败不能影响任务详情
+        logger.debug("能力解析刷新失败（降级）: {}", str(exc)[:120])
     view = run_view(job)
     # 过程气泡恢复：持久化的过程条目 + 由当前 Job 状态现推导的条目合并（去重且
     # ≤200）。内核 run_view 形状不动，只在 app 层补 process_log 字段。
@@ -624,6 +636,76 @@ def _run_next_sse_response(job_id: str, *, expected_step_id: str, plan_revision:
     )
 
 
+@router.get("/jobs/{job_id}/resume")
+async def resume_agent_job_state(
+    job_id: str,
+    after_seq: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=1000),
+    payload: dict = Depends(require_auth),
+):
+    """断线恢复的**唯一推荐入口**：读快照 + 只补增量（方案 §6）。
+
+    与 ``GET /jobs/{job_id}/events`` 的差别：这里**不做全量重放**。快照本身就是一次
+    "事件水位上的检查点"（``JobRunView.last_seq``），因此恢复 = 一次快照读 + 一次有界
+    增量读，是毫秒级的；``/events`` 是纯增量接口，客户端拿它做后续轮询。
+
+    客户端流程：``SEQ_GAP`` → 调本接口 → 用 ``snapshot`` 覆盖本地视图 →
+    从 ``baseline_seq`` 起追加 ``events`` → 之后按 ``retry_after_ms`` 决定是否立刻再拉。
+    """
+    await _get_owned_job(job_id, payload["sub"])
+    from app.services.resume_snapshot import build_gap_recovery
+
+    data = await build_gap_recovery(job_id, after_seq=after_seq, limit=limit)
+    return {"code": 0, "data": data, "message": data.get("message") or "已返回恢复包"}
+
+
+@router.get("/jobs/{job_id}/tool-window")
+async def read_agent_job_tool_window(
+    job_id: str,
+    limit: int = Query(20, ge=1, le=50),
+    payload: dict = Depends(require_auth),
+):
+    """读回本任务的**工具窗口四层诊断快照**（最新在前）。
+
+    回答的是线上最难问的问题之一："模型这次到底拿到了哪些工具，少了哪个，在哪一层少的"。
+    每一帧都是同一场景下 ``catalog``（系统知道）→ ``eligible``（允许用）→ ``ranked``
+    （排序候选）→ ``final``（真正传给模型）的四层证据，外加逐层差集与三态可见性。
+
+    前端排障面板读法：
+    * ``layers.final`` 才是模型真正看到的集合，**别拿 ``catalog`` 当窗口**；
+    * ``dropped_core`` 非空 → 强制核心工具被挤掉了，属于服务端缺陷，标红而不是提示用户；
+    * ``dropped_by_layer`` 直接指出"候选是在排序层丢的、还是在截断层丢的"；
+    * ``visibility`` 里 ``unavailable`` 表示能力本身不可用（客户端离线/租约过期），
+      这与"被窗口截断"是两种完全不同的处置。
+
+    只返回名字与状态，不含任何参数/schema/正文，因此可以安全展示与落审计。
+    Redis 降级或任务无快照时返回空列表（``available=false``），不报错。
+    """
+    await _get_owned_job(job_id, payload["sub"])
+    from app.services.resume_snapshot import TOOL_WINDOW_MAX_ENTRIES, read_tool_windows
+
+    windows = await read_tool_windows(job_id, limit=min(int(limit), TOOL_WINDOW_MAX_ENTRIES))
+    dropped_core_total = sum(len(item.get("dropped_core") or []) for item in windows)
+    return {
+        "code": 0,
+        "data": {
+            "job_id": job_id,
+            "available": bool(windows),
+            "count": len(windows),
+            "max_entries": TOOL_WINDOW_MAX_ENTRIES,
+            "dropped_core_total": dropped_core_total,
+            # 只要出现过核心工具被丢弃，就是服务端缺陷（不是用户可自行处理的情况）。
+            "has_dropped_core": dropped_core_total > 0,
+            "windows": windows,
+        },
+        "message": (
+            "已返回工具窗口诊断快照"
+            if windows
+            else "暂无工具窗口诊断快照（未开启工具注册表派生，或诊断数据已过期）"
+        ),
+    }
+
+
 @router.get("/jobs/{job_id}/events")
 async def replay_agent_job_events(
     job_id: str,
@@ -646,7 +728,20 @@ async def replay_agent_job_events(
     from app.contracts.events import STREAM_EVENT_VERSION, SseEventEncoder
     from app.services import job_event_log
 
-    frames = await job_event_log.read_frames(job_id, after_seq=after_seq, limit=limit)
+    frames, log_state = await job_event_log.read_frames_with_state(job_id, after_seq=after_seq, limit=limit)
+    # 快照水位：告诉客户端"从哪个 seq 起用增量就够"。快照已经覆盖的事件不必再发，
+    # 也不该让客户端以为"没收到事件 = 状态丢了"（方案 §6 的 Snapshot 真空期）。
+    snapshot_seq = 0
+    try:
+        from app.services.job_snapshot_store import read_snapshot
+
+        view = await read_snapshot(job_id)
+        snapshot_seq = int(getattr(view, "last_seq", 0) or 0) if view is not None else 0
+    except Exception:  # noqa: BLE001 - 快照不可用不影响增量补拉
+        snapshot_seq = 0
+    log_available = bool(log_state.get("available"))
+    head_seq = int(log_state.get("head_seq") or 0)
+    oldest_seq = int(log_state.get("oldest_seq") or 0)
     # 协议与版本必须**如实回报**（补拉里存的就是实时流同一份帧）：
     # 双协议期后端可能仍是 legacy 帧，不能一律写 canonical；版本也不能写死
     # （前端对 version > 支持版本 的帧会走 UNSUPPORTED_VERSION 降级）。
@@ -657,6 +752,7 @@ async def replay_agent_job_events(
     else:
         protocol = SseEventEncoder().protocol
     version = EVENT_ENVELOPE_VERSION if protocol == "canonical" else STREAM_EVENT_VERSION
+    last_returned = job_event_log.last_seq_of(frames) or int(after_seq)
     return {
         "code": 0,
         "data": {
@@ -664,12 +760,26 @@ async def replay_agent_job_events(
             "protocol": protocol,
             "version": int(version),
             "after_seq": int(after_seq),
-            "last_seq": job_event_log.last_seq_of(frames),
+            "last_seq": last_returned,
             "count": len(frames),
             "truncated": len(frames) >= limit,
+            # 快照水位与日志水位：客户端据此判断"要不要再拉"以及"本地视图落后多少"。
+            # 只有 last_seq 的话，客户端无法区分"追平了"与"日志被我自己的水位过滤光了"。
+            "snapshot_seq": int(snapshot_seq),
+            "head_seq": int(head_seq),
+            # 事件日志可读性：False 时"没有事件"没有结论意义（读失败也是空数组）。
+            "event_log_available": log_available,
+            "oldest_seq": int(oldest_seq),
+            # 明确缺口：日志起点已经晚于客户端水位的下一条（中间被裁剪）。
+            "gap_detected": bool(log_available and oldest_seq and oldest_seq > int(after_seq) + 1),
+            "caught_up": bool(log_available and int(head_seq) <= int(last_returned)),
             "events": frames,
         },
-        "message": "已返回增量事件" if frames else "没有新的增量事件（可用快照恢复）",
+        "message": (
+            "已返回增量事件"
+            if frames
+            else ("没有新的增量事件（可用快照恢复）" if log_available else "事件日志暂不可读，无法确认是否已追平")
+        ),
     }
 
 

@@ -309,10 +309,22 @@ def capability_for_tool(tool_name: str) -> str | None:
     * 带命名空间的 ``server.tool``。
 
     只做**后缀匹配到已知工具**，绝不按关键词猜（猜错的代价是把写操作当只读派发）。
+
+    **真相源**：``TOOL_REGISTRY_DERIVED`` 打开时先问统一注册表（它会把插件/Provider
+    声明的能力也纳入）；关闭时（默认）**逐字**走下面这张静态表。
     """
     requested = str(tool_name or "").strip()
     if not requested:
         return None
+    try:
+        from app.agents.capabilities.tool_registry import registry_derived_enabled, resolve_tool
+
+        if registry_derived_enabled():
+            entry = resolve_tool(requested)
+            if entry is not None and entry.capability:
+                return entry.capability
+    except Exception as exc:  # noqa: BLE001 - 注册表不可用时静默回到静态表
+        logger.debug("[capability] 工具注册表查询失败（回到静态表）: {}", str(exc)[:120])
     if requested in TOOL_CAPABILITY_MAP:
         return TOOL_CAPABILITY_MAP[requested]
     suffix = requested.split("__")[-1]

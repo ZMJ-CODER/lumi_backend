@@ -323,17 +323,20 @@ async def delete_account(
     # 清理用户上传文件（尽力而为，不阻塞注销）
     try:
         import asyncio
-        import shutil
         from pathlib import Path
 
         from app.core.config import settings
+        from app.services.safe_delete import remove_tree
 
         base = Path(settings.UPLOAD_DIR)
         for sub in ("chat", "tts_voice"):
             target = (base / sub / str(uid)).resolve()
-            if base.resolve() in target.parents and target.exists():
-                await asyncio.to_thread(shutil.rmtree, target, ignore_errors=True)
-    except Exception:  # noqa: BLE001
+            # 受控删除：边界 = 上传根目录（越界即拒绝，和既有 parents 校验同源但更严）。
+            if base.resolve() in target.parents:
+                # 注意：不能直接 to_thread(remove_tree, base, target)——位置参数会被
+                # 当成 (root, target) 正好，但显式绑定更不容易被后续改动弄错。
+                await asyncio.to_thread(remove_tree, base, target)
+    except Exception:  # noqa: BLE001 - 注销已经成功，清理失败不再回滚
         pass
 
     await invalidate_user_view(str(uid))

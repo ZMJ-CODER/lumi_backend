@@ -26,9 +26,9 @@ from app.agents.skills.discovery import (
     ToolDiscoverySession,
     build_domain_groups,
     record_discovery,
-    search_tools,
 )
 from app.agents.skills.base import SkillResult
+from app.agents.skills.mandatory_tools import apply_tool_window
 from app.agents.skills.prompting import build_tool_selection_contract
 from app.agents.skills.executor import (
     CapabilitySelection,
@@ -140,6 +140,12 @@ class LangGraphChatRunner:
                 user_id=self.user_id,
         )
         capabilities = selection.capabilities
+        # 四层快照的第 1/2 层：Catalog 全量 与 场景/权限过滤后。
+        # （第 3/4 层在每次截断处由 apply_tool_window 记录。）
+        catalog_snapshot = list(
+            await get_capabilities_for_scene(self.scene, self.user_role, self.user_id)
+        )
+        eligible_snapshot = list(capabilities)
         # ``office`` is also used by the lightweight fact-assistance path.
         # That path never owns a Job/effect journal, so write and confirmation
         # tools must be removed in code rather than merely discouraged in its
@@ -189,7 +195,15 @@ class LangGraphChatRunner:
                 and (self.scene != "office" or (not item.write_op and not item.requires_confirmation))
             ]
             by_name = {item.name: item for item in [*capabilities, *cached]}
-            capabilities = list(by_name.values())[:8]
+            # 会话缓存合并**也是**一处截断：以前在这里用 [:8] 会把强制工具挤掉。
+            capabilities, _ = apply_tool_window(
+                list(by_name.values()),
+                limit=8,
+                scene=self.scene,
+                catalog=catalog_snapshot,
+                eligible=eligible_snapshot,
+                layer="chat_graph.cache_merge",
+            )
         if self.chat_model is None:
             # Domain-first discovery for the production path.  RAG/flat tool
             # search no longer chooses the final callable; it only supplies a
@@ -214,7 +228,16 @@ class LangGraphChatRunner:
                     if item.domain in domain_names
                     and item.status == "stable"
                     and (self.scene != "office" or (not item.write_op and not item.requires_confirmation))
-                ][:8]
+                ]
+                # 域发现后的截断同样必须保强制工具（否则"域命中"反而把读工具挤掉）。
+                discovered, _ = apply_tool_window(
+                    discovered,
+                    limit=8,
+                    scene=self.scene,
+                    catalog=catalog_snapshot,
+                    eligible=eligible_snapshot,
+                    layer="chat_graph.domain_discovery",
+                )
                 if discovered:
                     self.discovery_session.add(discovered)
                     record_discovery(
@@ -228,7 +251,31 @@ class LangGraphChatRunner:
                     )
                     await self.discovery_session.save(self.user_id, self.conversation_id)
                     by_name = {item.name: item for item in [*capabilities, *discovered]}
-                    capabilities = list(by_name.values())[: max(1, min(8, len(by_name)))]
+                    # 最终池：上限只约束可选工具，强制工具（workspace_navigator）永远保留。
+                    capabilities, _final_window = apply_tool_window(
+                        list(by_name.values()),
+                        limit=8,
+                        scene=self.scene,
+                        catalog=catalog_snapshot,
+                        eligible=eligible_snapshot,
+                        ranked=list(by_name.values()),
+                        layer="chat_graph.final",
+                    )
+        # 工具链路诊断：把四层快照落成结构化日志（排障时不必再翻代码找是哪一层丢的）。
+        # 只含工具名与状态，不含参数/正文，因此可以安全进日志。
+        try:
+            from app.core.observability import record_tool_window_snapshot
+
+            record_tool_window_snapshot(
+                scene=self.scene,
+                catalog=catalog_snapshot,
+                eligible=eligible_snapshot,
+                final=capabilities,
+                layer="chat_graph",
+                job_id=str(self.conversation_id or ""),
+            )
+        except Exception:  # noqa: BLE001 - 诊断失败绝不影响工具注入
+            pass
         if selection_requires_escalation(selection, current_user_message):
             record_candidate_selection(
                 selection, request=current_user_message, user_id=self.user_id,

@@ -169,7 +169,34 @@ class LLMClient:
         selected_base_url = normalize_provider_base_url(base_url or cfg.get("base_url") or "")
         selected_api_key = api_key or cfg.get("api_key") or ""
         selected_model = model or cfg.get("model") or settings.DEEPSEEK_MODEL
+        # 超时的**唯一**收口点，顺序必须是：
+        #   模型默认值 → 运行时策略覆盖 → 与当前剩余 Deadline 取最小值
+        # 不能反过来：先取 deadline 再套策略会让一个**更大的**策略值重新放宽超时，
+        # 于是"请求只剩 3 秒"却给了模型 120 秒——deadline 形同虚设。
         selected_timeout = float(timeout or cfg.get("timeout") or 120.0)
+        try:
+            from app.services.runtime_policy import policy_store, runtime_policy_enabled
+
+            provider_id = str(getattr(role_info, "provider", "") or cfg.get("provider") or "")
+            if provider_id or selected_model:
+                if not policy_store.enabled(provider_id=provider_id, model=selected_model):
+                    raise RuntimeError(
+                        f"模型 {selected_model} 已被运行时策略停用（运维面板 policies）"
+                    )
+                if runtime_policy_enabled():
+                    selected_timeout = policy_store.timeout_seconds(
+                        provider_id=provider_id, model=selected_model, fallback=selected_timeout
+                    )
+        except RuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 策略读取失败绝不能拦下模型调用
+            logger.debug("运行时策略读取失败（沿用默认超时/启停）: {}", str(exc)[:120])
+        # 最后才与剩余预算取小：`ainvoke/astream` 外面没有 asyncio.wait_for，
+        # SDK 的 timeout= 就是唯一边界，必须把剩余预算压进来。
+        from app.core.deadline import ensure_budget, request_budget_seconds
+
+        ensure_budget(what=f"llm:{selected_model}")
+        selected_timeout = request_budget_seconds(cap=selected_timeout)
         effort = None if (disable_reasoning_effort or self._has_tool_messages(messages)) else (reasoning_effort or cfg.get("reasoning_effort"))
         return await get_chat_model(
             scene=scene,

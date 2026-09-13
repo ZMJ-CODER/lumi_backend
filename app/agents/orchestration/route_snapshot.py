@@ -30,7 +30,12 @@ from collections.abc import Mapping
 from typing import Any
 
 ROUTE_DECISION_SCHEMA_NAME = "lumi.route_decision"
-ROUTE_DECISION_SCHEMA_VERSION = 1
+#: 方案 4 §2.3：schema v2 新增 intent_type / action_intents / target_scope /
+#: target_clarity / required_capabilities / approval_required / confidence_source /
+#: decision_reason_code / capability_preflight。旧读者按 v1 字段读仍然有效（加法）。
+ROUTE_DECISION_SCHEMA_VERSION = 2
+LEGACY_ROUTE_DECISION_SCHEMA_VERSION = 1
+#: Router v2 的语义版本（``router_v2`` 仍是唯一权威版本标记）。
 ROUTER_V2_POLICY_VERSION = "router_v2"
 LEGACY_EXECUTION_POLICY_VERSION = "v2"
 COMPAT_KEY = "compat"
@@ -51,6 +56,15 @@ STRICT_PROFILE_FIELDS: tuple[str, ...] = (
     "risk_level",
     "data_sensitivity",
     "context_size_estimate",
+    # ── 方案 4 §2.3 新增（SSE 镜像也随之带上，前端无需改协议）──
+    "action_intents",
+    "target_scope",
+    "target_clarity",
+    "has_dependency",
+    "has_runtime_decision",
+    "approval_required",
+    "confidence_source",
+    "decision_reason_code",
 )
 
 # 由本投影器独占的 routing 字段：写入前先清理，避免残留另一套语义。
@@ -163,7 +177,22 @@ def build_route_snapshot(
             "route_reason_code": str(router_meta.get("route_reason_code") or ""),
             "safety_action": str(router_meta.get("safety_action") or ""),
             "assessor_source": str(router_meta.get("assessor_source") or ""),
+            # ── 方案 4 §2.3：顶层结构化决策字段（工具窗口注入/预检/前端都读这里）──
+            "intent_type": str(strict.get("intent_type") or ""),
+            "action_intents": [str(item) for item in (strict.get("action_intents") or [])],
+            "target_scope": str(strict.get("target_scope") or ""),
+            "target_clarity": str(strict.get("target_clarity") or ""),
+            "required_capabilities": [str(item) for item in (strict.get("required_capabilities") or [])],
+            "approval_required": bool(strict.get("approval_required") or router_meta.get("approval_required") or False),
+            "needs_clarification": bool(router_meta.get("needs_clarification") or False),
+            "confidence_source": str(strict.get("confidence_source") or ""),
+            "decision_reason_code": str(strict.get("decision_reason_code") or ""),
         }
+        # 预检结论位（方案 §2.3：`capability_preflight` 随路由快照一起落盘）。
+        # 未预检时**不写空对象**：`{}` 会被读成"预检过、结论为空"。
+        preflight = router_meta.get("capability_preflight")
+        if isinstance(preflight, Mapping) and preflight:
+            decision["capability_preflight"] = dict(preflight)
         snapshot[ROUTE_DECISION_KEY] = decision
         # 迁移期只读镜像：与 route_decision 同源，不允许各自写入。
         snapshot["policy_version"] = policy_version

@@ -354,10 +354,11 @@ def cleanup_generated_files(self):
         archives = cleanup_archive_outputs()
 
         # 沙箱残留临时目录（正常路径即时清理，这里兜底崩溃遗留）
-        import shutil
         import tempfile
         import time
         from pathlib import Path
+
+        from app.services.safe_delete import UnsafeRemoval, remove_tree
 
         base = Path(tempfile.gettempdir())
         cutoff = time.time() - settings.SANDBOX_TEMP_TTL_HOURS * 3600
@@ -365,9 +366,10 @@ def cleanup_generated_files(self):
         for entry in base.glob("lumi_sandbox_*"):
             try:
                 if entry.is_dir() and entry.stat().st_mtime < cutoff:
-                    shutil.rmtree(entry, ignore_errors=True)
+                    # 受控删除：边界 = 系统临时目录（且只匹配 lumi_sandbox_* 前缀）。
+                    remove_tree(base, entry)
                     removed_sandbox += 1
-            except OSError:
+            except (OSError, UnsafeRemoval):
                 continue
         logger.info(
             "[Task] cleanup_generated_files: 过期会话={} 用户产物文件={} 归档文件={}(按类 {}) 沙箱临时={}",

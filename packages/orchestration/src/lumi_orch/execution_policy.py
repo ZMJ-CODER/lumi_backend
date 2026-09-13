@@ -128,9 +128,21 @@ def _guess_safety(request: str, reasons: Iterable[str]) -> str:
     return _RISKY_WRITE if _HIGH_RISK.search(str(request or "")) else _SAFE_WRITE
 
 
+#: 动作意图 → 是否有副作用（方案 4 §1.1：读/检索不算副作用，其余都算"动手"）。
+_READ_ONLY_ACTIONS = frozenset({"READ", "SEARCH"})
+#: 高风险动作意图（DELETE/EXECUTE/PUBLISH 必须审批或阻断）。
+_HIGH_RISK_ACTIONS = frozenset({"DELETE", "EXECUTE", "PUBLISH"})
+
+
 @dataclass(slots=True)
 class TaskEntrySignals:
-    """入口可得的任务信号（全部来自请求/上下文，不做模型分类）。"""
+    """入口可得的任务信号（全部来自请求/上下文，不做模型分类）。
+
+    :param action_intents: **画像给出的**动作意图（方案 4）。给了它就以它为准，
+        ``reasons`` 里的旧词表理由只作兜底——这是"execution policy 不再自行解析
+        用户原文"的落点。
+    :param complexity_hint: 画像给出的复杂度档位（``ATOMIC`` / ``SEQUENTIAL`` / ``DYNAMIC``）。
+    """
 
     request: str = ""
     scene: str = "office"
@@ -140,16 +152,24 @@ class TaskEntrySignals:
     workspace_available: bool = False
     web_search_enabled: bool = False
     conversation_has_workspace: bool = False
+    action_intents: tuple[str, ...] = field(default_factory=tuple)
+    complexity_hint: str = ""
+    needs_runtime_decision: bool | None = None
 
 
 def assess_profile_from_signals(signals: TaskEntrySignals) -> dict[str, Any]:
     """由入口信号生成统一任务画像（JSON-safe dict）。
 
-    仅在 EXECUTION_POLICY_V2_ENABLED 时被调用方采用；本函数始终是确定性
-    启发式 —— 复杂任务真正的画像仍以 Planner/后续轮次 refine 为准。
+    仅在 EXECUTION_POLICY_V2_ENABLED 时被调用方采用；本函数始终是确定性启发式 ——
+    复杂任务真正的画像仍以 Planner/后续轮次 refine 为准。
+
+    **画像优先**：``signals.action_intents`` / ``complexity_hint`` /
+    ``needs_runtime_decision`` 由 canonical TaskProfile 注入时直接采用，
+    不再用 ``_GOAL_WORDS`` / ``_HIGH_RISK`` 解析用户原文判副作用与风险。
     """
     reasons = {str(item).strip() for item in (signals.reasons or ())}
     request = str(signals.request or "").strip()
+    intents = tuple(str(item).strip().upper() for item in (signals.action_intents or ()) if str(item).strip())
 
     sources: list[str] = []
     if signals.has_attachments or signals.has_office_docs:
@@ -160,8 +180,16 @@ def assess_profile_from_signals(signals: TaskEntrySignals) -> dict[str, Any]:
         sources.append("PUBLIC_WEB")
     sources = normalize_sources(sources)
 
-    side_effect = "side_effect" in reasons
-    runtime_decision = "runtime_decision" in reasons
+    # 副作用与风险：画像的动作意图优先，旧 reasons 只作兜底。
+    if intents:
+        side_effect = bool(set(intents) - _READ_ONLY_ACTIONS)
+    else:
+        side_effect = "side_effect" in reasons
+    runtime_decision = (
+        bool(signals.needs_runtime_decision)
+        if signals.needs_runtime_decision is not None
+        else "runtime_decision" in reasons
+    )
     dependency = "dependency" in reasons
     if runtime_decision:
         complexity = "DYNAMIC"
@@ -169,11 +197,27 @@ def assess_profile_from_signals(signals: TaskEntrySignals) -> dict[str, Any]:
         complexity = "SEQUENTIAL"
     else:
         complexity = "ATOMIC"
+    hint = str(signals.complexity_hint or "").strip().upper()
+    if hint in {"ATOMIC", "SEQUENTIAL", "DYNAMIC"}:
+        complexity = hint
 
     goal = _guess_goal(request, sources)
-    safety = _guess_safety(request, reasons)
+    if intents:
+        # 动作意图已明确：目标不再靠关键词猜。
+        if "EXECUTE" in intents:
+            goal = "EXECUTE"
+        elif set(intents) & {"CREATE", "MODIFY", "DELETE", "MOVE"}:
+            goal = "GENERATE" if "CREATE" in intents and not set(intents) & {"MODIFY", "DELETE", "MOVE"} else "EXECUTE"
+        elif set(intents) & {"SEND", "PUBLISH"}:
+            goal = "INTERACT"
+        elif set(intents) & {"READ", "SEARCH"}:
+            goal = "RETRIEVE" if any(source != _USER_INPUT for source in sources) else goal
+    if intents:
+        safety = _RISKY_WRITE if (set(intents) & _HIGH_RISK_ACTIONS) else (_SAFE_WRITE if side_effect else _READ_ONLY)
+    else:
+        safety = _guess_safety(request, reasons)
     confidence = 0.9 if complexity == "ATOMIC" else 0.8
-    return {
+    profile: dict[str, Any] = {
         "goal": goal,
         "required_sources": sources,
         "complexity": complexity,
@@ -182,6 +226,10 @@ def assess_profile_from_signals(signals: TaskEntrySignals) -> dict[str, Any]:
         "needs_runtime_decision": runtime_decision,
         "confidence": confidence,
     }
+    if intents:
+        # 把画像事实一并落到策略画像里：下游（工具窗口/审计）不必再解析原文。
+        profile["action_intents"] = list(intents)
+    return profile
 
 
 def policy_meta_from_signals(

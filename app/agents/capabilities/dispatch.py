@@ -59,6 +59,10 @@ CAPABILITY_TOOL_MAP: dict[str, str] = {
     "workspace.move": "workspace_move",
     "workspace.delete": "workspace_delete",
     "code.execute": "sandbox_run",
+    # ``workspace_diff`` 是 git.operations 的规范入口（真的会读工作区做 diff）；
+    # ``git`` 是**实现名**（见 catalog.IMPLEMENTATION_MAP 的注释），不是客户端原子工具名。
+    # 这里曾经登记 ``git``，于是反查"能力→规范入口"会得到 ``git`` 而静态表别处写
+    # ``workspace_diff`` —— 统一注册表的影子对比把这条不一致暴露出来（本轮修正）。
     "git.operations": "workspace_diff",
     "artifact.create": "create_office_document",
 }
@@ -118,8 +122,33 @@ class DispatchOutcome:
 
 
 def mcp_tool_for_capability(capability: str, *, fallback: str = "") -> str:
+    """能力 → 首选 MCP 原子工具。
+
+    **真相源**：``TOOL_REGISTRY_DERIVED`` 打开时先问统一注册表；关闭时（默认）逐字走
+    静态 ``CAPABILITY_TOOL_MAP``。两条路径的结果由 ``tool_registry.shadow_compare()``
+    持续对拍（当前三个维度均无差异）。
+    """
     base = str(capability or "").split("@", 1)[0]
+    try:
+        from app.agents.capabilities.tool_registry import registry_derived_enabled, resolve_tool
+
+        if registry_derived_enabled():
+            # 用"能力 → 首选工具"的反查：注册表里同能力可能有多个工具，取规范入口。
+            for entry in _registry_entries():
+                if entry.capability == base and entry.mcp_target:
+                    return entry.mcp_target
+            entry = resolve_tool(base)
+            if entry is not None and entry.mcp_target:
+                return entry.mcp_target
+    except Exception as exc:  # noqa: BLE001 - 注册表不可用时静默回到静态表
+        logger.debug("[capability] MCP 目标派生失败（回到静态表）: {}", str(exc)[:120])
     return CAPABILITY_TOOL_MAP.get(base, fallback)
+
+
+def _registry_entries() -> list[Any]:
+    from app.agents.capabilities.tool_registry import build_registry_entries
+
+    return build_registry_entries()
 
 
 def adapt_to_mcp_tool(tool_name: str, args: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:

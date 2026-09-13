@@ -41,6 +41,18 @@ class ToolCapability(BaseModel):
     resource_templates: list[str] = Field(default_factory=list)
     plan_required_fields: list[str] = Field(default_factory=list)
     annotations: dict = Field(default_factory=dict)
+    #: 审批档位声明（A 自动 / B 例行 / C 始终确认）：空 = 由能力副作用派生。
+    #: 插件/Provider **声明一次**，审批窗口与动作窗口都从注册表读它，不再各处写死表。
+    risk_tier: str = ""
+    #: 审批策略声明（``none`` / ``confirm`` …）：空 = 由 ``requires_confirmation`` 派生。
+    approval_policy: str = ""
+    #: **能力归属声明**（形如 ``workspace.read``）：空 = 由静态映射表派生。
+    #:
+    #: 新工具（插件/Provider 提供的、静态表还不认识的）必须能声明自己属于哪个能力，
+    #: 否则"声明一次 → 能力映射/MCP 目标/动作窗口/审批/Provider 路由 全部自动派生"
+    #: 就断在第一步。已登记的工具不受影响：静态映射表优先，声明不能改写既有归属
+    #: （路由/租约/审批都依赖那张表）。
+    capability: str = ""
 
     def to_tool_definition(self) -> dict:
         flags = []

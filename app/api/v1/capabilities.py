@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, Query
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.deps import require_auth
+from app.core.deps import get_admin_verified_token, require_auth, require_superadmin
 from app.core.exceptions import BadRequestException, ForbiddenException
 from lumi_contracts.plugins import CapabilityErrorCode
 
@@ -32,6 +32,13 @@ from app.services.capability_lease import (
 )
 
 router = APIRouter()
+
+
+def _require_admin_verified(x_admin_token: str | None, payload: dict) -> None:
+    """管理动作的二次验证（与 ``app/api/v1/admin.py`` 同一实现）。"""
+    from app.api.v1.admin import _require_admin_verified as impl
+
+    impl(x_admin_token, payload)
 
 #: 共享租约服务（与撤销订阅、Broker 用同一实例：清缓存必须清到同一份）。
 lease_service: CapabilityLeaseService = capability_lease_service
@@ -575,13 +582,19 @@ async def capability_dispatch_map(payload: dict = Depends(require_auth)):
 @router.post("/admin/revoke")
 async def admin_revoke_capabilities(
     req: AdminRevokeRequest,
-    payload: dict = Depends(require_auth),
+    payload: dict = Depends(require_superadmin),
+    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """管理端强制撤销（跨 worker 立即生效）。
 
     撤销方先改 Redis 权威副本（删租约 + 摘索引），再广播失效信号让**所有** worker 清掉
     本地读缓存——只做前者会有窗口期：客户端已隔离，别的 worker 仍按旧缓存派发。
+
+    **权限**：superadmin + ``X-Admin-Token``（与 ``PUT /admin/llm-config/models`` 一致）。
+    这里修掉了一个越权面：本端点此前只校验 ``require_auth``，任何登录用户只要知道
+    ``provider_id`` 就能撤销**别人**的租约（撤掉后对方的能力会直接不可用）。
     """
+    _require_admin_verified(x_admin_token, payload)
     removed = await lease_service.unregister(
         provider_id=req.provider_id,
         capability=req.capability,

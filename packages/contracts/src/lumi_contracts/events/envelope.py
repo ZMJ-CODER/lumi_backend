@@ -246,6 +246,11 @@ ALLOWED_PAYLOAD_KEYS: frozenset[str] = frozenset({
     # 统一错误模型（UnifiedError）：前端只展示 safe_message；detail_ref 是受权限
     # 保护的产物引用；category/retryable 决定前端默认动作。
     "category", "safe_message", "detail_ref", "safe_next_action",
+    # 能力预检的 control 帧（方案 4 §6.1）：blocked / waiting_clarification 走既有
+    # ``control`` 类型，这几个字段必须过白名单——否则规范化路径会把它们裁掉，
+    # 前端只剩一个没有解释的"被阻断"。
+    "phase", "question", "options", "required_capabilities", "tool_window",
+    "must_call_model",
     # 未知事件降级标记（前端据此记录"客户端不支持该事件"而不是白屏）
     "unsupported",
     # 路由审计（枚举值，非自由文本）
@@ -604,6 +609,10 @@ class ControlPayload(EventPayload):
 
     ``error_code`` 来自统一错误模型（失败/阻断时）；``safe_next_action`` 是给前端
     展示的"下一步动作"文案（``next_action`` 保留为兼容字段）。
+
+    方案 4 §6.1：能力预检的 ``blocked`` / ``waiting_clarification`` 也走这一个类型
+    （**不新增事件类型**），因此下面几个可选字段必须由本类型承载——否则规范化路径
+    （``canonical_events``）会把它们丢掉，前端就只能显示一个没有解释的"被阻断"。
     """
 
     state: str = "running"
@@ -612,6 +621,19 @@ class ControlPayload(EventPayload):
     reason: str = ""
     next_action: str = ""
     safe_next_action: str = ""
+    # ── 预检/等待态的补充事实（可选；不填即不出现）──
+    #: 产生该信号的阶段（例如 ``preflight``），供前端区分"预检阻断"与"运行中暂停"。
+    phase: str = ""
+    #: 需要澄清时的问题（前端只展示，不自己拼）。
+    question: str = ""
+    #: 需要澄清时的选项（后端给词表，前端只展示：仅生成/创建/编辑/取消）。
+    options: list[str] = Field(default_factory=list)
+    #: 该结论覆盖的能力（缺哪些能力一目了然）。
+    required_capabilities: list[str] = Field(default_factory=list)
+    #: 预检通过时允许注入的工具窗口（最小工具集）。
+    tool_window: list[str] = Field(default_factory=list)
+    #: 是否允许调用主模型（``False`` = 没有调用模型，前端必须如实说明）。
+    must_call_model: bool | None = None
 
     def model_post_init(self, __context: Any) -> None:  # noqa: D105 - 错误码收敛
         if self.error_code:

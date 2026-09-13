@@ -1,5 +1,8 @@
 # 用法: python acceptance_sse.py <token> <conversation_id> "<问题>" [workspace_id] <case_name>
-import json, sys, time, urllib.request
+import json
+import sys
+import time
+import urllib.request
 
 token, conv, question = sys.argv[1], sys.argv[2], sys.argv[3]
 workspace = sys.argv[4] if len(sys.argv) > 5 else ""
@@ -24,7 +27,8 @@ with urllib.request.urlopen(req, timeout=600) as resp:
         try:
             evt = json.loads(line[5:].strip())
         except ValueError:
-            out.write(f"{ts}\tRAW\t{line[:200]}\n"); continue
+            out.write(f"{ts}\tRAW\t{line[:200]}\n")
+            continue
         t = evt.get("type")
         detail = {
             "delta": len(evt.get("content") or ""),

@@ -28,6 +28,21 @@ def map_task_error(error: BaseException | str) -> PublicTaskError:
             "任务执行器内部发生错误，请稍后重试；若持续出现请联系管理员。",
             False,
         )
+    # 缺少模型凭据是"去填 Key"的可行动失败，不是内部错误：规划器/模型层已经给出
+    # 结构化码（``AppException.error_code`` 或 ``PlannerModelError.code``），
+    # 这里必须原样保留，否则前端只会看到"任务执行失败"而无从下手。
+    missing_key = (
+        str(getattr(exc, "error_code", "") or "").upper() == "MODEL_API_KEY_MISSING"
+        or str(getattr(exc, "code", "") or "").upper() == "MODEL_API_KEY_MISSING"
+        or "missing credentials" in text.lower()
+        or "请在设置里填写模型 api key" in text.lower()
+    )
+    if missing_key:
+        return PublicTaskError(
+            "MODEL_API_KEY_MISSING",
+            "当前没有可用的模型 API Key：请在设置里填写模型 API Key 后重试。",
+            False,
+        )
     if "balance" in text.lower() or "insufficient" in text.lower():
         return PublicTaskError("MODEL_INSUFFICIENT_BALANCE", "模型账户余额不足，任务未完成。", False)
     if "json" in text.lower() or "dsml" in text.lower() or "tool_call" in text.lower():

@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException
-from app.core.llm import LLMClient
+from app.platform.model.llm import LLMClient
 from app.services.content_codec import normalize_content, serialize_content
 from app.services.orchestrator import orchestrator
 from app.services.speech import detect_audio_meta, speech_to_text, synthesize_speech

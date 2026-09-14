@@ -332,7 +332,7 @@ def apply_tool_window(
     # 一起留下（"新增 workspace_write 不会让 resource.read 消失"）。
     # 保护作用在**截断层**而不是窗口生成层——丢工具真正发生在这里。
     try:
-        from app.agents.capabilities.resource_window import read_guards, window_enabled
+        from app.agents.capabilities.policy.resource_window import read_guards, window_enabled
 
         if window_enabled():
             guards = read_guards(rows)
@@ -402,7 +402,7 @@ def registry_epoch() -> str:
     except Exception as exc:  # noqa: BLE001 - 注册表不可读时退化为"未知"
         logger.debug("[tool-registry] ToolSpec 摘要不可用: {}", str(exc)[:120])
     try:
-        from app.agents.capabilities.catalog import capability_catalog
+        from app.agents.capabilities.catalog.legacy import capability_catalog
 
         names = sorted(
             f"{item.qualified_name}" for item in capability_catalog.all()

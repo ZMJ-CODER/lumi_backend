@@ -140,7 +140,7 @@ _STEP_TITLE_PROMPT = (
 async def _llm_step_title(ctx, instruction: str, path: str) -> str | None:
     """为代码编写节点生成一句话标题（LLM 概括；失败返回 None 走兜底）."""
     try:
-        from app.core.llm import LLMClient
+        from app.platform.model.llm import LLMClient
         from app.services.usage import CATEGORY_TITLE
 
         llm = LLMClient()
@@ -214,8 +214,8 @@ async def locate_project_file(
 ) -> dict:
     """定位相关文件：显式目标须经项目索引校验 → 语义检索（代码向量）→ 关键词（结构索引）兜底."""
     from app.core.database import async_session_factory
-    from app.services import code_embedding
-    from app.services import project_index
+    from app.knowledge.api import code_embedding
+    from app.knowledge.api import project_index
 
     try:
         async with async_session_factory() as session:
@@ -384,7 +384,7 @@ async def locate_project_file(
 async def list_project_files(user_id: str, project_id: str, limit: int = 500) -> list[str]:
     """服务端项目索引文件清单（不依赖客户端；供 code agent 参考与匹配）."""
     from app.core.database import async_session_factory
-    from app.services import project_index
+    from app.knowledge.api import project_index
 
     try:
         async with async_session_factory() as session:
@@ -557,7 +557,7 @@ async def generate_code_content(
     通知客户端截断重写，避免上次失败尝试的残留内容污染文件）。
     """
     try:
-        from app.core.llm import LLMClient
+        from app.platform.model.llm import LLMClient
         from app.services.usage import CATEGORY_CODE
         from app.agents.core.patch import (
             apply_search_replace,

@@ -66,7 +66,7 @@ def _transcribe_sync(file_path: str) -> str:
 async def transcribe_audio(file_path: str) -> str:
     """语音转文字（子线程执行，不阻塞事件循环）."""
     try:
-        from app.core.executors import run_in_compute
+        from app.platform.runtime.executors import run_in_compute
 
         return await run_in_compute(_transcribe_sync, file_path)
     except Exception as e:
@@ -85,7 +85,7 @@ _CORRECT_SYSTEM_PROMPT = (
 
 async def _qwen_chat(system_prompt: str, user_text: str, model: str, max_tokens: int = 512) -> str:
     """调用千问 ChatModel（复用 .env 的 QWEN_BASE_URL / API_KEY）."""
-    from app.core.llm import LLMClient
+    from app.platform.model.llm import LLMClient
 
     return await LLMClient(provider="qwen").chat(
         [
@@ -221,7 +221,7 @@ async def synthesize_speech(
             logger.warning("本地 qwen3-tts 失败，回退 edge-tts: {}", e)
     elif provider == "dashscope":
         try:
-            from app.core.executors import run_in_compute
+            from app.platform.runtime.executors import run_in_compute
 
             return await run_in_compute(_synthesize_sync, text, voice)
         except Exception as e:

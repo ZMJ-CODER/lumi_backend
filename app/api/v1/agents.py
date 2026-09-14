@@ -4,14 +4,14 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
-from app.agents.orchestration import orchestrator
+from app.agents.orchestration.orchestrator import orchestrator
 from app.agents.orchestration.orchestrator import (
     ActiveConversationJobError,
     AgentBackpressureError,
     UserJobLimitError,
 )
 from app.core.deps import require_auth
-from app.core.throttling import consume_route_limit
+from app.platform.security.throttling import consume_route_limit
 from app.core.exceptions import (
     AppException,
     BadRequestException,
@@ -64,7 +64,7 @@ async def preview_agent_plan(
 ):
     """验证真实路由、规划和编译结果，不创建或执行办公任务。"""
     if req.workspace_id and req.conversation_id:
-        from app.services import workspaces
+        from app.workspace import service as workspaces
 
         try:
             workspaces.bind_workspace_to_conversation(payload["sub"], req.workspace_id, req.conversation_id)
@@ -110,7 +110,7 @@ async def create_agent_job(
     """
     llm_api_key = request.headers.get("x-llm-api-key") or None
     if req.workspace_id and req.conversation_id:
-        from app.services import workspaces
+        from app.workspace import service as workspaces
 
         try:
             workspaces.bind_workspace_to_conversation(payload["sub"], req.workspace_id, req.conversation_id)
@@ -189,7 +189,7 @@ async def get_agent_job(job_id: str, payload: dict = Depends(require_auth)):
     # Provider 是异步注册/心跳的。刷新后再返回，避免"界面报缺少 workspace.read@1，
     # 而同一次任务的读取步骤已经成功"这种自相矛盾的展示（刷新失败保留旧快照）。
     try:
-        from app.agents.orchestration.capability_preflight_service import (
+        from app.agents.orchestration.preflight.capability_preflight_service import (
             refresh_capability_resolution,
         )
 
@@ -442,7 +442,7 @@ async def get_agent_job_recovery(
     且可核对的步骤会出现在 ``reconcile_step_ids``，必须先核对实际状态。
     """
     job = await _get_owned_job(job_id, payload["sub"])
-    from app.agents.orchestration.job_recovery_service import JobRecoveryService
+    from app.agents.orchestration.recovery.job_recovery_service import JobRecoveryService
 
     report = await JobRecoveryService().plan_for_job(job, load_dependencies=load_dependencies)
     return {"code": 0, "data": report.as_dict()}

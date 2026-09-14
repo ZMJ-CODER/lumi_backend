@@ -132,11 +132,11 @@ $env:PYTHONPATH = "packages/orchestration/src"
   tests/test_routing_lexicon.py `
   tests/test_routing_policy.py `
   tests/test_planner_routing_intent.py `
-  tests/test_tca.py `
-  tests/test_plan_compiler.py `
-  tests/test_logical_plan.py `
-  tests/test_routing_upgrade.py `
-  tests/test_state_machine.py `
+  tests/orchestration/test_tca.py `
+  tests/orchestration/test_plan_compiler.py `
+  tests/orchestration/test_logical_plan.py `
+  tests/orchestration/test_routing_upgrade.py `
+  tests/orchestration/test_state_machine.py `
   tests/test_temporal_manifest_runtime.py -q
 ```
 
@@ -144,17 +144,17 @@ $env:PYTHONPATH = "packages/orchestration/src"
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q `
-  tests/test_effect_journal.py `
-  tests/test_document_targeting.py `
-  tests/test_execution_lineage.py `
-  tests/test_approval_service.py
+  tests/orchestration/test_effect_journal.py `
+  tests/knowledge/test_document_targeting.py `
+  tests/orchestration/test_execution_lineage.py `
+  tests/orchestration/test_approval_service.py
 
 # Skill 候选召回、ReAct 工具选择与静态契约
 .\.venv\Scripts\python.exe -m pytest -q `
   tests/test_tool_selection_contract.py `
-  tests/test_langgraph_chat.py `
-  tests/test_react_runner.py `
-  tests/test_skills.py
+  tests/agents/test_langgraph_chat.py `
+  tests/orchestration/test_react_runner.py `
+  tests/agents/test_skills.py
 
 # 当前 CI 静态检查
 uvx ruff check app tests

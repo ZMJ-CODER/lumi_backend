@@ -4,7 +4,7 @@ import httpx
 from loguru import logger
 
 from app.core.config import settings
-from app.core.resilience import CircuitOpenError, get_breaker
+from app.platform.runtime.resilience import CircuitOpenError, get_breaker
 
 
 class WebSearchUnavailableError(RuntimeError):

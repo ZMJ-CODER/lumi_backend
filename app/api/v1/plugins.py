@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
-from app.services.plugins import (
+from app.plugins import (
     PluginManager,
     PluginRegistry,
     PluginRejected,

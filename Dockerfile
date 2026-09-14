@@ -71,17 +71,19 @@ RUN if [ "$ENABLE_CUDA_TORCH" = "true" ]; then \
 
 WORKDIR /app
 
-# 先复制依赖清单与两个本地包的元数据。依赖安装层只受这些清单影响；
+# 先复制依赖清单与本地包的元数据。依赖安装层只受这些清单影响；
 # 普通业务代码改动不会重新下载 torch、docling 等大型依赖。
 COPY pyproject.toml uv.lock ./
 COPY packages/orchestration/pyproject.toml ./packages/orchestration/pyproject.toml
 COPY packages/execution/pyproject.toml ./packages/execution/pyproject.toml
+COPY packages/contracts/pyproject.toml ./packages/contracts/pyproject.toml
+COPY packages/capability/pyproject.toml ./packages/capability/pyproject.toml
 
 # ``pip install .`` 必须在源码存在时构建本项目；先根据项目清单安装第三方
 # 运行时依赖，再在复制源码后以 --no-deps 安装本地包。这样保留 pip 解析语义，
-# 同时把昂贵依赖置于稳定 Docker 缓存层。两个 lumi-* 包由后续本地安装提供，
-# 不能向远端索引解析。
-RUN python -c "import tomllib; deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']; open('/tmp/runtime-requirements.txt', 'w', encoding='utf-8').write('\\n'.join(item for item in deps if not item.startswith(('lumi-orchestration', 'lumi-execution'))))" \
+# 同时把昂贵依赖置于稳定 Docker 缓存层。**所有 lumi-* 包由后续本地安装提供**，
+# 不能向远端索引解析（它们不在公共索引上）。
+RUN python -c "import tomllib; deps = tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']; open('/tmp/runtime-requirements.txt', 'w', encoding='utf-8').write('\\n'.join(item for item in deps if not item.startswith('lumi-')))" \
     && pip install --no-cache-dir -r /tmp/runtime-requirements.txt \
     && rm -f /tmp/runtime-requirements.txt
 
@@ -89,6 +91,8 @@ RUN python -c "import tomllib; deps = tomllib.load(open('pyproject.toml', 'rb'))
 COPY app ./app
 COPY packages/orchestration ./packages/orchestration
 COPY packages/execution ./packages/execution
+COPY packages/contracts ./packages/contracts
+COPY packages/capability ./packages/capability
 COPY celery_app ./celery_app
 COPY scripts ./scripts
 COPY tools ./tools
@@ -98,8 +102,13 @@ COPY alembic ./alembic
 COPY alembic.ini ./
 
 # 本地包不再次触发依赖解析；完整依赖已在上一稳定层安装。
-RUN pip install --no-cache-dir --no-deps ./packages/orchestration ./packages/execution . \
-    && python -c "import lumi_orch; import striprtf; import temporalio; import app.main; print('runtime dependency check passed')"
+RUN pip install --no-cache-dir --no-deps \
+        ./packages/orchestration \
+        ./packages/execution \
+        ./packages/contracts \
+        ./packages/capability \
+        . \
+    && python -c "import lumi_orch; import lumi_contracts; import lumi_capability; import striprtf; import temporalio; import app.main; print('runtime dependency check passed')"
 
 # ── Docling 模型预热（可选，默认关闭）──
 # 默认不预下载：构建期拉取约 1GB 模型容易卡住/失败；首次解析时按需下载。

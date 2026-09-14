@@ -11,7 +11,7 @@ capabilities → skills → capabilities 的循环），而 executor 需要把
         return routed          # 已按租约派发（或结构化失败）
     # 否则落回原现网路径
 
-模式语义见 ``app.agents.capabilities.routing``：``off`` 零开销、``shadow`` 只打点、
+模式语义见 ``app.agents.capabilities.policy.routing``：``off`` 零开销、``shadow`` 只打点、
 ``read_only`` 只切只读、``active`` 全切。
 """
 
@@ -22,9 +22,9 @@ from typing import Any
 
 from loguru import logger
 
-from app.agents.capabilities.context import AgentExecutionContext
-from app.agents.capabilities.dispatch import capability_for_mcp_tool
-from app.agents.capabilities.routing import (
+from app.agents.capabilities.contracts.context import AgentExecutionContext
+from app.agents.capabilities.broker.dispatch import capability_for_mcp_tool
+from app.agents.capabilities.policy.routing import (
     MODE_OFF,
     RoutingDecision,
     maybe_route_capability,
@@ -182,7 +182,7 @@ async def try_capability_route(
         resource_type = ""
         provider_name = ""
         try:
-            from app.agents.capabilities.resource_dispatch import (
+            from app.agents.capabilities.broker.resource_dispatch import (
                 dispatch_enabled,
                 resolve_dispatch,
             )
@@ -242,7 +242,7 @@ def _approval_context_for(
     """由既有工具级审批推导能力审批上下文（未命中返回 None = 未审批）。"""
     if not capability:
         return None
-    from app.agents.capabilities.approvals import binding_for_tool_call
+    from app.agents.capabilities.policy.approvals import binding_for_tool_call
 
     try:
         return binding_for_tool_call(

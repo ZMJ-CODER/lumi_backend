@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# 本地 pre-commit 钩子：与 CI 的 unsafe-calls 作业**同一个入口**。
+#
+# 安装（一次性）：
+#     bash scripts/install_git_hooks.sh
+# 或手工：
+#     cp scripts/pre-commit.sample .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+#
+# 为什么不引入 pre-commit 框架：那需要额外的依赖与 .pre-commit-config.yaml，
+# 而这里要做的事只有一件（跑一个纯标准库脚本）。少一个依赖，少一处失效点。
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# 只扫暂存的 .py 文件时容易漏掉"新增文件未被扫描"的情况，因此直接全量扫——
+# 本项目 790 个文件、2 秒内扫完，代价低于维护增量逻辑的复杂度。
+if ! python scripts/check_unsafe_calls.py; then
+  echo ""
+  echo "提交被拒绝：存在高危调用（见上）。"
+  echo "修复方式：改到受控入口（app/services/safe_delete.py / 沙箱 / 配额 worker）；"
+  echo "确属新的受控执行面时，在 scripts/check_unsafe_calls.py 的 ALLOWED_MODULES 里加条目并写明理由。"
+  exit 1
+fi
+
+# 架构边界门禁（与 CI 的 architecture 作业同一个入口）：规则 1、4 阻塞。
+if ! python tools/check_architecture.py; then
+  echo ""
+  echo "提交被拒绝：出现新的边界违规（见上）。"
+  echo "修复方式：改依赖方向（走 Port / 公共 DTO / 只读模型）；确属存量时登记到"
+  echo "tools/architecture_baseline.txt，兼容壳登记到 tools/compat_shims.txt（两者都只减不增）。"
+  exit 1
+fi

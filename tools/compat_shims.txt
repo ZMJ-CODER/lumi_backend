@@ -1,0 +1,15 @@
+# 兼容壳白名单（规则 4）。**只减不增**：
+#   新增条目 = 新增一条"CI 不再保护"的转发层；要么改调用点，要么别建壳。
+# 格式：<仓库相对路径>  # <为什么现在还不能删> | 删除计划
+#
+# ── 2026-09：白名单已清零（P7）──────────────────────────────────
+# P1~P6 期间这里最多有 15 个存量壳，现在**全部删掉**：
+#
+#   * orchestration/adapters 的 5 个内核薄壳 → 调用点直接 import lumi_orch / lumi_execution；
+#   * app/contracts/plugins 的 8 个转发壳 + 包入口 → 调用点直接 import lumi_contracts.plugins；
+#   * app/services/model_output_protocol → lumi_orch.protocol；
+#   * app/services/rag/__init__（知识域兼容层）→ app.knowledge。
+#
+# 之后**新增任何条目都视为架构回退**：规则 4 是阻塞规则，白名单一空，
+# 任何新转发壳都会立刻让 CI 变红。真需要"旧路径再卖一遍"时，先问一句
+# "调用点为什么不能直接改"——通常是能改的。

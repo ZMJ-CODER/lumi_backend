@@ -52,10 +52,10 @@
 - 依赖：`packages/{execution,orchestration}/pyproject.toml` 加 `lumi-contracts>=0.1.0`，`uv.lock` +4 行。
 
 ### 2.5 测试（新增）
-- `tests/test_agent_process_bubble_contract.py`（8，我实跑通过）
-- `tests/test_agent_process_log_persistence.py`（9）
-- `tests/test_process_event_semantics.py`（10，我实跑通过）
-- 其余相关：`tests/test_stream_event_contract.py`、`tests/test_run_view_contract.py`、`tests/test_projection_outlets.py`、`tests/test_model_projection_lists.py`、`tests/test_contracts_ts_export.py`
+- `tests/agents/test_agent_process_bubble_contract.py`（8，我实跑通过）
+- `tests/agents/test_agent_process_log_persistence.py`（9）
+- `tests/contracts/test_process_event_semantics.py`（10，我实跑通过）
+- 其余相关：`tests/contracts/test_stream_event_contract.py`、`tests/orchestration/test_run_view_contract.py`、`tests/contracts/test_projection_outlets.py`、`tests/platform/test_model_projection_lists.py`、`tests/contracts/test_contracts_ts_export.py`
 
 ## 3. 唯一剩余的代码活：遗留项 (a) —— 实时与刷新文案一致
 
@@ -84,7 +84,7 @@ type entry_id kind title summary detail safe_detail status step_id call_id tool_
 
 ## 5. 已知挂起（重要，别踩坑）
 
-`tests/test_logical_plan.py::test_logical_plan_replan_replaces_only_unfinished_tail`（6 个里的第 5 个）
+`tests/orchestration/test_logical_plan.py::test_logical_plan_replan_replaces_only_unfinished_tail`（6 个里的第 5 个）
 在**本机环境**会挂住（>90s 无进展）。已做的背靠背对比（同环境、同命令）：
 
 | 条件 | 结果 |
@@ -112,8 +112,8 @@ if(-not $p.WaitForExit(90000)){ $p.Kill(); "HUNG" }
 # lint（只查改动文件）
 & $py -m ruff check <files> --no-cache
 ```
-- **禁止跑全量**（用户要求）。只跑聚焦集：`tests/test_process_event_semantics.py`、`tests/test_agent_process_log_persistence.py`、
-  `tests/test_agent_process_bubble_contract.py`、`tests/test_stream_event_contract.py` + 你新加的 1 条。
+- **禁止跑全量**（用户要求）。只跑聚焦集：`tests/contracts/test_process_event_semantics.py`、`tests/agents/test_agent_process_log_persistence.py`、
+  `tests/agents/test_agent_process_bubble_contract.py`、`tests/contracts/test_stream_event_contract.py` + 你新加的 1 条。
 - 如需对比"有无改动"，把 `git stash push` 与 `git stash pop` 放在**同一条命令**里，并在 run 外面套 `WaitForExit(90000)`+`Kill`，
   否则命令被中断会把仓库留在 stash 状态。
 - 基线（供参考，非本次必须复现）：第一个子任务后 `858 passed`；子任务自报带内核改动 `867 passed`；两者都未在"本次全部改动 + 干净环境"下复验过。

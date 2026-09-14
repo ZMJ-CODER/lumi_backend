@@ -8,7 +8,7 @@
 * **内部可用**：DAG 的 ``atomic_step`` 只能执行 ``ToolRegistry`` 里注册过的工具，
   ``plan_compiler`` 的能力快照也只认注册过的工具，所以必须有正式 Tool 实现，
   否则计划编译直接判 ``TOOL_UNAVAILABLE``；
-* **执行只有一个实现**：``app.services.workspace_operations``（版本校验 → 审批 →
+* **执行只有一个实现**：``app.workspace.write.operations``（版本校验 → 审批 →
   回收站 → 读回校验 → ``OperationResult``）。本文件只负责把上下文注进去并把结果折成
   既有 ``ToolOutput``，不重复任何业务逻辑。
 """
@@ -24,7 +24,7 @@ from app.contracts.operations import (
     OperationContext,
     OperationKind,
 )
-from app.services.workspace_operations import (
+from app.workspace.write.operations import (
     NavigatorWorkspaceClient,
     WorkspaceOperationService,
 )
@@ -120,7 +120,7 @@ class _WorkspaceOperationTool(Tool):
 
 
 def _navigator(context: SkillContext, *, workspace_id: str, request: str):
-    from app.services.workspace_navigator import WorkspaceNavigatorService
+    from app.workspace.read.navigator import WorkspaceNavigatorService
 
     return WorkspaceNavigatorService(
         user_id=str(context.user_id or ""),

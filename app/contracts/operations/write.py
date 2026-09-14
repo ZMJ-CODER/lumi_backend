@@ -2,7 +2,7 @@
 
 实现重点（见方案 3）：路径解析 → 边界校验 → 动态保护 → ``expected_revision`` 校验 →
 空内容策略 → 父目录 → 同目录临时文件 → fsync → 原子替换 → 生成新 revision → 审计。
-本模块只定义**参数与载荷形状**；执行在 :mod:`app.services.workspace_operations`。
+本模块只定义**参数与载荷形状**；执行在 :mod:`app.workspace.write.operations`。
 """
 
 from __future__ import annotations

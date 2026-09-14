@@ -8,7 +8,7 @@ does not change Tool/Skill/Orchestrator contracts.
 Device routing contract
 -----------------------
 Each workspace registration records the desktop that hosts it
-(``device_id`` / ``device_server``, see ``app.services.workspaces``).  A task
+(``device_id`` / ``device_server``, see ``app.workspace.service``).  A task
 started from any device is routed back to that desktop by resolving the MCP
 server row that belongs to the workspace's registered device:
 

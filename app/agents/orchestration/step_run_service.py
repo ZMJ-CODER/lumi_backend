@@ -1,11 +1,13 @@
-"""单步执行（/jobs/{id}/resume action=run_next）应用适配层。
+"""Step 运行服务：对外流式入口（**门面 + 执行流程**）。
 
-编排/迁移逻辑位于 ``lumi_orch.step_engine``（StepRunEngine + ports）。
-本模块只做三件事：
-  1) Job ↔ StepRunState 映射与 store 读写；
-  2) 通过 ApplicationTaskNodeExecutor/Lifecycle 执行当前节点（node 执行仍复用
-     app 侧执行适配器，底层是 lumi_execution 引擎）；
-  3) 准入、审批门、终态收尾回调的接线。
+本包按职责分子模块：
+
+* 状态适配 → `step/state_adapter.py`；
+* 过程日志与事件投影（与刷新快照同源）→ `step/presentation.py`；
+* checkpoint 与结果引用持久化 → `step/persistence.py`。
+
+本模块保留：SSE 事件常量、``StepRunService``（对外入口）与执行流程。
+**不搬去 `lumi_execution`**：这里仍然带着应用层的 Job、事件与持久化依赖。
 """
 
 from __future__ import annotations
@@ -28,10 +30,21 @@ from lumi_execution.step_contract import (
     SSE_EVENT_WAITING_NEXT,
     StepOutcome,
     StepRunState,
-    locate_next_step,
 )
 from lumi_execution.step_engine import StepRunEngine
-from app.agents.orchestration.models import Job, JobStatus, TaskNode, TaskStatus
+from app.agents.orchestration.models import Job, JobStatus
+from app.agents.orchestration.step.persistence import (
+    _persist_node_result_ref,
+    _record_step_checkpoints,
+)
+from app.agents.orchestration.step.presentation import (
+    _live_presentation_fields,
+    _result_summary,
+)
+from app.agents.orchestration.step.state_adapter import (
+    _state_from_job,
+    locate_current_step,
+)
 from app.repositories.job_repository import JobRepository
 
 EVENT_STEP_STARTED = SSE_EVENT_STEP_STARTED
@@ -45,305 +58,6 @@ EVENT_TASK_FAILED = SSE_EVENT_TASK_FAILED
 EVENT_DONE = SSE_EVENT_DONE
 
 _VALID_JOB_STATUS = {status.value for status in JobStatus}
-
-
-def locate_current_step(job: Job):
-    """兼容入口：由 Job 定位下一步（实现委托给执行内核 step_engine）。"""
-    state = _state_from_job(job)
-    candidate = locate_next_step(state)
-    if candidate is None:
-        return None, -1, None, False
-    node = next((n for n in job.nodes if n.id == candidate.step_id), None)
-    return candidate.step, candidate.index, node, candidate.has_more
-
-
-def _state_from_job(job: Job) -> StepRunState:
-    routing = job.routing if isinstance(job.routing, dict) else {}
-    steps: list[dict] = []
-    nodes_by_id = {node.id: node for node in job.nodes}
-    for raw in routing.get("steps") or []:
-        if not isinstance(raw, dict):
-            continue
-        step = dict(raw)
-        node = nodes_by_id.get(str(step.get("id") or ""))
-        if node is not None:
-            step["dependencies_done"] = _dependencies_done(job, node)
-            hint = str((node.params or {}).get("preferred_tool") or "")
-            step.setdefault("tool", hint)
-        else:
-            step["dependencies_done"] = False
-        steps.append(step)
-    result = job.result if isinstance(job.result, dict) else {}
-    return StepRunState(
-        job_id=job.job_id,
-        user_id=job.user_id,
-        job_status=job.status.value if hasattr(job.status, "value") else str(job.status),
-        canonical=str(routing.get("execution_state") or ""),
-        plan_revision=int(routing.get("plan_revision") or 1),
-        current_step_index=int(routing.get("current_step_index") or 0),
-        steps=steps,
-        seen_keys=[str(x) for x in routing.get("seen_step_keys") or []],
-        error=job.error,
-        updated_at=float(job.updated_at or 0.0),
-        final_answer=str(result.get("final_answer") or result.get("answer") or ""),
-        execution_mode=str(routing.get("execution_mode") or "step_confirm"),
-        plan_text=str(routing.get("plan_text") or job.plan_text or ""),
-    )
-
-
-def _dependencies_done(job: Job, node: TaskNode) -> bool:
-    if not node.depends_on:
-        return True
-    nodes_by_id = {item.id: item for item in job.nodes}
-    return all(
-        (dep := nodes_by_id.get(dep_id)) is not None and dep.status == TaskStatus.COMPLETED
-        for dep_id in node.depends_on
-    )
-
-
-def _result_summary(result: dict | None, fallback: str = "") -> str:
-    value = result or {}
-    display = value.get("display")
-    if isinstance(display, dict) and str(display.get("completed") or "").strip():
-        return str(display["completed"])[:200]
-    content = str(
-        value.get("content") or value.get("output") or value.get("answer") or ""
-    ).strip()
-    if content:
-        first_line = next((line.strip() for line in content.splitlines() if line.strip()), "")
-        if first_line and len(first_line) <= 120:
-            return first_line
-        return (content[:96] + "…") if len(content) > 96 else content
-    return str(fallback or "")[:200]
-
-
-def _presentation_node(job: Job | None, step_id: str, step: dict | None) -> Any:
-    """还原 ``presentation`` 文案所需的节点形状（与刷新投影同一解析规则）。
-
-    ``app/contracts/process_log.py`` 用 ``job.nodes`` 里的节点（没有时退化成只用
-    ``routing["steps"]`` 的轻量节点）调用 ``presentation.step_action`` 等函数；这里
-    必须**逐字复用同一规则**，否则实时帧与刷新快照又会是两套措辞。内核只有声明
-    文案（instruction/title），拿不到面向用户的表达，所以文案注入放在 app 层。
-    """
-    node = next((item for item in (job.nodes if job is not None else []) or [] if item.id == step_id), None)
-    if node is not None:
-        return node
-    data = step if isinstance(step, dict) else {}
-    from app.contracts.process_log import _StepNode
-
-    return _StepNode(
-        step_id=step_id,
-        title=str(data.get("title") or ""),
-        tool=str(data.get("tool") or ""),
-    )
-
-
-def _display_text(result: Any, key: str) -> str:
-    """节点结果里的 ``display`` 文案（``attach_display_result`` 的落库副本）。"""
-    if not isinstance(result, dict):
-        return ""
-    display = result.get("display")
-    if not isinstance(display, dict):
-        return ""
-    return str(display.get(key) or "").strip()
-
-
-def _text_or(step: Any, key: str) -> str:
-    if not isinstance(step, dict):
-        return ""
-    return str(step.get(key) or "").strip()
-
-
-def _live_presentation_fields(job: Job | None, event: dict) -> dict[str, str]:
-    """按过程状态给出与刷新投影同源的 ``title``/``summary``（不改 ``entry_id``）。
-
-    ``process_log_from_job()`` 的步骤条目 = ``title: step_action(node)`` +
-    ``summary: intent/working/completed/failed_text(node, ...)``；实时帧若用内核
-    的声明文案，同一行（``entry_id`` 相同、不会重复）在刷新前后会换措辞。这里在
-    app 层注入同一套函数，使**同一步骤的实时帧与刷新快照逐字一致**。
-    """
-    from app.agents.orchestration.presentation import (
-        completed_text,
-        failed_text,
-        intent_text,
-        step_action,
-        working_text,
-    )
-
-    step_id = str(event.get("step_id") or "")
-    if not step_id:
-        return {}
-    steps = (job.routing or {}).get("steps") if isinstance(job.routing, dict) else []
-    step = next(
-        (
-            item
-            for item in steps or []
-            if isinstance(item, dict)
-            and step_id in {str(item.get("id") or ""), str(item.get("step_id") or "")}
-        ),
-        None,
-    )
-    node = _presentation_node(job, step_id, step)
-    result = step.get("result") if isinstance(step, dict) else None
-    if not isinstance(result, dict):
-        node_result = getattr(node, "result", None)
-        result = node_result if isinstance(node_result, dict) else None
-    status = str(event.get("status") or "running").casefold()
-    if status == "completed":
-        # 与刷新投影同源：刷新取节点 ``display.completed``（没有时才退到
-        # ``routing.steps[].result_summary``）。实时帧发射时节点结果可能还没写回
-        # 状态库，而 ``step_completed.result_summary`` **就是**引擎用同一个
-        # ``_result_summary`` 算出的同一句话，因此这里优先用它，避免实时与刷新
-        # 因为"快照早/晚一步"而换措辞。
-        summary = _display_text(result, "completed")
-        if not summary:
-            summary = str(event.get("result_summary") or "").strip()
-        if not summary:
-            summary = str((step or {}).get("result_summary") or "").strip()
-        if not summary:
-            summary = completed_text(node, result)
-    elif status == "failed":
-        # 与刷新投影（``_step_entry`` → ``failed_text(node, step.error)``）同源。
-        # 失败时状态库里的 ``step["error"]`` 与事件里的 ``result_summary`` 是**同一句**
-        # 净化后的错误（内核 ``settle_failure`` 同时写两处）；节点/步骤已落地的错误
-        # 优先，事件自带文本兜底，避免刷新前后措辞不同。
-        error = (
-            _display_text(result, "error")
-            or _text_or(step, "error")
-            or str(event.get("result_summary") or "").strip()
-            or str(event.get("error") or "")
-        )
-        summary = failed_text(node, error or None)
-    elif status == "pending":
-        summary = intent_text(node)
-    else:
-        summary = working_text(node)
-    return {"title": step_action(node), "summary": summary}
-
-
-async def _persist_node_result_ref(
-    user_id: str,
-    result: dict | None,
-    *,
-    job_id: str = "",
-    step_id: str = "",
-    tool_name: str = "",
-    schema_name: str = "execution_result",
-    schema_version: int = 1,
-) -> dict[str, str] | None:
-    try:
-        from app.agents.orchestration.execution.lineage import persist_result_ref
-
-        return await persist_result_ref(
-            user_id,
-            result,
-            job_id=job_id,
-            step_id=step_id,
-            tool_name=tool_name,
-            schema_name=schema_name,
-            schema_version=schema_version,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("步骤结果引用持久化失败（降级继续）: {}", str(exc)[:160])
-        return None
-
-
-async def _record_step_checkpoints(job: Job, state: StepRunState) -> None:
-    """方案 §2.3 第 6/7 步：**结果引用已落盘、状态已写 Job 之后**写步骤检查点。
-
-    这里只写检查点，不发事件：完成事件由内核对**已保存的状态**发射，而
-    ``save_state`` 一定在发射之前被调用（见 ``lumi_execution.step_engine._settle``），
-    因此"完成事件必须在检查点落盘之后"这条铁律由调用顺序保证；发射侧的闸门是
-    :func:`app.services.step_checkpoint.StepCheckpointCoordinator.confirm_persisted_for_emit`。
-
-    检查点写失败**不阻塞任务执行**（只记日志）：任务状态仍以 Job 快照为准，
-    恢复时按"没有检查点"保守处理。
-    """
-    from app.services.step_checkpoint import coordinator_for, state_for_step
-
-    coordinator = coordinator_for(job.job_id)
-    if not coordinator.enabled:
-        return
-    job_status = job.status.value if hasattr(job.status, "value") else str(job.status)
-    nodes_by_id = {node.id: node for node in job.nodes}
-    written: list[Any] = []
-    for raw in state.steps:
-        if not isinstance(raw, dict):
-            continue
-        step_id = str(raw.get("id") or raw.get("step_id") or "")
-        if not step_id:
-            continue
-        node = nodes_by_id.get(step_id)
-        metadata = node.metadata if node is not None and isinstance(node.metadata, dict) else {}
-        effect_type = str(
-            raw.get("effect_type")
-            or metadata.get("effect_type")
-            or _effect_type_for_node(node)
-        )
-        outcome = await coordinator.record(
-            step_id,
-            state_for_step(status=str(raw.get("status") or ""), job_status=job_status),
-            attempt=int(raw.get("attempt") or 1),
-            tool_name=str(raw.get("tool") or raw.get("tool_name") or "")[:160],
-            step_type=str(raw.get("step_type") or "")[:80],
-            effect_type=effect_type[:32],
-            idempotency_key=str(getattr(node, "idempotency_key", "") or "")[:160],
-            input_digest=str(metadata.get("input_sha256") or raw.get("input_digest") or "")[:128],
-            output_summary=str(raw.get("result_summary") or "")[:2000],
-            result_ref=raw.get("result_ref") if isinstance(raw.get("result_ref"), dict) else None,
-            error_code=str(raw.get("error_code") or (getattr(node, "error_code", "") or ""))[:120],
-            effect_status=str(
-                raw.get("effect_status") or (getattr(node, "effect_status", "") or "")
-            ),
-        )
-        if outcome.checkpoint is not None:
-            written.append(outcome.checkpoint)
-    if not written:
-        return
-    # 方案 §3.3：检查点同时异步投影进 DB（查询/审计用）。DB 写失败不阻塞执行。
-    from app.services.job_projection import project_job_run, project_step_checkpoints
-
-    await project_step_checkpoints(job.job_id, written)
-    await project_job_run(
-        job_id=job.job_id,
-        user_id=str(job.user_id or ""),
-        conversation_id=str(getattr(job, "conversation_id", "") or ""),
-        status=job_status,
-        current_step_id=_current_step_id(state),
-        plan_revision=int(state.plan_revision or 1),
-        last_checkpoint_version=max(int(item.checkpoint_version or 0) for item in written),
-        error_code=str(state.error or ""),
-    )
-
-
-def _current_step_id(state: StepRunState) -> str:
-    """当前步骤 id（越界/形状异常一律返回空串，不猜）。"""
-    index = int(state.current_step_index or 0)
-    steps = state.steps or []
-    if 0 <= index < len(steps) and isinstance(steps[index], dict):
-        return str(steps[index].get("id") or steps[index].get("step_id") or "")
-    return ""
-
-
-def _effect_type_for_node(node: Any) -> str:
-    """按节点声明判定副作用类型（判不出返回 ``unknown``，不猜）。"""
-    if node is None:
-        return ""
-    try:
-        from lumi_orch.effects import effect_type_for
-
-        params = getattr(node, "params", {}) or {}
-        return str(
-            effect_type_for(
-                params.get("preferred_tool"),
-                params.get("tool"),
-                params.get("action"),
-                params.get("operation"),
-                getattr(node, "agent", ""),
-            ).value
-        )
-    except Exception:  # noqa: BLE001 - 判不出类型不能影响检查点写入
-        return ""
 
 
 class StepRunService:
@@ -589,7 +303,7 @@ class StepRunService:
     ) -> StepOutcome:
         from app.agents.orchestration.execution.lifecycle import ApplicationNodeLifecycle
         from app.agents.orchestration.execution.node import ApplicationTaskNodeExecutor
-        from app.agents.orchestration.job_contract import freeze_job_spec
+        from app.agents.orchestration.runtime.job_contract import freeze_job_spec
 
         job = await self._store.get_job(state.job_id)
         if job is None:
@@ -675,7 +389,7 @@ class StepRunService:
         on_process: Callable[[str], Awaitable[None]],
     ) -> int:
         try:
-            from app.services.office_stream import read_deltas
+            from app.office.api import read_deltas
 
             deltas, cursor = await read_deltas(job_id, cursor)
         except Exception:  # noqa: BLE001

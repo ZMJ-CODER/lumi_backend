@@ -51,7 +51,7 @@ def _version(value: str) -> tuple[int, int, int]:
 # 能力即可用”，否则工作流会误报 MISSING_TOOL。
 # 原子名取自 workspace_context（唯一事实来源），不在这里维护第二份字面量。
 def _aggregated_sources() -> dict[str, tuple[str, ...]]:
-    from app.services.workspace_context import (
+    from app.workspace.context import (
         WORKSPACE_INTERNAL_READ_CAPABILITIES,
         WORKSPACE_NAVIGATOR,
     )

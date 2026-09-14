@@ -11,14 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException
-from app.core.read_view_cache import (
+from app.platform.runtime.read_view_cache import (
     ReadViewTimer,
     get_read_view,
     invalidate_user_view,
     set_read_view,
     user_view_key,
 )
-from app.core.security import hash_password, validate_password_strength, verify_password
+from app.platform.security.security import hash_password, validate_password_strength, verify_password
 from app.models.db_models import (
     Attachment,
     Conversation,
@@ -44,7 +44,7 @@ from app.models.user import (
     SetPromptRequest,
     UserProfileUpdateRequest,
 )
-from app.core.model_catalog import (
+from app.platform.model.model_catalog import (
     PROVIDER_BASE_URLS,
     find_model,
     get_model_catalog,

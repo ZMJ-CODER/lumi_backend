@@ -36,7 +36,33 @@ uv run alembic upgrade head
 
 # 启动后端
 uv run uvicorn app.main:app --reload --port 8000
+# 也支持脚本方式（IDE 直接跑 app/main.py）：
+# uv run python app/main.py
 ```
+
+> 入口 `app/main.py` 会先把 `app/` 从 `sys.path` 摘掉：以脚本方式启动时它是 `sys.path[0]`，
+> 会让第三方库的 `import platform` 命中 `app/platform/`（同名包），syntax 之外还会在
+> sqlalchemy 里炸成 `AttributeError: module 'platform' has no attribute 'python_implementation'`。
+> 推荐仍然用 `uvicorn app.main:app`（模块方式），该守卫对它是空操作。
+
+### 401 排查（全站接口都 401 时先看这里）
+
+`/api/v1/auth/captcha` 返回 200、其它接口全 401，**且 `POST /api/v1/auth/refresh` 也 401** ——
+这不是"没登录"，而是**令牌本身失效**：最典型的原因是 `JWT_SECRET_KEY` 变了（包括"在 `.env`
+末尾又追加了一条新密钥"这种重复定义——dotenv 只有**最后一条**生效）。
+
+```bash
+# 启动日志会打印密钥指纹（不是密钥本身）：
+#   JWT 密钥指纹=c8bef0a7（轮换会使所有已发出的令牌失效，客户端需重新登录）
+# 若 .env 有重复键，还会额外警告：
+#   .env 存在重复键（只有最后一条生效，请合并为一条）：JWT_SECRET_KEY
+# 本地自查：
+uv run python -c "from app.core.config import duplicate_env_keys; print(duplicate_env_keys())"
+```
+
+处理步骤：合并 `.env` 里的重复键（保留想要的那一条）→ 重启后端 → **客户端重新登录**
+（旧 refresh_token 由旧密钥签发，无法恢复）。前端应在 refresh 401 时清空本地令牌并跳登录页，
+不要循环重试。
 
 前端（Electron + Vite）在独立仓库，后端默认 `http://localhost:8000`。
 

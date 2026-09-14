@@ -1,7 +1,7 @@
 """办公技能（office/写作类）：邮件撰写 / 公文撰写 / 多风格改写 / 长文摘要 / 会议纪要."""
 
 from app.agents.skills.base import WorkflowSkill, SkillContext, ToolOutput
-from app.services.office_skill_utils import office_llm
+from app.office.skill_utils import office_llm
 
 
 def _ok(text: str) -> ToolOutput:

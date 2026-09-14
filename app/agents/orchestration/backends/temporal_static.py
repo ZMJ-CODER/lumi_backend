@@ -5,9 +5,9 @@ from __future__ import annotations
 import time
 
 from app.agents.orchestration.backends.contracts import BackendControlResult
-from app.agents.orchestration.job_contract import freeze_job_spec
+from app.agents.orchestration.runtime.job_contract import freeze_job_spec
 from app.agents.orchestration.models import Job, JobStatus
-from app.agents.orchestration.runtime_gateway import RuntimeGateway
+from app.agents.orchestration.runtime.runtime_gateway import RuntimeGateway
 from app.agents.orchestration.state_machine.transitions import transition
 from app.monitoring.context import MonitorContext
 from app.monitoring.logger import monitor_logger

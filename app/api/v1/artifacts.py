@@ -197,7 +197,7 @@ async def _assert_job_and_workspace_access(user_id: str, *, job_id: str, workspa
     """任务/工作区权限校验（给了才校验；缺省沿用"用户归属"这一层）。"""
     target_job = str(job_id or "").strip()
     if target_job:
-        from app.agents.orchestration import orchestrator
+        from app.agents.orchestration.orchestrator import orchestrator
 
         job = await orchestrator.get_job(target_job)
         if job is None or str(job.user_id) != user_id:

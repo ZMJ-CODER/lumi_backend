@@ -6,10 +6,10 @@
 | # | 主题 | 代码入口 | 开关 |
 | --- | --- | --- | --- |
 | 1 | 策略热更新 | `app/services/runtime_policy.py`、`app/api/v1/admin_policies.py` | `RUNTIME_POLICY_OVERRIDE` |
-| 2 | AST 静态门禁 | `scripts/check_unsafe_calls.py`、`tests/test_unsafe_call_gate.py` | 无（CI 阻塞作业） |
-| 3 | 统一绝对截止时间 | `app/core/deadline.py` | 无（未设截止时间=不限制） |
+| 2 | AST 静态门禁 | `scripts/check_unsafe_calls.py`、`tests/structure/test_unsafe_call_gate.py` | 无（CI 阻塞作业） |
+| 3 | 统一绝对截止时间 | `app/platform/runtime/deadline.py` | 无（未设截止时间=不限制） |
 | 4 | 写操作代际校验 | `app/services/write_gate.py` | `WRITE_GATE_ENFORCEMENT` |
-| 5 | 降级成本监控 | `app/core/observability.py`、`app/services/usage.py` | `METRICS_ENABLED` |
+| 5 | 降级成本监控 | `app/observability/observability.py`、`app/services/usage.py` | `METRICS_ENABLED` |
 | 6 | SSE 快照真空期 | `app/services/resume_snapshot.py`、`GET /agents/jobs/{id}/resume` | 无 |
 
 ## 评审后的 P0 收口（第二轮）
@@ -109,7 +109,7 @@
 2. 给**已有数据**的表加 `NOT NULL` 列不给 `server_default` → `NotNullViolationError`。
    0014 给 `fallback_used` / `duration_ms` / `tool_calls` 补上默认值。
 
-已实际执行 `alembic upgrade head` 到 0015；`tests/test_migration_executability.py` 把
+已实际执行 `alembic upgrade head` 到 0015；`tests/structure/test_migration_executability.py` 把
 这两条做成静态守卫（revision 长度、NOT NULL + server_default、单 head 链）。
 
 ### P0-9 读接口解耦共享连接池
@@ -147,8 +147,8 @@ Worker 侧（`PolicyStore`）：
 
 | 关注点 | 接入位置 |
 | --- | --- |
-| 模型超时 / 启停 | `app/core/llm.py::LLMClient._model`（所有 chat/stream/tools/embed 的唯一解析点） |
-| 能力 Provider | `app/agents/capabilities/broker.py::select` 的候选过滤（复用 `provider_unhealthy` 事实，用户可见映射不变） |
+| 模型超时 / 启停 | `app/platform/model/llm.py::LLMClient._model`（所有 chat/stream/tools/embed 的唯一解析点） |
+| 能力 Provider | `app/agents/capabilities/broker/broker.py::select` 的候选过滤（复用 `provider_unhealthy` 事实，用户可见映射不变） |
 
 优先级：`default` → `model` → `provider`，**后者覆盖前者**（越具体越优先；运维要干预的
 通常是具体执行方）。单层内逐字段合并，所以"只想改超时"不会顺手把并发或启停改掉。
@@ -163,10 +163,10 @@ POST   /api/v1/admin/policies/refresh        立刻轮询一次（排障：验�
 POST   /api/v1/admin/policies/write-lease    续签写租约（§4 用）
 ```
 
-写操作要 **superadmin JWT + `X-Admin-Token`**。这里**刻意没有**沿用
+写操作只需 **superadmin JWT**（2026-09 起二次密码 `X-Admin-Token` 已移除；
+`require_superadmin` 是唯一授权口径）。这里**刻意没有**沿用
 `POST /capabilities/admin/revoke` 的写法——那个端点此前只校验 `require_auth`，
-任何登录用户知道 `provider_id` 就能撤销别人的能力租约；本次一并修成
-`require_superadmin + X-Admin-Token`。
+任何登录用户知道 `provider_id` 就能撤销别人的能力租约；本次一并修成 `require_superadmin`。
 
 数值校验在上限层就拦住：`timeout_seconds ∈ [0.1, 3600]`、`max_concurrent ∈ [1, 256]`。
 一条手滑写成的 `timeout_seconds=0.001` 会让线上全部 LLM 调用瞬间超时，不能等到生效才发现。
@@ -187,7 +187,7 @@ CI：`.github/workflows/ci.yml` 的 **unsafe-calls 作业（阻塞）**。覆盖
 * `compile(` 命中 176 行，**没有一行**是内建：158 个 `re.compile`、14 个测试里的
   `def _compile`、4 个 `graph.compile(`；
 * `eval(` 命中 19 行，全是 `redis.eval(`（Lua）与测试替身；
-* `app/services/rag/cleaner.py` 的安全规则表里就有**字符串形式**的 `"os.system("`；
+* `app/knowledge/parsing/cleaner.py` 的安全规则表里就有**字符串形式**的 `"os.system("`；
 * `shutil.rmtree` 在 `app/api/v1/user.py` 是**裸引用**传给 `asyncio.to_thread`，
   只按 `Call` 扫会漏（门禁按 `Attribute` 也扫裸引用）。
 
@@ -201,11 +201,11 @@ CI：`.github/workflows/ci.yml` 的 **unsafe-calls 作业（阻塞）**。覆盖
 app/services/safe_delete.py                    受控删除的唯一实现
 app/agents/sandbox/local.py                    本地沙箱运行器
 app/agents/sandbox/docker.py                   Docker 沙箱运行器
-app/services/plugins/quota.py                  插件配额进程 worker（超时 kill / 计量 / rlimit）
+app/plugins/quota.py                  插件配额进程 worker（超时 kill / 计量 / rlimit）
 app/agents/orchestration/temporal/runtime.py   内置 Temporal 开发服务引导
 scripts/check_unsafe_calls.py                  门禁自身
-tests/test_unsafe_call_gate.py                 门禁的对抗性测试
-tests/test_office_docs.py                      内联执行受测的办公转换脚本（脚本生成器是受测对象）
+tests/structure/test_unsafe_call_gate.py                 门禁的对抗性测试
+tests/office/test_office_docs.py                      内联执行受测的办公转换脚本（脚本生成器是受测对象）
 ```
 
 为了让清单尽量短，**删除类调用已收口**到 `app/services/safe_delete.py`：6 个业务模块
@@ -217,7 +217,7 @@ tests/test_office_docs.py                      内联执行受测的办公转换
 ## 3. 统一绝对截止时间（contextvars）
 
 ```python
-from app.core.deadline import set_deadline, ensure_budget, get_remaining_budget
+from app.platform.runtime.deadline import set_deadline, ensure_budget, get_remaining_budget
 
 token = set_deadline(source="orchestrator.stream")   # 入口设一次
 ...
@@ -334,7 +334,7 @@ GET /api/v1/agents/jobs/{job_id}/resume?after_seq=<客户端水位>
 `snapshot_seq` / `head_seq` / `caught_up`，让客户端能区分"追平了"与"被自己的水位过滤光了"。
 
 快照键与序列化只属于 `app/services/job_snapshot_store.py`（新增 `read_snapshot_payload`
-作为恢复路径的唯一入口）——这条契约由 `tests/test_job_snapshot_write_guard.py` 静态守着，
+作为恢复路径的唯一入口）——这条契约由 `tests/orchestration/test_job_snapshot_write_guard.py` 静态守着，
 多一个模块拼同一个键就多一条可能绕过体积收缩的路径。
 
 ---
@@ -343,8 +343,8 @@ GET /api/v1/agents/jobs/{job_id}/resume?after_seq=<客户端水位>
 
 | 文件 | 覆盖 |
 | --- | --- |
-| `tests/test_runtime_policy_and_deadline.py` | epoch 刷新、不抹掉其它主体、max_ttl 退回默认值、轮询启停、脏数据容错；截止时间默认不限制/只缩窄/任务隔离/TimeoutError；写闸四种阻断 + 一种放行；成本估算与 label |
-| `tests/test_job_deadline.py` | 任务预算**替换**（而非取 min）请求预算、关闭时显式不限制、每段执行重新锚定（审批不消耗）、子路径只能缩窄、作用域化收尾余量、`budget_snapshot.scope`、执行循环装上并还原、预算耗尽 → `JOB_DEADLINE_EXCEEDED`、Temporal 预算与节点超时同源、并发任务各拿一份 |
-| `tests/test_admin_policy_api.py` | 权限与校验、写后本进程立即生效、删除回落默认值、Redis 不可达时租约签发报错 |
-| `tests/test_unsafe_call_gate.py` | 对抗性：真违规必拦（别名/裸引用/异步子进程/pathlib）、合法写法零误报（`re.compile`/`redis.eval`/字符串）、真实仓库 0 违规 |
-| `tests/test_resume_snapshot_gap.py` | 水位只扫尾部；快照覆盖过的事件不再返回；快照缺失/损坏/超大 gap 的降级与截断 |
+| `tests/platform/test_runtime_policy_and_deadline.py` | epoch 刷新、不抹掉其它主体、max_ttl 退回默认值、轮询启停、脏数据容错；截止时间默认不限制/只缩窄/任务隔离/TimeoutError；写闸四种阻断 + 一种放行；成本估算与 label |
+| `tests/orchestration/test_job_deadline.py` | 任务预算**替换**（而非取 min）请求预算、关闭时显式不限制、每段执行重新锚定（审批不消耗）、子路径只能缩窄、作用域化收尾余量、`budget_snapshot.scope`、执行循环装上并还原、预算耗尽 → `JOB_DEADLINE_EXCEEDED`、Temporal 预算与节点超时同源、并发任务各拿一份 |
+| `tests/capabilities/test_admin_policy_api.py` | 权限与校验、写后本进程立即生效、删除回落默认值、Redis 不可达时租约签发报错 |
+| `tests/structure/test_unsafe_call_gate.py` | 对抗性：真违规必拦（别名/裸引用/异步子进程/pathlib）、合法写法零误报（`re.compile`/`redis.eval`/字符串）、真实仓库 0 违规 |
+| `tests/orchestration/test_resume_snapshot_gap.py` | 水位只扫尾部；快照覆盖过的事件不再返回；快照缺失/损坏/超大 gap 的降级与截断 |

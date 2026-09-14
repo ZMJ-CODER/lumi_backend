@@ -68,7 +68,7 @@ def checkpoint_ttl_seconds() -> int:
 def checkpoints_enabled() -> bool:
     """``STEP_CHECKPOINT_V2``（默认关闭；关闭时写入是空操作）。"""
     try:
-        from app.core.feature_flags import feature_enabled
+        from app.platform.runtime.feature_flags import feature_enabled
 
         return feature_enabled("STEP_CHECKPOINT_V2")
     except Exception:  # noqa: BLE001 - 开关不可用时保持旧行为

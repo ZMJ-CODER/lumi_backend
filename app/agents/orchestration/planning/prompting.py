@@ -49,7 +49,7 @@ def build_planner_prompt() -> str:
     capability to a user-visible Skill afterwards.  Keeping this boundary here
     prevents every new business workflow from becoming another planner branch.
     """
-    from app.core.agent_security import UNTRUSTED_CONTENT_RULES
+    from app.platform.security.agent_security import UNTRUSTED_CONTENT_RULES
 
     return (
         "你是办公任务的抽象规划器，只输出可校验的 JSON。你不认识业务类别，"

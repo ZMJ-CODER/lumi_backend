@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from app.agents.skills.base import SkillContext, Tool
 from app.agents.skills.output_contract import ToolOutput
-from app.services.workspace_navigator import (
+from app.workspace.read.navigator import (
     ACTIONS,
     ACTION_LIST,
     WorkspaceNavigatorService,
@@ -183,7 +183,7 @@ class WorkspaceNavigatorTool(Tool):
         # 自己在产出边界做**字段级**清洗：保留工作区相对路径与解析正文，只清
         # 服务端路径形态与敏感字段。这样即使执行器随后按 environment="server"
         # 再洗一遍（同样的规则、幂等），也不会把合法正文或 path 字段洗掉。
-        from app.core.agent_security import sanitize_workspace_result
+        from app.platform.security.agent_security import sanitize_workspace_result
 
         return sanitize_workspace_result(result)
 

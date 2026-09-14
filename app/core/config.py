@@ -210,7 +210,7 @@ class Settings(BaseSettings):
     LLM_VISION_MAX_CONTEXT: int = 0
     LLM_VISION_TIMEOUT: float = 0.0
 
-    # ── 职责 → 档位（Model Role）：留空用 app/core/model_roles.py 的默认表 ──
+    # ── 职责 → 档位（Model Role）：留空用 app/platform/model/model_roles.py 的默认表 ──
     # 例：LLM_ROLE_TITLE=cheap、LLM_ROLE_CODE_WRITER=main、LLM_ROLE_VISION=vision
     LLM_ROLE_TITLE: str = ""
     LLM_ROLE_SUMMARY: str = ""
@@ -418,7 +418,7 @@ class Settings(BaseSettings):
     # 任何"等外部依赖（Electron/MCP/工作区设备）"的内部等待都必须有界：无界等待会
     # 让一次提交永远不返回（计划编译期发现桌面能力时尤其明显）。超时按任务复杂度
     # 档位取阶梯值，可按模型计划升级（M0→…→M3）或用请求里的 timeout_seconds 覆盖。
-    # 解析规则见 app/agents/orchestration/timeout_ladder.py。
+    # 解析规则见 app/agents/orchestration/runtime/timeout_ladder.py。
     AGENT_TIMEOUT_LADDER_ENABLED: bool = True
     AGENT_TIMEOUT_M0_SECONDS: int = 5
     AGENT_TIMEOUT_M1_SECONDS: int = 10
@@ -858,6 +858,33 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def duplicate_env_keys(path: str | Path | None = None) -> list[str]:
+    """``.env`` 里被定义了**多次**的键（按首次出现顺序，去重）。
+
+    为什么要查：dotenv/pydantic 的语义是"同名的**最后一条**生效"，而人在编辑
+    ``.env`` 时经常把新的密钥**追加**在文件末尾（旧的还留在上面）。于是"改了密钥"
+    看起来没生效、"没改"却悄悄轮换了——实测事故：全站 401，连 ``auth/refresh`` 都 401，
+    客户端无法自愈。这里只返回**键名**，永不返回值。
+
+    ``path`` 缺省用项目根的 ``.env``；文件不存在返回空列表（容器里通常用环境变量）。
+    """
+    env_path = Path(path) if path is not None else PROJECT_ROOT / ".env"
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    seen: dict[str, int] = {}
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        key = text.split("=", 1)[0].strip()
+        if not key:
+            continue
+        seen[key] = seen.get(key, 0) + 1
+    return [key for key, count in seen.items() if count > 1]
 
 
 settings = get_settings()

@@ -59,7 +59,7 @@ Postgres 单连接 `SELECT 1` 仅 0.14ms，DB 本身飞快；
 ## 三、第三轮：队列化日志 + 专用计算线程池（2026-08-17 追加）
 
 ### 1. 访问日志 QueueHandler（已落地）
-`app/core/logging.py` 新增 `setup_uvicorn_queue_logging()`：uvicorn.access/error 日志
+`app/observability/logging.py` 新增 `setup_uvicorn_queue_logging()`：uvicorn.access/error 日志
 切到 QueueHandler + QueueListener 后台线程写 stderr，事件循环只做一次内存入队。
 已接入 `main.py` 生命周期，开机即生效。
 
@@ -76,7 +76,7 @@ GIL/句柄竞争，追不上 `--no-access-log`。**默认保留队列日志（�
 追求极限吞吐时用 `--no-access-log`。**
 
 ### 2. 计算任务专用线程池（已落地）
-`app/core/executors.py` 提供 `COMPUTE_THREADS`（默认 4）的独立线程池，
+`app/platform/runtime/executors.py` 提供 `COMPUTE_THREADS`（默认 4）的独立线程池，
 OCR / Docling / Embedding / Whisper / TTS 全部从默认 `asyncio.to_thread` 切换到
 `run_in_compute`，避免并发上传占满默认线程池（CPU 核数+4）饿死 Web 后台任务。
 
@@ -114,7 +114,7 @@ Postgres/Redis（host.docker.internal），与 Windows 同脚本、同并发压�
 `read_structure` / `extract_full_text` 是 CPU 密集同步操作（图片 OCR、PDF 解析），
 原先在 async 接口里直接调用，一个上传就把整个事件循环卡死（实测 health 延迟飙到 3 秒）。
 
-修复：`app/api/v1/office_docs.py`、`app/services/office_docs.py`、
+修复：`app/api/v1/office_docs.py`、`app/office/docs.py`、
 `plugins/tools/office/office_docs.py` 全部改为 `asyncio.to_thread(...)`。
 
 ### 2. health 接口每次占用数据库连接池
@@ -146,7 +146,7 @@ Postgres/Redis（host.docker.internal），与 Windows 同脚本、同并发压�
 ### 高频读取缓存（2026-08-28）
 
 受保护的只读接口在重复轮询时会放大连接池排队：`/user/me`、`/conversations`、`/memory`
-都需要用户隔离，但返回数据在数秒内通常不变。因此新增 `app/core/read_view_cache.py`：
+都需要用户隔离，但返回数据在数秒内通常不变。因此新增 `app/platform/runtime/read_view_cache.py`：
 
 - 缓存键为 `api:view:{kind}:{user_id}`；会话列表额外哈希 `scene/limit/offset`，不共享跨用户或跨页响应。
 - TTL 为 `user=5s`、`conversations=10s`、`memory=15s`。Redis 仅作优化，任何连接、序列化或缓存值错误均 fail-open 回退 PostgreSQL。

@@ -4,7 +4,7 @@
 """
 
 from app.agents.skills.base import WorkflowSkill, SkillContext, ToolOutput
-from app.services.office_skill_utils import office_llm
+from app.office.skill_utils import office_llm
 
 
 class DailyReportSkill(WorkflowSkill):

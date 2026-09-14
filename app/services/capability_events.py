@@ -1,6 +1,6 @@
 """阶段 2：能力状态事件流（SSE 新增事件，**不改**普通聊天 delta 流程）。
 
-与 ``app/services/office_stream.py`` 同一套机制（Redis list + 游标 + 短 TTL），
+与 ``app/office/stream.py`` 同一套机制（Redis list + 游标 + 短 TTL），
 因为要解决的问题相同：过程状态在任务结束前就要抵达前端，且断线/刷新不能重复消费。
 
 事件类型与前端 ``src/types/plugins.ts`` 的 ``CapabilityEventType`` 逐字一致：

@@ -1,8 +1,8 @@
 # 工作区操作契约（Operation Contract）
 
 > 后端实现说明 + 前端对接要点。落点：`app/contracts/operations/`（契约）、
-> `app/services/workspace_operations.py`（执行网关）、
-> `app/services/workspace_revision.py`（版本）、`app/services/workspace_trash.py`（回收站）。
+> `app/workspace/write/operations.py`（执行网关）、
+> `app/workspace/write/revision.py`（版本）、`app/workspace/write/trash.py`（回收站）。
 
 ## 1. 链路
 

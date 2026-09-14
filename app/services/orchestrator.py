@@ -24,20 +24,20 @@ from app.agents.registry import AgentRegistry
 from app.agents.skills.executor import run_skill_loop
 from app.core.config import settings
 from app.core.database import async_session_factory
-from app.core.llm import LLMClient
-from app.core.llm_config import get_llm_config
-from app.core.model_roles import ROLE_SUMMARY, ROLE_TITLE
+from app.platform.model.llm import LLMClient
+from app.platform.model.llm_config import get_llm_config
+from app.platform.model.model_roles import ROLE_SUMMARY, ROLE_TITLE
 from app.core.redis import get_redis
 from app.models.db_models import Message
 from app.services.speech import speech_to_text
 from app.services.content_codec import normalize_content, serialize_content
-from app.services.rag.query_rewriter import get_retrieval_queries
-from app.services.rag.knowledge import search_user_knowledge
-from app.services.rag.scope import RetrievalScope, has_memory_reference, route_chat_retrieval_scope
+from app.knowledge.retrieval.query_rewriter import get_retrieval_queries
+from app.knowledge.retrieval.knowledge import search_user_knowledge
+from app.knowledge.retrieval.scope import RetrievalScope, has_memory_reference, route_chat_retrieval_scope
 from app.services.scene_manager import get_scene_config, get_scene_knowledge_tags
-from app.services.memory.retrieval import search_user_memories
-from app.services.memory.privacy import resolve_decrypt_candidates
-from app.services.conversation_memory import ConversationRecall, retrieve_conversation_recall
+from app.memory.long_term.retrieval import search_user_memories
+from app.memory.long_term.privacy import resolve_decrypt_candidates
+from app.memory.conversation import ConversationRecall, retrieve_conversation_recall
 from app.services.prompts import OFFICE_DECISION_PROMPT, get_base_system_prompt, get_prompt_content
 from app.services.usage import CATEGORY_CHAT, CATEGORY_SKILL, CATEGORY_TITLE
 from app.services.tool_output_projection import project_citations
@@ -266,7 +266,7 @@ async def _office_workspace_summary_text(
     if not (conversation_id or workspace_id):
         return ""
     try:
-        from app.services.workspace_context import (
+        from app.workspace.context import (
             load_workspace_context,
             workspace_summary_text,
         )
@@ -497,7 +497,7 @@ class Orchestrator:
         if cached:
             return cached
         try:
-            from app.services.conversation_memory import get_conversation_global_summary
+            from app.memory.conversation import get_conversation_global_summary
 
             async with async_session_factory() as session:
                 summary = await get_conversation_global_summary(session, conversation_id)
@@ -839,7 +839,7 @@ class Orchestrator:
         # scope and later surface as WORKSPACE_NOT_REGISTERED.
         if scene == "office" and conversation_id and not workspace_id:
             try:
-                from app.services.workspaces import workspace_for_conversation
+                from app.workspace.service import workspace_for_conversation
 
                 bound = workspace_for_conversation(user_id, conversation_id)
                 workspace_id = str((bound or {}).get("workspace_id") or "") or None
@@ -847,7 +847,7 @@ class Orchestrator:
                 workspace_id = None
 
         if scene == "office":
-            from app.agents.orchestration.task_preflight import preflight_external_effect
+            from app.agents.orchestration.preflight.task_preflight import preflight_external_effect
 
             preflight = preflight_external_effect(
                 content,
@@ -913,8 +913,8 @@ class Orchestrator:
             # context questions go straight to the model; Skills/Planner are
             # reserved for external capabilities, side effects and dynamic
             # multi-step work.
-            from app.agents.orchestration.task_shape import assess_task_shape_with_skills
-            from app.services.office_context import (
+            from app.agents.orchestration.planning.task_shape import assess_task_shape_with_skills
+            from app.office.context import (
                 OfficeContext,
                 append_office_context,
                 load_office_context,
@@ -1088,7 +1088,7 @@ class Orchestrator:
         # 用 contextvars 传播，因此 LLM / MCP / 工具 / 沙箱都不用改函数签名。
         # 生成器正在执行期间 context 一直有效；退出时必须 reset，否则同一个进程里
         # 下一个请求会继承上一个请求的预算（流式端点尤其容易踩）。
-        from app.core.deadline import budget_snapshot, set_deadline
+        from app.platform.runtime.deadline import budget_snapshot, set_deadline
 
         deadline_token = set_deadline(source="orchestrator.stream")
         try:
@@ -1139,7 +1139,7 @@ class Orchestrator:
 
         if scene == "office" and conversation_id and not workspace_id:
             try:
-                from app.services.workspaces import workspace_for_conversation
+                from app.workspace.service import workspace_for_conversation
 
                 bound = workspace_for_conversation(user_id, conversation_id)
                 workspace_id = str((bound or {}).get("workspace_id") or "") or None
@@ -1147,7 +1147,7 @@ class Orchestrator:
                 workspace_id = None
 
         if scene == "office":
-            from app.agents.orchestration.task_preflight import preflight_external_effect
+            from app.agents.orchestration.preflight.task_preflight import preflight_external_effect
 
             preflight = preflight_external_effect(
                 content,
@@ -1216,7 +1216,7 @@ class Orchestrator:
                 TaskEntrySignals,
                 policy_meta_from_signals,
             )
-            from app.agents.orchestration.task_shape import assess_task_shape
+            from app.agents.orchestration.planning.task_shape import assess_task_shape
 
             signals = TaskEntrySignals(
                 request=content,
@@ -1229,7 +1229,7 @@ class Orchestrator:
                 conversation_has_workspace=bool(workspace_id),
             )
             policy_meta = policy_meta_from_signals(signals, enabled=True)
-        from app.agents.orchestration.route_snapshot import (
+        from app.agents.orchestration.planning.route_snapshot import (
             build_route_snapshot,
             public_policy_fields,
         )
@@ -1297,7 +1297,7 @@ class Orchestrator:
             )
             policy_public = public_policy_fields(route_snapshot) or policy_public
         if policy_public:
-            from app.core.observability import observe_policy_route
+            from app.observability.observability import observe_policy_route
 
             observe_policy_route(
                 str(policy_public.get("execution_policy") or "direct_stream"),
@@ -1347,9 +1347,9 @@ class Orchestrator:
         atomic_steps: dict[str, dict] = {}
         stream = None
         if scene == "office":
-            from app.agents.orchestration.task_shape import assess_task_shape_with_skills
+            from app.agents.orchestration.planning.task_shape import assess_task_shape_with_skills
             from app.contracts import RouteMode
-            from app.services.office_context import (
+            from app.office.context import (
                 OfficeContext,
                 append_office_context,
                 load_office_context,
@@ -1517,7 +1517,7 @@ class Orchestrator:
             yield evt
         # v2 观测：route / first_delta / stream 时长（metrics 关闭时零开销）。
         if policy_public is not None:
-            from app.core.observability import (
+            from app.observability.observability import (
                 observe_answer_first_delta,
                 observe_answer_stream_duration,
                 observe_policy_route_latency,
@@ -1807,7 +1807,7 @@ class Orchestrator:
             return []
 
         try:
-            from app.agents.orchestration.logical_plan import load_logical_plan
+            from app.agents.orchestration.planning.logical_plan import load_logical_plan
             from app.agents.orchestration.models import TaskNode, TaskStatus
 
             plan = await load_logical_plan(user_id, plan_id)
@@ -1970,8 +1970,8 @@ class Orchestrator:
             return "", []
         if not _workspace_content_question(content):
             return "", []
-        from app.services.information_resolver import requires_complete_read
-        from app.services.workspace_reader import WorkspaceReader, unified_payload_to_text
+        from app.knowledge.information_resolver import requires_complete_read
+        from app.workspace.read.reader import WorkspaceReader, unified_payload_to_text
 
         reader = WorkspaceReader(
             user_id=user_id,
@@ -2108,7 +2108,7 @@ class Orchestrator:
             from lumi_orch.upgrade_policy import ContextFitStatus
 
             if bool(getattr(settings, "TASK_ROUTER_V2_ENABLED", False)):
-                from app.services.information_resolver import InformationResolver
+                from app.knowledge.information_resolver import InformationResolver
 
                 async def _workspace_reader(query: str) -> str:
                     text, _recs = await self.read_workspace_context(
@@ -2148,11 +2148,11 @@ class Orchestrator:
                     workspace_summary=workspace_summary,
                     llm_api_key=llm_api_key,
                 )
-            from app.core.observability import observe_workspace_read_duration
+            from app.observability.observability import observe_workspace_read_duration
 
             observe_workspace_read_duration(time.perf_counter() - started)
             if evidence:
-                from app.services.office_context import OfficeContext, append_office_context
+                from app.office.context import OfficeContext, append_office_context
 
                 answer_messages = append_office_context(
                     answer_messages,
@@ -2284,7 +2284,7 @@ class Orchestrator:
         # 能力预检失败的 process 事件（canonical 画像接入后才有事实）。只**新增**这一帧：
         # 既有 job/step/delta/done 帧的形状与顺序不变；刷新恢复由
         # app/contracts/process_log.py 从同一条 routing 载荷投影出同一 entry_id。
-        from app.agents.orchestration.office_plan_selection_service import (
+        from app.agents.orchestration.planning.office_plan_selection_service import (
             preflight_control_frame_from_routing,
             preflight_process_frame,
         )
@@ -2301,7 +2301,7 @@ class Orchestrator:
         # 模型路由/降级的 process 事件（``MODEL_CAPABILITY_ROUTER_V2`` 打开且真的换档/
         # 降级/阻断时才有载荷）。同样只**新增**这一帧；刷新恢复由
         # app/contracts/process_log.py 从同一条 routing 载荷投影出同一 entry_id。
-        from app.core.model_capability_router import model_routing_process_frame
+        from app.platform.model.model_capability_router import model_routing_process_frame
 
         routing_frame = model_routing_process_frame(getattr(job, "routing", None))
         if routing_frame is not None:
@@ -2435,7 +2435,7 @@ class Orchestrator:
                     yield event
                 # Text-producing office skills publish deltas independently of
                 # status snapshots. Drain them while the node is still running.
-                from app.services.office_stream import read_deltas
+                from app.office.stream import read_deltas
 
                 deltas, output_cursor = await read_deltas(job.job_id, output_cursor)
                 for delta in deltas:
@@ -2595,7 +2595,7 @@ class Orchestrator:
             # 办公模式使用独立、受控的近期任务摘要。它只包含请求摘要、
             # 结果摘要和产物元数据，不把完整工具输出或私有画像注入模型。
             try:
-                from app.agents.orchestration.memory_service import OfficeMemoryService
+                from app.agents.orchestration.office.memory_service import OfficeMemoryService
 
                 office_summary = await OfficeMemoryService().load_summaries(conversation_id)
             except Exception as exc:  # noqa: BLE001

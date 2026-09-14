@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from app.core.config import settings
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, NotFoundException
-from app.core.throttling import consume_route_limit
+from app.platform.security.throttling import consume_route_limit
 
 router = APIRouter()
 

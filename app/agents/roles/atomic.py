@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from app.agents.core.base import WorkerAgent, WorkerContext
 from app.agents.core.progress import set_progress as _report_progress
-from app.agents.orchestration.presentation import attach_display_result, working_text
+from app.agents.orchestration.execution.presentation import attach_display_result, working_text
 from app.agents.skills.executor import execute_tool_call, get_tools_for_scene
 from app.agents.skills.recovery import classify_model_error, decide_failure
 from app.services.tool_output_pipeline import render_for_model
@@ -187,8 +187,8 @@ class AtomicStepAgent(WorkerAgent):
         # 展示预算会把长 PPT/DOCX 的尾部在 direct_llm 回答前就丢掉。普通工具保持紧凑
         # 预算；工作区读取域（聚合入口 + 覆盖 Agent）使用配置的上下文窗口。
         display_limit = 2200
-        from app.services.workspace_context import WORKSPACE_READ_TOOL_NAMES
-        from app.services.workspace_navigator import handoff_text
+        from app.workspace.context import WORKSPACE_READ_TOOL_NAMES
+        from app.workspace.read.navigator import handoff_text
 
         # 覆盖读取（workspace_coverage）同样产出工作区正文证据，必须一起豁免：
         # 只放行 navigator+read 会让覆盖链路被 2200 字符截断，模型只拿到半段正文，

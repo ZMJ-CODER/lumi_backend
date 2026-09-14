@@ -135,6 +135,13 @@ DOMAIN_ERROR_SPECS: dict[str, ErrorSpec] = {
         "联系管理员开启插件配额执行",
     ),
     "resource.quota_exceeded": ErrorSpec("resource.quota_exceeded", ErrorCategory.BUSINESS, False, "已超出配额限制。", "调整用量"),
+    # 缺少模型凭据（BYOK 未带 key / 服务端未配置 key）：域内码，**不可重试**。
+    # 不登记会落回 ``model.provider_offline``（transient+retryable），前端就会把
+    # "去填 API Key"显示成"模型服务暂时不可用，正在重试"，并诱导无意义重试。
+    "model.credentials_missing": ErrorSpec(
+        "model.credentials_missing", ErrorCategory.BUSINESS, False,
+        "当前没有可用的模型 API Key，请先在设置里填写后重试。", "填写模型 API Key",
+    ),
     "resource.result_ref_expired": ErrorSpec("resource.result_ref_expired", ErrorCategory.BUSINESS, False, "产物引用已过期，请重新生成或重新打开。", "重新生成"),
     "resource.result_ref_unavailable": ErrorSpec(
         "resource.result_ref_unavailable", ErrorCategory.BUSINESS, False,
@@ -194,6 +201,7 @@ LEGACY_CODE_ALIASES: dict[str, str] = {
     "MODEL_TIMEOUT": "model.timeout",
     "MODEL_RATE_LIMITED": "model.rate_limited",
     "MODEL_AUTH_ERROR": "PROVIDER_UNHEALTHY",
+    "MODEL_API_KEY_MISSING": "model.credentials_missing",
     "MODEL_UNAVAILABLE": "PROVIDER_UNHEALTHY",
     "MODEL_INSUFFICIENT_BALANCE": "PROVIDER_UNHEALTHY",
     "MODEL_TOOL_CALL_INVALID": "model.provider_offline",

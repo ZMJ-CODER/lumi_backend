@@ -57,7 +57,7 @@ class ReviewCodeSkill(WorkflowSkill):
         instruction = str(params.get("instruction") or "")
         path = str(params.get("path") or "")
         try:
-            from app.core.llm import LLMClient
+            from app.platform.model.llm import LLMClient
             from app.services.usage import CATEGORY_REVIEW
 
             llm = LLMClient()

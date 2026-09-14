@@ -9,7 +9,7 @@ from typing import Any
 
 from lumi_orch import ExpansionSlot, PlanPatch, PlanPatchConflict, validate_dag
 
-from app.agents.orchestration.logical_plan import _node_record, logical_plan_execution_fingerprint
+from app.agents.orchestration.planning.logical_plan import _node_record, logical_plan_execution_fingerprint
 from app.agents.orchestration.models import TaskNode
 
 

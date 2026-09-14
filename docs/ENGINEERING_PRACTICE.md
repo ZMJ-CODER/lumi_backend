@@ -25,7 +25,7 @@ OCR / Docling 解析 / Embedding / TTS 都是同步 CPU 密集调用。若在 as
 
 第一版：`asyncio.to_thread(...)` 直接切到默认线程池。
 
-第二版（最终）：独立有界线程池 `app/core/executors.py`：
+第二版（最终）：独立有界线程池 `app/platform/runtime/executors.py`：
 
 ```python
 _compute_pool = ThreadPoolExecutor(
@@ -57,7 +57,7 @@ health 并发 20 只有 344 RPS；关闭访问日志直接到 990~1145 RPS。这
 
 ### 3.2 方案：QueueHandler + QueueListener
 
-`app/core/logging.py` 的 `setup_uvicorn_queue_logging()`：
+`app/observability/logging.py` 的 `setup_uvicorn_queue_logging()`：
 
 - uvicorn.access / uvicorn.error 切到 `QueueHandler`，请求路径只做一次内存入队（微秒级）；
 - 独立 `QueueListener` 线程负责实际 I/O（队列上限 20000 防积压）。

@@ -1,7 +1,7 @@
 # Lumi RAG 与分域检索设计
 
 > 版本：v2.1 ｜ 更新：2026-08-21
-> 对应代码：`app/services/rag/`、`app/services/memory/`、`app/services/office_docs.py`、
+> 对应代码：`app/services/rag/`、`app/services/memory/`、`app/office/docs.py`、
 > `app/agents/orchestration/`。`app/services/orchestrator.py` 仅保留兼容门面，不是编排内核。
 
 ## 1. 目标与边界
@@ -29,7 +29,7 @@
 
 ## 3. 路由与调用约束
 
-普通聊天的路由规则在 `app/services/rag/scope.py`，完全基于规则，不新增一次 LLM 分类调用：
+普通聊天的路由规则在 `app/knowledge/retrieval/scope.py`，完全基于规则，不新增一次 LLM 分类调用：
 
 ```text
 显式 retrieval_query / 附件 / "文档里、资料里、知识库"

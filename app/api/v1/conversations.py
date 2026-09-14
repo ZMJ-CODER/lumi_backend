@@ -26,7 +26,7 @@ from app.core.database import async_session_factory, get_db
 from app.core.deps import get_current_user, require_auth
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException
 from app.core.redis import get_redis
-from app.core.read_view_cache import (
+from app.platform.runtime.read_view_cache import (
     ReadViewTimer,
     conversation_view_key,
     get_read_view,
@@ -38,7 +38,7 @@ from app.models.conversation import (
     SendMessageRequest,
     UpdateConversationRequest,
 )
-from app.services import workspaces
+from app.workspace import service as workspaces
 from app.models.db_models import Attachment, Conversation, Message
 from app.services.content_codec import normalize_content, serialize_content, split_segments
 from app.services.orchestrator import orchestrator

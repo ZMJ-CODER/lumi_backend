@@ -13,13 +13,13 @@ from typing import Any
 from lumi_orch import ExpansionSlot, NodeSpec, PlanPatch, PlanPatchConflict
 
 from app.agents.orchestration.execution.validation import validate_planned_dag
-from app.agents.orchestration.logical_plan import (
+from app.agents.orchestration.planning.logical_plan import (
     load_logical_plan,
     logical_plan_progress,
     save_logical_plan,
 )
 from app.agents.orchestration.models import Job, JobStatus, TaskNode
-from app.agents.orchestration.safety import prepare_node_safety
+from app.agents.orchestration.execution.safety import prepare_node_safety
 from app.agents.orchestration.scheduling.plan_patches import (
     apply_plan_patch,
     patch_fingerprint,

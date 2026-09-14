@@ -7,7 +7,7 @@
 * ``must_call_model`` 是给调用方的**唯一判据**：假即"不要调用主模型"——禁止把空工具
   列表丢给模型让它自己编一段"我无法创建文件"。
 
-本模块只放数据结构与枚举映射，判定逻辑在 ``app.agents.orchestration.capability_preflight``。
+本模块只放数据结构与枚举映射，判定逻辑在 ``app.agents.orchestration.preflight.capability_preflight``。
 """
 
 from __future__ import annotations

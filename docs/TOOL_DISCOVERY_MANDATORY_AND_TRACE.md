@@ -122,7 +122,7 @@ schema 升级都会立刻让旧会话缓存失效，而不是等 30 分钟 TTL�
 
 ## 测试
 
-`tests/test_mandatory_tools.py`（13 例）：
+`tests/capabilities/test_mandatory_tools.py`（13 例）：
 
 * 8 个强相关写工具 + 核心读工具、上限 8 → 读工具仍在（**这条就是现场 bug 的复现**）；
 * 上限 1 时核心工具仍在；核心工具按池原顺序占位；

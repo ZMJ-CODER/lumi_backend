@@ -425,6 +425,8 @@ export interface ProcessLogEntry {
   resource_type?: string | null;
   provider_id?: string | null;
   provider_name?: string | null;
+  provider_kind?: string | null;
+  provider_label?: string | null;
   display_name?: string | null;
 }
 

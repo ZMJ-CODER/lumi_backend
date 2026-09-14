@@ -6,9 +6,9 @@ from pydantic import BaseModel
 
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, NotFoundException
-from app.core.throttling import consume_route_limit
-from app.core.executors import run_in_compute
-from app.services import office_docs
+from app.platform.security.throttling import consume_route_limit
+from app.platform.runtime.executors import run_in_compute
+from app.office import docs as office_docs
 
 router = APIRouter()
 

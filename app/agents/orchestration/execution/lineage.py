@@ -59,7 +59,7 @@ def _json(value: Any) -> str:
 def unified_result_store_enabled() -> bool:
     """结果是否走统一 ResultStore（``RESULT_STORE_V2``，默认关闭）。"""
     try:
-        from app.core.feature_flags import feature_enabled
+        from app.platform.runtime.feature_flags import feature_enabled
 
         return feature_enabled("RESULT_STORE_V2")
     except Exception:  # noqa: BLE001 - 开关不可用时保持旧路径（保守）
@@ -118,7 +118,7 @@ async def persist_result_ref(
         )
         if saved:
             return saved
-    from app.agents.orchestration.context import sanitize_dependency_result
+    from app.agents.orchestration.execution.context import sanitize_dependency_result
 
     body = sanitize_dependency_result(result)
     raw = _json(body)

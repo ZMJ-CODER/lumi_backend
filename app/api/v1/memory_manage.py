@@ -18,9 +18,9 @@ from app.core.database import get_db
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, NotFoundException
 from app.core.redis import get_redis
-from app.core.read_view_cache import ReadViewTimer, get_read_view, invalidate_memory_view, memory_view_key, set_read_view
+from app.platform.runtime.read_view_cache import ReadViewTimer, get_read_view, invalidate_memory_view, memory_view_key, set_read_view
 from app.models.db_models import Memory, MemoryProfile
-from app.services.memory.retrieval import search_user_memories
+from app.memory.long_term.retrieval import search_user_memories
 
 router = APIRouter()
 
@@ -167,7 +167,7 @@ async def clear_my_memory(payload: dict = Depends(require_auth), db: AsyncSessio
 async def rebuild_my_profile(payload: dict = Depends(require_auth), db: AsyncSession = Depends(get_db)):
     """手动重建我的用户画像（聚合活跃事实）."""
     uid = _uid(payload)
-    from app.services.memory.profile import build_user_profile
+    from app.memory.long_term.profile import build_user_profile
 
     profile = await build_user_profile(db, str(uid))
     await db.commit()
@@ -197,7 +197,7 @@ async def run_memory_self_test(
     try:
         # 1. 抽取链路（真实 LLM + 嵌入）
         try:
-            from app.services.memory.extraction import extract_memories_from_dialog
+            from app.memory.long_term.extraction import extract_memories_from_dialog
 
             count = await extract_memories_from_dialog(
                 db,
@@ -226,8 +226,8 @@ async def run_memory_self_test(
         ).scalars().all()
         if not existing:
             try:
-                from app.services.rag.embeddings import embed_texts
-                from app.services.memory.lifecycle import expire_at_for_memory_type
+                from app.knowledge.embedding.embeddings import embed_texts
+                from app.memory.long_term.lifecycle import expire_at_for_memory_type
 
                 vec = (await embed_texts([f"用户喜欢的测试语言是 {fact_key}"]))[0]
                 mem = Memory(
@@ -269,7 +269,7 @@ async def run_memory_self_test(
 
         # 5. 问答链路（真实 LLM）
         try:
-            from app.core.llm import LLMClient
+            from app.platform.model.llm import LLMClient
 
             memory_line = ", ".join(str(i.get("fact")) for i in items if fact_key in (i.get("fact") or ""))
             reply = await LLMClient().chat(

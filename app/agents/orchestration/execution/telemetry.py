@@ -8,7 +8,7 @@ from lumi_execution import NodeExecutionMetrics
 class LumiExecutionTelemetry:
     async def record(self, metrics: NodeExecutionMetrics) -> None:
         try:
-            from app.core.observability import observe_agent_node_duration
+            from app.observability.observability import observe_agent_node_duration
 
             agent = str(metrics.attributes.get("agent") or "unknown")
             observe_agent_node_duration(

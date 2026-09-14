@@ -6,7 +6,7 @@ from loguru import logger
 
 from app.agents.base import AgentBase, AgentContext
 from app.agents.registry import AgentRegistry
-from app.core.llm import LLMClient
+from app.platform.model.llm import LLMClient
 from app.core.redis import get_redis
 from app.services.prompts import get_base_system_prompt
 from app.services.scene_manager import get_scene_system_prompt
@@ -60,6 +60,10 @@ class ChatAgent(AgentBase):
         try:
             redis = get_redis()
             async with redis.pipeline(transaction=True) as pipe:
+                # ``redis.asyncio`` 的 pipeline：**命令方法是同步的**（只把命令排进队列），
+                # 只有 ``execute()`` 是协程。给命令方法加 ``await`` 会抛
+                # "object NoneType can't be used in 'await' expression"，
+                # 于是短期记忆**静默写不进去**（异常被下面的 except 吞成一条 warning）。
                 pipe.rpush(
                     key,
                     json.dumps({"role": "user", "content": message}, ensure_ascii=False),

@@ -26,8 +26,8 @@ from urllib.parse import urlsplit, urlunsplit
 from loguru import logger
 
 from app.core.config import settings
-from app.core.resilience import CircuitOpenError, get_breaker
-from app.agents.orchestration.timeout_ladder import DeadlineExceeded
+from app.platform.runtime.resilience import CircuitOpenError, get_breaker
+from app.agents.orchestration.runtime.timeout_ladder import DeadlineExceeded
 from app.agents.skills.base import SkillContext, SkillProgress, Tool
 from app.agents.skills.output_contract import OutputMeta, ToolOutput
 from app.services.tool_output_pipeline import normalize_execution_envelope, to_execution_envelope
@@ -69,7 +69,7 @@ def _call_timeout_seconds() -> float:
     取 ``AGENT_MCP_DISCOVERY_TIMEOUT_SECONDS``（默认 5s，可调），并夹在超时阶梯的
     合法区间内；任何情况下都不返回 0/None，避免退化成无界等待。
     """
-    from app.agents.orchestration.timeout_ladder import (
+    from app.agents.orchestration.runtime.timeout_ladder import (
         MAX_OVERRIDE_SECONDS,
         MIN_OVERRIDE_SECONDS,
     )
@@ -113,7 +113,7 @@ def _desktop_workspace_alias(skill_name: str, args: dict, *, task_id: str | None
     if not project_id:
         return None
     path = str(args.get("path") or args.get("file_path") or "").strip()
-    from app.services.workspace_context import WORKSPACE_NAVIGATOR
+    from app.workspace.context import WORKSPACE_NAVIGATOR
 
     if skill_name == WORKSPACE_NAVIGATOR:
         # 聚合读取入口的传输兼容别名：老客户端只实现了原子 workspace_read 时，
@@ -192,7 +192,7 @@ class _McpSessionWorker:
         # 版本不兼容），这个 future 永远不会被 set，调用方此前会**无界**挂住——
         # 计划编译期发现桌面能力正是这样把一次 submit_job 卡死的。超时后取消
         # future 并让调用方走既有降级（工具集为空/熔断冷却）。
-        from app.agents.orchestration.timeout_ladder import enforce
+        from app.agents.orchestration.runtime.timeout_ladder import enforce
 
         return await enforce(
             future,
@@ -238,7 +238,7 @@ async def ensure_server_healthy(name: str) -> bool:
     if until is None or time.monotonic() >= until:
         return True
     # 探测本身也必须有界：健康探测卡住同样会把提交路径钉死在这里。
-    from app.agents.orchestration.timeout_ladder import DeadlineExceeded, enforce
+    from app.agents.orchestration.runtime.timeout_ladder import DeadlineExceeded, enforce
 
     try:
         recovered = await enforce(
@@ -634,7 +634,7 @@ async def call_skill(
         call_device_id = ""
         if call_workspace_id and call_user_id:
             try:
-                from app.services.workspace_context import resolve_workspace_desktop
+                from app.workspace.context import resolve_workspace_desktop
 
                 route = resolve_workspace_desktop(call_user_id, call_workspace_id)
                 call_device_id = str(route.get("device_id") or "")

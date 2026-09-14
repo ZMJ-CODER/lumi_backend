@@ -19,7 +19,7 @@ AttemptHook = Callable[[int], Awaitable[None]]
 def _node_profile(node):
     """Recover the abstract profile persisted by the dispatcher, if present."""
     try:
-        from app.agents.orchestration.task_profiles import TaskProfile
+        from app.agents.orchestration.planning.task_profiles import TaskProfile
 
         raw = (getattr(node, "metadata", None) or {}).get("abstract_profile")
         return TaskProfile.model_validate(raw) if isinstance(raw, dict) else None
@@ -28,7 +28,7 @@ def _node_profile(node):
 
 
 def _node_strategy_snapshot(node):
-    from app.agents.orchestration.strategy_engine import strategy_engine
+    from app.agents.orchestration.planning.strategy_engine import strategy_engine
 
     metadata = getattr(node, "metadata", None) or {}
     saved = strategy_engine.snapshot_from_payload(metadata.get("strategy_snapshot"))
@@ -72,7 +72,7 @@ class NodeExecutionRunner:
                             "replan_required": decision.replan_required,
                             "user_action_required": decision.user_action_required,
                             "switched_tool": decision.try_alternative}
-                from app.agents.orchestration.escalation import infer_escalation
+                from app.agents.orchestration.execution.escalation import infer_escalation
                 signal = infer_escalation(error_code=error_code, recovery=recovery,
                                           message=str(error or ""), node_id=outer.node.id)
                 return FailureDecision(retry_same=decision.retry_same,

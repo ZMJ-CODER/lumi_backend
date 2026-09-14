@@ -302,8 +302,8 @@ class OfficeScriptAgent(WorkerAgent):
             }
         await _report_progress(ctx.job_id, node.id, "正在编写并执行脚本…")
         try:
-            from app.services import office_docs
-            from app.agents.orchestration.document_scope import extract_output_contract
+            from app.office import docs as office_docs
+            from app.agents.orchestration.office.document_scope import extract_output_contract
 
             conversion = node.params.get("conversion")
             output_contract = node.params.get("output_contract")
@@ -453,7 +453,7 @@ print(f"已生成文件：{{target.name}}")
         output_contract: dict | None = None,
     ) -> str:
         """一次调用生成可执行脚本，避免逻辑稿与代码稿两次串行模型往返。"""
-        from app.core.llm import LLMClient
+        from app.platform.model.llm import LLMClient
         from app.services.usage import CATEGORY_PLAN
 
         llm = LLMClient()
@@ -615,7 +615,7 @@ class OfficeDocumentAgent(WorkerAgent):
     ) -> dict:
         """Use LangChain JSON output for content only; renderer owns file mechanics."""
         from app.agents.langchain.planning import invoke_json_object
-        from app.core.agent_security import UNTRUSTED_CONTENT_RULES
+        from app.platform.security.agent_security import UNTRUSTED_CONTENT_RULES
 
         shape = {
             "docx": '{"title":"...","style":"business","sections":[{"heading":"...","paragraphs":["..."],"bullets":["..."],"table":{"headers":["..."],"rows":[["..."]]}}]}',

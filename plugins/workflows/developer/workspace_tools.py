@@ -51,7 +51,7 @@ async def select_desktop_workspace_capabilities(
         get_desktop_mcp_capabilities,
         get_workspace_navigator_capability,
     )
-    from app.services.workspace_context import WORKSPACE_NAVIGATOR, resolve_workspace_desktop
+    from app.workspace.context import WORKSPACE_NAVIGATOR, resolve_workspace_desktop
 
     selected: list[Any] = []
     route = resolve_workspace_desktop(user_id, str(workspace_id or "").strip()) if workspace_id else {}

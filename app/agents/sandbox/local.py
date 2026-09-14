@@ -29,8 +29,8 @@ def _plugin_quota_enforced(quota_spec: Any) -> bool:
     if quota_spec is None:
         return False
     try:
-        from app.core.feature_flags import feature_enabled
-        from app.services.plugins.quota import FLAG
+        from app.platform.runtime.feature_flags import feature_enabled
+        from app.plugins.quota import FLAG
 
         return bool(feature_enabled(FLAG))
     except Exception:  # noqa: BLE001 - 开关不可读时按关闭处理（保守）
@@ -47,7 +47,7 @@ async def _run_with_plugin_quota(
     timeout: float | None = None,
 ) -> SandboxResult:
     """走 PluginWorker：配额由 Manifest 声明，执行由 Worker 真约束。"""
-    from app.services.plugins.quota import PluginWorker
+    from app.plugins.quota import PluginWorker
 
     worker = PluginWorker(spec=quota_spec, owner=owner, container="plugin-sandbox")
     outcome = await worker.run_process(list(cmd), cwd=workdir, env=env, timeout=timeout)

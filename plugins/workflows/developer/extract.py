@@ -1,7 +1,7 @@
 """办公技能（office/抽取与合规）：信息抽取 / 发票解析 / 敏感词合规审查."""
 
 from app.agents.skills.base import WorkflowSkill, SkillContext, ToolOutput
-from app.services.office_skill_utils import SENSITIVE_WORDS, office_llm
+from app.office.skill_utils import SENSITIVE_WORDS, office_llm
 
 
 def _bad(msg: str) -> ToolOutput:

@@ -23,6 +23,16 @@ class ToolRegistry:
     # model capabilities. They are intentionally absent from list()/counts.
     _skill_implementations: dict[str, Tool] = {}
     _sources: dict[str, str] = {}
+    #: 内容版本：每次 register/unregister/clear 自增。派生缓存（工具注册表条目、
+    #: 会话发现缓存）的失效键必须含它——工具的 ``capability`` / ``resource_type``
+    #: 是**工具自己声明**的，声明变化不一定改动 ToolSpec 影子注册（实测：同一个
+    #: ToolSpec 先登记、Skill 稍后才加载），只按 spec 摘要失效会让派生结果停在旧值。
+    _version: int = 0
+
+    @classmethod
+    def version(cls) -> int:
+        """注册表内容版本（只增不减，``clear()`` 也自增）。"""
+        return cls._version
 
     @classmethod
     def register(cls, tool: Tool, source: str = "builtin", *, public: bool = True) -> None:
@@ -38,6 +48,7 @@ class ToolRegistry:
         if not public:
             cls._skill_implementations[tool.name] = tool
             cls._sources[tool.name] = source
+            cls._version += 1
             logger.debug("记录 Skill 执行实现（不进入工具注册表）: {}", tool.name)
             cls._shadow_register_tool_spec(tool, internal=True)
             return
@@ -46,6 +57,7 @@ class ToolRegistry:
             logger.warning("工具 '{}' 已存在，将被覆盖（来源: {}）", tool.name, source)
         target[tool.name] = tool
         cls._sources[tool.name] = source
+        cls._version += 1
         cls._shadow_register_tool_spec(tool, internal=False)
 
     @staticmethod
@@ -70,6 +82,7 @@ class ToolRegistry:
     @classmethod
     def unregister(cls, name: str) -> Tool | None:
         cls._sources.pop(name, None)
+        cls._version += 1
         return cls._tools.pop(name, None) or cls._skill_implementations.pop(name, None)
 
     @classmethod
@@ -95,6 +108,7 @@ class ToolRegistry:
         cls._tools.clear()
         cls._skill_implementations.clear()
         cls._sources.clear()
+        cls._version += 1
 
 
 class SkillRegistry:

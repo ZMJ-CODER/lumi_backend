@@ -33,19 +33,51 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.core.exceptions import UnauthorizedException
-from app.core.throttling import consume_route_limit
+from app.platform.security.throttling import consume_route_limit
 from app.agents.orchestration.orchestrator import (
     ActiveConversationJobError,
     AgentBackpressureError,
     UserJobLimitError,
 )
-from app.agents.orchestration.state import StatePersistenceError
+from app.agents.orchestration.runtime.state import StatePersistenceError
 from app.models.conversation import SendMessageRequest
 from app.services.orchestrator import orchestrator
-from app.services import workspaces
+from app.workspace import service as workspaces
 from app.agents.skills.recovery import classify_model_error
 
 router = APIRouter()
+
+#: 模型侧错误码 → 流内 ``error`` 帧的 HTTP 语义状态码；未登记的错误码一律 500 兜底。
+_MODEL_ERROR_STATUS: dict[str, int] = {
+    "MODEL_INSUFFICIENT_BALANCE": 402,
+    "MODEL_AUTH_ERROR": 401,
+    # 缺少模型凭据是"去填 API Key"（400），不是登录态失效（401）：前端据此弹设置面板，
+    # 401 会被误判成登录过期而触发重新登录。
+    "MODEL_API_KEY_MISSING": 400,
+    "MODEL_NOT_FOUND": 404,
+    "MODEL_CONFIG_ERROR": 400,
+    "MODEL_TOOL_CALL_UNSUPPORTED": 422,
+    "MODEL_PROVIDER_UNAVAILABLE": 503,
+    "MODEL_CONNECTION_ERROR": 503,
+    "MODEL_UNAVAILABLE": 503,
+}
+
+
+def stream_error_frame(exc: Exception | str) -> dict:
+    """异常 → SSE ``error`` 帧（与 HTTP 路径共用同一套错误码与文案）。
+
+    流一旦开始（响应头已发出）就无法再改成 HTTP 4xx，错误只能走帧；但帧里的
+    ``status`` / ``code`` 必须和 HTTP 路径完全一致，否则前端会出现"同一种失败两副面孔"：
+    非流式是 400 + ``MODEL_API_KEY_MISSING``，流式却退化成 500「服务器内部错误」。
+    """
+    code, message = classify_model_error(exc)
+    status = _MODEL_ERROR_STATUS.get(code)
+    return {
+        "type": "error",
+        "message": message if status else "服务器内部错误",
+        "status": status or 500,
+        "code": code if status else "CHAT_STREAM_INTERNAL_ERROR",
+    }
 
 
 @router.post("/stream")
@@ -268,23 +300,7 @@ async def chat_stream(
             # long office task can exhaust the selected DeepSeek account;
             # returning 500 makes the next chat appear broken and encourages
             # blind retries that consume more quota.
-            model_code, model_message = classify_model_error(exc)
-            model_status = {
-                "MODEL_INSUFFICIENT_BALANCE": 402,
-                "MODEL_AUTH_ERROR": 401,
-                "MODEL_NOT_FOUND": 404,
-                "MODEL_CONFIG_ERROR": 400,
-                "MODEL_TOOL_CALL_UNSUPPORTED": 422,
-                "MODEL_PROVIDER_UNAVAILABLE": 503,
-                "MODEL_CONNECTION_ERROR": 503,
-                "MODEL_UNAVAILABLE": 503,
-            }.get(model_code)
-            for _line in encoder.encode_all({
-                "type": "error",
-                "message": model_message if model_status else "服务器内部错误",
-                "status": model_status or 500,
-                "code": model_code if model_status else "CHAT_STREAM_INTERNAL_ERROR",
-            }):
+            for _line in encoder.encode_all(stream_error_frame(exc)):
                 yield _line
         finally:
             # 尾帧必须落日志：断线续传时不能丢最后一批过程/终态事件。

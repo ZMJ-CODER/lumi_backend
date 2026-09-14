@@ -11,8 +11,8 @@
 * 本模块的 :class:`SnapshotWriter` 是**唯一调用它的地方**：序列化（:func:`snapshot_payload`
   / :func:`snapshot_json`）与 Redis 写入都在这里；生产写入方
   （``RedisStateStore``）只经由它写运行视图快照，见
-  ``app/agents/orchestration/state.py::save_run_view``；
-* ``tests/test_job_snapshot_write_guard.py`` 静态扫描"绕过本模块直接序列化
+  ``app/agents/orchestration/runtime/state.py::save_run_view``；
+* ``tests/orchestration/test_job_snapshot_write_guard.py`` 静态扫描"绕过本模块直接序列化
   ``JobRunView``"的代码，发现即失败。
 
 **写入契约（不是开关）**::
@@ -25,7 +25,7 @@
 …）都不得关闭或跳过它——本模块**不读取任何特性开关**（读取路径 :func:`read_snapshot`
 同样与开关无关）。开关允许影响的是"视图里放什么"（例如 ``ARCHIVE_CONTENT_V2`` 决定
 过程日志归档是否产出、因而决定快照里有没有归档引用），而不是"快照是否落库"。
-这条边界由 ``tests/test_snapshot_write_contract.py`` 断言（文档 vs 行为）。
+这条边界由 ``tests/orchestration/test_snapshot_write_contract.py`` 断言（文档 vs 行为）。
 
 每次写入都会记录 TTL、写入口版本（:data:`SNAPSHOT_WRITER_VERSION`）、快照体积，并打
 一条结构化日志 + 指标 ``lumi_job_snapshot_writes_total``，便于回答"快照到底写没写、
@@ -196,7 +196,7 @@ def _record_write(result: SnapshotWriteResult) -> None:
         result.contract,
     )
     try:
-        from app.core.observability import inc_job_snapshot_write
+        from app.observability.observability import inc_job_snapshot_write
 
         inc_job_snapshot_write(status="written", version=result.version)
     except Exception as exc:  # noqa: BLE001 - 指标失败绝不影响写入路径
@@ -247,7 +247,7 @@ async def read_snapshot_baseline(job_id: str, *, redis: Any = None) -> tuple[Job
 
     断线恢复（``app/services/resume_snapshot.py``）只认这一个入口：快照天然是一次
     "某个 seq 上的检查点"，恢复路径因此不需要重建视图，也**不需要自己知道快照键**
-    （键只在本模块出现这条契约由 ``tests/test_job_snapshot_write_guard.py`` 守着——
+    （键只在本模块出现这条契约由 ``tests/orchestration/test_job_snapshot_write_guard.py`` 守着——
     多一个模块拼同一个键，就多一条可能绕过体积收缩与写入规范的路径）。
     """
     view = await read_snapshot(job_id, redis=redis)

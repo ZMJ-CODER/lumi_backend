@@ -10,9 +10,9 @@ from langchain_openai import ChatOpenAI
 from loguru import logger
 
 from app.core.config import settings
-from app.core.llm_config import get_llm_config
-from app.core.model_catalog import normalize_provider_base_url
-from app.core.network import resolve_http_proxy
+from app.platform.model.llm_config import get_llm_config
+from app.platform.model.model_catalog import normalize_provider_base_url
+from app.platform.network.network import resolve_http_proxy
 
 
 # Provider/model capability cache.  A local model's lack of Function Calling
@@ -129,7 +129,7 @@ async def get_chat_model(
 ) -> CompatibleChatOpenAI:
     """每次创建短生命周期模型，保证 Redis 动态配置即时生效。"""
     cfg = dict(llm_config or await get_llm_config(scene, user_id=user_id))
-    from app.core.model_catalog import normalize_model_id
+    from app.platform.model.model_catalog import normalize_model_id
 
     selected_model = normalize_model_id(model or cfg.get("model"))
     selected_base_url = normalize_provider_base_url(base_url or cfg.get("base_url") or "")

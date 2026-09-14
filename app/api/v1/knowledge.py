@@ -7,9 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
-from app.core.throttling import consume_route_limit
+from app.platform.security.throttling import consume_route_limit
 from app.models.knowledge import CreateSpaceRequest, UpdateSpaceRequest
-from app.services.rag import knowledge as kb
+from app.knowledge.retrieval import knowledge as kb
 
 router = APIRouter()
 

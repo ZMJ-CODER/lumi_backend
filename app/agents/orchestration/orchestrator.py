@@ -15,53 +15,53 @@ import hashlib
 import json
 import uuid
 
-from loguru import logger
 
 from app.agents.orchestration.backends.legacy import LegacyDagBackend
 from app.agents.orchestration.backends.temporal_logical_effects import TemporalLogicalEffectsBackend
 from app.agents.orchestration.backends.temporal_logical_read import TemporalLogicalReadBackend
 from app.agents.orchestration.backends.temporal_static import TemporalStaticBackend
-from app.agents.orchestration.execution_loop_service import ExecutionLoopService
-from app.agents.orchestration.fork_service import JobForkService
-from app.agents.orchestration.failed_job_replan_service import FailedJobReplanService
-from app.agents.orchestration.failed_job_recovery_service import FailedJobRecoveryService
-from app.agents.orchestration.escalation_service import EscalationService
-from app.agents.orchestration.approval_service import ApprovalService
-from app.agents.orchestration.control_service import JobControlService
-from app.agents.orchestration.admission_lease import AdmissionLeaseMonitor
-from app.agents.orchestration.admission import AdmissionBackpressureError, job_admission
-from app.agents.orchestration.submission_guard import (
+from app.agents.orchestration.execution.execution_loop_service import ExecutionLoopService
+from app.agents.orchestration.execution.fork_service import JobForkService
+from app.agents.orchestration.recovery.coordination import RecoveryCoordinationMixin
+from app.agents.orchestration.recovery.failed_job_replan_service import FailedJobReplanService
+from app.agents.orchestration.recovery.failed_job_recovery_service import FailedJobRecoveryService
+from app.agents.orchestration.execution.escalation_service import EscalationService
+from app.agents.orchestration.execution.approval_service import ApprovalService
+from app.agents.orchestration.execution.control_service import JobControlService
+from app.agents.orchestration.admission.admission_lease import AdmissionLeaseMonitor
+from app.agents.orchestration.admission.admission import AdmissionBackpressureError, job_admission
+from app.agents.orchestration.submission.submission_guard import (
     ActiveConversationJobError,
     AgentBackpressureError,
     SubmissionGuard,
     UserJobLimitError,
 )
-from app.agents.orchestration.job_finalizer import JobFinalizer
-from app.agents.orchestration.job_error_service import JobErrorService
-from app.agents.orchestration.logical_plan_service import LogicalPlanContinuationService
-from app.agents.orchestration.submission_context_service import SubmissionContextService
-from app.agents.orchestration.office_plan_selection_service import OfficePlanSelectionService
-from app.agents.orchestration.job_materialization_service import JobMaterializationService
-from app.agents.orchestration.job_lifecycle_service import JobLifecycleService
-from app.agents.orchestration.job_submission_service import JobSubmissionService
-from app.agents.orchestration.job_coordinator import JobOperationsCoordinator
-from app.agents.orchestration.logical_plan_replan_service import LogicalPlanReplanService
+from app.agents.orchestration.execution.job_finalizer import JobFinalizer
+from app.agents.orchestration.execution.job_error_service import JobErrorService
+from app.agents.orchestration.planning.logical_plan_service import LogicalPlanContinuationService
+from app.agents.orchestration.submission.submission_context_service import SubmissionContextService
+from app.agents.orchestration.planning.office_plan_selection_service import OfficePlanSelectionService
+from app.agents.orchestration.execution.job_materialization_service import JobMaterializationService
+from app.agents.orchestration.execution.job_lifecycle_service import JobLifecycleService
+from app.agents.orchestration.submission.service import JobSubmissionService
+from app.agents.orchestration.execution.job_coordinator import JobOperationsCoordinator
+from app.agents.orchestration.recovery.logical_plan_replan_service import LogicalPlanReplanService
 from app.agents.orchestration.scheduling.service import PlanPatchAppendResult, PlanPatchScheduler
-from app.agents.orchestration.replan_evidence_service import ReplanEvidenceService
+from app.agents.orchestration.recovery.replan_evidence_service import ReplanEvidenceService
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus
-from app.agents.orchestration.memory_service import OfficeMemoryService
-from app.agents.orchestration.query_service import JobQueryService
-from app.agents.orchestration.runtime_gateway import RuntimeGateway
-from app.agents.orchestration.planner import LlmPlanner, Planner
+from app.agents.orchestration.office.memory_service import OfficeMemoryService
+from app.agents.orchestration.execution.query_service import JobQueryService
+from app.agents.orchestration.runtime.runtime_gateway import RuntimeGateway
+from app.agents.orchestration.planning.planner import LlmPlanner, Planner
 from app.agents.orchestration.planning.context import PlanRequestContext
 from app.agents.orchestration.planning.compilation import PlanCompilationService
-from app.agents.orchestration.review import ReviewHook, get_reviewer
-from app.agents.orchestration.tca import ComplexityLevel, TaskComplexityAssessor
-from app.agents.orchestration.state import RedisStateStore
+from app.agents.orchestration.execution.review import ReviewHook, get_reviewer
+from app.agents.orchestration.planning.tca import ComplexityLevel, TaskComplexityAssessor
+from app.agents.orchestration.runtime.state import RedisStateStore
 from app.repositories.job_repository import JobRepository, StateStoreJobRepository
-from app.repositories.memory_repository import MemoryRepository
+from app.memory.repository import MemoryRepository
 from app.repositories.project_repository import ProjectRepository, SqlAlchemyProjectRepository
-from app.agents.orchestration.workers import WORKERS
+from app.agents.orchestration.execution.workers import WORKERS
 from app.core.config import settings
 
 # Kept as module-level compatibility exports for API callers and older tests;
@@ -74,7 +74,7 @@ __all__ = [
 ]
 
 
-class AgentOrchestrator:
+class AgentOrchestrator(RecoveryCoordinationMixin):
     """多智能体协作编排器（单例，全局复用）.
 
     temporal_enabled：None 时按 settings.AGENT_ORCHESTRATION 决定；
@@ -422,7 +422,7 @@ class AgentOrchestrator:
         """规划任务树并启动执行（Temporal 优先），立即返回 Job."""
         if scene == "office" and not workspace_id and conversation_id:
             try:
-                from app.services.workspaces import workspace_for_conversation
+                from app.workspace.service import workspace_for_conversation
 
                 bound = workspace_for_conversation(user_id, conversation_id)
                 workspace_id = str((bound or {}).get("workspace_id") or "") or None
@@ -514,7 +514,7 @@ class AgentOrchestrator:
         """
         if scene == "office" and not workspace_id and conversation_id:
             try:
-                from app.services.workspaces import workspace_for_conversation
+                from app.workspace.service import workspace_for_conversation
 
                 bound = workspace_for_conversation(user_id, conversation_id)
                 workspace_id = str((bound or {}).get("workspace_id") or "") or None
@@ -638,99 +638,22 @@ class AgentOrchestrator:
     @staticmethod
     def _has_terminal_model_failure(job: Job) -> bool:
         """Billing/auth/provider failures terminate the snapshot-bound job."""
-        terminal = {
-            "MODEL_INSUFFICIENT_BALANCE", "MODEL_AUTH_ERROR", "MODEL_NOT_FOUND",
-            "MODEL_CONFIG_ERROR", "MODEL_TOOL_CALL_UNSUPPORTED",
-            "MODEL_PROVIDER_UNAVAILABLE", "MODEL_CONNECTION_ERROR", "MODEL_UNAVAILABLE",
-        }
+        from app.agents.skills.recovery import is_terminal_model_error_code
+
         failed = [node for node in (job.nodes or []) if node.status == TaskStatus.FAILED]
-        if not any(str(node.error_code or "").upper() in terminal for node in failed):
+        if not any(is_terminal_model_error_code(node.error_code) for node in failed):
             return False
         job.status = JobStatus.FAILED
         job.error = next(
             (str(node.error or "模型连接异常，办公任务已停止") for node in failed
-             if str(node.error_code or "").upper() in terminal),
+             if is_terminal_model_error_code(node.error_code)),
             "模型连接异常，办公任务已停止。请检查模型连接、API Key、账户余额或供应商状态后重试。",
         )
         return True
 
-    async def _continue_logical_plan(self, job: Job) -> bool:
-        """Commit a single ordinary-DAG frontier and materialize the next one."""
-        return await self._logical_plan.continue_job(job)
 
-    async def _maybe_replan_logical_plan(self, job: Job, llm_api_key: str | None) -> bool:
-        """Apply approval safety controls, then delegate safe L3 recovery."""
-        pointer = (job.routing or {}).get("logical_plan")
-        if not isinstance(pointer, dict) or not pointer.get("plan_id"):
-            return False
-        if job.scene != "office" or job.status in {
-            JobStatus.CANCELLED,
-            JobStatus.INTERRUPTED,
-            JobStatus.PAUSED,
-        }:
-            return False
-        if self._has_terminal_model_failure(job):
-            await self._store.save_job(job)
-            return False
 
-        # L2 stays in the prebuilt approval/clarification controller.  An
-        # approved node remains the same logical node, so reopen only its
-        # materialized record for the later retry instead of changing the
-        # logical graph or consuming another L3 attempt.
-        if await self._handle_task_escalation(job):
-            if job.status == JobStatus.WAITING_APPROVAL:
-                from app.agents.orchestration.logical_plan import (
-                    load_logical_plan,
-                    logical_plan_progress,
-                    save_logical_plan,
-                )
 
-                plan = await load_logical_plan(job.user_id, str(pointer["plan_id"]))
-                if not plan:
-                    job.status = JobStatus.FAILED
-                    job.error = "逻辑计划状态不可用，无法安全恢复失败步骤。"
-                    await self._store.save_job(job)
-                    return False
-                records = plan.get("nodes") or {}
-                for node in job.nodes:
-                    logical_id = str((node.metadata or {}).get("logical_node_id") or node.id)
-                    record = records.get(logical_id)
-                    if isinstance(record, dict) and node.status == TaskStatus.PENDING:
-                        record["status"] = "materialized"
-                        record["error"] = ""
-                        record["error_code"] = ""
-                job.routing = dict(job.routing or {})
-                job.routing["logical_plan"] = {
-                    **pointer,
-                    "revision": plan.get("revision", 1),
-                    "progress": logical_plan_progress(plan),
-                }
-                await save_logical_plan(job.user_id, plan)
-                await self._store.save_job(job)
-            return True
-
-        context = self._job_plan_context.get(job.job_id)
-        return await self._logical_plan_replan.replan(
-            job,
-            context=context,
-            llm_api_key=llm_api_key,
-            dynamic_enabled=settings.AGENT_DYNAMIC_SUBGRAPH_ENABLED,
-            max_replans=settings.AGENT_SUBGRAPH_MAX_REPLANS,
-            planner_level_aware=callable(getattr(self._planner, "plan_for_level", None)),
-        )
-
-    async def _maybe_replan_failed_job(self, job: Job, llm_api_key: str | None) -> bool:
-        """Delegate ordinary failure recovery to the policy coordinator."""
-        return await self._failed_job_recovery.maybe_recover(job, llm_api_key)
-
-    async def _handle_task_escalation(self, job: Job) -> bool:
-        """Resolve L2 signals through deterministic orchestration controls.
-
-        Missing prerequisites become a stable clarification result. Confirmation
-        signals make one existing node wait for the API approval flow.  Neither
-        branch permits an arbitrary new edge/node supplied by a worker.
-        """
-        return await self._escalation.handle_task_escalation(job)
 
     # ── 查询 ────────────────────────────────────────────────
 
@@ -785,25 +708,6 @@ class AgentOrchestrator:
             await unseal_job(job_id)
         return job
 
-    async def _finalize_step_failed(self, job: Job) -> None:
-        """单步执行失败：先按升级决策树记录建议，再做终态清理。"""
-        try:
-            from app.services.upgrade_adapter import suggest_upgrade
-
-            result = job.result if isinstance(job.result, dict) else {}
-            error_code = str(
-                result.get("error_code")
-                or next((node.error_code for node in job.nodes if node.error_code), "")
-                or ""
-            )
-            current = str((job.routing or {}).get("complexity") or "M1")
-            suggestion = suggest_upgrade(error_code, current=current)
-            if suggestion:
-                job.routing = {**(job.routing or {}), "upgrade": suggestion}
-                await self._store.save_job(job)
-        except Exception as exc:  # noqa: BLE001 - 建议记录失败不影响终态清理
-            logger.warning("记录升级建议失败 {}: {}", str(job.job_id)[:12], str(exc)[:160])
-        await self._finalizer.finalize(job)
 
     async def stream_run_next(
         self,

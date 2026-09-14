@@ -1,48 +1,108 @@
 """Lumi 后端多智能体协作服务入口。
 
 架构分层:
-  api/       → FastAPI 路由层 (接口定义、参数校验)
-  services/  → 业务逻辑层 (编排、场景管理、记忆提取)
-  agents/    → 智能体层 (各场景 AI 人格实现)
-  core/      → 基础设施层 (配置、DB、Redis、LLM、安全)
-  models/    → 数据模型层 (Pydantic schema + SQLAlchemy ORM)
-  celery_app/ → 异步任务层 (文档处理等耗时操作)
+  api/           → FastAPI 路由层 (接口定义、参数校验)
+  services/      → 业务逻辑层 (编排、场景管理、记忆提取)
+  agents/        → 智能体层 (各场景 AI 人格实现) + capabilities/ 资源能力层
+  workspace/ knowledge/ memory/ office/ → 四个业务域
+  platform/      → 平台设施 (模型、安全、运行时、网络)
+  observability/ → 日志与指标
+  core/          → 配置、数据库、DI、异常映射
+  models/        → 数据模型层 (Pydantic schema + SQLAlchemy ORM)
+  celery_app/    → 异步任务层 (文档处理等耗时操作)
+
+启动方式（推荐 ``uvicorn app.main:app``）：见 README。**也支持** ``python app/main.py``——
+入口会先把 ``app/`` 从 ``sys.path`` 摘掉（见 :func:`ensure_import_root`）。
 """
 
-from contextlib import asynccontextmanager
-
-import uvicorn
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from loguru import logger
+import sys
 from pathlib import Path
 
-from app.agents.registry import init_agents
-from app.api.router import api_router
-from app.core.config import settings
-from app.core.exception_handlers import register_exception_handlers
-from app.core.logging import setup_logging
-from app.core.observability import (
+
+def ensure_import_root() -> None:
+    """把仓库根放进 ``sys.path``，并把 ``app/`` 目录**移出去**。
+
+    以脚本方式运行本文件（``python app/main.py``）时，Python 会把脚本所在目录
+    ``app/`` 放到 ``sys.path[0]``。于是第三方库里的 ``import platform`` 会命中
+    ``app/platform/``（同名包），一进 sqlalchemy 就炸：
+
+    ```
+    AttributeError: module 'platform' has no attribute 'python_implementation'
+    ```
+
+    （``platform`` 是 ``app/`` 下唯一与标准库重名的顶层名字。）这里把 ``app/`` 摘掉、
+    把仓库根补到最前：``app.*`` 一律按包导入，标准库不会再被遮蔽。
+    以模块方式启动（``uvicorn app.main:app`` / ``python -m app.main``）时本函数是空操作。
+
+    幂等、可重复调用：每次按当前 ``sys.path`` 重新收敛，并把仓库根放到**最前**
+    （本地源码优先于任何已安装副本）。
+    """
+    app_dir = Path(__file__).resolve().parent
+    root = str(app_dir.parent)
+    kept: list[str] = []
+    for entry in sys.path:
+        try:
+            # 空串表示当前工作目录；解析后与 app 目录相同也要摘掉（否则照样遮蔽标准库）。
+            if entry and Path(entry).resolve() == app_dir:
+                continue
+        except OSError:  # pragma: no cover - 无法解析的路径原样保留
+            pass
+        if entry == root:  # 仓库根稍后统一插到最前
+            continue
+        kept.append(entry)
+    sys.path[:] = [root, *kept]
+
+
+ensure_import_root()
+
+from contextlib import asynccontextmanager  # noqa: E402
+
+import uvicorn  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from loguru import logger  # noqa: E402
+
+from app.agents.registry import init_agents  # noqa: E402
+from app.api.router import api_router  # noqa: E402
+from app.core.config import settings  # noqa: E402
+from app.core.exception_handlers import register_exception_handlers  # noqa: E402
+from app.observability.logging import setup_logging  # noqa: E402
+from app.observability.observability import (  # noqa: E402
     init_sentry,
     metrics_middleware,
     metrics_text,
     refresh_async_dispatch_metrics,
 )
-from app.core.redis import close_redis, init_redis
-from app.core.security_hardening import rate_limit_middleware, security_headers_middleware
+from app.core.redis import close_redis, init_redis  # noqa: E402
+from app.platform.security.security_hardening import rate_limit_middleware, security_headers_middleware  # noqa: E402
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理."""
     setup_logging()
-    from app.core.logging import setup_uvicorn_queue_logging
+    from app.observability.logging import setup_uvicorn_queue_logging
 
     setup_uvicorn_queue_logging()
     init_sentry()
     logger.info(f" {settings.PROJECT_NAME} v{settings.VERSION} 启动中...")
     if settings.JWT_SECRET_KEY == "change-me-in-production":
         logger.warning("JWT_SECRET_KEY 仍为默认值！请在 .env 中配置随机密钥，否则令牌可被伪造")
+    # 密钥指纹（不是密钥本身）：全站突然 401 时，用它和"令牌签发时的指纹"对比，
+    # 一眼分清是密钥轮换、令牌过期，还是真的没登录（见 decode_token 的告警）。
+    from app.platform.security.security import jwt_secret_fingerprint
+
+    logger.info("JWT 密钥指纹={}（轮换会使所有已发出的令牌失效，客户端需重新登录）", jwt_secret_fingerprint())
+    # .env 里同名键写两次时，只有**最后一条**生效：这会让"改了密钥却没生效/悄悄生效"
+    # 变成难查的事故（实测：全站 401）。启动时点名提醒，不打印任何值。
+    from app.core.config import duplicate_env_keys
+
+    duplicates = duplicate_env_keys()
+    if duplicates:
+        logger.warning(
+            ".env 存在重复键（只有最后一条生效，请合并为一条）：{}",
+            ", ".join(duplicates),
+        )
 
     # 初始化基础设施
     init_agents()
@@ -64,7 +124,7 @@ async def lifespan(app: FastAPI):
             logger.warning("Skill 语义路由启动预热失败，当前将记录 lexical_fallback: {}", exc)
     # 策略与 Skill 生命周期独立。错误绝不阻断启动：引擎保留内置安全兜底。
     try:
-        from app.agents.orchestration.strategy_engine import strategy_engine
+        from app.agents.orchestration.planning.strategy_engine import strategy_engine
 
         await strategy_engine.reload()
     except Exception as exc:  # noqa: BLE001
@@ -75,7 +135,7 @@ async def lifespan(app: FastAPI):
     # Reconcile only stale two-phase effect reservations. A fresh reservation
     # may belong to another healthy worker, hence the conservative grace period.
     try:
-        from app.agents.orchestration.effects import recover_orphaned_effect_intents
+        from app.agents.orchestration.runtime.effects import recover_orphaned_effect_intents
 
         count = await recover_orphaned_effect_intents(
             settings.AGENT_EFFECT_INTENT_RECOVERY_GRACE_SECONDS
@@ -106,7 +166,7 @@ async def lifespan(app: FastAPI):
     # 用户产物与归档按各自的保留类别清理，互不越界。
     try:
         from app.services.artifact_retention import cleanup_archive_outputs
-        from app.services.office_docs import cleanup_expired_sessions, cleanup_generic_outputs
+        from app.office.docs import cleanup_expired_sessions, cleanup_generic_outputs
 
         await cleanup_expired_sessions()
         cleanup_generic_outputs(settings.GENERATED_FILES_TTL_DAYS)

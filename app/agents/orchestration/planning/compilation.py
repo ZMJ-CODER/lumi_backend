@@ -35,12 +35,12 @@ class PlanCompilationService:
             serialize_steps(nodes)
 
     async def compile_with_feedback(self, tree, *, routing: dict, context: PlanRequestContext, user_role: str):
-        from app.agents.orchestration.plan_compiler import CompileDecision, compile_plan, validate_request_coverage
+        from app.agents.orchestration.planning.plan_compiler import CompileDecision, compile_plan, validate_request_coverage
 
         async def compile_current(current_tree):
             max_nodes = None
             if self._temporal_static_mode:
-                from app.agents.orchestration.temporal_policy import evaluate_static_temporal_nodes
+                from app.agents.orchestration.runtime.temporal_policy import evaluate_static_temporal_nodes
 
                 decision = evaluate_static_temporal_nodes(
                     list(current_tree.nodes or []),

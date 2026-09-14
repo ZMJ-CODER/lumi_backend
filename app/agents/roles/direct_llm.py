@@ -7,7 +7,7 @@ from app.agents.core.progress import set_progress
 from app.agents.skills.base import SkillContext
 # 路由哨兵定义只保留一处：流式缓冲（office_skill_utils）与本节点判定必须引用
 # 同一个常量，否则又会出现"缓冲拦不住、判定认不出"的半截标记泄漏。
-from app.services.office_skill_utils import (
+from app.office.api import (
     ROUTE_SENTINEL_PREFIX,
     office_llm,
 )
@@ -169,7 +169,7 @@ class DirectLlmAgent(WorkerAgent):
                 limit = 6000
                 # Planner/Skill 可以给读取节点任意 ID，不能靠固定名称决定预算。
                 # 直接依据结果信封中的工作区事实识别证据，覆盖所有编排路径。
-                from app.agents.orchestration.context import _is_workspace_evidence
+                from app.agents.orchestration.execution.context import _is_workspace_evidence
 
                 if _is_workspace_evidence(result):
                     from app.core.config import settings

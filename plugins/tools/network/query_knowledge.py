@@ -6,7 +6,7 @@
 
 from app.agents.skills.base import Tool, SkillContext, ToolOutput
 from app.core.database import async_session_factory
-from app.services.rag.knowledge import search_user_knowledge
+from app.knowledge.retrieval.knowledge import search_user_knowledge
 from app.services.scene_manager import get_scene_knowledge_tags
 
 

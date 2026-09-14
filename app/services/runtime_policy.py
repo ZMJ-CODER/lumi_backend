@@ -302,7 +302,7 @@ def policy_bucket_ttl_seconds() -> int:
 def runtime_policy_enabled() -> bool:
     """``RUNTIME_POLICY_OVERRIDE``（默认关闭时本模块是零开销直通）。"""
     try:
-        from app.core.feature_flags import feature_enabled
+        from app.platform.runtime.feature_flags import feature_enabled
 
         return feature_enabled("RUNTIME_POLICY_OVERRIDE")
     except Exception:  # noqa: BLE001

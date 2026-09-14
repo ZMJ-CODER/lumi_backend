@@ -38,8 +38,8 @@ from app.agents.skills.executor import (
     selection_requires_escalation,
     select_capabilities_with_trace,
 )
-from app.core.agent_security import redact_server_text, wrap_untrusted_tool_output
-from app.core.model_response import normalize_tool_response
+from app.platform.security.agent_security import redact_server_text, wrap_untrusted_tool_output
+from app.platform.model.model_response import normalize_tool_response
 from app.services.tool_output_pipeline import clean_assistant_text
 from app.services.tool_output_projection import project_tool_output
 
@@ -264,7 +264,7 @@ class LangGraphChatRunner:
         # 统一资源能力层（Phase 5）：模型可见面收敛（默认关闭 → 逐字等于改造前）。
         # 收敛只改"模型看到的名字"；实现名仍是执行与审计的真相源，解析在
         # ``executor._resolve_model_alias`` 一处完成。
-        from app.agents.capabilities.resource_surface import collapse_for_surface
+        from app.agents.capabilities.views.resource_surface import collapse_for_surface
 
         surface_pairs = collapse_for_surface(capabilities)
         surface_enabled_now = len(surface_pairs) != len(capabilities) or any(
@@ -274,7 +274,7 @@ class LangGraphChatRunner:
         # 只含工具名与状态，不含参数/正文，因此可以安全进日志。
         # 收敛打开时快照记录**对外名**——它才回答"模型这次拿到了什么"。
         try:
-            from app.core.observability import record_tool_window_snapshot
+            from app.observability.observability import record_tool_window_snapshot
 
             record_tool_window_snapshot(
                 scene=self.scene,

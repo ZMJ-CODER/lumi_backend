@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crypto import decrypt_memory_text
+from app.platform.security.crypto import decrypt_memory_text
 from app.core.database import get_db
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException

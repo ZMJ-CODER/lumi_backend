@@ -125,7 +125,7 @@ async def _run_workflow_skill(
         # atomic tool.  Keep it available to the developer workflows without
         # re-registering it in the model-visible ToolRegistry.
         if name == "query_knowledge":
-            from app.services.rag.knowledge import search_user_knowledge
+            from app.knowledge.api import search_user_knowledge
             from app.core.database import async_session_factory
             from app.services.scene_manager import get_scene_knowledge_tags
 

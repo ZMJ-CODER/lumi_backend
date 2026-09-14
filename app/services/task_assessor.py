@@ -390,7 +390,7 @@ def canonical_profile(
     ``legacy`` 由调用方给出（例如 LLM 评估结果）；缺省用确定性启发式画像，
     保证预检等"计划前"的调用点**不额外发起模型调用**。
     """
-    from app.core.feature_flags import feature_enabled, shadow_mode
+    from app.platform.runtime.feature_flags import feature_enabled, shadow_mode
 
     if legacy is None:
         legacy = apply_confidence_policy(heuristic_profile(context))
@@ -501,7 +501,7 @@ async def assess_task_profile(
     if use_llm:
         try:
             from app.agents.langchain.planning import invoke_json_object
-            from app.core.model_roles import ROLE_INTENT_ASSESSOR
+            from app.platform.model.model_roles import ROLE_INTENT_ASSESSOR
 
             payload = await invoke_json_object(
                 assessor_prompt(context),

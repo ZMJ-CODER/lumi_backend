@@ -32,6 +32,6 @@
 ## 验证
 
 ```powershell
-.venv\Scripts\python.exe -m pytest packages/orchestration/tests/test_execution_spec.py tests/test_execution_policy.py -q
+.venv\Scripts\python.exe -m pytest packages/orchestration/tests/test_execution_spec.py tests/orchestration/test_execution_policy.py -q
 ```
 

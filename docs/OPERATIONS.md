@@ -65,7 +65,7 @@ Alembic revision 发布。
   ```bash
   export NEW_MEMORY_ENCRYPTION_KEY="<openssl rand -base64 32>"
   export NEW_MEMORY_ENCRYPTION_KEY_VERSION=2
-  python scripts/rotate_memory_key.py
+  python scripts/migrations/rotate_memory_key.py
   ```
   脚本会用新密钥重加密全部密文并升级 `key_version`，完成后更新 `.env`/secrets 再重启。
 

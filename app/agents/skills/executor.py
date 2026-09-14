@@ -24,8 +24,8 @@ from app.agents.skills.base import Tool, SkillContext, SkillResult
 from app.agents.skills.capability import ToolCapability, role_allows
 from app.agents.skills.registry import ToolRegistry
 from app.core.config import settings
-from app.core.agent_security import redact_server_text, sanitize_server_result, wrap_untrusted_tool_output
-from app.core.resource_policy import ResourcePolicyError, validate_client_path, validate_command
+from app.platform.security.agent_security import redact_server_text, sanitize_server_result, wrap_untrusted_tool_output
+from app.platform.security.resource_policy import ResourcePolicyError, validate_client_path, validate_command
 from app.core.database import async_session_factory
 from app.models.db_models import ControlLog
 from app.services import client_tools
@@ -504,7 +504,7 @@ async def get_workspace_action_capabilities(
     Only the Electron connection that registered ``workspace_id`` is queried,
     and only tools whose raw name is in ``allowed_raw`` are returned.
     """
-    from app.services.workspace_context import resolve_workspace_desktop
+    from app.workspace.context import resolve_workspace_desktop
 
     if not user_id or not str(workspace_id or "").strip() or not allowed_raw:
         return []
@@ -572,7 +572,7 @@ async def get_workspace_navigator_capability(
     ``workspace_id`` 不由模型填写：执行时由 ``execute_tool_call`` 用服务端注入的
     ``authorized_workspace_id`` 覆盖。
     """
-    from app.services.workspace_context import (
+    from app.workspace.context import (
         WORKSPACE_INTERNAL_READ_CAPABILITIES,
         WORKSPACE_NAVIGATOR,
         WORKSPACE_READ_TOOL_NAMES,
@@ -1134,7 +1134,7 @@ def record_candidate_selection(
     metadata["model_called"] = model_called
     metadata["not_called_candidates"] = [name for name in names if name and name != model_called]
     try:
-        from app.core.observability import inc_skill_routing_mode
+        from app.observability.observability import inc_skill_routing_mode
         from app.monitoring.context import MonitorContext
         from app.monitoring.logger import monitor_logger
 
@@ -1474,7 +1474,7 @@ def _resolve_model_alias(name: str) -> tuple[str, dict]:
       绝不静默换一个工具——那等于绕过用户对那次调用的批准。
     """
     try:
-        from app.agents.capabilities.resource_surface import (
+        from app.agents.capabilities.views.resource_surface import (
             is_model_facing,
             resolve_alias,
             surface_enabled,
@@ -1503,7 +1503,7 @@ def _registered_tool_names() -> tuple[str, ...]:
     """
     names: list[str] = []
     try:
-        from app.agents.orchestration.capability_preflight_service import tool_registration_facts
+        from app.agents.orchestration.preflight.capability_preflight_service import tool_registration_facts
 
         names.extend(tool_registration_facts())
     except Exception:  # noqa: BLE001
@@ -1771,7 +1771,7 @@ async def execute_tool_call(
             # 唯一模型可见的读取入口：action=list/search/read/scan 由后端聚合服务分发到
             # 内部处理器，再复用 Electron 原子工具与格式解析器。
             # workspace_id 一律取服务端注入值，模型传值被忽略。
-            from app.services.workspace_navigator import (
+            from app.workspace.read.navigator import (
                 ACTIONS as NAVIGATOR_ACTIONS,
                 WorkspaceNavigatorService,
                 model_text as navigator_model_text,
@@ -1815,7 +1815,7 @@ async def execute_tool_call(
             )
         if tool_name == "workspace_read":
             # 唯一读取能力：目录/定位/解析/分页全部在统一读取服务内部完成。
-            from app.services.workspace_reader import WorkspaceReader, json_dumps
+            from app.workspace.read.reader import WorkspaceReader, json_dumps
 
             reader = WorkspaceReader(
                 user_id=user_id,
@@ -1869,7 +1869,7 @@ async def execute_tool_call(
                 policy_expires_at = ""
                 if wsid_for_policy:
                     try:
-                        from app.services.workspace_context import load_workspace_context
+                        from app.workspace.context import load_workspace_context
 
                         ctx_policy = await load_workspace_context(
                             user_id, workspace_id=wsid_for_policy
@@ -1969,7 +1969,7 @@ async def execute_tool_call(
                 call_device_id = ""
                 if mcp_target and (tool_name.startswith(("workspace_", "sandbox_")) or call_workspace_id):
                     try:
-                        from app.services.workspace_context import resolve_workspace_desktop
+                        from app.workspace.context import resolve_workspace_desktop
 
                         route = resolve_workspace_desktop(user_id, call_workspace_id or str(args.get("workspace_id") or ""))
                         call_device_id = str(route.get("device_id") or "")
@@ -2012,7 +2012,7 @@ async def execute_tool_call(
             and call_workspace_id
         ):
             try:
-                from app.services.workspace_context import invalidate_workspace_context
+                from app.workspace.context import invalidate_workspace_context
 
                 await invalidate_workspace_context(call_workspace_id)
             except Exception:  # noqa: BLE001
@@ -2173,7 +2173,7 @@ async def _record_skill_telemetry(
     duration_ms: int,
 ) -> None:
     try:
-        from app.core.observability import inc_skill_call
+        from app.observability.observability import inc_skill_call
         from app.services.skill_telemetry import record_skill_outcome
 
         inc_skill_call(capability.name, result.success)
@@ -2501,7 +2501,7 @@ async def run_skill_loop(
     旧循环仅保留给非 Lumi mock/第三方适配对象，以及 LangGraph 本身不可用时的
     最后兼容降级，不能作为 office 的常规执行路径。
     """
-    from app.core.llm import LLMClient
+    from app.platform.model.llm import LLMClient
 
     # 办公 DAG 的原子节点仍由 NodeExecutionRunner 编排；这里覆盖的是所有
     # "模型自主调用多工具" 的循环。无论场景，实际能力都继续由 scene/role

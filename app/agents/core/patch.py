@@ -55,7 +55,14 @@ def _load_language(lang: str):
         elif lang == "javascript":
             from tree_sitter_javascript import language as fn
         else:
-            from tree_sitter_typescript import language as fn
+            # ``tree_sitter_typescript`` 只提供 ``language_typescript`` / ``language_tsx``
+            # （没有 ``language``）：名字写错时这里会被 except 吞掉，静默退化成正则抽取，
+            # 看起来"能用"但精度不同。两个名字都试，兼容新旧版本。
+            try:
+                from tree_sitter_typescript import language_typescript as fn
+            except ImportError:  # pragma: no cover - 旧版本
+                # import-symbols: allow-missing —— 仅旧版包的兜底分支，新版本没有这个名字
+                from tree_sitter_typescript import language as fn  # type: ignore[no-redef]
         return Language(fn())
     except Exception as exc:  # noqa: BLE001
         logger.debug("tree-sitter 语法加载失败({}): {}", lang, exc)

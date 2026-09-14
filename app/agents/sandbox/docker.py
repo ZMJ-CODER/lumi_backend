@@ -312,12 +312,12 @@ class DockerSandbox(Sandbox):
         """阶段 4（灰度）：容器路径的配额后处理（超限转产物引用 + 超时错误码）。
 
         容器里的进程无法由本进程 ``kill()``（清理由 ``docker rm`` 负责），因此判定与
-        产物化统一收在 ``app.services.plugins.quota``，与子进程路径**同一套规则**。
+        产物化统一收在 ``app.plugins.quota``，与子进程路径**同一套规则**。
         """
         if quota_spec is None:
             return result
         try:
-            from app.services.plugins.quota import apply_quota_to_sandbox_result
+            from app.plugins.quota import apply_quota_to_sandbox_result
 
             return await apply_quota_to_sandbox_result(
                 result, spec=quota_spec, run_started=started, owner=owner,

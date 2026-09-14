@@ -7,7 +7,7 @@
   - 按 user 归属校验工作区存在性。
 
 不再提供文件上传、目录、tree、下载、snapshot/rollback/commit 等
-服务端文件镜像端点（已停用，见 app/services/workspaces.py 模块说明）。
+服务端文件镜像端点（已停用，见 app/workspace/service.py 模块说明）。
 """
 
 from fastapi import APIRouter, Depends
@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from app.core.deps import require_auth
 from app.core.exceptions import BadRequestException, NotFoundException
-from app.services import workspaces
+from app.workspace import service as workspaces
 
 router = APIRouter()
 
@@ -126,13 +126,13 @@ async def refresh_workspace_context(
         workspaces.ensure_workspace(payload["sub"], workspace_id)
     except LookupError as exc:
         raise NotFoundException(str(exc)) from exc
-    from app.services.workspace_context import invalidate_workspace_context
+    from app.workspace.context import invalidate_workspace_context
 
     await invalidate_workspace_context(workspace_id)
     summary_refreshed = False
     if req.force:
         try:
-            from app.services.workspace_context import load_workspace_context
+            from app.workspace.context import load_workspace_context
 
             ctx = await load_workspace_context(
                 payload["sub"], workspace_id=workspace_id, force_refresh=True

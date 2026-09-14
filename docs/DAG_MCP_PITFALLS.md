@@ -144,13 +144,13 @@ M0 失败不能伪造“已完成”，而是附带失败证据升到 M1/M2。M2
 
 ```powershell
 # 模型配置、错误归因、LangChain 模型参数
-.\.venv\Scripts\python.exe -m pytest -q tests/test_model_config.py tests/test_langchain_models.py tests/test_skill_recovery.py
+.\.venv\Scripts\python.exe -m pytest -q tests/platform/test_model_config.py tests/agents/test_langchain_models.py tests/agents/test_skill_recovery.py
 
 # MCP 会话、缓存、任务关联与取消
-.\.venv\Scripts\python.exe -m pytest -q tests/test_mcp_manager.py
+.\.venv\Scripts\python.exe -m pytest -q tests/capabilities/test_mcp_manager.py
 
 # 办公编排、ReAct、工具与产物路径
-.\.venv\Scripts\python.exe -m pytest -q tests/test_orchestration.py tests/test_react_runner.py tests/test_skills.py
+.\.venv\Scripts\python.exe -m pytest -q tests/orchestration/test_orchestration.py tests/orchestration/test_react_runner.py tests/agents/test_skills.py
 
 # 全量回归
 .\.venv\Scripts\python.exe -m pytest -q

@@ -44,7 +44,7 @@ from lumi_contracts.events.process import (
 )
 from lumi_contracts.persistence.run_view import PROCESS_LOG_MAX_ENTRIES
 
-from app.agents.orchestration.presentation import (
+from app.agents.orchestration.execution.presentation import (
     completed_text,
     failed_text,
     intent_text,
@@ -222,7 +222,7 @@ def _preflight_entry(job_id: str, routing: dict, occurred_at: str) -> ProcessLog
     载荷由 ``CapabilityPreflightService`` 的 ``preflight_process_notice`` 产出（canonical
     画像接入后才有事实）；``entry_id`` 与 SSE 发射点一致，刷新后与实时帧合并成同一行。
     """
-    from app.agents.orchestration.capability_preflight_service import (
+    from app.agents.orchestration.preflight.capability_preflight_service import (
         PREFLIGHT_NOTICE_ENTRY_ID,
         PREFLIGHT_NOTICE_KEY,
     )
@@ -240,11 +240,11 @@ def _preflight_entry(job_id: str, routing: dict, occurred_at: str) -> ProcessLog
 def _model_routing_entry(job_id: str, routing: dict, occurred_at: str) -> ProcessLogEntry | None:
     """模型路由/降级的 process 事件 → 过程条目（routing 里没有该载荷时返回 None）。
 
-    载荷由 ``app.core.model_capability_router`` 产出（``MODEL_CAPABILITY_ROUTER_V2``
+    载荷由 ``app.platform.model.model_capability_router`` 产出（``MODEL_CAPABILITY_ROUTER_V2``
     打开且真的换档/降级/阻断时才有）；``entry_id`` 与 SSE 发射点一致，
     刷新后与实时帧合并成同一行。
     """
-    from app.core.model_capability_router import (
+    from app.platform.model.model_capability_router import (
         MODEL_ROUTING_NOTICE_ENTRY_ID,
         MODEL_ROUTING_NOTICE_KEY,
     )
@@ -263,7 +263,7 @@ def _route_detail(routing: dict) -> str:
     """路由/策略的**只读**审计摘要（枚举值，非自由文本，不含用户原文）。
 
     这里只读 ``routing``，不写回任何策略字段；``route_decision`` 仍是唯一权威来源
-    （见 ``app/agents/orchestration/route_snapshot.py``）。
+    （见 ``app/agents/orchestration/planning/route_snapshot.py``）。
     """
     decision = routing.get("route_decision")
     decision = decision if isinstance(decision, dict) else {}
@@ -355,22 +355,32 @@ def _step_entry(
 
 
 def dispatch_labels_for_step(step: dict, tool: str) -> dict[str, str]:
-    """步骤 → 结构化标签（能力/资源/Provider/模型可见名）。
+    """步骤 → 结构化标签（能力/资源/Provider/模型可见名/稳定展示字段）。
 
-    优先用步骤里**已经落盘的**标签（调用方更清楚"模型当时叫什么"），缺失时按工具名
-    从统一能力目录补。全部是闭集词汇；认不出工具就什么都不填（老工具/本机动作）。
+    规则：**步骤里已经落盘的标签优先**（调用方更清楚"模型当时叫什么"），缺失的按工具名
+    从统一能力目录补。``setdefault`` 保证历史事实**不被改写**——老步骤里写下的
+    ``provider_id``（例如兼容期的 ``lumi.client.forwarder``）原样回放，同时补上
+    ``provider_kind`` / ``provider_label`` 两个稳定展示字段，前端不必为老行单独兜底。
+
+    全部是闭集词汇（``provider_label`` 是后端固定表文案）；认不出工具就什么都不填。
     """
     labels: dict[str, str] = {}
-    for key in ("capability", "resource_type", "provider_id", "provider_name", "display_name"):
+    for key in (
+        "capability",
+        "resource_type",
+        "provider_id",
+        "provider_name",
+        "provider_kind",
+        "provider_label",
+        "display_name",
+    ):
         value = str(step.get(key) or "")
         if value:
             labels[key] = value
-    if labels.get("capability") and labels.get("resource_type"):
-        return labels
     if not tool:
         return labels
     try:
-        from app.agents.capabilities.resource_dispatch import dispatch_labels
+        from app.agents.capabilities.broker.resource_dispatch import dispatch_labels
 
         derived = dispatch_labels(tool)
     except Exception as exc:  # noqa: BLE001 - 标签补全失败不能影响过程日志

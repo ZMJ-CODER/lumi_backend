@@ -16,7 +16,7 @@ from app.agents.orchestration.execution.lifecycle import (
     prior_node_result,
 )
 from app.agents.orchestration.execution.node import ApplicationTaskNodeExecutor
-from app.agents.orchestration.job_contract import freeze_job_spec
+from app.agents.orchestration.runtime.job_contract import freeze_job_spec
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus
 from app.core.config import settings
 

@@ -11,7 +11,7 @@ from app.core.config import settings
 from loguru import logger
 
 if TYPE_CHECKING:  # 只用于注解：插件子系统在真实执行时才 import（避免加载期副作用）
-    from app.services.plugins.boundary import ExecutionPlan
+    from app.plugins.boundary import ExecutionPlan
 
 
 def _generic_output_dir(user_id: str, conv_id: str) -> Path:
@@ -111,11 +111,11 @@ async def _plugin_execution_plan(
     行为与既有路径逐字节一致（不会因此去构造插件管理器）。
     """
     plugin_id = str(getattr(context, "plugin_id", "") or "").strip()
-    from app.services.plugins.boundary import resolve_execution
+    from app.plugins.boundary import resolve_execution
 
     manager = None
     if plugin_id:
-        from app.services.plugins.manager import active_plugin_manager
+        from app.plugins.manager import active_plugin_manager
 
         manager = active_plugin_manager()
     # 本地/容器沙箱都起**可强杀**的独立进程；其它执行面不宣称有强杀能力。
@@ -225,7 +225,7 @@ class PythonExecSkill(Tool):
         else:
             env_extra["LUMI_OUTPUT_DIR"] = str(generic_dir)
         if doc_ids and context and context.user_id:
-            from app.services import office_docs
+            from app.office import docs as office_docs
 
             doc_paths: dict[str, str] = {}
             doc_out_dirs: dict[str, str] = {}
@@ -290,7 +290,7 @@ class PythonExecSkill(Tool):
         produced: list[dict] = []
         output_paths: dict[str, list[Path]] = {}
         if doc_ids and context and context.user_id:
-            from app.services import office_docs
+            from app.office import docs as office_docs
 
             seen = set()
             for doc_id in doc_ids:

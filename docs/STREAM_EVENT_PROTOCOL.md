@@ -137,10 +137,10 @@ SSE 只负责实时展示，不是唯一事实来源。`JobRunView`（`lumi.job_
 | 5 | 保留旧 SSE 适配输出（默认 `legacy`，前端零改动） | ✅ |
 | 6-9 | 前端 `StreamConsumer`、切 `canonical`、写入/审批/沙箱、Artifact/View Plugin | 前端已完成主体；后端联调项见 §9 |
 
-回归：`tests/test_stream_event_envelope.py`（信封字段 / 收敛表 / 去重 / 脱敏 /
-终态状态 / 路由元数据）、`tests/test_artifact_view_replay.py`（产物签名与越权 /
+回归：`tests/contracts/test_stream_event_envelope.py`（信封字段 / 收敛表 / 去重 / 脱敏 /
+终态状态 / 路由元数据）、`tests/contracts/test_artifact_view_replay.py`（产物签名与越权 /
 结果归一化链 / 视图白名单 / 审批标识与决议 / 终态透传 / 按 seq 补拉）、既有
-`tests/test_stream_event_contract.py`（旧投影逐字不变）。
+`tests/contracts/test_stream_event_contract.py`（旧投影逐字不变）。
 
 ## 9. 联调检查清单（前端四项，后端已就绪）
 
@@ -217,13 +217,13 @@ SSE 只负责实时展示，不是唯一事实来源。`JobRunView`（`lumi.job_
 
 | 方案条目 | 后端实现 | 回归测试 |
 |---|---|---|
-| §1.3 Schema Registry + 未知事件策略 | `packages/contracts/.../events/registry.py`、`event_adapter._unknown_event_payload` | `tests/test_event_schema_registry.py` |
-| §2.3 View 体积/嵌套上限（64KB / 10 层 / 1000 元素 → `data_ref`） | `envelope.ViewUpdatedPayload`、`envelope.bound_view_frame`（两种投影共用） | `tests/test_unified_error_model.py` |
-| §3 统一错误模型 + 冻结码表 + ErrorTranslator | `packages/contracts/.../events/errors.py`、`envelope.ErrorPayload` / `ControlPayload` | `tests/test_unified_error_model.py` |
-| §5.1 Artifact 短时下载 URL | `app/services/artifacts.py`、`app/api/v1/artifacts.py` | `tests/test_artifact_download_url.py` |
-| §6.2 终态封印（后端闸门） | `app/services/job_event_seal.py`、接入 `chat.py` / `agents.py` / `job_event_log.record_frames` / `orchestrator.cancel_job` | `tests/test_event_terminal_seal.py` |
-| §7.2–7.3 前端状态模型参考实现 | `app/contracts/stream_view_model.py` | `tests/test_stream_contract_fixtures.py` |
-| §8 阶段 2/6/7 Fixture + 双协议一致 + 安全验收 | `docs/fixtures/stream-events/*.json` | `tests/test_stream_contract_fixtures.py` |
+| §1.3 Schema Registry + 未知事件策略 | `packages/contracts/.../events/registry.py`、`event_adapter._unknown_event_payload` | `tests/contracts/test_event_schema_registry.py` |
+| §2.3 View 体积/嵌套上限（64KB / 10 层 / 1000 元素 → `data_ref`） | `envelope.ViewUpdatedPayload`、`envelope.bound_view_frame`（两种投影共用） | `tests/contracts/test_unified_error_model.py` |
+| §3 统一错误模型 + 冻结码表 + ErrorTranslator | `packages/contracts/.../events/errors.py`、`envelope.ErrorPayload` / `ControlPayload` | `tests/contracts/test_unified_error_model.py` |
+| §5.1 Artifact 短时下载 URL | `app/services/artifacts.py`、`app/api/v1/artifacts.py` | `tests/api/test_artifact_download_url.py` |
+| §6.2 终态封印（后端闸门） | `app/services/job_event_seal.py`、接入 `chat.py` / `agents.py` / `job_event_log.record_frames` / `orchestrator.cancel_job` | `tests/contracts/test_event_terminal_seal.py` |
+| §7.2–7.3 前端状态模型参考实现 | `app/contracts/stream_view_model.py` | `tests/contracts/test_stream_contract_fixtures.py` |
+| §8 阶段 2/6/7 Fixture + 双协议一致 + 安全验收 | `docs/fixtures/stream-events/*.json` | `tests/contracts/test_stream_contract_fixtures.py` |
 
 ### 10.1 统一错误模型（`error` / `control` 载荷）
 
@@ -242,6 +242,15 @@ SSE 只负责实时展示，不是唯一事实来源。`JobRunView`（`lumi.job_
   通过 **唯一映射表** `LEGACY_CODE_ALIASES` 收敛：同一类失败从任何路径返回同一个
   `code` + `safe_message`（验收清单 #1）。未登记但"看起来像错误码"的值保留原码
   （排障），文案落回通用安全文案。
+* **模型侧错误码 → 帧内 `status`**（`app/api/v1/chat.py::stream_error_frame`，与 HTTP
+  路径同一套判定）：`MODEL_INSUFFICIENT_BALANCE`→402、`MODEL_AUTH_ERROR`→401、
+  `MODEL_API_KEY_MISSING`→**400**、`MODEL_NOT_FOUND`→404、`MODEL_CONFIG_ERROR`→400、
+  `MODEL_TOOL_CALL_UNSUPPORTED`→422、`MODEL_PROVIDER_UNAVAILABLE` / `MODEL_CONNECTION_ERROR` /
+  `MODEL_UNAVAILABLE`→503；其余异常 → `500 CHAT_STREAM_INTERNAL_ERROR`。
+  缺密钥走 400（`model.credentials_missing`，business 且不可重试）而不是 401：401 会被
+  前端当成登录态失效而触发重新登录，而这里要做的是"去设置里填 API Key"。
+  同一失败在非流式入口是 HTTP 400 + `data.error_code = MODEL_API_KEY_MISSING`
+  （带 `data.byok` / `data.base_url`），两条路径的 code/文案必须逐字一致。
 * 失败/取消的 `control` 帧同样带 `error_code`（同一个码）与 `safe_next_action`。
 * **前端文案表**：只展示 `safe_message`；`trace_id` / `event_id` / `seq` / `error_code`
   只进日志。收到未知 `code` 时回落到 `safe_message`，不要自己拼文案。
@@ -298,7 +307,7 @@ SSE 只负责实时展示，不是唯一事实来源。`JobRunView`（`lumi.job_
 ### 10.5 联调 Fixture（`docs/fixtures/stream-events/`）
 
 9 个场景，每个文件含 `input_events`（内部事件）、`legacy_frames`、`canonical_frames`、
-`expect`（期望的终态/计数/被吞帧数）。由 `tests/test_stream_contract_fixtures.py`
+`expect`（期望的终态/计数/被吞帧数）。由 `tests/contracts/test_stream_contract_fixtures.py`
 生成与校验，因此不会与实现漂移；前端可直接喂给 `StreamConsumer`。
 
 | 文件 | 场景 |
@@ -343,8 +352,8 @@ SSE 只负责实时展示，不是唯一事实来源。`JobRunView`（`lumi.job_
 3. **补拉响应元数据**：原来写死 `protocol:"canonical"`、`version:2`；
    现已按实际帧形状如实回报（双协议期可能是 legacy 帧），版本取自协议常量。
 
-以上三点都有后端回归测试钉住（`tests/test_stream_contract_fixtures.py` 的
-"前端冻结契约对齐"四例 + `tests/test_artifact_download_url.py` 的响应形状断言）。
+以上三点都有后端回归测试钉住（`tests/contracts/test_stream_contract_fixtures.py` 的
+"前端冻结契约对齐"四例 + `tests/api/test_artifact_download_url.py` 的响应形状断言）。
 
 > 结论：**前端不需要为这三处改代码**；切 `canonical` 之前请确认后端版本为 1
 > （`EVENT_ENVELOPE_VERSION`）并跑一遍 `docs/fixtures/stream-events/` 的 fixture。

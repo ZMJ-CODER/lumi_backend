@@ -251,7 +251,7 @@ def _with_canonical_semantics(context: AssessmentContext, profile: TaskProfile, 
     ``side_effects``，"旧词表判只读、新画像判写入"这一类冲突无法被纠正。
     """
     try:
-        from app.core.feature_flags import feature_enabled
+        from app.platform.runtime.feature_flags import feature_enabled
 
         if not feature_enabled(task_assessor_module.CANONICAL_FLAG):
             return profile

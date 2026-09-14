@@ -37,7 +37,7 @@ class GenerateTestsSkill(WorkflowSkill):
         path = str(params.get("path") or "")
         instruction = str(params.get("instruction") or "")
         try:
-            from app.core.llm import LLMClient
+            from app.platform.model.llm import LLMClient
             from app.services.usage import CATEGORY_CODE
 
             llm = LLMClient()

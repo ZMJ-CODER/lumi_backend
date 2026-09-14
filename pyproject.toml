@@ -67,6 +67,9 @@ dependencies = [
     "lumi-execution>=0.1.0",
     # 跨模块契约包（工具/结果/事件/投影）；backend-neutral，不依赖 app。
     "lumi-contracts>=0.1.0",
+    # 能力域纯决策内核（P3）：统一能力词表 / 档位派生 / 部署判定 / 候选择优；
+    # 只依赖 lumi-contracts，不依赖 app 与编排内核。
+    "lumi-capability>=0.1.0",
     "agentregistry>=0.1.0",
 ]
 
@@ -96,6 +99,7 @@ default = true
 lumi-orchestration = { workspace = true }
 lumi-execution = { workspace = true }
 lumi-contracts = { workspace = true }
+lumi-capability = { workspace = true }
 # torch 必须用 CUDA 版（PyPI 上是 CPU 版，uv sync 会把它覆盖导致嵌入模型无法用 GPU）
 # 仅 Windows 本地生效；Linux（CI/Docker）从索引解析 CPU 版
 torch = [
@@ -114,7 +118,7 @@ environments = [
 ]
 
 [tool.uv.workspace]
-members = ["packages/orchestration", "packages/execution", "packages/contracts"]
+members = ["packages/orchestration", "packages/execution", "packages/contracts", "packages/capability"]
 
 [tool.setuptools.packages.find]
 include = ["app*", "celery_app*"]

@@ -15,7 +15,7 @@ from app.core.deps import require_superadmin
 from app.core.exceptions import BadRequestException, NotFoundException
 from app.models.db_models import Memory, MemoryProfile
 from app.models.memory import UpdateMemoryRequest
-from app.services.rag.embeddings import embed_texts
+from app.knowledge.embedding.embeddings import embed_texts
 
 router = APIRouter()
 

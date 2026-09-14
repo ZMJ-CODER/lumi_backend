@@ -12,7 +12,8 @@ from app.models.project import (
     UploadCodeChunksRequest,
     UploadCodeEmbeddingsRequest,
 )
-from app.services import code_embedding, project_index
+from app.knowledge.embedding import code_embedding
+from app.knowledge.code import project_index
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()

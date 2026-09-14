@@ -217,16 +217,34 @@ class ProcessLogEntry(BaseModel):
     resource_type: str | None = None
     provider_id: str | None = None
     provider_name: str | None = None
+    #: **稳定展示维度**（缺口 2c）：``provider_kind`` 是资源类型（ASCII 闭集），
+    #: ``provider_label`` 是后端固定表给的展示文案。前端按这两个字段渲染，
+    #: 不要按物理 ``provider_id`` 分支——它在迁移期会改名（例如
+    #: ``lumi.client.forwarder`` → ``lumi.client.office_document``）。
+    provider_kind: str | None = None
+    provider_label: str | None = None
     display_name: str | None = None
 
     @field_validator(
-        "capability", "resource_type", "provider_id", "provider_name", "display_name",
+        "capability", "resource_type", "provider_id", "provider_name", "provider_kind",
+        "display_name",
         mode="before",
     )
     @classmethod
     def _validate_label(cls, value: Any) -> Any:
         """结构化标签的形状闸门（**安全不变量**，不是格式偏好）。"""
         return label_value(value)
+
+    @field_validator("provider_label", mode="before")
+    @classmethod
+    def _validate_label_text(cls, value: Any) -> Any:
+        """展示文案闸门：值**必须来自固定表**（不是用户输入），因此按文案规则净化。
+
+        与 ``title``/``summary`` 同一条规则（去绝对路径/凭据 + 限长）；这里再收一次长度，
+        因为它只用来显示"哪一类 Provider"，不需要长文本。
+        """
+        text = sanitize_process_text(value, limit=32)
+        return text or None
 
     @field_validator("status", mode="before")
     @classmethod

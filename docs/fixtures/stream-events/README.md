@@ -9,10 +9,10 @@
 
 ```powershell
 $env:TEMP="E:\pythonpycharm\lumi_backend\.ptmp"; $env:MCP_SERVERS='[]'
-.\.venv\Scripts\python.exe -m pytest tests/test_stream_contract_fixtures.py -q -p no:cacheprovider
+.\.venv\Scripts\python.exe -m pytest tests/contracts/test_stream_contract_fixtures.py -q -p no:cacheprovider
 ```
 
-生成器：`tests/test_stream_contract_fixtures.py`（场景与期望值都在里面）。
+生成器：`tests/contracts/test_stream_contract_fixtures.py`（场景与期望值都在里面）。
 契约文档：`docs/STREAM_EVENT_PROTOCOL.md` §10。
 
 ## 文件结构

@@ -279,7 +279,7 @@ class CalendarManagerSkill(Tool):
 
         if action == "export":
             try:
-                from app.services.office_docs import generic_outputs_dir
+                from app.office.docs import generic_outputs_dir
 
                 conv_id = context.conversation_id or "default"
                 out_dir = generic_outputs_dir(context.user_id, conv_id)

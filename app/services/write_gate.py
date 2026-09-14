@@ -51,7 +51,7 @@ class WriteGateDenied(RuntimeError):
 def write_gate_enabled() -> bool:
     """``WRITE_GATE_ENFORCEMENT``（默认关闭 = 完全不影响既有写路径）。"""
     try:
-        from app.core.feature_flags import feature_enabled
+        from app.platform.runtime.feature_flags import feature_enabled
 
         return feature_enabled("WRITE_GATE_ENFORCEMENT")
     except Exception:  # noqa: BLE001

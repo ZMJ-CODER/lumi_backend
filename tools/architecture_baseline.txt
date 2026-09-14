@@ -1,0 +1,6 @@
+# 架构边界基线：**已经存在**的违规（存量不要求一次性清零）。
+# 格式：规则|文件|细节。新增违规会被 tools/check_architecture.py 阻塞。
+# 重构推进时这份文件只应该**变短**；用 --update-baseline 重写它。
+
+3|app/agents/roles/office/agents.py|agents→office: app.office
+5|lumi_orch/execution_mode.py|lumi_orch → lumi_execution

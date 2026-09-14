@@ -128,18 +128,18 @@ Tool / Skill / LLM
 
 | 场景 | 落点 |
 | --- | --- |
-| 普通短回答不被错误上传 Blob | `tests/test_result_store.py::test_short_result_stays_in_kv_and_never_touches_blob` |
+| 普通短回答不被错误上传 Blob | `tests/contracts/test_result_store.py::test_short_result_stays_in_kv_and_never_touches_blob` |
 | 几十页正文明细不进快照、可分页/按引用读取 | `test_large_result_goes_to_blob_and_is_readable_by_reference` + `test_budgeted_load_*` |
 | 引用 hash 错误被拒绝 | `test_integrity_failure_is_rejected` |
 | 结果引用过期明确报错 | `test_expired_reference_raises_explicit_error` |
 | 旧 result_ref 用旧 schema 解析 | `test_history_is_parsed_with_the_stored_schema_version` |
-| 第 N 步完成后崩溃可恢复 | `tests/test_job_recovery_flow.py::test_completion_event_arrives_after_state_and_checkpoint_are_persisted` |
-| 审批后崩溃仍为 waiting_approval | `tests/test_step_checkpoint.py::test_approval_then_crash_keeps_waiting_approval_state` |
+| 第 N 步完成后崩溃可恢复 | `tests/orchestration/test_job_recovery_flow.py::test_completion_event_arrives_after_state_and_checkpoint_are_persisted` |
+| 审批后崩溃仍为 waiting_approval | `tests/orchestration/test_step_checkpoint.py::test_approval_then_crash_keeps_waiting_approval_state` |
 | 在途取消 → uncertain，恢复时判定而非重跑 | `test_cancel_while_effect_in_flight_marks_uncertain` + `test_recovery_service_reconciles_pending_effect_when_verifiable` |
 | 500 步长任务快照有界（检查点独立落盘） | `test_checkpoint_is_isolated_from_job_snapshot_and_bounded` |
 | 日志不可用 fail-closed | `test_recovery_service_fails_closed_when_journal_unavailable` |
-| DB 写失败不阻塞执行、可补写 | `tests/test_job_projection.py::test_db_failure_keeps_rows_for_later_and_never_raises` |
-| 引用接口：越权 404 / 过期 410 + 明确错误码 / 分页预算 | `tests/test_result_reference_api.py` |
+| DB 写失败不阻塞执行、可补写 | `tests/orchestration/test_job_projection.py::test_db_failure_keeps_rows_for_later_and_never_raises` |
+| 引用接口：越权 404 / 过期 410 + 明确错误码 / 分页预算 | `tests/contracts/test_result_reference_api.py` |
 | `uncertain` 在实时与刷新两条路径都不被吞掉 | `test_uncertain_status_survives_both_live_and_refresh_paths` + `test_process_event_semantics.py` |
 | `/steps` 分页 + `display_summary` + `entry_id` 去重键 | `test_steps_endpoint_paginates_and_exposes_display_summary` |
 

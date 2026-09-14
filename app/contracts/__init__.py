@@ -275,7 +275,7 @@ class WorkspaceNavigatorModelProjection(ModelProjection):
                 imports = imports or payload.get("imports")
                 stats = stats or payload.get("stats")
                 notes = notes or payload.get("notes")
-            from app.services.code_structure import render_skeleton_lines
+            from app.knowledge.code.code_structure import render_skeleton_lines
 
             summary = str(getattr(payload, "summary", "") or "")
             if isinstance(payload, dict):

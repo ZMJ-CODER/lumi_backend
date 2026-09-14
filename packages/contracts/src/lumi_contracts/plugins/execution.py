@@ -13,7 +13,7 @@
    ``wired`` / ``enforced``；协作式**不算** ``enforced``。
 
 边界：本模块只定义**判定**。真正取 Worker（``PluginManager.worker_for``）与记录执行证据
-在 ``app.services.plugins.boundary``；Worker 真杀进程在 ``app.services.plugins.quota``。
+在 ``app.plugins.boundary``；Worker 真杀进程在 ``app.plugins.quota``。
 """
 
 from __future__ import annotations

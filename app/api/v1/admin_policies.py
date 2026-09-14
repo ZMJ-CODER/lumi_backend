@@ -8,10 +8,13 @@ Worker 每 10 秒轮询一次 epoch，就够了。
 
 ## 权限
 
-写操作必须 **superadmin JWT + ``X-Admin-Token``**（与 ``PUT /admin/llm-config/models``
-同一套：``_require_admin_verified``）。这是本模块**刻意**不沿用
-``POST /capabilities/admin/revoke`` 的原因——那个端点只校验 ``require_auth``，
-任何登录用户都能凭 provider_id 撤销别人的租约（越权面），不能作为新接口的模板。
+**只需 superadmin JWT**（``Depends(require_superadmin)``）。历史实现要求
+"超管 JWT + ``X-Admin-Token``"（token 由 ``POST /admin/verify-password`` 用管理员密码换取），
+已于 2026-09 移除：管理员已经登录过一次，改超时/并发不该再输一遍密码。
+
+注意本模块**刻意**不沿用 ``POST /capabilities/admin/revoke`` 那种"只校验 ``require_auth``"
+的写法——那个端点任何登录用户都能凭 provider_id 撤销别人的租约（越权面）。
+本模块的每个端点都显式 ``require_superadmin``。
 
 ## 生效范围与延迟
 
@@ -28,7 +31,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from loguru import logger
 
-from app.core.deps import get_admin_verified_token, require_superadmin
+from app.core.deps import require_superadmin
 from app.core.exceptions import BadRequestException, ConflictException
 from app.services.runtime_policy import (
     SCOPE_DEFAULT,
@@ -55,13 +58,6 @@ MIN_TIMEOUT_SECONDS = 0.1
 MAX_TIMEOUT_SECONDS = 3600.0
 MAX_CONCURRENT_LIMIT = 256
 MAX_TTL_LIMIT = 86400.0
-
-
-def _require_admin_verified(x_admin_token: str | None, payload: dict) -> None:
-    """与 ``app/api/v1/admin.py`` 同一实现（延迟导入避免循环）。"""
-    from app.api.v1.admin import _require_admin_verified as impl
-
-    impl(x_admin_token, payload)
 
 
 def _store() -> PolicyStore:
@@ -117,7 +113,7 @@ def _surface_view(entries: list) -> dict:
     * ``entries``：逐工具去向（``hidden`` / ``kept``）——**分类不了的工具有意保留**。
     """
     try:
-        from app.agents.capabilities.resource_surface import (
+        from app.agents.capabilities.views.resource_surface import (
             hidden_tools,
             surface_entries,
             surface_snapshot,
@@ -140,13 +136,15 @@ async def tool_registry_view(payload: dict = Depends(require_superadmin)):
     只读。差异为空的维度才可以安全地把真相源切到注册表；有差异时先修派生逻辑，
     不要急着打开 ``TOOL_REGISTRY_DERIVED``——差异意味着"打开后行为会变"。
     """
-    from app.agents.capabilities.tool_registry import (
+    from app.agents.capabilities.views.tool_shadow import (
         SHADOW_DECLARED_DIMENSIONS,
         SHADOW_PARITY_DIMENSIONS,
-        build_registry_entries,
-        registry_derived_enabled,
         shadow_compare,
         shadow_parity_totals,
+    )
+    from app.agents.capabilities.catalog.tool_registry import (
+        build_registry_entries,
+        registry_derived_enabled,
     )
     from app.core.config import settings
 
@@ -155,7 +153,7 @@ async def tool_registry_view(payload: dict = Depends(require_superadmin)):
     totals = shadow_parity_totals(diffs)
     # 统一资源能力层（Phase 1）：**只读进度**——哪些工具已经有 (统一能力, 资源类型, Provider)
     # 元数据，哪些还没有。它能回答"迁移到哪一步了"，而不是靠翻代码数。
-    from app.agents.capabilities.resource_catalog import (
+    from app.agents.capabilities.catalog.resource import (
         catalog_snapshot,
         unbound_tools,
     )
@@ -200,7 +198,7 @@ async def tool_registry_view(payload: dict = Depends(require_superadmin)):
 
 @router.get("")
 async def list_policies(payload: dict = Depends(require_superadmin)):
-    """查看当前策略、本地缓存新鲜度与轮询状态（只读，不需要二次验证）。"""
+    """查看当前策略、本地缓存新鲜度与轮询状态（只读）。"""
     snapshot = _store().snapshot()
     snapshot["write_gate"] = write_gate.snapshot()
     snapshot["bucket_ttl_seconds"] = policy_bucket_ttl_seconds()
@@ -212,7 +210,6 @@ async def list_policies(payload: dict = Depends(require_superadmin)):
 async def upsert_policy(
     req: dict,
     payload: dict = Depends(require_superadmin),
-    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """写入/覆盖一条策略并推进 epoch。
 
@@ -220,7 +217,6 @@ async def upsert_policy(
     （如 ``deepseek-v4-flash``）；``scope=default`` 时不填。未给的字段不覆盖，
     因此"只想改超时"不会顺手把并发或启停改掉。
     """
-    _require_admin_verified(x_admin_token, payload)
     scope = str(req.get("scope") or SCOPE_PROVIDER).strip().lower()
     field_name = _field_for(scope, str(req.get("target") or ""))
     timeout = _validate_number(
@@ -270,10 +266,8 @@ async def upsert_policy(
 async def delete_policy(
     field_name: str,
     payload: dict = Depends(require_superadmin),
-    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """删掉某条覆盖，回落到 ``.env`` / 代码默认值（同样推进 epoch）。"""
-    _require_admin_verified(x_admin_token, payload)
     target = str(field_name or "").strip()
     if not target:
         raise BadRequestException("缺少策略 field", error_code="INVALID_ARGUMENTS")
@@ -288,10 +282,8 @@ async def delete_policy(
 @router.post("/refresh")
 async def refresh_policies(
     payload: dict = Depends(require_superadmin),
-    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """立刻轮询一次（排障用：验证"改完是不是所有 Worker 都换过来了"）。"""
-    _require_admin_verified(x_admin_token, payload)
     refreshed = await _store().refresh_once()
     return {
         "code": 0,
@@ -304,14 +296,12 @@ async def refresh_policies(
 async def grant_write_lease(
     req: dict,
     payload: dict = Depends(require_superadmin),
-    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """续签写租约（``WRITE_GATE_ENFORCEMENT`` 打开后，写操作需要它）。
 
     没有走"自动续签"是因为写闸的语义是**授权**：谁有权持续写，得由运维显式给出，
     而不是让写路径自己给自己发租约（那就等于没有闸）。
     """
-    _require_admin_verified(x_admin_token, payload)
     scope = str(req.get("scope") or WRITE_SCOPE).strip() or WRITE_SCOPE
     lease_ttl = req.get("lease_ttl_seconds")
     ttl = int(lease_ttl) if lease_ttl not in (None, "") else None

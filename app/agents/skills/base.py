@@ -393,7 +393,7 @@ class WorkflowSkill:
         非法值一律丢掉而不是"就近取一个"：能力名是路由/审批/租约的键，
         写错的能力声明必须退回旧路径，不能悄悄变成另一个能力。
         """
-        from app.agents.capabilities.resource_catalog import (
+        from app.agents.capabilities.catalog.resource import (
             is_unified_capability,
             normalize_unified_capability,
         )
@@ -411,7 +411,7 @@ class WorkflowSkill:
         这就是"旧 MCP 依赖 → 新能力依赖"的转换：老 Skill 不改一行代码也能被
         能力层理解，从而在 Phase 5 收敛工具面时不至于被漏掉。
         """
-        from app.agents.capabilities.resource_catalog import binding_for_tool
+        from app.agents.capabilities.catalog.resource import binding_for_tool
 
         out: list[str] = []
         for name in self.allowed_tools or ():
@@ -432,7 +432,7 @@ class WorkflowSkill:
         workspace / office_document / … 上，这里返回空（由调用方决定要不要澄清），
         而不是随便挑一个资源。
         """
-        from app.agents.capabilities.resource_catalog import (
+        from app.agents.capabilities.catalog.resource import (
             RESOURCE_TYPES,
             binding_for_tool,
             providers_for,
@@ -461,7 +461,7 @@ class WorkflowSkill:
 
     def effective_providers(self) -> list[str]:
         """生效 Provider：显式声明 ∪ 由能力推导的候选（去重保序）。"""
-        from app.agents.capabilities.resource_catalog import providers_for
+        from app.agents.capabilities.catalog.resource import providers_for
 
         out = [str(item or "").strip() for item in (self.providers or ()) if str(item or "").strip()]
         out = list(dict.fromkeys(out))
@@ -514,7 +514,7 @@ class WorkflowSkill:
         """
         if not self.declared_capabilities():
             return []
-        from app.agents.capabilities.resource_workflow import tools_for_capabilities
+        from app.agents.capabilities.policy.resource_workflow import tools_for_capabilities
 
         rows: list[dict[str, Any]] = []
         for name in tools_for_capabilities(
@@ -545,7 +545,7 @@ class WorkflowSkill:
         if not text:
             return text
         try:
-            from app.agents.capabilities.resource_surface import translate_prompt_names
+            from app.agents.capabilities.views.resource_surface import translate_prompt_names
 
             return translate_prompt_names(text)
         except Exception:  # noqa: BLE001 - 翻译失败用原文，绝不因为改名丢掉提示词

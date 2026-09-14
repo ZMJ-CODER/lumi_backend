@@ -114,8 +114,8 @@ async def invoke_json_object(
     结构化结果不合法时由调用方决定回退（意图评估会换主档位重试一次，仍失败则用
     确定性启发式画像）——**低成本模型只负责"理解意图"，不负责安全放行**。
     """
-    from app.core import model_roles
-    from app.core.llm import LLMClient
+    from app.platform.model import model_roles
+    from app.platform.model.llm import LLMClient
 
     role_name = str(role or "").strip()
     client = LLMClient()

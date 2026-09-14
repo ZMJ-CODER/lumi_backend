@@ -63,7 +63,7 @@ def artifact_view(user_id: str, artifact: dict[str, Any]) -> dict[str, Any] | No
     if not artifact_id or not filename:
         return None
     from app.services import artifacts as artifact_service
-    from app.services.office_docs import preview_generated_output
+    from app.office.docs import preview_generated_output
 
     path: Path | None = artifact_service.artifact_path(user_id, artifact_id)
     if path is None:

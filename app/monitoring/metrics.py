@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.core import observability
+from app.observability import observability
 
 
 class MonitorMetrics:

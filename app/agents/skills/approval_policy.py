@@ -186,7 +186,7 @@ def classify_tool_risk(
     # 注册表派生（仅在开关打开且注册表愿意负责这个工具时生效）。
     derived_tier: Tier | None = None
     try:
-        from app.agents.capabilities.tool_registry import (
+        from app.agents.capabilities.catalog.tool_registry import (
             registry_derived_enabled,
             risk_tier_of,
         )

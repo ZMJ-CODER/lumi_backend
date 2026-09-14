@@ -33,14 +33,15 @@ class CreateTaskPlanSkill(WorkflowSkill):
             return ToolOutput(success=False, error="缺少 request", error_code="INVALID_ARGS", retryable=False)
         project_id = str(params.get("project_id") or "")
         try:
-            from app.agents.orchestration.planner import _build_planner_prompt, _extract_json
-            from app.core.llm import LLMClient
+            from app.agents.langchain.planning import _parse_json_object_text
+            from app.agents.orchestration.planning.prompting import build_planner_prompt
+            from app.platform.model.llm import LLMClient
             from app.services.usage import CATEGORY_PLAN
 
             context_text = f"用户请求：{request}"
             if project_id:
                 from app.core.database import async_session_factory
-                from app.services import project_index
+                from app.knowledge.code import project_index
 
                 async with async_session_factory() as session:
                     files = await project_index.list_project_files(
@@ -53,7 +54,7 @@ class CreateTaskPlanSkill(WorkflowSkill):
                 [
                     {
                         "role": "user",
-                        "content": _build_planner_prompt() + "\n" + context_text,
+                        "content": build_planner_prompt() + "\n" + context_text,
                     }
                 ],
                 temperature=0.1,
@@ -63,7 +64,7 @@ class CreateTaskPlanSkill(WorkflowSkill):
                 reasoning_effort="low",
                 api_key=context.llm_api_key,
             )
-            data = _extract_json(reply) if reply else None
+            data = _parse_json_object_text(reply) if reply else None
         except Exception as exc:  # noqa: BLE001
             return ToolOutput(
                 success=False,

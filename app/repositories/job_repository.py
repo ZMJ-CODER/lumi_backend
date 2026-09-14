@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from app.agents.orchestration.models import Job
-from app.agents.orchestration.state import StateStore
+from app.agents.orchestration.runtime.state import StateStore
 
 
 class JobRepository(Protocol):

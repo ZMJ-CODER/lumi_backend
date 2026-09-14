@@ -33,8 +33,8 @@ from lumi_contracts.plugins import (
     capability_failure,
 )
 
-from app.agents.capabilities.catalog import CapabilityCatalog, capability_catalog
-from app.agents.capabilities.registry import CapabilityRegistry, capability_registry
+from app.agents.capabilities.catalog.legacy import CapabilityCatalog, capability_catalog
+from app.agents.capabilities.registry.registry import CapabilityRegistry, capability_registry
 from app.services.capability_lease_redis import lease_id_for
 from app.services.capability_events import (
     CAPABILITY_EVENT_PROVIDER_CONNECTED,

@@ -22,7 +22,7 @@ class SqlAlchemyProjectRepository:
 
     async def list_projects(self, user_id: str) -> list[dict]:
         from app.core.database import async_session_factory
-        from app.services import project_index
+        from app.knowledge.code import project_index
 
         async with async_session_factory() as session:
             projects = await project_index.list_projects(session, user_id)
@@ -35,7 +35,7 @@ class SqlAlchemyProjectRepository:
         self, user_id: str, project_id: str, limit: int = 50
     ) -> list[str]:
         from app.core.database import async_session_factory
-        from app.services import project_index
+        from app.knowledge.code import project_index
 
         async with async_session_factory() as session:
             return await project_index.list_project_files(

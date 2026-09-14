@@ -1,6 +1,6 @@
 """executor 与统一操作契约之间的薄接线（放在 skills 侧，避免契约层反向依赖）。
 
-为什么需要单独一层：``app/contracts/operations`` 与 ``app/services/workspace_operations``
+为什么需要单独一层：``app/contracts/operations`` 与 ``app/workspace/write/operations``
 都不该 import ``app.agents.skills``（会形成循环），而 executor 需要把
 ``OperationResult`` 折成既有 ``SkillResult``。转换与上下文注入因此留在调用方一侧。
 
@@ -25,13 +25,13 @@ from typing import Any
 
 from loguru import logger
 
-from app.agents.capabilities.context import AgentExecutionContext
+from app.agents.capabilities.contracts.context import AgentExecutionContext
 from app.contracts.operations import (
     OperationApprovalState,
     OperationContext,
     OperationStatus,
 )
-from app.services.workspace_operations import (
+from app.workspace.write.operations import (
     NavigatorWorkspaceClient,
     WorkspaceOperationService,
     operation_kind_for_tool,
@@ -93,7 +93,7 @@ def _authorize(
     from lumi_contracts.plugins import CapabilityInvocation
 
     try:
-        from app.agents.capabilities.policy_guard import policy_guard
+        from app.agents.capabilities.policy.policy_guard import policy_guard
 
         context = dict(approval_context or {})
         invocation = CapabilityInvocation(
@@ -141,7 +141,7 @@ async def try_workspace_operation(
             metadata={"tool": tool_name, "operation": str(kind)},
         )
     try:
-        from app.agents.capabilities.catalog import capability_catalog
+        from app.agents.capabilities.catalog.legacy import capability_catalog
 
         capability = f"workspace.{kind}"
         descriptor = capability_catalog.get(capability)
@@ -236,7 +236,7 @@ async def try_workspace_operation(
 
 
 def _default_client(**kwargs: Any) -> NavigatorWorkspaceClient:
-    from app.services.workspace_navigator import WorkspaceNavigatorService
+    from app.workspace.read.navigator import WorkspaceNavigatorService
 
     return NavigatorWorkspaceClient(
         WorkspaceNavigatorService(

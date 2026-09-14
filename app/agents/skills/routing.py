@@ -59,7 +59,7 @@ def schedule_skill_semantic_index(capabilities: Iterable[ToolCapability]) -> Non
     try:
         # Request path never loads bge. Startup/reload owns proactive warmup;
         # before it completes the caller records lexical_fallback explicitly.
-        from app.services.rag.embeddings import embedding_model_loaded
+        from app.knowledge.api import embedding_model_loaded
 
         if not embedding_model_loaded():
             return
@@ -82,7 +82,7 @@ async def warm_skill_semantic_index(capabilities: Iterable[ToolCapability]) -> N
         if _ready and not _invalidated:
             return
         try:
-            from app.services.rag.embeddings import embed_texts
+            from app.knowledge.api import embed_texts
 
             values = await embed_texts([_descriptor(item) for item in items])
             if len(values) != len(items):
@@ -122,7 +122,7 @@ async def semantic_scores(request: str, capabilities: Iterable[ToolCapability]) 
         return {}
     items = list(capabilities)
     try:
-        from app.services.rag.embeddings import embed_query
+        from app.knowledge.api import embed_query
 
         query = await embed_query(request)
         if not query:

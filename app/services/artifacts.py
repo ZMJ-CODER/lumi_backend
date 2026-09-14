@@ -7,7 +7,7 @@
 设计取舍：
 
 * **不新建产物存储**：产物字节仍由既有通用产物目录持有
-  （``app/services/office_docs.py::generic_outputs_dir`` /
+  （``app/office/docs.py::generic_outputs_dir`` /
   ``resolve_generic_output``，已内含按用户隔离 + 路径越权校验）；
 * ``artifact_id`` 是**签名的不透明标识**（HMAC + base64url），内容是
   ``{container_id, name, issued_at}``：不需要新的数据库/Redis 表，且无法被伪造
@@ -364,7 +364,7 @@ def artifact_path(user_id: str, artifact_id: str) -> Path | None:
     # 缺失签发时间视为已过期（fail-closed）：否则伪造/截断的时间戳能让产物永不过期。
     if is_expired(parsed):
         return None
-    from app.services.office_docs import resolve_generic_output
+    from app.office.docs import resolve_generic_output
 
     # resolve_generic_output 只在该用户自己的产物目录里解析，等价于归属校验。
     return resolve_generic_output(user_id, parsed["container_id"], parsed["name"])

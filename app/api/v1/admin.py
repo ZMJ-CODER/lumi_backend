@@ -11,11 +11,11 @@ from app.core.config import settings
 from app.core.database import get_db
 from typing import Any
 
-from app.core.deps import get_admin_verified_token, require_admin, require_superadmin
+from app.core.deps import require_admin, require_superadmin
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException
-from app.core.rag_config import set_rag_overrides
-from app.core.read_view_cache import invalidate_user_view
-from app.core.security import create_admin_verified_token, verify_admin_verified_token, verify_password
+from app.knowledge.config import set_rag_overrides
+from app.platform.runtime.read_view_cache import invalidate_user_view
+from app.platform.security.security import create_admin_verified_token, verify_password
 from app.models.admin import (
     LLMConfigRequest,
     LLMResetRequest,
@@ -30,7 +30,7 @@ from app.models.admin import (
 )
 from app.models.db_models import ControlLog, Document, KnowledgeSpace, User
 from app.models.knowledge import AdminPasswordVerifyRequest, RebuildIndexRequest
-from app.services.rag import knowledge as kb
+from app.knowledge.retrieval import knowledge as kb
 
 router = APIRouter()
 
@@ -61,13 +61,19 @@ async def _load_user(db: AsyncSession, payload: dict) -> User:
     return user
 
 
-def _require_admin_verified(x_admin_token: str | None, payload: dict) -> None:
-    """校验管理员二次验证令牌（必须属于当前登录用户）."""
-    if not x_admin_token:
-        raise ForbiddenException("需要管理员二次验证")
-    data = verify_admin_verified_token(x_admin_token)
-    if not data or str(data.get("sub")) != str(payload.get("sub")):
-        raise ForbiddenException("管理员二次验证无效或已过期，请重新验证")
+# ── 管理面授权口径（2026-09 裁决） ─────────────────────
+#
+# **只需要 superadmin JWT**：管理员已经登录过一次，查看连接状态/改配置不再要求
+# 第二次输入密码。历史实现是"超管 JWT + X-Admin-Token"两级（token 由
+# ``POST /admin/verify-password`` 用管理员密码换取），现场体验是"点一下测试连接
+# 还要再输一遍密码"，且多窗口/多端时 token 5 分钟就过期。现已全部移除：
+#
+# * ``POST /admin/verify-password`` **保留**（仍校验密码、仍签发 token），
+#   仅为尚未更新的旧客户端兼容，不再有接口依赖它；
+# * 鉴权唯一入口仍是 ``Depends(require_superadmin)``（``require_auth`` + 角色判定）。
+#
+# 注意：请求里若仍带 ``X-Admin-Token`` 会被**直接忽略**（unknown header 无副作用），
+# 因此新旧客户端都能用。
 
 
 # ── 用户管理（超管） ──────────────────────────────────
@@ -133,7 +139,7 @@ async def update_user(
     return {"code": 0, "message": "已更新"}
 
 
-# ── 二次密码验证 ─────────────────────────────────────
+# ── 二次密码验证（**已废弃**，仅为旧客户端保留） ──────────
 
 @router.post("/verify-password")
 async def verify_admin_password(
@@ -141,7 +147,12 @@ async def verify_admin_password(
     db: AsyncSession = Depends(get_db),
     payload: dict = Depends(require_admin),
 ):
-    """二次密码验证，返回临时 verified_token（有效期 5 分钟）."""
+    """[已废弃] 二次密码验证，返回临时 verified_token（有效期 5 分钟）。
+
+    管理接口**不再需要**这个 token（授权只依赖 superadmin JWT）。端点保留是为了
+    旧客户端不会 404：仍然校验密码、仍然签发 token，但没有任何接口消费它。
+    新客户端请直接调用管理接口，不要再弹密码框。
+    """
     user = await _load_user(db, payload)
     if not verify_password(req.admin_password, user.password_hash):
         raise BadRequestException("密码错误")
@@ -151,20 +162,20 @@ async def verify_admin_password(
         "data": {
             "verified_token": token,
             "expires_in": settings.ADMIN_VERIFIED_TOKEN_EXPIRE_SECONDS,
+            "deprecated": True,
+            "deprecated_reason": "管理接口已不再要求二次密码验证，请直接调用",
         },
     }
 
 
-# ── 全局 RAG 配置（超管 + 二次验证） ─────────────────
+# ── 全局 RAG 配置（超管） ────────────────────────────
 
 @router.put("/rag-config")
 async def update_rag_config(
     req: RAGConfigRequest,
     payload: dict = Depends(require_superadmin),
-    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """全局检索参数配置：分块大小、Top-K、相似度阈值."""
-    _require_admin_verified(x_admin_token, payload)
     cfg = {
         "top_k": req.top_k,
         "similarity_threshold": req.similarity_threshold,
@@ -280,11 +291,9 @@ async def delete_public_kb_document(
 @router.post("/knowledge/index/rebuild")
 async def rebuild_index(
     req: RebuildIndexRequest,
-    x_admin_token: str | None = Depends(get_admin_verified_token),
     payload: dict = Depends(require_admin),
 ):
     """重建向量索引."""
-    _require_admin_verified(x_admin_token, payload)
     from celery_app.tasks import rebuild_index as rebuild_index_task
 
     rebuild_index_task.delay(req.space_id)
@@ -293,11 +302,9 @@ async def rebuild_index(
 
 @router.post("/knowledge/cleanup")
 async def cleanup_knowledge(
-    x_admin_token: str | None = Depends(get_admin_verified_token),
     payload: dict = Depends(require_admin),
 ):
     """清理冗余向量数据."""
-    _require_admin_verified(x_admin_token, payload)
     from celery_app.tasks import cleanup_vectors
 
     cleanup_vectors.delay()
@@ -355,7 +362,7 @@ async def get_llm_config_view(
     payload: dict = Depends(require_superadmin),
 ):
     """查看当前生效的 LLM 配置（api_key 脱敏）."""
-    from app.core.llm_config import get_llm_config
+    from app.platform.model.llm_config import get_llm_config
 
     cfg = await get_llm_config(scene)
     return {"code": 0, "data": {**cfg, "api_key": _mask_api_key(cfg.get("api_key", ""))}}
@@ -367,7 +374,7 @@ async def update_llm_config(
     payload: dict = Depends(require_superadmin),
 ):
     """更新 LLM 动态配置：先验证连通性，通过后才写入 Redis，立即生效."""
-    from app.core.llm_config import get_llm_config, set_llm_config, validate_llm_config
+    from app.platform.model.llm_config import get_llm_config, set_llm_config, validate_llm_config
 
     current = await get_llm_config(req.scene)
     candidate = {
@@ -395,7 +402,7 @@ async def reset_llm_config_view(
     payload: dict = Depends(require_superadmin),
 ):
     """删除 Redis 中的 LLM 配置，回落 .env 默认值."""
-    from app.core.llm_config import reset_llm_config
+    from app.platform.model.llm_config import reset_llm_config
 
     await reset_llm_config(req.scene)
     scope = f"场景 {req.scene}" if req.scene else "全局"
@@ -405,11 +412,11 @@ async def reset_llm_config_view(
 # ── 模型档位 / 职责角色（方案 §五、§十：后台一处切换所有同档位功能）──
 #
 # 路径以**前端契约**为准（``src/services/adminSystem.js::LLM_CONFIG_ENDPOINTS``）：
-#   GET  /admin/llm-config/models       读取档位 + 角色映射（无需二次验证）
+#   GET  /admin/llm-config/models       读取档位 + 角色映射
 #   PUT  /admin/llm-config/models       保存（body: {profiles?:{...}, roles?:{...}}）
 #   POST /admin/llm-config/models/reset 重置（body: {profile?}；空=全部）
 #   POST /admin/llm-config/models/test  连通性测试（body: {profile}）
-# 写操作沿用本仓库既有范式：超管 JWT + ``X-Admin-Token``（来自 /admin/verify-password）。
+# 全部只需超管 JWT（二次密码验证已于 2026-09 移除）。
 # 旧的 ``/admin/model-roles*`` 保留为兼容别名（同语义）。
 
 
@@ -429,7 +436,7 @@ def _profile_payload(profiles: Any, roles: Any) -> tuple[dict[str, dict], dict[s
 
 async def _apply_role_config(profile_updates: dict[str, dict], role_updates: dict[str, str]) -> dict:
     """写入档位覆盖与角色映射；返回生效摘要（供回执/审计）。"""
-    from app.core.model_roles import ALL_PROFILES, set_profile_config, set_role_profile
+    from app.platform.model.model_roles import ALL_PROFILES, set_profile_config, set_role_profile
 
     applied_profiles: list[str] = []
     applied_roles: list[str] = []
@@ -450,7 +457,7 @@ async def _apply_role_config(profile_updates: dict[str, dict], role_updates: dic
 @router.get("/llm-config/models")
 async def get_llm_models_view(payload: dict = Depends(require_superadmin)):
     """当前生效的档位与角色映射（密钥只回脱敏文本，管理页读取用）。"""
-    from app.core.model_roles import role_config_view
+    from app.platform.model.model_roles import role_config_view
 
     return {"code": 0, "data": await role_config_view()}
 
@@ -459,10 +466,8 @@ async def get_llm_models_view(payload: dict = Depends(require_superadmin)):
 async def update_llm_models(
     req: ModelRolesUpdateRequest,
     payload: dict = Depends(require_superadmin),
-    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """保存档位 / 角色映射（只提交被改动的部分，写 Redis 后立即生效、无需重启）."""
-    _require_admin_verified(x_admin_token, payload)
     profile_updates, role_updates = _profile_payload(req.profiles, req.roles)
     if not profile_updates and not role_updates:
         raise BadRequestException("没有需要保存的改动")
@@ -479,11 +484,9 @@ async def update_llm_models(
 async def reset_llm_models(
     req: ModelRolesResetRequest,
     payload: dict = Depends(require_superadmin),
-    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """重置为 .env 默认：给了 ``profile`` 只重置该档位，否则清空全部动态覆盖."""
-    _require_admin_verified(x_admin_token, payload)
-    from app.core.model_roles import (
+    from app.platform.model.model_roles import (
         ALL_PROFILES,
         ALL_ROLES,
         CHAT_PROFILES,
@@ -507,14 +510,12 @@ async def reset_llm_models(
 async def test_llm_model_profile(
     req: ModelRolesTestRequest,
     payload: dict = Depends(require_superadmin),
-    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """测试某档位连通性（不返回密钥）；结果写入状态供管理页展示."""
-    _require_admin_verified(x_admin_token, payload)
     import time
 
-    from app.core.llm_config import validate_llm_config
-    from app.core.model_roles import CHAT_PROFILES, resolve_role, set_profile_status
+    from app.platform.model.llm_config import validate_llm_config
+    from app.platform.model.model_roles import CHAT_PROFILES, resolve_role, set_profile_status
 
     profile = str(req.profile or "").strip()
     if not profile:
@@ -549,7 +550,7 @@ async def test_llm_model_profile(
 @router.get("/model-roles")
 async def get_model_roles_view(payload: dict = Depends(require_superadmin)):
     """（兼容别名）当前生效的档位与角色配置。"""
-    from app.core.model_roles import role_config_view
+    from app.platform.model.model_roles import role_config_view
 
     return {"code": 0, "data": await role_config_view()}
 
@@ -559,11 +560,9 @@ async def update_model_profile(
     profile: str,
     req: ModelProfileRequest,
     payload: dict = Depends(require_superadmin),
-    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """（兼容别名）覆盖一个档位的 provider/base_url/api_key/model 与能力声明。"""
-    _require_admin_verified(x_admin_token, payload)
-    from app.core.model_roles import resolve_role, set_profile_config
+    from app.platform.model.model_roles import resolve_role, set_profile_config
 
     if req.reset:
         await set_profile_config(profile, None)
@@ -589,7 +588,7 @@ async def update_model_profile(
         raise BadRequestException("没有可更新的字段")
 
     if req.test_only or req.check_connection:
-        from app.core.llm_config import validate_llm_config
+        from app.platform.model.llm_config import validate_llm_config
 
         probe = {
             "base_url": candidate.get("base_url") or "",
@@ -617,11 +616,9 @@ async def update_model_role(
     role: str,
     req: ModelRoleRequest,
     payload: dict = Depends(require_superadmin),
-    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """（兼容别名）把一个逻辑角色固定到某个档位（空 = 清除，回落 LLM_ROLE_*）."""
-    _require_admin_verified(x_admin_token, payload)
-    from app.core.model_roles import set_role_profile
+    from app.platform.model.model_roles import set_role_profile
 
     try:
         await set_role_profile(role, req.profile)
@@ -634,11 +631,9 @@ async def update_model_role(
 @router.post("/model-roles/reset")
 async def reset_model_roles(
     payload: dict = Depends(require_superadmin),
-    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """（兼容别名）一键恢复：清除全部角色与档位的动态覆盖（回落 .env）。"""
-    _require_admin_verified(x_admin_token, payload)
-    from app.core.model_roles import ALL_PROFILES, ALL_ROLES, set_profile_config, set_role_profile
+    from app.platform.model.model_roles import ALL_PROFILES, ALL_ROLES, set_profile_config, set_role_profile
 
     for role in ALL_ROLES:
         await set_role_profile(role, None)
@@ -647,28 +642,24 @@ async def reset_model_roles(
     return {"code": 0, "data": {"message": "已恢复全部模型角色/档位为 .env 默认配置"}}
 
 
-# ── 编排策略管理（管理员 + 二次验证） ─────────────────
+# ── 编排策略管理（管理员） ───────────────────────────
 
 @router.get("/strategy-policies")
 async def list_strategy_policies(
-    x_admin_token: str | None = Depends(get_admin_verified_token),
     payload: dict = Depends(require_admin),
 ):
     """查看独立策略文件及当前加载状态。"""
-    _require_admin_verified(x_admin_token, payload)
-    from app.agents.orchestration.strategy_engine import strategy_engine
+    from app.agents.orchestration.planning.strategy_engine import strategy_engine
 
     return {"code": 0, "data": await strategy_engine.inspect()}
 
 
 @router.post("/strategy-policies/reload")
 async def reload_strategy_policies(
-    x_admin_token: str | None = Depends(get_admin_verified_token),
     payload: dict = Depends(require_admin),
 ):
     """重新校验并原子加载策略目录；无可用策略时自动使用内置安全兜底。"""
-    _require_admin_verified(x_admin_token, payload)
-    from app.agents.orchestration.strategy_engine import strategy_engine
+    from app.agents.orchestration.planning.strategy_engine import strategy_engine
 
     return {"code": 0, "data": await strategy_engine.reload(), "message": "策略已重新加载"}
 
@@ -676,12 +667,10 @@ async def reload_strategy_policies(
 @router.post("/strategy-policies/unload")
 async def unload_strategy_policy(
     req: StrategyPolicyToggleRequest,
-    x_admin_token: str | None = Depends(get_admin_verified_token),
     payload: dict = Depends(require_admin),
 ):
     """卸载一条策略；若没有其他策略，引擎继续使用内置安全兜底。"""
-    _require_admin_verified(x_admin_token, payload)
-    from app.agents.orchestration.strategy_engine import strategy_engine
+    from app.agents.orchestration.planning.strategy_engine import strategy_engine
 
     try:
         data = await strategy_engine.unload(req.policy_id)
@@ -695,12 +684,10 @@ async def unload_strategy_policy(
 @router.post("/strategy-policies/load")
 async def load_strategy_policy(
     req: StrategyPolicyToggleRequest,
-    x_admin_token: str | None = Depends(get_admin_verified_token),
     payload: dict = Depends(require_admin),
 ):
     """恢复一条已卸载的策略文件。"""
-    _require_admin_verified(x_admin_token, payload)
-    from app.agents.orchestration.strategy_engine import strategy_engine
+    from app.agents.orchestration.planning.strategy_engine import strategy_engine
 
     try:
         data = await strategy_engine.load(req.policy_id)

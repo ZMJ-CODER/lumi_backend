@@ -210,7 +210,7 @@ revoke_bus = RevokeBus()
 
 def _invalidate_local_cache(event: RevokeEvent) -> None:
     """收到撤销 → 清空租约读缓存（权威数据仍在 Redis，下次 refresh 会重建）。"""
-    from app.agents.capabilities.registry import capability_registry
+    from app.agents.capabilities.registry.registry import capability_registry
     from app.services.capability_lease import capability_lease_service
 
     try:

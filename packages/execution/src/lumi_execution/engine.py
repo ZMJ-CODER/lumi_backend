@@ -152,9 +152,12 @@ class ExecutionEngine:
         except Exception as exc:  # noqa: BLE001
             code, message = self.classify_exception(exc)
             return None, message or str(exc) or "执行失败", code or "EXEC_ERROR", code not in {
-                "MODEL_INSUFFICIENT_BALANCE", "MODEL_AUTH_ERROR", "MODEL_NOT_FOUND",
-                "MODEL_CONFIG_ERROR", "MODEL_TOOL_CALL_UNSUPPORTED", "MODEL_PROVIDER_UNAVAILABLE",
-                "MODEL_CONNECTION_ERROR", "MODEL_UNAVAILABLE",
+                # 模型侧终止码（需要用户/运维介入，不可盲目重试）。与
+                # ``app.agents.skills.recovery._MODEL_ACTION_REQUIRED`` 保持一致；
+                # 内核包不能依赖 app，因此此处保留字面量。
+                "MODEL_INSUFFICIENT_BALANCE", "MODEL_AUTH_ERROR", "MODEL_API_KEY_MISSING",
+                "MODEL_NOT_FOUND", "MODEL_CONFIG_ERROR", "MODEL_TOOL_CALL_UNSUPPORTED",
+                "MODEL_PROVIDER_UNAVAILABLE", "MODEL_CONNECTION_ERROR", "MODEL_UNAVAILABLE",
             }
 
     def _alternatives_remaining(self, result: Mapping[str, Any] | None) -> bool:

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lumi-capability"
+version = "0.1.0"
+description = "Backend-neutral capability vocabulary, tiering and selection for Lumi"
+requires-python = "==3.13.*"
+# 只依赖契约层：不依赖 lumi_orch / lumi_execution / app.*（由 tools/check_architecture.py 规则 1/5/7 保证）。
+# 一旦这里出现 redis / fastapi / sqlalchemy / loguru / 编排内核，就说明抽错了东西——
+# 纯决策与运行时适配的边界会立刻糊掉，而"抽出来的包还能被第二个服务复用"正是 P3 的全部意义。
+dependencies = [
+    "lumi-contracts>=0.1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-p no:cacheprovider"

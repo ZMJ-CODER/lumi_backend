@@ -1,17 +1,36 @@
-"""插件化/能力化后端（阶段 1 起）。
+"""插件化/能力化后端（阶段 1 起；内部纵切已完成）。
 
-模块地图::
+目录地图（P2：能力域内部纵切，**不出 package、不改行为**）::
 
-    context    AgentExecutionContext：服务端授权事实（工作区/项目/审批指纹）
-    catalog    内置能力目录：现有能力 → workspace.read/write、code.execute 等
-    registry   CapabilityProvider 协议 + CapabilityRegistry（阶段 2 的 Broker 用它选 Provider）
-    builtin    现有实现包装成内置 Provider（阶段 1，行为不变）
-    broker     能力选择/租约/授权/调用转发（阶段 2）
+    contracts/   能力描述协议、授权事实（纯数据）
+      context              AgentExecutionContext：服务端授权事实
+    catalog/     目录声明（**两代并存**，见方案 §六）
+      legacy               旧一代内置能力目录（CapabilityCatalog + 描述符）
+      resource             新一代统一资源能力目录（能力/资源类型/Provider 声明）
+      tool_registry        工具注册表条目派生 + 档位/审批 + 影子对拍
+    registry/    Provider 协议与注册表
+      registry             CapabilityProvider 协议 + CapabilityRegistry
+      builtin              现有实现包装成内置 Provider
+      resolver             抽象能力 → 具体能力
+    policy/      门禁裁决与策略包（纯决策；P3 抽包的主要候选区）
+      gate / policy_guard / policy_packs / approvals / routing /
+      resource_window / resource_workflow
+    broker/      选择与派发
+      broker               能力调用入口（服务端唯一转发点）
+      dispatch             旧一代派发（静态 CAPABILITY_TOOL_MAP）
+      resource_dispatch    新一代派发（统一能力 + 资源类型 + Provider Adapter）
+    audit/       审计写入路径（**只搬目录，语义不变**；语义统一单独立项）
+      audit
+    views/       只读投影（不参与决策）
+      views / snapshots / resource_surface
+
+本模块是**包级稳定入口**：``__all__`` 与 P2 之前逐字相同（旧一代公开面），
+子包各自刻意不做 re-export。
 """
 
 from __future__ import annotations
 
-from app.agents.capabilities.builtin import (
+from app.agents.capabilities.registry.builtin import (
     PROVIDER_CLIENT_CODE,
     PROVIDER_CLIENT_GIT,
     PROVIDER_CLIENT_WORKSPACE,
@@ -21,7 +40,7 @@ from app.agents.capabilities.builtin import (
     capability_requires_client,
     register_builtin_providers,
 )
-from app.agents.capabilities.catalog import (
+from app.agents.capabilities.catalog.legacy import (
     CAPABILITY_ARTIFACT_CREATE,
     CAPABILITY_CODE_EXECUTE,
     CAPABILITY_CODE_SCAN,
@@ -37,8 +56,8 @@ from app.agents.capabilities.catalog import (
     CapabilityCatalog,
     capability_catalog,
 )
-from app.agents.capabilities.context import AgentExecutionContext
-from app.agents.capabilities.dispatch import (
+from app.agents.capabilities.contracts.context import AgentExecutionContext
+from app.agents.capabilities.broker.dispatch import (
     CAPABILITY_TOOL_MAP,
     NEVER_FALLBACK_CAPABILITIES,
     CapabilityDispatchAdapter,
@@ -47,7 +66,7 @@ from app.agents.capabilities.dispatch import (
     capability_for_mcp_tool,
     mcp_tool_for_capability,
 )
-from app.agents.capabilities.routing import (
+from app.agents.capabilities.policy.routing import (
     MODE_ACTIVE,
     MODE_OFF,
     MODE_READ_ONLY,
@@ -58,7 +77,7 @@ from app.agents.capabilities.routing import (
     routing_mode,
     should_route,
 )
-from app.agents.capabilities.policy_guard import (
+from app.agents.capabilities.policy.policy_guard import (
     ApprovalVerdict,
     PluginPolicyGuard,
     PolicyVerdict,
@@ -67,7 +86,7 @@ from app.agents.capabilities.policy_guard import (
     policy_guard,
     validate_approval,
 )
-from app.agents.capabilities.policy_packs import (
+from app.agents.capabilities.policy.policy_packs import (
     BUILTIN_POLICY_IDS,
     DEFAULT_POLICY_ID,
     POLICY_COST_SAVER,
@@ -79,14 +98,14 @@ from app.agents.capabilities.policy_packs import (
     policy_packs,
     select_policy_id,
 )
-from app.agents.capabilities.registry import (
+from app.agents.capabilities.registry.registry import (
     CapabilityProvider,
     CapabilityRegistry,
     ProviderRegistration,
     capability_registry,
     descriptor_allows_deployment,
 )
-from app.agents.capabilities.resolver import (
+from app.agents.capabilities.registry.resolver import (
     ABSTRACT_CAPABILITY_MAP,
     CapabilityResolution,
     CapabilityResolver,

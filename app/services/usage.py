@@ -87,7 +87,7 @@ def record_usage_metrics(
     往里塞 user_id / job_id / prompt——那会让时间序列数随用户数线性增长。
     """
     try:
-        from app.core.observability import record_llm_usage_metrics
+        from app.observability.observability import record_llm_usage_metrics
 
         record_llm_usage_metrics(
             model=model,

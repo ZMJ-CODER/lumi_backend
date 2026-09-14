@@ -6,7 +6,7 @@
 永远是空串；本模块把它接上：
 
 * **不新建存储**：归档文件写进既有通用产物目录
-  （``app/services/office_docs.py::generic_outputs_dir``，按用户 × 任务隔离），
+  （``app/office/docs.py::generic_outputs_dir``，按用户 × 任务隔离），
   引用用既有 ``artifacts.make_artifact_id`` 签名，读取走冻结的
   ``GET /api/v1/artifacts/{ref}/content``；
 * **内容真实**：写的是窗口外条目的 JSON Lines（一行一条、UTF-8、有序、可读）；
@@ -74,7 +74,7 @@ ROUTING_ARCHIVE_KEY = "process_log_archive"
 
 def is_enabled() -> bool:
     """``ARCHIVE_CONTENT_V2``（默认关闭；关闭时不写文件、不加 routing 字段）。"""
-    from app.core.feature_flags import feature_enabled
+    from app.platform.runtime.feature_flags import feature_enabled
 
     return feature_enabled("ARCHIVE_CONTENT_V2")
 
@@ -152,7 +152,7 @@ def retention_policy(
 
 def archive_path(job: Job) -> Path:
     """归档文件的真实落盘位置（既有通用产物目录，不新增存储）。"""
-    from app.services.office_docs import generic_outputs_dir
+    from app.office.docs import generic_outputs_dir
 
     return generic_outputs_dir(str(job.user_id or ""), str(job.job_id or "")) / ARCHIVE_FILENAME
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from app.agents.skills.base import SkillContext, ToolOutput, WorkflowSkill
-from app.core.llm import LLMClient
+from app.platform.model.llm import LLMClient
 from app.services.usage import CATEGORY_SKILL
 
 
@@ -62,7 +62,7 @@ def _select_capabilities(capabilities):
     开关关闭时逐字走旧的名字白名单（``item.name in _TOOLS``），行为与改造前一致。
     """
     try:
-        from app.agents.capabilities.resource_workflow import (
+        from app.agents.capabilities.policy.resource_workflow import (
             select_capabilities,
             workflow_enabled,
         )
@@ -88,7 +88,7 @@ def _surface(capabilities):
     关闭开关时对外名 = 实现名、映射为空，逐字等于改造前。
     """
     try:
-        from app.agents.capabilities.resource_surface import collapse_with_names
+        from app.agents.capabilities.views.resource_surface import collapse_with_names
 
         return collapse_with_names(capabilities)
     except Exception:  # noqa: BLE001 - 收敛失败用原名
@@ -193,7 +193,7 @@ class WorkspaceCodeChangeSkill(WorkflowSkill):
         # SOP 里的工具名做**运行期翻译**（收敛关闭时逐字不变）：业务文本仍由
         # `plugins/workflows/prompts/*.md` 维护，架构迁移不改它的内容。
         try:
-            from app.agents.capabilities.resource_surface import translate_prompt_names
+            from app.agents.capabilities.views.resource_surface import translate_prompt_names
 
             system = translate_prompt_names(system)
         except Exception:  # noqa: BLE001 - 翻译失败用原文

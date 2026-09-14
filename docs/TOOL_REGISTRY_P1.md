@@ -18,7 +18,7 @@
 
 ## 现在：一个入口，八个派生点
 
-新模块 `app/agents/capabilities/tool_registry.py`：
+新模块 `app/agents/capabilities/catalog/tool_registry.py`：
 
 ```text
 ToolSpec（影子注册表）
@@ -127,7 +127,7 @@ ToolSpec（影子注册表）
 ## 影子对比：四个判定维度当前**零差异**
 
 ```python
-from app.agents.capabilities.tool_registry import shadow_compare
+from app.agents.capabilities.catalog.tool_registry import shadow_compare
 shadow_compare()
 # {'tool→capability': [], 'capability→mcp_target': [], 'intent→tool_window': [], 'tool→risk_tier': []}
 ```
@@ -275,7 +275,7 @@ GET /api/v1/agents/jobs/{job_id}/tool-window?limit=20
 
 ## 测试
 
-`tests/test_tool_registry.py`（18 例）：
+`tests/capabilities/test_tool_registry.py`（18 例）：
 
 * 开关默认关闭；关闭时 `capability_of` / `mcp_target_for` / `action_window`
   **逐字**等于静态表结果；
@@ -289,7 +289,7 @@ GET /api/v1/agents/jobs/{job_id}/tool-window?limit=20
 * `workspace_commit` → `git.operations`（两条静态表冲突时的裁决口径）；
 * 运行期 `ToolCapability` 派生：环境/审批/动作类型/场景（场景在 `annotations` 里）。
 
-`tests/test_approval_tier_derivation.py`（22 例）：
+`tests/capabilities/test_approval_tier_derivation.py`（22 例）：
 
 * **逐条对拍**：注册表负责的每个工具，`risk_tier_of` == `static_tier_of`，
   且 `classify_tool_risk` 与注册表给同一档位；
@@ -307,7 +307,7 @@ GET /api/v1/agents/jobs/{job_id}/tool-window?limit=20
   `confirm`，但**工具级例外优先**（`workspace_diff` 仍为只读无确认）；
 * 开关关闭时声明完全不参与判定。
 
-`tests/test_tool_window_diagnostics.py`（12 例）：
+`tests/capabilities/test_tool_window_diagnostics.py`（12 例）：
 
 * 窗口快照最新在前、按 `TOOL_WINDOW_MAX_ENTRIES` 裁剪、带 TTL、坏数据跳过、
   读写失败静默；

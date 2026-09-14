@@ -34,7 +34,7 @@ _REQUIRED_PARAMS: dict[str, list[str]] = {
 def validate_planned_dag(nodes: list[TaskNode], workers: dict | None = None) -> list[str]:
     """Validate agent registration, required parameters and graph structure."""
     if workers is None:
-        from app.agents.orchestration.workers import WORKERS
+        from app.agents.orchestration.execution.workers import WORKERS
 
         workers = WORKERS
     errors: list[str] = []

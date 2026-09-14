@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, Query
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.deps import get_admin_verified_token, require_auth, require_superadmin
+from app.core.deps import require_auth, require_superadmin
 from app.core.exceptions import BadRequestException, ForbiddenException
 from lumi_contracts.plugins import CapabilityErrorCode
 
@@ -32,13 +32,6 @@ from app.services.capability_lease import (
 )
 
 router = APIRouter()
-
-
-def _require_admin_verified(x_admin_token: str | None, payload: dict) -> None:
-    """管理动作的二次验证（与 ``app/api/v1/admin.py`` 同一实现）。"""
-    from app.api.v1.admin import _require_admin_verified as impl
-
-    impl(x_admin_token, payload)
 
 #: 共享租约服务（与撤销订阅、Broker 用同一实例：清缓存必须清到同一份）。
 lease_service: CapabilityLeaseService = capability_lease_service
@@ -363,7 +356,7 @@ async def list_capabilities(payload: dict = Depends(require_auth)):
     catalog = lease_service.catalog
     providers: list[dict[str, Any]] = []
     try:
-        from app.agents.capabilities.registry import capability_registry
+        from app.agents.capabilities.registry.registry import capability_registry
 
         providers = [item.to_snapshot() for item in capability_registry.providers()]
     except Exception as exc:  # noqa: BLE001 - 注册表快照失败不影响目录读取
@@ -563,7 +556,7 @@ async def capability_dispatch_map(payload: dict = Depends(require_auth)):
     派发**必须按租约**：MCP 原子工具直接调本机实现，不过健康门禁；只按"工具可达"派发
     会让健康隔离与撤销通道失效。这张表是服务端侧的可机读对照，便于两边断言一致。
     """
-    from app.agents.capabilities.builtin import TOOL_CAPABILITY_MAP
+    from app.agents.capabilities.registry.builtin import TOOL_CAPABILITY_MAP
 
     return {
         "code": 0,
@@ -583,18 +576,16 @@ async def capability_dispatch_map(payload: dict = Depends(require_auth)):
 async def admin_revoke_capabilities(
     req: AdminRevokeRequest,
     payload: dict = Depends(require_superadmin),
-    x_admin_token: str | None = Depends(get_admin_verified_token),
 ):
     """管理端强制撤销（跨 worker 立即生效）。
 
     撤销方先改 Redis 权威副本（删租约 + 摘索引），再广播失效信号让**所有** worker 清掉
     本地读缓存——只做前者会有窗口期：客户端已隔离，别的 worker 仍按旧缓存派发。
 
-    **权限**：superadmin + ``X-Admin-Token``（与 ``PUT /admin/llm-config/models`` 一致）。
+    **权限**：``require_superadmin``（只需超管 JWT；二次密码验证已于 2026-09 移除）。
     这里修掉了一个越权面：本端点此前只校验 ``require_auth``，任何登录用户只要知道
     ``provider_id`` 就能撤销**别人**的租约（撤掉后对方的能力会直接不可用）。
     """
-    _require_admin_verified(x_admin_token, payload)
     removed = await lease_service.unregister(
         provider_id=req.provider_id,
         capability=req.capability,
@@ -676,8 +667,8 @@ async def invoke_capability(
     """
     from lumi_contracts.plugins import CapabilityInvocation, SessionBinding
 
-    from app.agents.capabilities.broker import capability_broker
-    from app.agents.capabilities.context import AgentExecutionContext
+    from app.agents.capabilities.broker.broker import capability_broker
+    from app.agents.capabilities.contracts.context import AgentExecutionContext
 
     binding = await _resolve_job_binding(req.job_id, payload["sub"])
     workspace_id = str(binding.get("workspace_id") or req.workspace_id or "")
@@ -735,7 +726,7 @@ async def report_local_denial(
     """
     from lumi_contracts.plugins import CapabilityInvocation
 
-    from app.agents.capabilities.audit import to_capability_result
+    from app.agents.capabilities.audit.audit import to_capability_result
     from app.services.capability_events import events_for_result, publish_capability_event
 
     invocation = CapabilityInvocation(

@@ -1,7 +1,7 @@
 """开发者公共工作流：基于已授权文档执行问答与摘要。"""
 
 from app.agents.skills.base import SkillContext, ToolOutput, WorkflowSkill
-from app.services import office_docs
+from app.office import docs as office_docs
 
 
 class OfficeDocumentAnalysisSkill(WorkflowSkill):

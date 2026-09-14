@@ -56,7 +56,7 @@ User Query
 
 > **最重要的回归场景**："旧词表判只读 + 新画像判 `CREATE`"必须进入
 > `M1_ATOMIC_ACTION` 并注入 `workspace_write`——原因码 `ACTION_INTENTS_REQUIRE_ORCHESTRATION`
-> 专门用于把它与旧路径区分开（见 `tests/test_task_understanding_preflight.py`）。
+> 专门用于把它与旧路径区分开（见 `tests/orchestration/test_task_understanding_preflight.py`）。
 
 ## 路由快照（`route_snapshot.py`，schema **v2**）
 
@@ -97,7 +97,7 @@ User Query
 
 ## Tool Window（画像驱动的最小工具集）
 
-`ACTION_TOOL_WINDOW` 是唯一映射表，工具名与 `app/agents/capabilities/catalog.py` 的注册名
+`ACTION_TOOL_WINDOW` 是唯一映射表，工具名与 `app/agents/capabilities/catalog/legacy.py` 的注册名
 **逐字一致**（测试断言，否则预检"通过"却注入不存在的工具）：
 
 | 意图 | 工具窗口 |
@@ -200,7 +200,7 @@ User Query
 判成两个结果——曾出现"`workspace.read@1` 被判成缺少必需能力 / 没有可用的 Provider"，
 把只读任务误阻断，看起来像"模型识别不到读工具"。
 
-**修复**（`app/agents/capabilities/resolver.py`）：
+**修复**（`app/agents/capabilities/registry/resolver.py`）：
 
 * `normalize_capability_name()`：唯一归一化入口（剥 `?` 可选前缀与 `@数字` 版本；
   `@beta` 这类非数字后缀不误伤）；
@@ -227,7 +227,7 @@ User Query
 上一条修好了**名字归一化**，但线上仍有"界面报缺少必需能力 / 没有可用的 Provider，
 而同一次任务的工作区读取其实成功"。真因是另外两条，与名字无关：
 
-**1）单例撕裂：Broker 看不到任何客户端注册（`app/agents/capabilities/broker.py`）**
+**1）单例撕裂：Broker 看不到任何客户端注册（`app/agents/capabilities/broker/broker.py`）**
 
 * 注册端点（`/capabilities/register`、`/heartbeat`、`/unregister`）注入的是
   `app.services.capability_lease.capability_lease_service`；

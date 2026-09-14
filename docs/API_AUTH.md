@@ -408,8 +408,16 @@ refresh_token 也过期：
 - 全站 HTTPS，开启 HSTS
 - 明文密码仅在 HTTPS 请求体中短暂存在，客户端不缓存、不记录
 
-### 敏感操作二次验证
-- 修改密码、注销账号等需要重新输入密码
+### 敏感操作二次验证（管理面已移除）
+- 修改密码、注销账号等需要重新输入密码（用户级操作，保留）；
+- **管理面（`/api/v1/admin/**`）不再要求二次密码**（2026-09 裁决）：管理员登录一次
+  （superadmin JWT）即可查看/修改运维面板。历史实现是"超管 JWT + `X-Admin-Token`"
+  （`POST /admin/verify-password` 用管理员密码换 5 分钟令牌），现场体验是"点一下测试连接
+  还要再输一遍密码"，且多窗口时令牌很快过期。现在：
+  * 授权唯一入口是 `Depends(require_superadmin)`；
+  * `POST /admin/verify-password` 保留但已废弃（响应带 `deprecated: true`），
+    不再有任何接口消费它的 token；
+  * 请求里带旧 `X-Admin-Token` 会被忽略（新旧客户端都能用）。
 
 ---
 

@@ -1,8 +1,8 @@
 """办公技能（office/文档编辑）：office_doc_read / office_doc_edit —— 结构化编辑可编辑办公文件."""
 
 from app.agents.skills.base import Tool, SkillContext, ToolOutput
-from app.core.executors import run_in_compute
-from app.services import office_docs
+from app.platform.runtime.executors import run_in_compute
+from app.office import docs as office_docs
 
 
 def _authorized_doc_ids(params: dict, context: SkillContext) -> list[str]:

@@ -38,7 +38,7 @@ class AnalyzeLogsSkill(WorkflowSkill):
             return ToolOutput(success=False, error="缺少日志内容 content", error_code="INVALID_ARGS", retryable=False)
         context_text = str(params.get("context") or "")
         try:
-            from app.core.llm import LLMClient
+            from app.platform.model.llm import LLMClient
             from app.services.usage import CATEGORY_CHAT
 
             llm = LLMClient()

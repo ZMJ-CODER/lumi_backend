@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 
 from app.agents.skills.base import SkillContext, ToolOutput, WorkflowSkill
-from app.core.llm import LLMClient
+from app.platform.model.llm import LLMClient
 from app.services.usage import CATEGORY_SKILL
 
 # 与 workspace_code_change 保持一致的前缀约定：正式桌面 MCP 能力名
@@ -41,7 +41,7 @@ _TOOLS = (
 )
 
 #: 统一资源能力声明（Phase 4）：与 workspace_code_change 同一套（读/写/编辑/移动/删除 +
-#: 沙箱执行），底层名字只是兼容层。见 ``app/agents/capabilities/resource_workflow.py``。
+#: 沙箱执行），底层名字只是兼容层。见 ``app/agents/capabilities/policy/resource_workflow.py``。
 _CAPABILITIES = (
     "resource.read",
     "resource.write",
@@ -72,7 +72,7 @@ _OPTIONAL_TOOLS = frozenset({
 def _select_capabilities(capabilities):
     """选本轮可用的工作区工具：**能力声明优先，旧名字白名单兜底**（Phase 4）。"""
     try:
-        from app.agents.capabilities.resource_workflow import (
+        from app.agents.capabilities.policy.resource_workflow import (
             select_capabilities,
             workflow_enabled,
         )
@@ -93,7 +93,7 @@ def _select_capabilities(capabilities):
 def _surface(capabilities):
     """收敛后的工具面：``([(capability, 对外名)], {对外名: 实现名})``（Phase 5）。"""
     try:
-        from app.agents.capabilities.resource_surface import collapse_with_names
+        from app.agents.capabilities.views.resource_surface import collapse_with_names
 
         return collapse_with_names(capabilities)
     except Exception:  # noqa: BLE001 - 收敛失败用原名
@@ -177,7 +177,7 @@ class WorkspaceOperationSkill(WorkflowSkill):
             "并由系统授权策略决定是否需要确认。"
         )
         try:
-            from app.agents.capabilities.resource_surface import translate_prompt_names
+            from app.agents.capabilities.views.resource_surface import translate_prompt_names
 
             system = translate_prompt_names(system)
         except Exception:  # noqa: BLE001 - 翻译失败用原文

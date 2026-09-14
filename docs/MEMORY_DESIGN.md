@@ -122,7 +122,7 @@ PII_PATTERNS = {
 - 每条记录：12 字节随机 nonce，存储格式 `base64(nonce || ciphertext || tag)`；
 - 字段 `key_version` 记录密钥版本，支持轮换。
 
-新增 `app/core/crypto.py`：
+新增 `app/platform/security/crypto.py`：
 
 ```python
 def encrypt_memory_text(plaintext: str, user_id: str) -> tuple[str, int]:
@@ -295,7 +295,7 @@ class ExtractedFact(BaseModel):
 
 ### 6.1 检索（复用 RAG 混合检索模式）
 
-新增 `app/services/memory/retrieval.py::search_user_memories`，完全对照 `search_user_knowledge` 的实现：
+新增 `app/memory/long_term/retrieval.py::search_user_memories`，完全对照 `search_user_knowledge` 的实现：
 
 - 向量路：`1 - (m.embedding <=> :qvec)`，top `MEMORY_HYBRID_VECTOR_TOP_K`；
 - 关键词路：`m.fact ILIKE %kw%`（占位符文本可被关键词命中），top `MEMORY_HYBRID_KEYWORD_TOP_K`；
@@ -460,20 +460,20 @@ MEMORY_PROFILE_INJECT_ENABLED: bool = True
 ### 阶段 1：地基（表结构 + 加密 + 配置）
 
 - `docs` 本设计落库后执行：
-- `app/core/crypto.py`（AES-GCM + HKDF 派生 + key_version）；
+- `app/platform/security/crypto.py`（AES-GCM + HKDF 派生 + key_version）；
 - `app/models/db_models.py` 扩展 `Memory` + 新增 `MemoryProfile`；
 - Alembic migration（ALTER + 新表 + 索引）；
 - `config.py` + `.env` 增加 §10 配置项。
 
 ### 阶段 2：抽取管线
 
-- `app/services/memory/extraction.py`（prompt、pydantic schema、PII 正则、去重/合并/矛盾）；
+- `app/memory/long_term/extraction.py`（prompt、pydantic schema、PII 正则、去重/合并/矛盾）；
 - `celery_app/tasks.py` 实现 `extract_memories`、新增 `build_user_profile`、`cleanup_memories`；
 - 编排器摘要触发点接入批量抽取（`orchestrator._maybe_summarize_context`）。
 
 ### 阶段 3：检索与注入
 
-- `app/services/memory/retrieval.py::search_user_memories`；
+- `app/memory/long_term/retrieval.py::search_user_memories`；
 - `orchestrator.get_memory_context` 改为"画像 + 召回事实"；
 - `_build_messages` 增加记忆块与隐私规则文本；
 - Redis 缓存改为画像 JSON；

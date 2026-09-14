@@ -1,8 +1,8 @@
 # 模型档位与职责角色（Model Profile + Model Role）
 
 > 状态：**Phase 1 配置层 + Phase 2 低风险职责切换已落地**（后端）。
-> 落点：`app/core/model_roles.py`（档位/角色/解析）、`app/core/model_plan.py`（任务级冻结）、
-> `app/core/llm.py`（`role=` 入口）、`app/api/v1/admin.py`（后台切换接口）。
+> 落点：`app/platform/model/model_roles.py`（档位/角色/解析）、`app/platform/model/model_plan.py`（任务级冻结）、
+> `app/platform/model/llm.py`（`role=` 入口）、`app/api/v1/admin.py`（后台切换接口）。
 
 把"按场景选模型"升级为"**按任务职责选模型**"：业务代码只说"我需要什么角色"，
 模型/端点/密钥由档位配置决定，换模型只改一处。
@@ -114,7 +114,7 @@ ModelPlan{ plan_id, version, created_at, byok, scene, roles:{role → {profile,p
 | `POST /api/v1/admin/llm-config/models/test` | 连通性测试：`{profile}`，返回 `{ok, error, latency_ms}` | `ModelRolesTestRequest` |
 
 响应形状（`normalizeProfileConfig` 依赖，逐字段钉死在
-`tests/test_model_role_admin_api.py::test_read_view_shape_matches_frontend_normalizer`）：
+`tests/platform/test_model_role_admin_api.py::test_read_view_shape_matches_frontend_normalizer`）：
 
 ```jsonc
 // HTTP body（前端 authRequest 返回整个 body，取 body.data）
@@ -142,16 +142,17 @@ ModelPlan{ plan_id, version, created_at, byok, scene, roles:{role → {profile,p
 `max_context`）；未提交的字段保持原值（真正的局部更新）。保存后立即生效，
 返回 `data.profiles` / `data.roles` 为本次改动的名字列表。
 
-### 6.2 鉴权（已确认）
+### 6.2 鉴权（已简化）
 
-写操作沿用本仓库既有范式，与 `/admin/rag-config` 完全一致：
+**所有档位/角色接口（含写操作与"测试连接"）只需超管 JWT**：
+`Depends(require_superadmin)`。2026-09 起移除了"二次管理员密码"这一层
+（原实现：先 `POST /api/v1/admin/verify-password {admin_password}` 拿 `verified_token`，
+再把 `X-Admin-Token` 放进每个写请求）。
 
-1. 先 `POST /api/v1/admin/verify-password {admin_password}` 拿到 `data.verified_token`；
-2. 之后每个写请求带 `X-Admin-Token: <verified_token>`，同时带超管 JWT。
-
-即 `Depends(require_superadmin)` + `Depends(get_admin_verified_token)` +
-`_require_admin_verified(x_admin_token, payload)`；缺失/过期令牌会被拒绝（文案含"二次验证"）。
-`GET` 只需要超管 JWT（配置页首屏可能还没做二次验证）。
+* `POST /admin/verify-password` 仍然存在（仍校验密码、仍签发 token），但**已废弃**：
+  响应里带 `deprecated: true`，没有任何接口消费它，只为旧客户端不 404；
+* 请求里带旧 `X-Admin-Token` 会被直接忽略；
+* 非超管仍然被拒（`403 需要超级管理员权限`）——角色门禁没有被一起删掉。
 
 ### 6.3 兼容别名（后端保留，前端不要新增使用）
 
@@ -205,5 +206,5 @@ ModelPlan{ plan_id, version, created_at, byok, scene, roles:{role → {profile,p
 | 4 | 按复杂度切 Planner 与工具域（写入 main、执行 reasoning） | 角色已定义，待灰度接线 |
 | 5 | 后台控制与成本看板（灰度某角色、观察失败与回退、一键恢复） | 接口已就绪，看板待前端 |
 
-回归：`tests/test_model_roles.py`（档位解析 / 角色映射 / 动态覆盖 / 密钥不外发 /
+回归：`tests/platform/test_model_roles.py`（档位解析 / 角色映射 / 动态覆盖 / 密钥不外发 /
 计划冻结），旧 LLM 相关用例全部保持通过。

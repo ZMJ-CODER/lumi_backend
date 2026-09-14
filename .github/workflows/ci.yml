@@ -53,7 +53,10 @@ jobs:
         run: uv run alembic upgrade head
 
       - name: 单元测试
-        run: uv run pytest tests packages/orchestration/tests -q
+        # 覆盖 app 侧 tests/ 与**所有** workspace 包的测试（orchestration / execution /
+        # contracts / capability）。纯决策包（lumi_capability）的单测不 import app，
+        # 因此它们同时是"包边界没被污染"的证据。
+        run: uv run pytest tests packages -q
 
   lint:
     name: 代码规范（ruff，非阻塞）
@@ -67,7 +70,7 @@ jobs:
 
   unsafe-calls:
     # 硬约束：**阻塞**合并。高危调用（子进程 / 动态执行 / 反序列化 / 删除）只允许出现在
-    # app/agents/sandbox、app/services/plugins/quota.py、app/services/safe_delete.py 等
+    # app/agents/sandbox、app/plugins/quota.py、app/services/safe_delete.py 等
     # 受控执行面；其余位置一律走受控入口。用 AST 实现（不是 grep），因此 re.compile /
     # redis.eval / 字符串里的违规词都不会误报。本地同一入口：
     #   python scripts/check_unsafe_calls.py
@@ -78,6 +81,48 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: 扫描受管目录
         run: uv run python scripts/check_unsafe_calls.py
+
+  architecture:
+    # 硬约束：规则 1（packages/* 不得 import app.*）与规则 4（禁止新增跨包 re-export 壳）
+    # **阻塞**合并；其余规则（域间隔离 / agents 不碰域实现 / 包分层 / core 洁净度）先报告，
+    # 等基线稳定后再逐条转阻塞。存量违规登记在 tools/architecture_baseline.txt（只减不增），
+    # 兼容壳登记在 tools/compat_shims.txt（只减不增）。用 AST 实现（不是 grep），
+    # 因此相对导入、别名、星号导入、字符串式动态导入都不会漏。本地同一入口：
+    #   python tools/check_architecture.py
+    name: 架构边界门禁（AST，阻塞）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: 检查依赖方向与边界
+        run: uv run python tools/check_architecture.py
+
+  import-smoke:
+    # 大范围搬家之后，测试只覆盖它们 import 到的模块：只被 Celery 任务 / Temporal Worker /
+    # 懒加载分支引用的模块如果路径漏改，测试全绿、线上第一次跑到才炸。这一关把 app/ +
+    # celery_app/ + plugins/ 的**每个模块**都 import 一遍（独立进程，不污染 pytest）。
+    # 本地同一入口：python tools/check_imports.py
+    name: 导入冒烟（阻塞）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: 逐个 import 应用模块
+        run: uv run python tools/check_imports.py
+
+  import-symbols:
+    # import-smoke 抓不到**函数体内的懒加载导入**：`from app.office.api import ensure_rag_index`
+    # 模块级 import 全绿，直到用户真发一条带文档的消息才炸
+    # （流式聊天失败: cannot import name 'ensure_rag_index' from 'app.office.api'）。
+    # 这一关读 AST 校验每一条 `from X import Y` 的 Y 是否真在 X 里（含 try/except 兜底分支）。
+    # 本地同一入口：python tools/check_import_symbols.py
+    name: 导入符号门禁（AST，阻塞）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: 校验 from-import 的符号存在
+        run: uv run python tools/check_import_symbols.py
 
   docker-build:
     name: 后端镜像构建

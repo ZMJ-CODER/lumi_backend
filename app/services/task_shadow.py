@@ -44,7 +44,7 @@ def shadow_key(job_id: str) -> str:
 def shadow_enabled() -> bool:
     """影子模式是否打开（``INTEGRATION_SHADOW_MODE``，默认关闭）。"""
     try:
-        from app.core.feature_flags import shadow_mode
+        from app.platform.runtime.feature_flags import shadow_mode
 
         return shadow_mode()
     except Exception:  # noqa: BLE001 - 开关不可用时按关闭处理（保守）

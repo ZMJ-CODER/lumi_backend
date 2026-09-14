@@ -20,16 +20,16 @@ from sqlalchemy.pool import NullPool
 from celery_app import celery_app
 from app.core.config import settings
 from app.models.db_models import Memory
-from app.services.rag.cleaner import DocumentQualityError
-from app.services.rag.knowledge import (
+from app.knowledge.parsing.cleaner import DocumentQualityError
+from app.knowledge.retrieval.knowledge import (
     mark_document_retryable,
     process_document_pipeline,
     recover_stale_document_jobs,
 )
-from app.services import conversation_trim
-from app.services.memory.extraction import extract_memories_from_dialog
-from app.services.memory.profile import build_user_profile as build_user_profile_record
-from app.services.conversation_memory import maintain_conversation_memory
+from app.memory import trim as conversation_trim
+from app.memory.long_term.extraction import extract_memories_from_dialog
+from app.memory.long_term.profile import build_user_profile as build_user_profile_record
+from app.memory.conversation import maintain_conversation_memory
 from app.services.usage import aggregate_daily_stats
 
 
@@ -347,7 +347,7 @@ def cleanup_generated_files(self):
 
     async def _run() -> None:
         from app.services.artifact_retention import cleanup_archive_outputs
-        from app.services.office_docs import cleanup_expired_sessions, cleanup_generic_outputs
+        from app.office.docs import cleanup_expired_sessions, cleanup_generic_outputs
 
         expired_sessions = await cleanup_expired_sessions()
         removed_outputs = cleanup_generic_outputs(settings.GENERATED_FILES_TTL_DAYS)

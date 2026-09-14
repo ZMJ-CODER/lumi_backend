@@ -3,8 +3,8 @@
 from pathlib import Path
 
 from app.agents.skills.base import Tool, SkillContext, ToolOutput
-from app.services.document_renderer import render_document
-from app.services.office_docs import generic_outputs_dir
+from app.office.render import render_document
+from app.office.docs import generic_outputs_dir
 
 
 class CreateOfficeDocumentSkill(Tool):

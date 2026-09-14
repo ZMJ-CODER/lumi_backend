@@ -29,7 +29,7 @@ code.execute / artifact.create
 
 ## Phase 1（已完成）：兼容能力目录
 
-模块：`app/agents/capabilities/resource_catalog.py`
+模块：`app/agents/capabilities/catalog/resource.py`
 
 | 内容 | 说明 |
 | --- | --- |
@@ -77,7 +77,7 @@ code.execute / artifact.create
 1. **不认识就不猜**：没有绑定的工具返回 `source="unknown"`、能力为空。绝不"名字里有
    write 就当写"——猜错的代价是把写操作当只读派发；
 2. **旧能力名仍是合法输入**：兼容层接受 `workspace.read`，统一名是它的**上层表达**而不是
-   替换（客户端协议冻结在旧名上，`tests/test_capability_client_contract.py` 守着）；
+   替换（客户端协议冻结在旧名上，`tests/capabilities/test_capability_client_contract.py` 守着）；
 3. **零行为变化**：Phase 1 只加元数据。影子对拍仍为零差异，`capability_of` /
    `classify_tool_risk` / 工具窗口逐字不变（有测试钉住），元数据派生失败也不影响条目构造。
 
@@ -85,7 +85,7 @@ code.execute / artifact.create
 
 ## Phase 2（已完成）：统一预检与工具窗口
 
-模块：`app/agents/capabilities/resource_window.py`；开关 `RESOURCE_CAPABILITY_WINDOW`（默认关闭）。
+模块：`app/agents/capabilities/policy/resource_window.py`；开关 `RESOURCE_CAPABILITY_WINDOW`（默认关闭）。
 
 ```text
 action_intent + resource_type
@@ -118,7 +118,7 @@ action_intent + resource_type
 
 ## Phase 3（已完成）：统一 Broker 派发
 
-模块：`app/agents/capabilities/resource_dispatch.py`；开关 `RESOURCE_CAPABILITY_DISPATCH`（默认关闭）。
+模块：`app/agents/capabilities/broker/resource_dispatch.py`；开关 `RESOURCE_CAPABILITY_DISPATCH`（默认关闭）。
 
 改造前，"这次调用属于哪个能力"是**从工具名字猜出来的**（`workspace_write → workspace.write`
 查静态表）；名字里带什么就认定是什么，写错的映射会把写操作当只读派发。改造后派发拿到的
@@ -150,7 +150,7 @@ mcp_target         = workspace_write        ← 底层原子工具（Adapter 的
 
 ## Phase 4（已完成）：Workflow Skill 依赖迁移到能力声明
 
-模块：`app/agents/capabilities/resource_workflow.py`；开关 `RESOURCE_CAPABILITY_WORKFLOW`（默认关闭）。
+模块：`app/agents/capabilities/policy/resource_workflow.py`；开关 `RESOURCE_CAPABILITY_WORKFLOW`（默认关闭）。
 
 ```text
 改造前  allowed_tools = [mcp__lumi_client__workspace_navigator, …workspace_write,
@@ -179,7 +179,7 @@ mcp_target         = workspace_write        ← 底层原子工具（Adapter 的
 
 ## Phase 5（进行中）：模型可见工具面收敛
 
-模块：`app/agents/capabilities/resource_surface.py`；开关 `RESOURCE_CAPABILITY_SURFACE`（默认关闭）。
+模块：`app/agents/capabilities/views/resource_surface.py`；开关 `RESOURCE_CAPABILITY_SURFACE`（默认关闭）。
 
 ```text
 收敛后（模型可见）：  Read / Write / Edit / Move / Delete / Run / Search
@@ -232,7 +232,7 @@ mcp_target         = workspace_write        ← 底层原子工具（Adapter 的
 | `allowed_tools`（传给执行器） | 传**实现名**（执行器先解析对外名再校验，解析只在一处） |
 | `build_tool_selection_contract` | 传按对外名改写的候选（`:func:`collapse_for_surface` 的 display），保证提示词与 schema 一致 |
 
-实测（`tests/test_react_surface_convergence.py`）：收敛打开时绑定给模型的是 `Read/Edit/Write`；
+实测（`tests/orchestration/test_react_surface_convergence.py`）：收敛打开时绑定给模型的是 `Read/Edit/Write`；
 模型先 `Edit` 仍被护栏拦下（错误回给 `Edit` 这个名字），`Read` 之后再 `Edit` 才真正执行。
 
 **Phase 5 第四步（已完成，Workflow 路径）**：schema 与 SOP 提示词同时收敛，用**运行期翻译**
@@ -271,13 +271,13 @@ class TaskMemorySkill(Tool):
     capability = "resource.write"     # ← 声明一次
     resource_type = "memory"          # ← 声明一次
 
-# app/agents/capabilities/resource_catalog.py
+# app/agents/capabilities/catalog/resource.py
 ResourceProviderSpec(name="memory_provider", provider_id="lumi.server.memory",
                      resource_types=("memory",),
                      capabilities=(resource.read, resource.write), ...)
 ```
 
-| 环节 | 证据（`tests/test_memory_provider_acceptance.py`，22 例） |
+| 环节 | 证据（`tests/memory/test_memory_provider_acceptance.py`，22 例） |
 | --- | --- |
 | **被发现** | 注册表条目带 `unified_capability=resource.write` / `resource_type=memory` / `resource_provider=memory_provider`；它从"未绑定清单"里消失 |
 | **被注入** | `tool_window_for_actions(["CREATE"], resource_types=["memory"])` 含 `task_memory`；`plan_for_actions` 给出能力→工具→候选 Provider；Workflow 只声明 `required_capabilities`/`resource_types` 就能拿到工具 |
@@ -297,7 +297,7 @@ ResourceProviderSpec(name="memory_provider", provider_id="lumi.server.memory",
 ### 测试隔离教训（已修）
 
 验收测试最初调 `load_skill_plugins()` 加载全量插件，顺带注册了 `python_exec`；而办公脚本
-Agent 在 `python_exec` **未注册**时会跳过沙箱预检，于是 `tests/test_office_docs.py` 的三个
+Agent 在 `python_exec` **未注册**时会跳过沙箱预检，于是 `tests/office/test_office_docs.py` 的三个
 用例在整包运行里失败（单跑通过）。现在验收测试按文件名**精确加载**一个插件并在结束时撤销：
 验收测试不该改变别人的前置条件。
 
@@ -337,20 +337,31 @@ Phase 5 之后前端仍剩一处"只能靠工具名猜"：实时步骤与刷新�
 | `resource_type` | 同上 | 否 |
 | `provider_id` | `DEFAULT_PROVIDER_BY_RESOURCE` / 派发解析 | 否 |
 | `provider_name` | `RESOURCE_PROVIDERS` 里的 Provider 名 | 否 |
+| `provider_kind` | = `resource_type`（**稳定类别**；前端按它分组/取文案） | 否 |
+| `provider_label` | 后端固定表 `RESOURCE_LABELS` 的中文展示文案（如"办公文档能力"） | 否 |
 | `display_name` | 本轮模型**实际看到**的对外名 | **是**（收敛关闭时等于工具名，故省略不下发） |
 
-五条不变量（`tests/test_process_dispatch_labels.py`，15 例）：
+**前端请按稳定维度渲染**：`provider_kind` / `provider_label` / `provider_name` 是稳定维度；
+`provider_id` 是**物理 id，迁移期会改名**（缺口 2c：`lumi.client.forwarder` →
+`lumi.client.office_document`，兼容期内两个 id 都合法），只应用于排障，不要作为展示分支条件。
 
-1. **开关无关的目录事实**：`capability`/`resource_type`/`provider_id`/`provider_name` 与任何
-   flag 无关——它们是"这个工具是什么"，不是"模型现在叫什么"；
+六条不变量（`tests/contracts/test_process_dispatch_labels.py` + 批次 4 的跨代守卫）：
+
+1. **开关无关的目录事实**：`capability`/`resource_type`/`provider_id`/`provider_name`/
+   `provider_kind`/`provider_label` 与任何 flag 无关——它们是"这个工具是什么"，
+   不是"模型现在叫什么"；
 2. **不谎报**：`display_name` 受收敛开关约束（关闭时不给，前端已有的 `tool_name` 就是模型看到
    的名字）；调用方若已记下当时的对外名（`step["display_name"]`），则以它为准；
+   只有声明、没有实现的 Provider **不会**出现在 `provider_id` 上（缺口 2a）；
 3. **不猜**：认不出的工具返回空（前端回退到原逻辑），形状怪异的输入返回空；
 4. **绝不含用户数据**：`label_value()` 是闭集形状闸门（`^[A-Za-z0-9_.:@-]{1,80}$`），
    路径/正文/参数不可能借标签漏出（有用例专门断言 `/home/secret/.env`、
-   `TOP-SECRET-TOKEN` 不出现在任何标签里）；
+   `TOP-SECRET-TOKEN` 不出现在任何标签里）；`provider_label` 来自**固定表**，
+   走文案闸门（`sanitize_process_text`，去路径/凭据 + 限长）；
 5. **老载荷逐字不变**：字段默认 `None` + `exclude_none=True` ⇒ 老条目 JSON 一个键都不多
-   （新增用例断言默认载荷仍是原来那 13 个键）。
+   （新增用例断言默认载荷仍是原来那 13 个键）；**历史步骤里已落盘的 `provider_id` 不被改写**
+   （`setdefault` 语义），只是补上缺失的稳定展示字段；
+6. **新增工具不改变既有标签**（批次 4 的单调性断言）。
 
 接线位置（都是"取到就带上，取不到什么都不发生"）：
 
@@ -366,7 +377,7 @@ Phase 5 之后前端仍剩一处"只能靠工具名猜"：实时步骤与刷新�
 
 ## 测试
 
-`tests/test_process_dispatch_labels.py`（15 例，过程条目结构化标签）：
+`tests/contracts/test_process_dispatch_labels.py`（15 例，过程条目结构化标签）：
 
 * 标签是目录事实（开关关闭也下发）、`display_name` 只在收敛后有值、未知/畸形工具名返回空；
 * 形状闸门 `label_value` 只放行闭集字符；契约侧默认载荷**一个键都不多**、`from_event`
@@ -375,7 +386,7 @@ Phase 5 之后前端仍剩一处"只能靠工具名猜"：实时步骤与刷新�
 * **安全用例**：步骤参数里的路径与正文不出现在任何标签里；
 * 预览 ≠ 现状：管理端预览面照旧算出 `Write`，而实际下发名在开关关闭时仍是 `workspace_write`。
 
-`tests/test_resource_workflow_surface.py`（9 例，Phase 5 第四步）：
+`tests/capabilities/test_resource_workflow_surface.py`（9 例，Phase 5 第四步）：
 
 * 关闭开关时 SOP 翻译**逐字不变**；打开时实现名 → 对外名，且 `workspace_writer_helper`
   这类子串**不被误替换**；
@@ -385,7 +396,7 @@ Phase 5 之后前端仍剩一处"只能靠工具名猜"：实时步骤与刷新�
   schema 里不存在的名字）；
 * 真实 SOP（`plugins/workflows/prompts/*.md`）在收敛打开时不再残留任何收敛过的实现名。
 
-`tests/test_react_surface_convergence.py`（3 例，Phase 5 第三步）：
+`tests/orchestration/test_react_surface_convergence.py`（3 例，Phase 5 第三步）：
 
 * 收敛打开 → 绑定给模型的是 `Read/Edit/Write`（实现层名字不出现）；关闭 → 逐字是
   `workspace_navigator/workspace_edit/workspace_write`；
@@ -393,7 +404,7 @@ Phase 5 之后前端仍剩一处"只能靠工具名猜"：实时步骤与刷新�
   才真正执行（`_impl_name` 把对外名解析回实现名）；
 * `_impl_name` 恒等/映射语义与 `search_tools` 编排原语不受影响。
 
-`tests/test_resource_surface_injection.py`（9 例，Phase 5 第二步）：
+`tests/capabilities/test_resource_surface_injection.py`（9 例，Phase 5 第二步）：
 
 * 关闭时是恒等映射**且不去重**；打开时改名 + 合并，同一对外名保留第一个能力；
 * 未登记工具（`AskUserQuestion`）与刻意不收敛的 `create_office_document` 原样保留；
@@ -402,7 +413,7 @@ Phase 5 之后前端仍剩一处"只能靠工具名猜"：实时步骤与刷新�
 * 端到端解析：对外名 → 实现名 + 能力；解析不出报 `MODEL_ALIAS_UNAVAILABLE`；
 * 办公文档/本机动作不参与收敛，调用路径逐字不变。
 
-`tests/test_resource_surface.py`（20 例，Phase 5）：
+`tests/capabilities/test_resource_surface.py`（20 例，Phase 5）：
 
 * 名称映射（含 `Search` 的两条判定路径、别名归一）、刻意不收敛与未知能力不给模型名；
 * **分类不了就不隐藏**：无绑定工具与 `create_office_document` 均保留，隐藏项必须有能力绑定；
@@ -413,7 +424,7 @@ Phase 5 之后前端仍剩一处"只能靠工具名猜"：实时步骤与刷新�
   关闭开关时同名工具照旧走旧路径（`SKILL_NOT_FOUND`），证明没有隐式改名；
 * 真实注册表上可算出收敛面与隐藏清单，且收敛面一定小于当前面。
 
-`tests/test_resource_workflow.py`（19 例，Phase 4）：
+`tests/capabilities/test_resource_workflow.py`（19 例，Phase 4）：
 
 * 声明归一（别名/去重/非法丢弃）、老 Skill 的能力兼容解析、歧义不猜、Provider 声明 ∪ 推导；
 * **只补不替**：旧工具行全部保留、能力行以 `via=capability` 追加且 `required=false`；
@@ -422,7 +433,7 @@ Phase 5 之后前端仍剩一处"只能靠工具名猜"：实时步骤与刷新�
 * `select_capabilities` 的能力筛选 + 旧名字兜底 + "什么都不声明就不选"；
 * 两个真实 Skill 的声明与**不出圈**断言（解析出的工具 ⊆ 旧声明）。
 
-`tests/test_resource_dispatch.py`（19 例，Phase 3）：
+`tests/capabilities/test_resource_dispatch.py`（19 例，Phase 3）：
 
 * **结构化解析**：`workspace_write` → `workspace.write` / `resource.write` / `workspace` /
   `workspace_provider` / `lumi.local.workspace` / `mcp_target=workspace_write`；
@@ -437,7 +448,7 @@ Phase 5 之后前端仍剩一处"只能靠工具名猜"：实时步骤与刷新�
   开关关闭时逐字走 `capability_for_mcp_tool`；`off` 模式零开销；
   结构化解析抛异常时回落兼容解析（不让一次工具调用打挂）。
 
-`tests/test_resource_catalog.py`（41 例）：
+`tests/capabilities/test_resource_catalog.py`（41 例）：
 
 * **验收**：`Read` / `workspace_navigator` / `office_doc_read` → `resource.read`，
   且资源类型区分工作区与办公文档；注册表派生/插件声明的能力也能落进统一层；
@@ -453,5 +464,5 @@ Phase 5 之后前端仍剩一处"只能靠工具名猜"：实时步骤与刷新�
 * 零行为变化：影子对拍全空、`switch_safe` 为真、`capability_of` 与静态表逐字相同、
   绑定矩阵 20 条逐一钉住、**元数据派生抛异常也不影响条目构造**。
 
-`tests/test_admin_policy_api.py` 增加：`resource_catalog` / `resource_bound_count` /
+`tests/capabilities/test_admin_policy_api.py` 增加：`resource_catalog` / `resource_bound_count` /
 `resource_unbound_tools` 的形状断言。

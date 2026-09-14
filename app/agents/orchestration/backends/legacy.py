@@ -8,9 +8,9 @@ from contextlib import suppress
 import time
 
 from app.agents.orchestration.backends.contracts import BackendControlResult
-from app.agents.orchestration.job_contract import freeze_job_spec
+from app.agents.orchestration.runtime.job_contract import freeze_job_spec
 from app.agents.orchestration.models import Job, JobStatus, TaskStatus
-from app.agents.orchestration.state import StateStore
+from app.agents.orchestration.runtime.state import StateStore
 from app.agents.orchestration.state_machine.transitions import transition
 
 

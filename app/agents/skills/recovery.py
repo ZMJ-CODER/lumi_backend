@@ -29,6 +29,7 @@ _TRANSIENT = {"TIMEOUT", "RATE_LIMIT", "NETWORK_ERROR", "MODEL_EMPTY_RESPONSE"}
 _MODEL_ACTION_REQUIRED = {
     "MODEL_INSUFFICIENT_BALANCE",
     "MODEL_AUTH_ERROR",
+    "MODEL_API_KEY_MISSING",
     "MODEL_NOT_FOUND",
     "MODEL_CONFIG_ERROR",
     "MODEL_TOOL_CALL_UNSUPPORTED",
@@ -36,6 +37,12 @@ _MODEL_ACTION_REQUIRED = {
     "MODEL_CONNECTION_ERROR",
     "MODEL_UNAVAILABLE",
 }
+
+#: 缺密钥时的用户可见文案（两类来源共用：结构化错误码与供应商文本）。
+_MISSING_KEY_MESSAGE = (
+    "当前没有可用的模型 API Key：请在设置里填写模型 API Key 后重试"
+    "（发消息时通过请求头 x-llm-api-key 携带）。"
+)
 
 
 def is_terminal_model_error_code(code: str | None) -> bool:
@@ -48,9 +55,21 @@ def classify_model_error(error: Exception | str) -> tuple[str, str]:
 
     供应商对同一问题的响应格式并不一致（HTTP 状态、JSON code 或纯文本），
     因此不能把所有异常都笼统记为 ``MODEL_UNAVAILABLE`` 后盲目重试。
+
+    结构化错误码优先：上游已经把「没有可用密钥」这类**用户可行动**的失败归一成了
+    ``AppException.error_code``（见 ``app.platform.model.llm``），这里不能再靠文本猜一次
+    —— 猜错的代价是 SSE 帧退化成 500「服务器内部错误」，前端既不知道该填 Key，
+    还可能把 401 误判成登录过期而触发重新登录。
     """
     text = str(error or "")
     lowered = text.lower()
+    structured = str(getattr(error, "error_code", "") or "").upper()
+    if structured in _MODEL_ACTION_REQUIRED:
+        if text:
+            return structured, text
+        return structured, (
+            _MISSING_KEY_MESSAGE if structured == "MODEL_API_KEY_MISSING" else "模型调用失败，请稍后重试。"
+        )
     if any(marker in lowered or marker in text for marker in ("empty response", "empty content", "返回空内容", "空内容", "no content")):
         return "MODEL_EMPTY_RESPONSE", "模型未返回有效内容，请稍后重试。"
     if (
@@ -77,23 +96,21 @@ def classify_model_error(error: Exception | str) -> tuple[str, str]:
         "missing credentials" in lowered
         or "api key is required" in lowered
         or "api_key is required" in lowered
+        or "no api key" in lowered
     )
+    if missing_credentials:
+        # 缺密钥是"去填 Key"（400），不是"密钥不对/登录过期"（401）：
+        # 401 会让前端把业务配置问题当成登录态失效，触发无意义的重新登录。
+        return "MODEL_API_KEY_MISSING", _MISSING_KEY_MESSAGE
     if (
         "401" in lowered
         or "invalid api key" in lowered
         or "authentication" in lowered
         or "unauthorized" in lowered
-        or missing_credentials
     ):
-        message = (
-            "当前自备模型未携带 API 密钥，办公任务已停止。请在模型设置中重新保存自备 API，"
-            "或切换到内置模型后重试。"
-            if missing_credentials
-            else "模型 API 密钥无效或已失效，办公任务已停止。请在模型设置中检查密钥后重试。"
-        )
         return (
             "MODEL_AUTH_ERROR",
-            message,
+            "模型 API 密钥无效或已失效，办公任务已停止。请在模型设置中检查密钥后重试。",
         )
     if "404" in lowered or "model_not_found" in lowered or "model not found" in lowered:
         return (
@@ -192,7 +209,7 @@ def decide_failure(
     if effectful:
         return RecoveryDecision(category, replan_required=category in {"input", "capability_unavailable"})
     if strategy_snapshot is not None:
-        from app.agents.orchestration.strategy_engine import strategy_engine
+        from app.agents.orchestration.planning.strategy_engine import strategy_engine
 
         action = strategy_engine.failure_action(
             category=category,

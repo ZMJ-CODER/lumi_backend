@@ -881,7 +881,7 @@ class ResultStore:
         if isinstance(value, dict):
             # 落库走**存储侧脱敏**：只剥敏感键，不按 Prompt 预算裁剪结构
             # （裁剪由读取侧的 LoadBudget 负责，否则按引用取回的是残件）。
-            from app.agents.orchestration.context import sanitize_stored_result
+            from app.agents.orchestration.execution.context import sanitize_stored_result
 
             cleaned = sanitize_stored_result(value)
             return cleaned, cleaned != value

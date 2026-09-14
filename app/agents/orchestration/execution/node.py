@@ -43,7 +43,7 @@ class ApplicationTaskNodeExecutor:
         dependency_results: Mapping[str, dict],
     ) -> NodeExecutionResult:
         from app.agents.orchestration.policy.runtime import node_timeout_seconds
-        from app.agents.orchestration.safety import is_effectful, prepare_node_safety
+        from app.agents.orchestration.execution.safety import is_effectful, prepare_node_safety
 
         node = self._nodes[spec_node.id]
         worker = self._workers.get(node.agent)
@@ -59,7 +59,7 @@ class ApplicationTaskNodeExecutor:
         # Forked prefixes intentionally keep no result body in the branch Job.
         # Resolve their owner-scoped references at execution time so the core
         # engine can still pass the same dependency contract to the Worker.
-        from app.agents.orchestration.context import build_dependency_context_from_refs
+        from app.agents.orchestration.execution.context import build_dependency_context_from_refs
 
         resolved_dependencies = await build_dependency_context_from_refs(
             node,
@@ -108,7 +108,7 @@ class ApplicationTaskNodeExecutor:
         return await self._persist_outcome(node, outcome, effectful)
 
     def _resource_scope(self, node: TaskNode) -> tuple[Any, list[Any]]:
-        from app.agents.orchestration.resources import resource_coordinator
+        from app.agents.resource_coordination import resource_coordinator
 
         # AgentOrchestrator wraps every StateStore in StateStoreJobRepository.
         # Inspect the wrapped store as well, otherwise in-memory tests are
@@ -165,9 +165,9 @@ class ApplicationTaskNodeExecutor:
         return worker_node
 
     async def _run_worker(self, *, coordinator, claims, worker, node, worker_node, effectful, timeout_seconds, max_retries):
-        from app.agents.orchestration.channel_limits import channel_limiter
+        from app.agents.orchestration.admission.channel_limits import channel_limiter
         from app.agents.orchestration.execution.node_runtime import NodeExecutionRunner
-        from app.agents.orchestration.resources import WriteResourceCoordinationUnavailable
+        from app.agents.resource_coordination import WriteResourceCoordinationUnavailable
         from app.agents.orchestration.execution.telemetry import LumiExecutionTelemetry
 
         async def on_running(_attempt: int) -> None:
@@ -205,8 +205,8 @@ class ApplicationTaskNodeExecutor:
             return None
 
     def _worker_context(self, node: TaskNode) -> Any:
-        from app.agents.orchestration.workers import WorkerContext
-        from app.services.office_stream import push_delta
+        from app.agents.orchestration.execution.workers import WorkerContext
+        from app.office.api import push_delta
 
         async def on_output(text: str) -> None:
             await push_delta(self._job.job_id, node.id, text)
@@ -275,7 +275,7 @@ class ApplicationTaskNodeExecutor:
                 return None
         except Exception:  # noqa: BLE001 - 配置不可用时按关闭处理（保守）
             return None
-        from app.agents.capabilities.gate import declared_capabilities, node_capability_failure
+        from app.agents.capabilities.policy.gate import declared_capabilities, node_capability_failure
 
         if not declared_capabilities(node):
             return None
@@ -325,7 +325,7 @@ class ApplicationTaskNodeExecutor:
     async def _reserve_effect(self, node: TaskNode, effectful: bool) -> NodeExecutionResult | None:
         if not effectful or not node.idempotency_key:
             return None
-        from app.agents.orchestration.effects import EffectJournalUnavailable, effect_guard, effect_intent_for_node
+        from app.agents.orchestration.runtime.effects import EffectJournalUnavailable, effect_guard, effect_intent_for_node
 
         try:
             existing = await effect_guard.reserve(
@@ -342,8 +342,8 @@ class ApplicationTaskNodeExecutor:
         return self._failure(node, "副作用步骤已开始但结果不确定，已停止自动重试以避免重复执行", "EFFECT_UNCERTAIN", "uncertain")
 
     async def _persist_outcome(self, node: TaskNode, outcome: Any, effectful: bool) -> NodeExecutionResult:
-        from app.agents.orchestration.effects import EffectJournalUnavailable, effect_guard
-        from app.agents.orchestration.presentation import attach_display_result
+        from app.agents.orchestration.runtime.effects import EffectJournalUnavailable, effect_guard
+        from app.agents.orchestration.execution.presentation import attach_display_result
 
         if outcome.success:
             result = attach_display_result(node, outcome.result or {})
@@ -374,7 +374,7 @@ class ApplicationTaskNodeExecutor:
 
     async def _abandon_effect(self, node: TaskNode, effectful: bool) -> None:
         if effectful and node.idempotency_key:
-            from app.agents.orchestration.effects import EffectJournalUnavailable, effect_guard
+            from app.agents.orchestration.runtime.effects import EffectJournalUnavailable, effect_guard
             try:
                 await effect_guard.abandon_pending(node.idempotency_key)
             except (EffectJournalUnavailable, RuntimeError):
@@ -382,7 +382,7 @@ class ApplicationTaskNodeExecutor:
 
     async def _mark_effect_uncertain(self, node: TaskNode, effectful: bool, reason: str) -> None:
         if effectful and node.idempotency_key:
-            from app.agents.orchestration.effects import EffectJournalUnavailable, effect_guard
+            from app.agents.orchestration.runtime.effects import EffectJournalUnavailable, effect_guard
             try:
                 await effect_guard.mark_uncertain(node.idempotency_key, reason)
             except (EffectJournalUnavailable, RuntimeError):
